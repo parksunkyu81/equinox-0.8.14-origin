@@ -580,35 +580,18 @@ void NvgWindow::drawHud(QPainter &p) {
                       device_State.getMemoryUsagePercent(),
   */
   QString infoText;
-  QString liveValidStr;
-
-  bool torqueLiveValid = controls_state.getTorqueLiveValid();
-  if (torqueLiveValid) {
-        liveValidStr = "ON";
-  } else {
-        liveValidStr = "OFF";
-  }
-
-  infoText.sprintf("LiveValid:%s (AccelFactor:%.4f / Friction:%.4f / BucketPoint:%.0f) SR(%.2f) SAD(%.2f)",
-                     qPrintable(liveValidStr), // QString → const char*
-                     controls_state.getLatAccelFactor(),
-                     controls_state.getFriction(),
-                     controls_state.getTotalBucketPoints(),
-                     controls_state.getSteerRatio(),
-                     controls_state.getSteerActuatorDelay());
-
-  /*infoText.sprintf("(FACT:%.2f,FRI:%.2f,PT:%.0f) TCO(%.2f) SR(%.2f) SAD(%.2f) CURVE(%.2f) MIN_TR(%.1f) DF_MOD(%.1f)",
+  infoText.sprintf("(FACT:%.2f,FRI:%.2f,PT:%.0f) TCO(%.2f) SR(%.2f) SAD(%.2f) CURVE(%.2f) MIN_TR(%.1f) DF_MOD(%.1f)",
                       controls_state.getLatAccelFactor(),
                       //controls_state.getLatAccelOffset(),
                       controls_state.getFriction(),
-                      controls_state.get(),
+                      controls_state.getTotalBucketPoints(),
                       controls_state.getTotalCameraOffset(),
                       controls_state.getSteerRatio(),
                       controls_state.getSteerActuatorDelay(),
                       controls_state.getSccCurvatureFactor(),
                       controls_state.getMinTR(),
                       controls_state.getGlobalDfMod()
-                      );*/
+                      );
 
 
   // info
@@ -628,7 +611,6 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
   // 하단 원형 2줄 시작점
   const int icon_start_x = 600;
-  const int icon_step = radius + 50;
 
   // 1. 핸들 토크 각도
   int x = icon_start_x;
