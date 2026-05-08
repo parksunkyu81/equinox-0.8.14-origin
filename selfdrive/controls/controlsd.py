@@ -43,6 +43,9 @@ MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
 
 SOFT_DISABLE_TIME = 3  # seconds
+# controlsAllowed mismatch는 CAN/pandaState 수신 타이밍 차이로 순간 발생할 수 있으므로
+# 연속 mismatch만 controlsMismatch로 처리한다. 100Hz 기준 10프레임 = 약 100ms.
+CONTROLS_ALLOWED_MISMATCH_FRAMES = 10
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
@@ -201,6 +204,8 @@ class Controls:
         self.applyMaxSpeed = 0
 
         self.mismatch_counter = 0
+        self.last_safety_mismatch_log_frame = -1000000
+        self.last_controls_allowed_mismatch_log_frame = -1000000
         self.cruise_mismatch_counter = 0
         self.can_rcv_error_counter = 0
         self.last_blinker_frame = 0
@@ -492,20 +497,53 @@ class Controls:
         #if not CS.canValid:
         #    self.events.add(EventName.canError)
 
-        for i, pandaState in enumerate(self.sm['pandaStates']):
-            # All pandas must match the list of safetyConfigs, and if outside this list, must be silent or noOutput
-            if i < len(self.CP.safetyConfigs):
-                safety_mismatch = pandaState.safetyModel != self.CP.safetyConfigs[i].safetyModel or \
-                                  pandaState.safetyParam != self.CP.safetyConfigs[i].safetyParam or \
-                                  pandaState.alternativeExperience != self.CP.alternativeExperience
-            else:
-                safety_mismatch = pandaState.safetyModel not in IGNORED_SAFETY_MODES
+        # Panda safety 설정 불일치는 즉시 controlsMismatch로 처리한다.
+        # 단, pandaStates 자체가 invalid/stale이면 아래 usbError/commIssue 경로에서 처리한다.
+        if self.sm.valid["pandaStates"]:
+            for i, pandaState in enumerate(self.sm['pandaStates']):
+                # All pandas must match the list of safetyConfigs,
+                # and if outside this list, must be silent or noOutput.
+                if i < len(self.CP.safetyConfigs):
+                    expected_safety = self.CP.safetyConfigs[i]
+                    safety_mismatch = pandaState.safetyModel != expected_safety.safetyModel or \
+                                      pandaState.safetyParam != expected_safety.safetyParam or \
+                                      pandaState.alternativeExperience != self.CP.alternativeExperience
 
-            if safety_mismatch or self.mismatch_counter >= 200:
-                self.events.add(EventName.controlsMismatch)
+                    if safety_mismatch and (self.sm.frame - self.last_safety_mismatch_log_frame) > int(1. / DT_CTRL):
+                        cloudlog.warning(
+                            "controlsMismatch safety mismatch: "
+                            f"idx={i} "
+                            f"pandaModel={pandaState.safetyModel} expectedModel={expected_safety.safetyModel} "
+                            f"pandaParam={pandaState.safetyParam} expectedParam={expected_safety.safetyParam} "
+                            f"pandaAltExp={pandaState.alternativeExperience} expectedAltExp={self.CP.alternativeExperience}"
+                        )
+                        self.last_safety_mismatch_log_frame = self.sm.frame
+                else:
+                    safety_mismatch = pandaState.safetyModel not in IGNORED_SAFETY_MODES
 
-            if log.PandaState.FaultType.relayMalfunction in pandaState.faults:
-                self.events.add(EventName.relayMalfunction)
+                    if safety_mismatch and (self.sm.frame - self.last_safety_mismatch_log_frame) > int(1. / DT_CTRL):
+                        cloudlog.warning(
+                            "controlsMismatch extra panda not ignored: "
+                            f"idx={i} pandaModel={pandaState.safetyModel}"
+                        )
+                        self.last_safety_mismatch_log_frame = self.sm.frame
+
+                if safety_mismatch:
+                    self.events.add(EventName.controlsMismatch)
+
+                if log.PandaState.FaultType.relayMalfunction in pandaState.faults:
+                    self.events.add(EventName.relayMalfunction)
+
+        # controlsAllowed mismatch는 순간값 누적이 아니라 연속 프레임만 카운트한다.
+        if self.mismatch_counter >= CONTROLS_ALLOWED_MISMATCH_FRAMES:
+            if (self.mismatch_counter == CONTROLS_ALLOWED_MISMATCH_FRAMES or
+                    (self.sm.frame - self.last_controls_allowed_mismatch_log_frame) > int(1. / DT_CTRL)):
+                cloudlog.warning(
+                    "controlsMismatch controlsAllowed mismatch: "
+                    f"mismatch_counter={self.mismatch_counter} enabled={self.enabled}"
+                )
+                self.last_controls_allowed_mismatch_log_frame = self.sm.frame
+            self.events.add(EventName.controlsMismatch)
 
         # Check for HW or system issues
         if len(self.sm['radarState'].radarErrors):
@@ -621,16 +659,20 @@ class Controls:
         else:
             self.can_rcv_error = False
 
-        # When the panda and controlsd do not agree on controls_allowed
-        # we want to disengage openpilot. However the status from the panda goes through
-        # another socket other than the CAN messages and one can arrive earlier than the other.
-        # Therefore we allow a mismatch for two samples, then we trigger the disengagement.
-        if not self.enabled:
-            self.mismatch_counter = 0
+        # When the panda and controlsd do not agree on controls_allowed,
+        # disengage openpilot after consecutive mismatch frames.
+        # 중요: mismatch가 사라지면 반드시 counter를 0으로 되돌려야 한다.
+        controls_allowed_mismatch = False
+        if self.enabled and self.sm.valid["pandaStates"]:
+            controls_allowed_mismatch = any(
+                not ps.controlsAllowed
+                for ps in self.sm['pandaStates']
+                if ps.safetyModel not in IGNORED_SAFETY_MODES
+            )
 
-        # All pandas not in silent mode must have controlsAllowed when openpilot is enabled
-        if self.enabled and any(not ps.controlsAllowed for ps in self.sm['pandaStates']
-                                if ps.safetyModel not in IGNORED_SAFETY_MODES):
+        if not self.enabled or not controls_allowed_mismatch:
+            self.mismatch_counter = 0
+        else:
             self.mismatch_counter += 1
 
         self.distance_traveled += CS.vEgo * DT_CTRL
