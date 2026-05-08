@@ -1797,19 +1797,25 @@ void NvgWindow::drawThermal(QPainter &p) {
   }
 
   // =========================
-  // 레이아웃(가로형 + 좌상단 여유)
+  // 레이아웃(세로형 + 오른쪽 아래 디버그 표시 위쪽)
   // =========================
-  const int x = 35;
-  const int y = 425;   // 기존 25 -> 425 로 변경
-
   const int tile_w = 185;
-  const int tile_h = 145;
+  const int tile_h = 120;
+  const int gap = 14;
+  const int pad = 14;
 
-  const int gap = 20;   // ✅ 타일 사이 간격: 18 -> 20 (10% 증가 반영)
-  const int pad = 16;
+  const int total_w = tile_w;
+  const int total_h = tile_h * 3 + gap * 2;
 
-  const int total_w = tile_w * 3 + gap * 2;
-  const int total_h = tile_h;
+  // 오른쪽 여백 기준 고정. 작은 해상도에서는 최소 x=35 보장.
+  const int x_calc = width() - tile_w - 35;
+  const int x = x_calc > 35 ? x_calc : 35;
+
+  // 하단 디버그/정보 표시 영역 위쪽으로 올림.
+  // 1080p 기준 대략 y=500 부근에 배치되어 오른쪽 하단 원형 아이콘과 겹치지 않음.
+  const int bottom_margin = 170;
+  const int y_calc = rect().bottom() - bottom_margin - total_h;
+  const int y = y_calc > 80 ? y_calc : 80;
 
   // ✅ 배경: 투명 검정 + 라운드
   QRect bg_rect(x - pad, y - pad, total_w + pad * 2, total_h + pad * 2);
@@ -1817,21 +1823,18 @@ void NvgWindow::drawThermal(QPainter &p) {
   p.setBrush(QColor(0, 0, 0, 150));
   p.drawRoundedRect(bg_rect, 18, 18);
 
-  auto drawTile = [&](int tx, const QString &value, const QString &label, const QColor &valColor) {
-    const int label_h = 48;                 // 라벨 영역 높이
-    const int value_label_gap = 5;          // ✅ 값/라벨 사이 세로 여백(약 10% 느낌으로 추가)
+  auto drawTile = [&](int ty, const QString &value, const QString &label, const QColor &valColor) {
+    const int label_h = 42;
+    const int value_label_gap = 4;
 
-    // ✅ valueRect 아래를 줄여서 labelRect와 사이에 빈 공간을 만들기
-    QRect valueRect(tx, y, tile_w, tile_h - label_h - value_label_gap);
-    QRect labelRect(tx, y + tile_h - label_h, tile_w, label_h);
+    QRect valueRect(x, ty, tile_w, tile_h - label_h - value_label_gap);
+    QRect labelRect(x, ty + tile_h - label_h, tile_w, label_h);
 
-    // ✅ 값 폰트: 20% 확대 유지
-    configFont(p, "Open Sans", 60, "Bold");
+    configFont(p, "Open Sans", 56, "Bold");
     p.setPen(valColor);
     p.drawText(valueRect, Qt::AlignCenter, value);
 
-    // ✅ 라벨 폰트: 20% 확대 유지
-    configFont(p, "Open Sans", 35, "Bold");
+    configFont(p, "Open Sans", 31, "Bold");
     p.setPen(QColor(0, 255, 0, 220));
     p.drawText(labelRect, Qt::AlignCenter, label);
   };
@@ -1844,7 +1847,7 @@ void NvgWindow::drawThermal(QPainter &p) {
 
   int r = interp<float>(cpuTemp, {50.f, 90.f}, {200.f, 255.f}, false);
   int g = interp<float>(cpuTemp, {50.f, 90.f}, {255.f, 200.f}, false);
-  drawTile(x, batStr, "BAT.L", QColor(r, g, 200, 220));
+  drawTile(y, batStr, "BAT.L", QColor(r, g, 200, 220));
 
   // =========================
   // CPU
@@ -1854,7 +1857,7 @@ void NvgWindow::drawThermal(QPainter &p) {
 
   r = interp<float>(cpuTemp, {50.f, 90.f}, {200.f, 255.f}, false);
   g = interp<float>(cpuTemp, {50.f, 90.f}, {255.f, 200.f}, false);
-  drawTile(x + (tile_w + gap), cpuStr, "CPU", QColor(r, g, 200, 220));
+  drawTile(y + (tile_h + gap), cpuStr, "CPU", QColor(r, g, 200, 220));
 
   // =========================
   // AMBIENT
@@ -1864,7 +1867,7 @@ void NvgWindow::drawThermal(QPainter &p) {
 
   r = interp<float>(ambientTemp, {35.f, 60.f}, {200.f, 255.f}, false);
   g = interp<float>(ambientTemp, {35.f, 60.f}, {255.f, 200.f}, false);
-  drawTile(x + (tile_w + gap) * 2, ambStr, "AMBIENT", QColor(r, g, 200, 220));
+  drawTile(y + (tile_h + gap) * 2, ambStr, "AMBIENT", QColor(r, g, 200, 220));
 
   p.restore();
 }
