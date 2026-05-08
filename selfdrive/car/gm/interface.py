@@ -239,35 +239,37 @@ class CarInterface(CarInterfaceBase):
         ###
 
         if self.CP.enableGasInterceptor:
-            if not self.CS.main_on:  # lat dis-engage
-                for b in ret.buttonEvents:
-                    if (b.type == ButtonType.decelCruise and not b.pressed) and not self.CS.adaptive_Cruise:
-                        self.CS.adaptive_Cruise = True
-                        self.CS.enable_lkas = True
-                        events.add(EventName.buttonEnable)
-                        break
-                    if (b.type == ButtonType.accelCruise and not b.pressed) and not self.CS.adaptive_Cruise:
-                        self.CS.adaptive_Cruise = True
-                        self.CS.enable_lkas = True
-                        events.add(EventName.buttonEnable)
-                        break
-                    if (b.type == ButtonType.cancel and b.pressed) and self.CS.adaptive_Cruise:
-                        self.CS.adaptive_Cruise = False
-                        self.CS.enable_lkas = False
-                        # events.add(EventName.buttonEnable)
-                        events.add(EventName.buttonCancel)
-                        break
-                    if (b.type == ButtonType.altButton3 and b.pressed):  # and self.CS.adaptive_Cruise
-                        self.CS.adaptive_Cruise = False
-                        self.CS.enable_lkas = True
-                        events.add(EventName.buttonEnable)  # 어느 이벤트가 먼저인지 확인
-                        break
-            else:  # lat engage
+            # 가속 페달 장착 차량
+            for b in ret.buttonEvents:
+                if (b.type in [ButtonType.decelCruise, ButtonType.accelCruise]) and not b.pressed:
+                    self.CS.adaptive_Cruise = True
+                    self.CS.enable_lkas = True
+                    events.add(EventName.buttonEnable)
+                    break
+                if (b.type == ButtonType.cancel and b.pressed):
+                    self.CS.adaptive_Cruise = False
+                    self.CS.enable_lkas = False
+                    events.add(EventName.buttonCancel)
+                    break
+                if (b.type == ButtonType.altButton3 and b.pressed):
+                    # MAIN 버튼은 단순히 main_on 플래그를 토글하는 역할로만 두고
+                    # adaptive_Cruise 상태는 main_on 상태에 맞춰 아래에서 반영
+                    break
+
+            # MAIN 상태에 따라 adaptiveCruise 반영
+            if self.CS.main_on:
                 self.CS.adaptive_Cruise = False
+                self.CS.enable_lkas = True
+            else:
+                self.CS.adaptive_Cruise = True
                 self.CS.enable_lkas = True
 
         else:
-            if self.CS.main_on:  # wihtout pedal case
+            # 페달 없는 차량
+            if self.CS.main_on:
+                self.CS.adaptive_Cruise = True
+                self.CS.enable_lkas = True
+            else:
                 self.CS.adaptive_Cruise = False
                 self.CS.enable_lkas = True
 
