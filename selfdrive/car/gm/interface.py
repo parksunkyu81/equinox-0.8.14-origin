@@ -138,8 +138,10 @@ class CarInterface(CarInterfaceBase):
             ret.lateralTuning.init('torque')
 
             try:
-              torque_lat_accel_factor = ntune_torque_get('latAccelFactor')  # LAT_ACCEL_FACTOR
-              torque_friction = ntune_torque_get('friction')  # FRICTION
+              # torque_lat_accel_factor = ntune_torque_get('latAccelFactor')  # LAT_ACCEL_FACTOR
+              # torque_friction = ntune_torque_get('friction')  # FRICTION
+              torque_lat_accel_factor = 1.88  # LAT_ACCEL_FACTOR
+              torque_friction = 0.255  # FRICTION
             except:
               torque_lat_accel_factor = float(
                     Decimal(params.get("TorqueMaxLatAccel", encoding="utf8")) * Decimal('0.1'))  # LAT_ACCEL_FACTOR

@@ -580,13 +580,12 @@ void NvgWindow::drawHud(QPainter &p) {
                       device_State.getMemoryUsagePercent(),
   */
   QString infoText;
-  infoText.sprintf("TORQUE(LatAccel:%.2f,Friction:%.2f) TCO(%.2f) SR(%.2f) SAD(%.2f) CURVE(%.2f) MIN_TR(%.1f) DF_MOD(%.1f)",
+  infoText.sprintf("TORQUE(LatA:%.2f,Fri:%.2f) TCO(%.2f) SR(%.2f) SAD(%.2f) MIN_TR(%.1f) DF_MOD(%.1f)",
                       controls_state.getLatAccelFactor(),
                       controls_state.getFriction(),
                       controls_state.getTotalCameraOffset(),
                       controls_state.getSteerRatio(),
                       controls_state.getSteerActuatorDelay(),
-                      controls_state.getSccCurvatureFactor(),
                       controls_state.getMinTR(),
                       controls_state.getGlobalDfMod()
                       );
@@ -609,6 +608,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
   // 하단 원형 2줄 시작점
   const int icon_start_x = 600;
+  const int icon_step = radius + 50;
 
   // 1. 핸들 토크 각도
   int x = icon_start_x;
@@ -643,7 +643,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.setOpacity(1.0);
 
   // 2. VISION DIST
-  x = radius / 2 + (bdr_s * 2) + (radius + 50);
+  x = icon_start_x + (icon_step * 1);
 
   p.setPen(Qt::NoPen);
   p.setBrush(blackColor(200));
@@ -679,7 +679,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.setOpacity(1.0);
 
   // 3. LKAS
-  x = radius / 2 + (bdr_s * 2) + ((radius + 50) * 2);
+  x = icon_start_x + (icon_step * 2);
   bool lkas_bool = car_state.getLkasEnable();
 
   textSize = 48.f;
@@ -713,7 +713,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // 4.auto hold
   int autohold = car_state.getAutoHold();
   if(autohold >= 0) {
-    x = radius / 2 + (bdr_s * 2) + ((radius + 50) * 3);
+    x = icon_start_x + (icon_step * 3);
     img_alpha = autohold > 0 ? 1.0f : 0.15f;
     bg_alpha = autohold > 0 ? 0.3f : 0.1f;
     drawIcon(p, x, y1, autohold > 1 ? ic_autohold_warning : ic_autohold_active,
@@ -725,6 +725,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // ================================================================================================================ //
   x = 140;
   const int y2 = rect().bottom() - (footer_h / 2) - (radius + 50) - 10;
+  x = icon_start_x;
 
   // 1.TR Value
   float tr_value = controls_state.getDynamicTRValue();
@@ -781,7 +782,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.setOpacity(1.0);*/
 
   // 2. PEDAL
-  x = radius / 2 + (bdr_s * 2) + (radius + 50);
+  x = icon_start_x + (icon_step * 1);
   float accel = car_control.getActuators().getAccel();
 
   p.setPen(Qt::NoPen);
@@ -811,7 +812,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.setOpacity(1.0);
 
   // 3. ACC
-  x = radius / 2 + (bdr_s * 2) + ((radius + 50) * 2);
+  x = icon_start_x + (icon_step * 2);
   bool acc_bool = car_state.getAdaptiveCruise();
   p.setPen(Qt::NoPen);
   p.setBrush(blackColor(200));
@@ -836,7 +837,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.setOpacity(1.0);
 
   // 4. brake
-  x = radius / 2 + (bdr_s * 2) + ((radius + 50) * 3);
+  x = icon_start_x + (icon_step * 3);
   bool brake_valid = car_state.getBrakePressed();
   img_alpha = brake_valid ? 1.0f : 0.15f;
   bg_alpha = brake_valid ? 0.3f : 0.1f;
@@ -844,7 +845,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.setOpacity(1.0);
 
   // 5. long control state
-  x = radius / 2 + (bdr_s * 2) + ((radius + 50) * 4);
+  x = icon_start_x + (icon_step * 4);
   int longControlState = (int)controls_state.getLongControlState();
   const char* long_state[] = {"off", "pid", "stopping", "starting"};
   p.setPen(Qt::NoPen);
