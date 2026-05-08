@@ -1813,7 +1813,7 @@ void NvgWindow::drawThermal(QPainter &p) {
 
   // 하단 디버그/정보 표시 영역 위쪽으로 올림.
   // 1080p 기준 대략 y=500 부근에 배치되어 오른쪽 하단 원형 아이콘과 겹치지 않음.
-  const int bottom_margin = 170;
+  const int bottom_margin = 200;
   const int y_calc = rect().bottom() - bottom_margin - total_h;
   const int y = y_calc > 80 ? y_calc : 80;
 
