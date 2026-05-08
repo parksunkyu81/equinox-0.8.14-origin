@@ -5,6 +5,7 @@
 #include <QDebug>
 #include <QSound>
 #include <QMouseEvent>
+#include <algorithm>
 
 #include "selfdrive/common/timing.h"
 #include "selfdrive/ui/qt/util.h"
@@ -56,10 +57,10 @@ OnroadWindow::OnroadWindow(QWidget *parent) : QWidget(parent) {
 
   QWidget* recorder_widget = new QWidget(this);
   QVBoxLayout * recorder_layout = new QVBoxLayout (recorder_widget);
-  recorder_layout->setMargin(35);
+  recorder_layout->setContentsMargins(0, 0, 0, 0);
   recorder = new ScreenRecoder(this);
   recorder_layout->addWidget(recorder);
-  recorder_layout->setAlignment(recorder, Qt::AlignRight | Qt::AlignBottom);
+  recorder_layout->setAlignment(recorder, Qt::AlignRight | Qt::AlignTop);
 
   stacked_layout->addWidget(recorder_widget);
   recorder_widget->raise();
@@ -287,6 +288,7 @@ void NvgWindow::updateFrameMat(int w, int h) {
       .translate(-intrinsic_matrix.v[2], -intrinsic_matrix.v[5]);
 }
 
+/*
 void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
   const UIScene &scene = s->scene;
   // lanelines
@@ -343,7 +345,61 @@ void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
   painter.drawPolygon(scene.track_vertices.v, scene.track_vertices.cnt);
 
   painter.restore();
+}*/
+
+// 차선 흰색→녹색, PATH는 E2E 여부와 무관하게 항상 녹/노/빨 그라데이션, painter save/restore 짝 정상화
+void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
+  painter.save();
+
+  const UIScene &scene = s->scene;
+
+  // 1) lanelines: WHITE -> GREEN (alpha = prob, max 0.7)
+  for (int i = 0; i < std::size(scene.lane_line_vertices); ++i) {
+    const float a = std::clamp<float>(scene.lane_line_probs[i], 0.0f, 0.7f);
+    painter.setBrush(QColor::fromRgbF(0.0, 1.0, 0.0, a));
+    painter.drawPolygon(scene.lane_line_vertices[i].v, scene.lane_line_vertices[i].cnt);
+  }
+
+  // road edges (원본 유지)
+  for (int i = 0; i < std::size(scene.road_edge_vertices); ++i) {
+    painter.setBrush(QColor::fromRgbF(1.0, 0.0, 0.0, std::clamp<float>(1.0f - scene.road_edge_stds[i], 0.0f, 1.0f)));
+    painter.drawPolygon(scene.road_edge_vertices[i].v, scene.road_edge_vertices[i].cnt);
+  }
+
+  // 2) PATH: ALWAYS green~yellow~red gradient (accel/curve based)
+  const auto model = (*s->sm)["modelV2"].getModelV2();
+
+  float accel_future = 0.f;
+  const auto &acc = model.getAcceleration();
+  if (acc.getX().size() > 16) {
+    accel_future = acc.getX()[16];  // ~2.5s
+  }
+
+  float orient_future = 0.f;
+  const auto &ori = model.getOrientation();
+  if (ori.getZ().size() > 16) {
+    orient_future = std::abs(ori.getZ()[16]);  // ~2.5s
+  }
+
+  // accel: + => greener, - => redder (0~120)
+  float hue_acc = std::clamp(60.f + accel_future * 30.f, 0.f, 120.f);
+  // curve: bigger => redder (0~120)
+  float hue_curve = std::clamp(120.f - orient_future * 600.f, 0.f, 120.f);
+
+  float end_hue = std::min(hue_acc, hue_curve);
+  end_hue = int(end_hue * 100.f + 0.5f) / 100.f;
+
+  QLinearGradient bg(0, height(), 0, height() / 4);
+  bg.setColorAt(0.0, QColor::fromHslF(120.f / 360.f, 0.97, 0.56, 0.45));    // green
+  bg.setColorAt(0.5, QColor::fromHslF(end_hue / 360.f, 1.00, 0.68, 0.35));  // mid
+  bg.setColorAt(1.0, QColor::fromHslF(end_hue / 360.f, 1.00, 0.68, 0.00));  // fade
+
+  painter.setBrush(bg);
+  painter.drawPolygon(scene.track_vertices.v, scene.track_vertices.cnt);
+
+  painter.restore();
 }
+
 
 void NvgWindow::drawLead(QPainter &painter, const cereal::ModelDataV2::LeadDataV3::Reader &lead_data, const QPointF &vd, bool is_radar) {
   const float speedBuff = 10.;
@@ -496,7 +552,7 @@ void NvgWindow::drawHud(QPainter &p) {
   //const auto live_torque_params = sm["liveTorqueParameters"].getLiveTorqueParameters();
   //const auto torque_state = controls_state.getLateralControlState().getTorqueState();
 
-  QColor orangeColor = QColor(52, 197, 66, 255);
+  //QColor orangeColor = QColor(52, 197, 66, 255);
 
   /*float cpuTemp = 0;
   auto cpuList = device_State.getCpuTempC();
@@ -524,36 +580,40 @@ void NvgWindow::drawHud(QPainter &p) {
                       device_State.getMemoryUsagePercent(),
   */
   QString infoText;
-  /*infoText.sprintf("%s TS(%.2f/%.2f) LTP(%.2f/%.2f/%.0f) TCO(%.2f) AO(%.2f/%.2f) SR(%.2f) SAD(%.2f)",
-                      s->lat_control.c_str(),
-                      torque_state.getLatAccelFactor(),
-                      torque_state.getFriction(),
-                      live_torque_params.getLatAccelFactorRaw(),
-                      live_torque_params.getFrictionCoefficientRaw(),
-                      live_torque_params.getTotalBucketPoints(),
-                      controls_state.getTotalCameraOffset(),
-                      live_params.getAngleOffsetDeg(),
-                      live_params.getAngleOffsetAverageDeg(),
-                      controls_state.getSteerRatio(),
-                      controls_state.getSteerActuatorDelay()
-                      );*/
-  infoText.sprintf("(FACT:%.2f,FRI:%.2f,PT:%.0f) TCO(%.2f) SR(%.2f) SAD(%.2f) CURVE(%.2f) MIN_TR(%.1f) DF_MOD(%.1f)",
+  QString liveValidStr;
+
+  bool torqueLiveValid = controls_state.getTorqueLiveValid();
+  if (torqueLiveValid) {
+        liveValidStr = "ON";
+  } else {
+        liveValidStr = "OFF";
+  }
+
+  infoText.sprintf("LiveValid:%s (AccelFactor:%.4f / Friction:%.4f / BucketPoint:%.0f) SR(%.2f) SAD(%.2f)",
+                     qPrintable(liveValidStr), // QString → const char*
+                     controls_state.getLatAccelFactor(),
+                     controls_state.getFriction(),
+                     controls_state.getTotalBucketPoints(),
+                     controls_state.getSteerRatio(),
+                     controls_state.getSteerActuatorDelay());
+
+  /*infoText.sprintf("(FACT:%.2f,FRI:%.2f,PT:%.0f) TCO(%.2f) SR(%.2f) SAD(%.2f) CURVE(%.2f) MIN_TR(%.1f) DF_MOD(%.1f)",
                       controls_state.getLatAccelFactor(),
                       //controls_state.getLatAccelOffset(),
                       controls_state.getFriction(),
-                      controls_state.getTotalBucketPoints(),
+                      controls_state.get(),
                       controls_state.getTotalCameraOffset(),
                       controls_state.getSteerRatio(),
                       controls_state.getSteerActuatorDelay(),
                       controls_state.getSccCurvatureFactor(),
                       controls_state.getMinTR(),
                       controls_state.getGlobalDfMod()
-                      );
+                      );*/
 
 
   // info
-  configFont(p, "Open Sans", 40, "Regular");
-  p.setPen(QColor(120, 255, 120, 200));
+  configFont(p, "Open Sans", 43, "Regular");
+  p.setPen(QColor(0, 255, 0, 255));
   p.drawText(rect().left() + 20, rect().height() - 15, infoText);
 
 
@@ -566,8 +626,12 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   auto car_control = sm["carControl"].getCarControl();
   auto controls_state = sm["controlsState"].getControlsState();
 
+  // 하단 원형 2줄 시작점
+  const int icon_start_x = 600;
+  const int icon_step = radius + 50;
+
   // 1. 핸들 토크 각도
-  int x = 140;
+  int x = icon_start_x;
   const int y1 = rect().bottom() - footer_h / 2 - 10;
 
   float cur_speed = std::max(0.0, car_state.getVEgo() * MS_TO_KPH);
@@ -584,19 +648,18 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.setBrush(blackColor(200));
   p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
 
-  //float textSize = 60.f;
   float textSize = 48.f;
   textColor = QColor(255, 255, 255, 200);
 
   str.sprintf("%.0f°", steer_angle);
   configFont(p, "Open Sans", textSize, "Bold");
   textColor = QColor(255, 255, 255, 200);
-  drawTextWithColor(p, x, y1-20, str, textColor);
+  drawTextWithColor(p, x, y1 - 20, str, textColor);
 
   str2.sprintf("%.0f°", desire_angle);
   configFont(p, "Open Sans", textSize, "Bold");
   textColor = QColor(155, 255, 155, 200);
-  drawTextWithColor(p, x, y1+50, str2, textColor);
+  drawTextWithColor(p, x, y1 + 50, str2, textColor);
   p.setOpacity(1.0);
 
   // 2. VISION DIST
@@ -821,79 +884,261 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 }
 
 /*
-void NvgWindow::drawMaxSpeed(QPainter &p) {
-  UIState *s = uiState();
-  const SubMaster &sm = *(s->sm);
-  const auto controls_state = sm["controlsState"].getControlsState();
-  bool is_metric = s->scene.is_metric;
-
-  // kph
-  float applyMaxSpeed = controls_state.getApplyMaxSpeed();
-  float cruiseMaxSpeed = controls_state.getCruiseMaxSpeed();
-  bool is_cruise_set = (cruiseMaxSpeed > 0 && cruiseMaxSpeed < 255);
-
-  QRect rc(30, 30, 184, 202);
-  p.setPen(QPen(QColor(0xff, 0xff, 0xff, 100), 10));
-  p.setBrush(QColor(0, 0, 0, 100));
-  p.drawRoundedRect(rc, 20, 20);
-  p.setPen(Qt::NoPen);
-
-  if (is_cruise_set) {
-    char str[256];
-    if (is_metric)
-        snprintf(str, sizeof(str), "%d", (int)(applyMaxSpeed + 0.5));
-    else
-        snprintf(str, sizeof(str), "%d", (int)(applyMaxSpeed*KM_TO_MILE + 0.5));
-
-    configFont(p, "Open Sans", 38, "Bold");
-    drawText(p, rc.center().x(), 100, str, 255);
-
-    if (is_metric)
-        snprintf(str, sizeof(str), "%d", (int)(cruiseMaxSpeed + 0.5));
-    else
-        snprintf(str, sizeof(str), "%d", (int)(cruiseMaxSpeed*KM_TO_MILE + 0.5));
-
-    configFont(p, "Open Sans", 76, "Bold");
-    drawText(p, rc.center().x(), 195, str, 255);
-  } else {
-    configFont(p, "Open Sans", 48, "sans-semibold");
-    drawText(p, rc.center().x(), 100, "MAX", 100);
-
-    configFont(p, "Open Sans", 76, "sans-semibold");
-    drawText(p, rc.center().x(), 195, "N/A", 100);
-  }
-}*/
-
 void NvgWindow::drawSpeed(QPainter &p) {
+  p.save();
+
   UIState *s = uiState();
   const SubMaster &sm = *(s->sm);
-  float cur_speed = std::max(0.0, sm["carState"].getCarState().getVEgo() * (s->scene.is_metric ? MS_TO_KPH : MS_TO_MPH));
+
+  // std::max 타입 에러 방지(전부 float로 통일)
+  float v_ego = sm["carState"].getCarState().getVEgo();
+  float conv = s->scene.is_metric ? (float)MS_TO_KPH : (float)MS_TO_MPH;
+  float cur_speed = std::max(0.0f, v_ego * conv);
+
   auto car_state = sm["carState"].getCarState();
   float accel = car_state.getAEgo();
 
-  QColor color = QColor(255, 255, 255, 230);
-
-  if(accel > 0) {
-    int a = (int)(255.f - (180.f * (accel/2.f)));
+  QColor color(255, 255, 255, 230);
+  if (accel > 0) {
+    int a = (int)(255.f - (180.f * (accel / 2.f)));
     a = std::min(a, 255);
     a = std::max(a, 80);
     color = QColor(a, a, 255, 230);
-  }
-  else {
-    int a = (int)(255.f - (255.f * (-accel/3.f)));
+  } else {
+    int a = (int)(255.f - (255.f * (-accel / 3.f)));
     a = std::min(a, 255);
     a = std::max(a, 60);
     color = QColor(255, a, a, 230);
   }
 
+  // 위치(기존과 동일)
+  const int x = rect().center().x() - 150;
+  const int y_speed = 460;
+  const int y_unit  = 540;
+
   QString speed;
   speed.sprintf("%.0f", cur_speed);
+  const QString unit = s->scene.is_metric ? "km/h" : "mph";
+
+  // =========================
+  // 고정 배경(템플릿 기준) + 폭 20% 확대
+  // =========================
+  const QString speed_template = "888";   // 3자리 폭 기준(고정)
+  const QString unit_template  = "km/h";  // 둘 중 긴 쪽 기준(고정)
+
+  // 템플릿으로 "기준 배경" 계산
   configFont(p, "Open Sans", 176, "Bold");
-  drawTextWithColor(p, rect().center().x(), 230, speed, color);
+  QFontMetricsF fmSpeed(p.font());
+  QRectF rSpeedT = fmSpeed.boundingRect(speed_template);
+  QRectF speedRectT(x - rSpeedT.width() / 2.0,
+                    y_speed - fmSpeed.ascent(),
+                    rSpeedT.width(),
+                    fmSpeed.height());
 
   configFont(p, "Open Sans", 66, "Regular");
-  drawText(p, rect().center().x(), 310, s->scene.is_metric ? "km/h" : "mph", 200);
+  QFontMetricsF fmUnit(p.font());
+  QRectF rUnitT = fmUnit.boundingRect(unit_template);
+  QRectF unitRectT(x - rUnitT.width() / 2.0,
+                   y_unit - fmUnit.ascent(),
+                   rUnitT.width(),
+                   fmUnit.height());
+
+  // 템플릿 두 줄을 감싸는 기본 배경 + 패딩
+  QRectF bgBase = speedRectT.united(unitRectT).adjusted(-28, -18, 28, 18);
+
+  // 폭 20% 확대 + (고정) 센터 유지
+  const qreal w = bgBase.width() * 1.2;
+  const qreal h = bgBase.height();        // 높이도 고정(원하시면 *1.1 같은 조절 가능)
+  const QPointF c = bgBase.center();
+  QRectF bgFixed(c.x() - w / 2.0, c.y() - h / 2.0, w, h);
+
+  // ---- 2) 반투명 검정 배경(바깥 레이어) ----
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(0, 0, 0, 160));
+  p.drawRoundedRect(bgFixed, 22, 22);
+
+  // ---- 3) 텍스트(안쪽 레이어) ----
+  configFont(p, "Open Sans", 176, "Bold");
+  drawTextWithColor(p, x, y_speed, speed, color);
+
+  configFont(p, "Open Sans", 66, "Regular");
+  drawText(p, x, y_unit, unit, 200);
+
+  p.restore();
+}*/
+
+void NvgWindow::drawSpeed(QPainter &p) {
+  p.save();
+
+  UIState *s = uiState();
+  const SubMaster &sm = *(s->sm);
+
+  // -------------------------
+  // Current speed value
+  // -------------------------
+  const auto car_state = sm["carState"].getCarState();
+  const float v_ego = car_state.getVEgo();
+  const float conv = s->scene.is_metric ? (float)MS_TO_KPH : (float)MS_TO_MPH;
+  const float cur_speed = std::max(0.0f, v_ego * conv);
+
+  const float accel = car_state.getAEgo();
+
+  // speedColor (가감속에 따라 변화)
+  QColor speedColor(255, 255, 255, 230);
+  if (accel > 0) {
+    int a = (int)(255.f - (180.f * (accel / 2.f)));
+    a = std::min(a, 255);
+    a = std::max(a, 80);
+    speedColor = QColor(a, a, 255, 230);
+  } else {
+    int a = (int)(255.f - (255.f * (-accel / 3.f)));
+    a = std::min(a, 255);
+    a = std::max(a, 60);
+    speedColor = QColor(255, a, a, 230);
+  }
+
+  // -------------------------
+  // Main speed position (기존 동일)
+  // -------------------------
+  const int x = rect().center().x() - 150;
+  const int speed_y_offset = 400;
+  const int y_speed = 460 + speed_y_offset;
+  const int y_unit  = 540 + speed_y_offset;
+
+  QString speed;
+  speed.sprintf("%.0f", cur_speed);
+
+  // -------------------------
+  // Speed background (template-based)
+  // -------------------------
+  const QString speed_template = "888";
+  const QString unit_template  = "km/h";
+
+  configFont(p, "Open Sans", 176, "Bold");
+  QFontMetricsF fmSpeed(p.font());
+  QRectF rSpeedT = fmSpeed.boundingRect(speed_template);
+  QRectF speedRectT(x - rSpeedT.width() / 2.0,
+                    y_speed - fmSpeed.ascent(),
+                    rSpeedT.width(),
+                    fmSpeed.height());
+
+  configFont(p, "Open Sans", 66, "Regular");
+  QFontMetricsF fmUnit(p.font());
+  QRectF rUnitT = fmUnit.boundingRect(unit_template);
+  QRectF unitRectT(x - rUnitT.width() / 2.0,
+                   y_unit - fmUnit.ascent(),
+                   rUnitT.width(),
+                   fmUnit.height());
+
+  QRectF bgBase = speedRectT.united(unitRectT).adjusted(-28, -18, 28, 18);
+
+  // 폭 20% 확대 + 센터 유지
+  const qreal bgW = bgBase.width() * 1.2;
+  const qreal bgH = bgBase.height();
+  const QPointF bgC = bgBase.center();
+  QRectF bgFixed(bgC.x() - bgW / 2.0, bgC.y() - bgH / 2.0, bgW, bgH);
+
+  // -------------------------
+  // Background color (30% brighter)
+  // -------------------------
+  QColor bgBright30(77, 77, 77, 160);
+
+  // ✅ 패널 배경을 10% 더 투명하게 (alpha 160 -> 144)
+  QColor panelBgColor(77, 77, 77, 144);
+
+  // -------------------------
+  // Cruise/Apply panel (left)
+  // -------------------------
+  const auto controls_state = sm["controlsState"].getControlsState();
+  const float applyMaxSpeed_kph  = controls_state.getApplyMaxSpeed();
+  const float cruiseMaxSpeed_kph = controls_state.getCruiseMaxSpeed();
+  const bool is_cruise_set = (cruiseMaxSpeed_kph > 0.f && cruiseMaxSpeed_kph < 255.f);
+
+  auto to_display_speed = [&](float kph) -> int {
+    if (kph <= 0.f) return 0;
+    if (s->scene.is_metric) return (int)(kph + 0.5f);
+    return (int)(kph * (float)KM_TO_MILE + 0.5f);
+  };
+
+  // ✅ 패널 폭 10% 증가 (콘텐츠 폭 기준으로 같이 확대)
+  const qreal panel_content_w = 220.0 * 1.10;
+  const qreal panel_content_h = bgFixed.height();
+  const qreal panel_bg_w = panel_content_w * 1.2;
+  const qreal panel_bg_h = panel_content_h;
+
+  // 가운데(좌측 패널 ↔ 메인 속도 박스) 가로 여백
+  const int baseGap = 24;
+  const int extraGapX = 14;
+  const int gap = baseGap + extraGapX;
+
+  QRectF panelBg(bgFixed.left() - gap - panel_bg_w,
+                 bgFixed.top(),
+                 panel_bg_w,
+                 panel_bg_h);
+
+  QRectF panelContent(panelBg.center().x() - panel_content_w / 2.0,
+                      panelBg.top(),
+                      panel_content_w,
+                      panel_content_h);
+
+  // 패널 배경 (✅ 더 투명)
+  p.setPen(Qt::NoPen);
+  p.setBrush(panelBgColor);
+  p.drawRoundedRect(panelBg, 22, 22);
+
+  const int panel_cx = (int)panelContent.center().x();
+
+  // 3줄 배치 + 중간 여백
+  const int midGapY = 25;
+
+  int y_cruise = (int)(panelContent.top() + panelContent.height() * 0.30) - midGapY;
+  int y_curspd = (int)(panelContent.top() + panelContent.height() * 0.55);
+  int y_apply  = (int)(panelContent.top() + panelContent.height() * 0.80) + midGapY;
+
+  // 폰트
+  const int unifiedFont = 70;     // Cruise/Apply
+  const int unifiedSpdFont = 100;  // Current Speed
+
+  // Colors
+  QColor cruiseGreen(120, 255, 120, 200);
+  QColor naWhite(255, 255, 255, 180);
+  QColor applyOrange(255, 127, 0, 200);
+
+  // Cruise
+  QString strCruise;
+  configFont(p, "Inter", unifiedFont, "Bold");
+  if (is_cruise_set) {
+    strCruise.sprintf("%d", to_display_speed(cruiseMaxSpeed_kph));
+    drawTextWithColor(p, panel_cx, y_cruise, strCruise, cruiseGreen);
+  } else {
+    strCruise = "N/A";
+    drawTextWithColor(p, panel_cx, y_cruise, strCruise, naWhite);
+  }
+
+  // Current Speed (숫자만, speedColor 유지)
+  QColor curSpeedColor = speedColor;
+  QString strCur;
+  strCur.sprintf("%d", (int)(cur_speed + 0.5f));
+  configFont(p, "Inter", unifiedSpdFont, "Bold");
+  drawTextWithColor(p, panel_cx, y_curspd, strCur, curSpeedColor);
+
+  // Apply
+  QString strApply;
+  if (is_cruise_set && applyMaxSpeed_kph > 0.f) {
+    strApply.sprintf("%d", to_display_speed(applyMaxSpeed_kph));
+  } else {
+    strApply = "MAX";
+  }
+  configFont(p, "Inter", unifiedFont, "Bold");
+  drawTextWithColor(p, panel_cx, y_apply, strApply, applyOrange);
+
+  p.restore();
 }
+
+
+
+
+
 
 QRect getRect(QPainter &p, int flags, QString text) {
   QFontMetrics fm(p.font());
@@ -901,6 +1146,7 @@ QRect getRect(QPainter &p, int flags, QString text) {
   return fm.boundingRect(init_rect, flags, text);
 }
 
+/*
 void NvgWindow::drawSpeedLimit(QPainter &p) {
   const SubMaster &sm = *(uiState()->sm);
   auto roadLimitSpeed = sm["roadLimitSpeed"].getRoadLimitSpeed();
@@ -934,11 +1180,13 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   {
       int w = 120;
       int h = 54;
-      int x = (width() + (bdr_s*2))/2 - w/2 - bdr_s;
-      int y = 40 - bdr_s;
+      //int x = (width() + (bdr_s*2))/2 - w/2 - bdr_s;
+      //int y = 40 - bdr_s;
+      int y = 80 - bdr_s;
 
       p.setOpacity(1.f);
-      p.drawPixmap(x, y, w, h, activeNDA == 1 ? ic_nda : ic_hda);
+      //p.drawPixmap(x, y, w, h, activeNDA == 1 ? ic_nda : ic_hda);
+      p.drawPixmap(280, y, w, h, activeNDA == 1 ? ic_nda : ic_hda);
   }
 
   const int x_start = 30;
@@ -1113,73 +1361,231 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   }
 
   p.restore();
-  /*if(limit_speed > 10 && limit_speed < 130)
-  {
-    int radius_ = 192;
+}*/
 
-    int x = 30;
-    int y = 270;
+// SpeedLimit만 표시하고, Cruise/Apply(=MaxSpeed 박스)는 완전히 제거
+// + 보드 위치20% 아래 이동(클램프)
+// + roadLimit_Speed(SPEED LIMIT 박스)일 때 NDA/HDA 아이콘을 박스 위에 표시
+void NvgWindow::drawSpeedLimit(QPainter &p) {
+  p.save();
 
-    p.setPen(Qt::NoPen);
-    p.setBrush(QBrush(QColor(255, 0, 0, 255)));
-    QRect rect = QRect(x, y, radius_, radius_);
-    p.drawEllipse(rect);
+  const SubMaster &sm = *(uiState()->sm);
+  auto roadLimitSpeed = sm["roadLimitSpeed"].getRoadLimitSpeed();
 
-    p.setBrush(QBrush(QColor(255, 255, 255, 255)));
+  const int activeNDA = roadLimitSpeed.getActive();
+  const int roadLimit_Speed = roadLimitSpeed.getRoadLimitSpeed();
+  const int camLimitSpeed = roadLimitSpeed.getCamLimitSpeed();
+  const int camLimitSpeedLeftDist = roadLimitSpeed.getCamLimitSpeedLeftDist();
+  const int sectionLimitSpeed = roadLimitSpeed.getSectionLimitSpeed();
+  const int sectionLeftDist = roadLimitSpeed.getSectionLeftDist();
 
-    const int tickness = 14;
-    rect.adjust(tickness, tickness, -tickness, -tickness);
-    p.drawEllipse(rect);
+  int limit_speed = 0;
+  int left_dist = 0;
 
-    QString str_limit_speed, str_left_dist;
-    str_limit_speed.sprintf("%d", limit_speed);
+  if (camLimitSpeed > 0 && camLimitSpeedLeftDist > 0) {
+    limit_speed = camLimitSpeed;
+    left_dist = camLimitSpeedLeftDist;
+  } else if (sectionLimitSpeed > 0 && sectionLeftDist > 0) {
+    limit_speed = sectionLimitSpeed;
+    left_dist = sectionLeftDist;
+  }
 
-    if(left_dist >= 1000)
-      str_left_dist.sprintf("%.1fkm", left_dist / 1000.f);
-    else if(left_dist > 0)
-      str_left_dist.sprintf("%dm", left_dist);
+  const bool show_cam_or_section = (limit_speed > 0 && left_dist > 0);
+  const bool show_road = (roadLimit_Speed > 0 && roadLimit_Speed < 200);
 
-    configFont(p, "Open Sans", 80, "Bold");
-    p.setPen(QColor(0, 0, 0, 230));
-    p.drawText(rect, Qt::AlignCenter, str_limit_speed);
+  if (!show_cam_or_section && !show_road) {
+    p.restore();
+    return;
+  }
 
-    if(str_left_dist.length() > 0) {
-      configFont(p, "Open Sans", 60, "Bold");
-      rect.translate(0, radius_/2 + 45);
-      rect.adjust(-30, 0, 30, 0);
-      p.setPen(QColor(255, 255, 255, 230));
-      p.drawText(rect, Qt::AlignCenter, str_left_dist);
+  // ============================================================
+  // ✅ 15% 확대 스케일
+  // ============================================================
+  const float k = 1.00f;
+  auto S = [&](int v) -> int { return (int)std::lround(v * k); };
+
+  // ---- layout base ----
+  const int x_start = 30;             // 위치는 유지
+  const int base_y_start = 70;        // 위치는 유지
+  const int corner_radius = S(32);
+  const QColor bgColor(0, 0, 0, 166);
+
+  // ---- 20% 아래로 이동 (화면 하단 넘어가면 clamp) + 현재 보이던 위치에서 400 더 내리는 것----
+  const int desired_shift = (int)std::lround(height() * 0.20f) + 400;
+
+  int needed_h = 0;
+  if (show_cam_or_section) {
+    const int board_w = S((limit_speed < 100) ? 210 : 230);
+    // 원형 표지(보드) + 아래 거리 pill 여유
+    needed_h = board_w + S(110);
+  } else { // show_road
+    needed_h = S(275);
+  }
+
+  const int max_shift = std::max(0, height() - (base_y_start + needed_h) - S(20));
+  const int y_shift = std::clamp(desired_shift, 0, max_shift);
+  const int y_start = base_y_start + y_shift;
+
+  // ---- NDA/HDA 아이콘 ----
+  // 요구사항: roadLimit_Speed(SPEED LIMIT 박스) 있으면 박스 "위"에 표시
+  if (activeNDA > 0) {
+    const int w = S(120);
+    const int h = S(54);
+    p.setOpacity(1.f);
+
+    if (show_road) {
+      // SPEED LIMIT 박스 위 중앙 정렬
+      const int board_width = S(210);
+      const int top_margin = S(10);
+      const int x_icon = x_start + (board_width - w) / 2;
+      int y_icon = y_start - h - top_margin;
+      y_icon = std::max(0, y_icon);
+
+      p.drawPixmap(x_icon, y_icon, w, h, (activeNDA == 1) ? ic_nda : ic_hda);
+    } else {
+      // CAM/SECTION일 때는 기존 위치 유지(크기만 확대), 이동량만 반영
+      const int x_icon = 280;
+      const int base_nda_y = 80 - bdr_s;
+      const int y_icon = base_nda_y + y_shift;
+
+      p.drawPixmap(x_icon, y_icon, w, h, (activeNDA == 1) ? ic_nda : ic_hda);
     }
   }
-  else {
-    auto controls_state = sm["controlsState"].getControlsState();
-    int sccStockCamAct = (int)controls_state.getSccStockCamAct();
-    int sccStockCamStatus = (int)controls_state.getSccStockCamStatus();
 
-    if(sccStockCamAct == 2 && sccStockCamStatus == 2) {
-      int radius_ = 192;
+  p.setOpacity(1.f);
 
-      int x = 30;
-      int y = 270;
+  QString str;
 
-      p.setPen(Qt::NoPen);
+  // ------------------------------------------------------------
+  // CAM/SECTION 제한속도 (원형 표지 + 아래 거리 pill)
+  // ------------------------------------------------------------
+  if (show_cam_or_section) {
+    const int board_width = S((limit_speed < 100) ? 210 : 230);
+    const int board_height = board_width;
 
-      p.setBrush(QBrush(QColor(255, 0, 0, 255)));
-      QRect rect = QRect(x, y, radius_, radius_);
-      p.drawEllipse(rect);
+    // background
+    p.setPen(Qt::NoPen);
+    p.setBrush(bgColor);
+    p.drawRoundedRect(QRectF(x_start, y_start, board_width, board_height), corner_radius, corner_radius);
 
-      p.setBrush(QBrush(QColor(255, 255, 255, 255)));
+    // inner circle
+    QRect board_rect(x_start, y_start, board_width, board_width);
 
-      const int tickness = 14;
-      rect.adjust(tickness, tickness, -tickness, -tickness);
-      p.drawEllipse(rect);
+    int padding = S(14);
+    board_rect.adjust(padding, padding, -padding, -padding);
+    p.setBrush(QBrush(Qt::white));
+    p.drawEllipse(board_rect);
 
-      configFont(p, "Open Sans", 70, "Bold");
-      p.setPen(QColor(0, 0, 0, 230));
-      p.drawText(rect, Qt::AlignCenter, "CAM");
+    padding = S(18);
+    board_rect.adjust(padding, padding, -padding, -padding);
+    p.setBrush(Qt::NoBrush);
+    p.setPen(QPen(Qt::red, S(25)));
+    p.drawEllipse(board_rect);
+
+    // speed text
+    p.setPen(QPen(Qt::black, padding));
+    str.sprintf("%d", limit_speed);
+    configFont(p, "Inter", S(70), "Bold");
+
+    QRect text_rect = getRect(p, Qt::AlignCenter, str);
+    QRect b_rect = board_rect;
+    text_rect.moveCenter({b_rect.center().x(), 0});
+    text_rect.moveTop(b_rect.top() + (b_rect.height() - text_rect.height()) / 2);
+    p.drawText(text_rect, Qt::AlignCenter, str);
+
+    // left dist pill
+    QRect rcLeftDist;
+    QString strLeftDist;
+
+    if (left_dist < 1000) strLeftDist.sprintf("%dm", left_dist);
+    else strLeftDist.sprintf("%.1fkm", left_dist / 1000.f);
+
+    QFont font("Inter");
+    font.setPixelSize(S(55));
+    font.setStyleName("Bold");
+
+    QFontMetrics fm(font);
+    int w_txt = fm.width(strLeftDist);
+
+    padding = S(10);
+    const int center_x = x_start + board_width / 2;
+
+    rcLeftDist.setRect(center_x - w_txt / 2,
+                       y_start + board_height + S(15),
+                       w_txt,
+                       font.pixelSize() + S(10));
+    rcLeftDist.adjust(-padding * 2, -padding, padding * 2, padding);
+
+    p.setPen(Qt::NoPen);
+    p.setBrush(bgColor);
+    p.drawRoundedRect(rcLeftDist, S(20), S(20));
+
+    configFont(p, "Inter", S(55), "Bold");
+    p.setBrush(Qt::NoBrush);
+    p.setPen(QColor(255, 255, 255, 230));
+    p.drawText(rcLeftDist, Qt::AlignCenter | Qt::AlignVCenter, strLeftDist);
+  }
+
+  // ------------------------------------------------------------
+  // 일반 도로 제한속도 (SPEED LIMIT 박스)
+  // ------------------------------------------------------------
+  else if (show_road) {
+    const int board_width = S(210);
+    const int board_height = S(275);
+
+    // background
+    p.setPen(Qt::NoPen);
+    p.setBrush(bgColor);
+    p.drawRoundedRect(QRectF(x_start, y_start, board_width, board_height), corner_radius, corner_radius);
+
+    QRectF board_rect(x_start, y_start, board_width, board_height);
+
+    int padding = S(14);
+    board_rect.adjust(padding, padding, -padding, -padding);
+    p.setBrush(QBrush(Qt::white));
+    p.drawRoundedRect(board_rect, corner_radius - padding / 2, corner_radius - padding / 2);
+
+    padding = S(10);
+    board_rect.adjust(padding, padding, -padding, -padding);
+    p.setBrush(Qt::NoBrush);
+    p.setPen(QPen(Qt::black, padding));
+    p.drawRoundedRect(board_rect, corner_radius - S(12), corner_radius - S(12));
+
+    // "SPEED LIMIT"
+    {
+      str = "SPEED\nLIMIT";
+      configFont(p, "Inter", S(35), "Bold");
+
+      QRect text_rect = getRect(p, Qt::AlignCenter, str);
+      QRect b_rect(board_rect.x(), board_rect.y(), board_rect.width(), board_rect.height() / 2);
+      text_rect.moveCenter({b_rect.center().x(), 0});
+      text_rect.moveTop(b_rect.top() + S(20));
+      p.setPen(QColor(0, 0, 0, 255));
+      p.drawText(text_rect, Qt::AlignCenter, str);
     }
-  }*/
+
+    // road limit number
+    {
+      str.sprintf("%d", roadLimit_Speed);
+      configFont(p, "Inter", S(75), "Bold");
+
+      QRect text_rect = getRect(p, Qt::AlignCenter, str);
+      QRect b_rect(board_rect.x(),
+                   board_rect.y() + board_rect.height() / 2,
+                   board_rect.width(),
+                   board_rect.height() / 2);
+      text_rect.moveCenter({b_rect.center().x(), 0});
+      text_rect.moveTop(b_rect.top() + S(3));
+      p.setPen(QColor(0, 0, 0, 255));
+      p.drawText(text_rect, Qt::AlignCenter, str);
+    }
+  }
+
+  p.setOpacity(1.f);
+  p.restore();
 }
+
+
 
 QPixmap NvgWindow::get_icon_iol_com(const char* key) {
   auto item = ic_oil_com.find(key);
@@ -1399,82 +1805,123 @@ void NvgWindow::drawThermal(QPainter &p) {
   auto deviceState = sm["deviceState"].getDeviceState();
 
   const auto cpuTempC = deviceState.getCpuTempC();
-  //const auto gpuTempC = deviceState.getGpuTempC();
   float ambientTemp = deviceState.getAmbientTempC();
 
   float cpuTemp = 0.f;
-  //float gpuTemp = 0.f;
-
-  if(std::size(cpuTempC) > 0) {
-    for(int i = 0; i < std::size(cpuTempC); i++) {
+  if (std::size(cpuTempC) > 0) {
+    for (int i = 0; i < (int)std::size(cpuTempC); i++) {
       cpuTemp += cpuTempC[i];
     }
     cpuTemp = cpuTemp / (float)std::size(cpuTempC);
   }
 
-  /*if(std::size(gpuTempC) > 0) {
-    for(int i = 0; i < std::size(gpuTempC); i++) {
-      gpuTemp += gpuTempC[i];
-    }
-    gpuTemp = gpuTemp / (float)std::size(gpuTempC);
-    cpuTemp = (cpuTemp + gpuTemp) / 2.f;
-  }*/
+  // =========================
+  // 레이아웃(가로형 + 좌상단 여유)
+  // =========================
+  const int x = 35;
+  const int y = 425;   // 기존 25 -> 425 로 변경
 
-  int w = 192;
-  int x = width() - (30 + w);
-  int y = 330;
+  const int tile_w = 185;
+  const int tile_h = 145;
 
-  QString str;
-  QRect rect;
+  const int gap = 20;   // ✅ 타일 사이 간격: 18 -> 20 (10% 증가 반영)
+  const int pad = 16;
 
-  configFont(p, "Open Sans", 50, "Bold");
-  str.sprintf("%d%%", deviceState.getBatteryPercent());
-  rect = QRect(x, y, w, w);
+  const int total_w = tile_w * 3 + gap * 2;
+  const int total_h = tile_h;
+
+  // ✅ 배경: 투명 검정 + 라운드
+  QRect bg_rect(x - pad, y - pad, total_w + pad * 2, total_h + pad * 2);
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(0, 0, 0, 150));
+  p.drawRoundedRect(bg_rect, 18, 18);
+
+  auto drawTile = [&](int tx, const QString &value, const QString &label, const QColor &valColor) {
+    const int label_h = 48;                 // 라벨 영역 높이
+    const int value_label_gap = 5;          // ✅ 값/라벨 사이 세로 여백(약 10% 느낌으로 추가)
+
+    // ✅ valueRect 아래를 줄여서 labelRect와 사이에 빈 공간을 만들기
+    QRect valueRect(tx, y, tile_w, tile_h - label_h - value_label_gap);
+    QRect labelRect(tx, y + tile_h - label_h, tile_w, label_h);
+
+    // ✅ 값 폰트: 20% 확대 유지
+    configFont(p, "Open Sans", 60, "Bold");
+    p.setPen(valColor);
+    p.drawText(valueRect, Qt::AlignCenter, value);
+
+    // ✅ 라벨 폰트: 20% 확대 유지
+    configFont(p, "Open Sans", 35, "Bold");
+    p.setPen(QColor(0, 255, 0, 220));
+    p.drawText(labelRect, Qt::AlignCenter, label);
+  };
+
+  // =========================
+  // BAT
+  // =========================
+  QString batStr;
+  batStr.sprintf("%d%%", deviceState.getBatteryPercent());
 
   int r = interp<float>(cpuTemp, {50.f, 90.f}, {200.f, 255.f}, false);
   int g = interp<float>(cpuTemp, {50.f, 90.f}, {255.f, 200.f}, false);
-  p.setPen(QColor(r, g, 200, 200));
-  p.drawText(rect, Qt::AlignCenter, str);
+  drawTile(x, batStr, "BAT.L", QColor(r, g, 200, 220));
 
-  y += 55;
-  configFont(p, "Open Sans", 25, "Bold");
-  rect = QRect(x, y, w, w);
-  p.setPen(QColor(255, 255, 255, 200));
-  p.drawText(rect, Qt::AlignCenter, "BAT.L");
-
-  y += 80;
-  configFont(p, "Open Sans", 50, "Bold");
-  str.sprintf("%.0f°C", cpuTemp);
-  rect = QRect(x, y, w, w);
+  // =========================
+  // CPU
+  // =========================
+  QString cpuStr;
+  cpuStr.sprintf("%.0f°C", cpuTemp);
 
   r = interp<float>(cpuTemp, {50.f, 90.f}, {200.f, 255.f}, false);
   g = interp<float>(cpuTemp, {50.f, 90.f}, {255.f, 200.f}, false);
-  p.setPen(QColor(r, g, 200, 200));
-  p.drawText(rect, Qt::AlignCenter, str);
+  drawTile(x + (tile_w + gap), cpuStr, "CPU", QColor(r, g, 200, 220));
 
-  y += 55;
-  configFont(p, "Open Sans", 25, "Bold");
-  rect = QRect(x, y, w, w);
-  p.setPen(QColor(255, 255, 255, 200));
-  p.drawText(rect, Qt::AlignCenter, "CPU");
+  // =========================
+  // AMBIENT
+  // =========================
+  QString ambStr;
+  ambStr.sprintf("%.0f°C", ambientTemp);
 
-  y += 80;
-  configFont(p, "Open Sans", 50, "Bold");
-  str.sprintf("%.0f°C", ambientTemp);
-  rect = QRect(x, y, w, w);
   r = interp<float>(ambientTemp, {35.f, 60.f}, {200.f, 255.f}, false);
   g = interp<float>(ambientTemp, {35.f, 60.f}, {255.f, 200.f}, false);
-  p.setPen(QColor(r, g, 200, 200));
-  p.drawText(rect, Qt::AlignCenter, str);
-
-  y += 55;
-  configFont(p, "Open Sans", 25, "Bold");
-  rect = QRect(x, y, w, w);
-  p.setPen(QColor(255, 255, 255, 200));
-  p.drawText(rect, Qt::AlignCenter, "AMBIENT");
+  drawTile(x + (tile_w + gap) * 2, ambStr, "AMBIENT", QColor(r, g, 200, 220));
 
   p.restore();
 }
+
+
+
+
+/*void NvgWindow::drawDebugText(QPainter &p) {
+  const SubMaster &sm = *(uiState()->sm);
+  QString str;
+
+  int y = 200;
+  //const int height = 60;
+
+  const int text_x = width()/2 + 200;
+  //const int text_x = 40;
+
+  auto controls_state = sm["controlsState"].getControlsState();
+  //auto car_control = sm["carControl"].getCarControl();
+  //auto car_state = sm["carState"].getCarState();
+
+  const char* bucketPointsStr = controls_state.getBucketPoints().cStr();
+
+  configFont(p, "Open Sans", 27, "Bold");
+  p.setPen(QColor(0, 255, 0, 255));
+  p.setRenderHint(QPainter::TextAntialiasing);
+
+  // |가 아니라 이미 \n로 단락 구분된 문자열을 받는다고 가정
+  QString bucketStr(bucketPointsStr);
+
+  // 텍스트 그리기: QRect와 TextWordWrap 사용
+  int textWidth = 900;   // 영역 너비, 필요에 따라 조정
+  int textHeight = 1000; // 영역 높이, 필요에 따라 조정
+  QRect textRect(text_x, y, textWidth, textHeight);
+
+  // Qt::TextWordWrap 옵션으로 \n 단락 반영
+  p.drawText(textRect, Qt::AlignLeft | Qt::TextWordWrap, bucketStr);
+}*/
 
 void NvgWindow::drawDebugText(QPainter &p) {
   const SubMaster &sm = *(uiState()->sm);
