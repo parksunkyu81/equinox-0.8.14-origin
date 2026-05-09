@@ -195,6 +195,13 @@ LTP_STATE_PATH_PKL = os.path.join(LTP_LOG_DIR, "ltp_state.pkl")
 LTP_WARM_COMPAT_MAX_VERSION_GAP = 0  # major tuning change: do not restore old bucket/filter state across VERSION changes
 LTP_STATE_SAVE_MIN_DELTA_PTS = 300  # save sooner when many new points are added
 
+# VERSION 변경 시 이전 warm-state/LiveTorqueParameters/사용자 anchor Param을 확실히 버린다.
+# 기존에는 VERSION mismatch로 warm-state만 스킵하고, 종료 시 EMA merge나 Runtime Param이
+# 예전 값을 다시 주입할 수 있어서 source anchor(1.90/0.255)로 초기화되지 않는 문제가 있었다.
+LTP_VERSION_PARAM_KEY = "LiveTorqueLastAppliedVersion"
+LTP_CLEAR_RUNTIME_ANCHOR_PARAMS_ON_VERSION_CHANGE = True
+LTP_RUNTIME_ANCHOR_PARAM_KEYS = ("TorqueMaxLatAccel", "TorqueFriction")
+
 # Tunables
 # -----------------------------
 HISTORY = 5  # secs
@@ -364,7 +371,7 @@ RATE_LIM_STEADY_FRICTION_BLEND_W = 0.15  # 준정상 rate-limit 구간에서 fri
 # Applied profile: Equinox 2020 Diesel
 # - CarControllerParams matched: STEER_MAX=300, STEER_DELTA_UP=10, STEER_DELTA_DOWN=17, MIN_STEER_SPEED=3.0m/s
 # - Corner learning starts at 3.00m/s (~10.8km/h); straight/offset learning remains >=20km/h
-VERSION = 23
+VERSION = 25  # reset-fix: clear stale state/cache/runtime anchors on VERSION change
 
 
 def slope2rot(slope):
@@ -3259,7 +3266,55 @@ def main(sm=None, pm=None):
             except Exception:
                 pass
 
-    # Initial load (once at startup)
+    def _clear_ltp_persistent_state(reason: str, clear_runtime_anchor_params: bool = False):
+        """Clear every persistent source that can override source anchors on startup."""
+        try:
+            cloudlog.warning("LiveTorque: clearing persistent state (%s)" % str(reason))
+        except Exception:
+            pass
+
+        try:
+            for pth in (LTP_STATE_PATH, LTP_STATE_PATH_PKL):
+                if os.path.exists(pth):
+                    os.remove(pth)
+        except Exception:
+            pass
+
+        for key in ("LiveTorqueCarParams", "LiveTorqueParameters"):
+            try:
+                params.remove(key)
+            except Exception:
+                pass
+
+        if clear_runtime_anchor_params:
+            for key in LTP_RUNTIME_ANCHOR_PARAM_KEYS:
+                try:
+                    params.remove(key)
+                except Exception:
+                    pass
+
+    startup_version_reset = False
+
+    # VERSION이 바뀌면 source anchor 기준으로 완전 초기화한다.
+    # 단순히 VERSION만 올리면 warm-state는 스킵되더라도 LiveTorqueParameters/Runtime Param이
+    # 예전 filtered 값을 다시 섞을 수 있으므로, 부팅 초기에 먼저 제거한다.
+    try:
+        saved_version = params.get(LTP_VERSION_PARAM_KEY, encoding="utf8")
+        saved_version = str(saved_version).strip() if saved_version is not None else ""
+        if saved_version != str(VERSION):
+            startup_version_reset = True
+            _clear_ltp_persistent_state(
+                "VERSION changed %s -> %s" % (saved_version or "none", VERSION),
+                clear_runtime_anchor_params=bool(LTP_CLEAR_RUNTIME_ANCHOR_PARAMS_ON_VERSION_CHANGE),
+            )
+            try:
+                params.put(LTP_VERSION_PARAM_KEY, str(VERSION).encode("utf8"))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Initial load (once at startup). VERSION reset 이후에 읽어야 예전 Runtime Param이 anchor를 덮지 않는다.
     _reload_user_torque_params(estimator_ref=None, force_log=True)
 
     try:
@@ -3268,26 +3323,16 @@ def main(sm=None, pm=None):
         if v is not None and v.strip() in [b"1", b"true", b"True", b"YES", b"yes"]:
             do_reset = True
         if do_reset:
-            cloudlog.warning("LiveTorque: reset requested - clearing cached params")
-
-            # ✅ warm-state 파일 삭제(restore 스킵 목적)
-            try:
-                for pth in (LTP_STATE_PATH, LTP_STATE_PATH_PKL):
-                    if os.path.exists(pth):
-                        os.remove(pth)
-            except Exception:
-                pass
-
-            try:
-                params.remove("LiveTorqueCarParams")
-            except Exception:
-                pass
-            try:
-                params.remove("LiveTorqueParameters")
-            except Exception:
-                pass
+            _clear_ltp_persistent_state(
+                "manual reset",
+                clear_runtime_anchor_params=bool(LTP_CLEAR_RUNTIME_ANCHOR_PARAMS_ON_VERSION_CHANGE),
+            )
             try:
                 params.put("LiveTorqueReset", b"0")
+            except Exception:
+                pass
+            try:
+                params.put(LTP_VERSION_PARAM_KEY, str(VERSION).encode("utf8"))
             except Exception:
                 pass
     except Exception:
@@ -3298,6 +3343,26 @@ def main(sm=None, pm=None):
     # Sync offline anchors to the latest runtime Params values
     try:
         _reload_user_torque_params(estimator_ref=estimator, force_log=True)
+    except Exception:
+        pass
+
+    # VERSION/manual reset 직후에는 filtered 값/버킷/decay도 source anchor로 강제 초기화한다.
+    try:
+        if startup_version_reset:
+            estimator.reset()
+            estimator._straight_bias = deque()
+            estimator._pending_straight_restore = None
+            estimator._straight_win_ok = 0
+            estimator._straight_win_total = 0
+            estimator._straight_win_ok_ratio = 0.0
+            estimator.filtered_params['latAccelFactor'].x = float(estimator.offline_latAccelFactor)
+            estimator.filtered_params['latAccelOffset'].x = 0.0
+            estimator.filtered_params['frictionCoefficient'].x = float(estimator.offline_friction)
+            estimator.decay = float(MIN_FILTER_DECAY)
+            cloudlog.warning(
+                "LiveTorque: VERSION reset applied filtered anchors latAF=%.5f friction=%.5f"
+                % (float(estimator.offline_latAccelFactor), float(estimator.offline_friction))
+            )
     except Exception:
         pass
 
@@ -3325,13 +3390,24 @@ def main(sm=None, pm=None):
                 prev = log.Event.from_bytes(prev_bytes).liveTorqueParameters
                 cur = msg.liveTorqueParameters
 
-                cur.latAccelFactorFiltered = merge_with_cache(prev.latAccelFactorFiltered, cur.latAccelFactorFiltered,
-                                                              EMA_ALPHA)
-                cur.latAccelOffsetFiltered = merge_with_cache(prev.latAccelOffsetFiltered, cur.latAccelOffsetFiltered,
-                                                              EMA_ALPHA)
-                cur.frictionCoefficientFiltered = merge_with_cache(prev.frictionCoefficientFiltered,
-                                                                   cur.frictionCoefficientFiltered, EMA_ALPHA)
-                cur.decay = max(prev.decay, cur.decay)
+                # VERSION이 다른 이전 캐시와 EMA merge하면 새 anchor 초기화가 다시 오염된다.
+                # 같은 VERSION일 때만 EMA merge를 허용한다.
+                if int(getattr(prev, 'version', -1)) == int(getattr(cur, 'version', VERSION)):
+                    cur.latAccelFactorFiltered = merge_with_cache(prev.latAccelFactorFiltered, cur.latAccelFactorFiltered,
+                                                                  EMA_ALPHA)
+                    cur.latAccelOffsetFiltered = merge_with_cache(prev.latAccelOffsetFiltered, cur.latAccelOffsetFiltered,
+                                                                  EMA_ALPHA)
+                    cur.frictionCoefficientFiltered = merge_with_cache(prev.frictionCoefficientFiltered,
+                                                                       cur.frictionCoefficientFiltered, EMA_ALPHA)
+                    cur.decay = max(prev.decay, cur.decay)
+                else:
+                    try:
+                        cloudlog.warning(
+                            "LiveTorque: skip EMA cache merge due to VERSION mismatch prev=%s cur=%s"
+                            % (getattr(prev, 'version', None), getattr(cur, 'version', None))
+                        )
+                    except Exception:
+                        pass
             params.put("LiveTorqueParameters", msg.to_bytes())
         except Exception:
             cloudlog.exception("EMA cache merge failed; saving current snapshot")
@@ -3385,17 +3461,18 @@ def main(sm=None, pm=None):
                 if v is not None and v.strip() in [b"1", b"true", b"True", b"YES", b"yes"]:
                     cloudlog.warning("LiveTorque: runtime reset requested")
                     try:
-                        for pth in (LTP_STATE_PATH, LTP_STATE_PATH_PKL):
-                            if os.path.exists(pth):
-                                os.remove(pth)
+                        _clear_ltp_persistent_state(
+                            "runtime reset",
+                            clear_runtime_anchor_params=bool(LTP_CLEAR_RUNTIME_ANCHOR_PARAMS_ON_VERSION_CHANGE),
+                        )
                     except Exception:
                         pass
                     try:
-                        params.remove("LiveTorqueCarParams")
+                        params.put(LTP_VERSION_PARAM_KEY, str(VERSION).encode("utf8"))
                     except Exception:
                         pass
                     try:
-                        params.remove("LiveTorqueParameters")
+                        _reload_user_torque_params(estimator_ref=estimator, force_log=True)
                     except Exception:
                         pass
                     try:
