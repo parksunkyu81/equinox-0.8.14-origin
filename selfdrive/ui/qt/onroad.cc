@@ -580,10 +580,11 @@ void NvgWindow::drawHud(QPainter &p) {
                       device_State.getMemoryUsagePercent(),
   */
   QString infoText;
-  infoText.sprintf("TORQUE(LatA:%.3f,Fri:%.3f) TCO(%.2f) SR(%.2f) SAD(%.2f) MIN_TR(%.1f) DF_MOD(%.1f)",
+  infoText.sprintf("(LatA:%.3f,Fri:%.3f,PT:%.0f) TCO(%.2f) SR(%.2f) SAD(%.2f) MIN_TR(%.1f) DF_MOD(%.1f)",
                       controls_state.getLatAccelFactor(),
                       controls_state.getFriction(),
-                      controls_state.getTotalCameraOffset(),
+                      controls_state.getTotalBucketPoints(),
+                      ontrols_state.getTotalCameraOffset(),
                       controls_state.getSteerRatio(),
                       controls_state.getSteerActuatorDelay(),
                       controls_state.getMinTR(),
