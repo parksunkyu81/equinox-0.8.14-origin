@@ -306,7 +306,7 @@ MIN_ENGAGE_BUFFER = 2  # secs
 # -----------------------------
 STEER_MAX_DIAG = 300
 STEER_DELTA_UP_DIAG = 10
-STEER_DELTA_DOWN_DIAG = 14
+STEER_DELTA_DOWN_DIAG = 17
 STEER_SAT_THRESHOLD = 0.98
 STEER_CLIP_EPS = 0.05  # ignore small desired/applied gaps that are normal actuator lag
 STEER_CLIP_MIN_DES = 0.18  # ignore 'clip' inference when desired is small
