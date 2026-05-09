@@ -198,7 +198,8 @@ LTP_STATE_SAVE_MIN_DELTA_PTS = 300  # save sooner when many new points are added
 # VERSION 변경 시 이전 warm-state/LiveTorqueParameters/사용자 anchor Param을 확실히 버린다.
 # 기존에는 VERSION mismatch로 warm-state만 스킵하고, 종료 시 EMA merge나 Runtime Param이
 # 예전 값을 다시 주입할 수 있어서 source anchor(1.90/0.255)로 초기화되지 않는 문제가 있었다.
-LTP_VERSION_PARAM_KEY = "LiveTorqueLastAppliedVersion"
+LTP_VERSION_PARAM_KEY = "LiveTorqueLastAppliedVersion"  # legacy only; may be unknown in 0.8.14 Params
+LTP_VERSION_FILE_PATH = os.path.join(LTP_LOG_DIR, "ltp_version.txt")
 LTP_CLEAR_RUNTIME_ANCHOR_PARAMS_ON_VERSION_CHANGE = True
 LTP_RUNTIME_ANCHOR_PARAM_KEYS = ("TorqueMaxLatAccel", "TorqueFriction")
 
@@ -371,7 +372,7 @@ RATE_LIM_STEADY_FRICTION_BLEND_W = 0.15  # 준정상 rate-limit 구간에서 fri
 # Applied profile: Equinox 2020 Diesel
 # - CarControllerParams matched: STEER_MAX=300, STEER_DELTA_UP=10, STEER_DELTA_DOWN=17, MIN_STEER_SPEED=3.0m/s
 # - Corner learning starts at 3.00m/s (~10.8km/h); straight/offset learning remains >=20km/h
-VERSION = 25  # reset-fix: clear stale state/cache/runtime anchors on VERSION change
+VERSION = 27  # logfix: file-based VERSION reset + no Params.remove dependency
 
 
 def slope2rot(slope):
@@ -905,10 +906,14 @@ class TorqueEstimator:
                 except Exception:
                     cloudlog.exception("failed to restore cached torque params")
                     try:
-                        params.remove("LiveTorqueCarParams")
-                        params.remove("LiveTorqueParameters")
+                        # Do not call params.remove(); unavailable in some 0.8.14 forks.
+                        for _k in ("LiveTorqueCarParams", "LiveTorqueParameters"):
+                            for _base in ("/data/params/d", "/data/params"):
+                                _p = os.path.join(_base, _k)
+                                if os.path.exists(_p):
+                                    os.remove(_p)
                     except Exception as e:
-                        cloudlog.warning(f"torque cache remove error: {e}")
+                        cloudlog.warning(f"torque cache file remove error: {e}")
 
         self.filtered_params = {
             'latAccelFactor': FirstOrderFilter(initial_params['latAccelFactor'], self.decay, DT_MDL),
@@ -3266,6 +3271,71 @@ def main(sm=None, pm=None):
             except Exception:
                 pass
 
+    def _delete_path_silent(path):
+        try:
+            if path and os.path.exists(path):
+                os.remove(path)
+                try:
+                    cloudlog.warning("LiveTorque: deleted %s" % str(path))
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                cloudlog.warning("LiveTorque: delete failed %s: %s" % (str(path), str(e)))
+            except Exception:
+                pass
+
+    def _delete_param_key_file(key: str):
+        """
+        openpilot 0.8.14 Params may not expose remove().  Deleting the backing
+        file is the safest cross-version way to clear a Param without raising
+        UnknownKeyName for custom keys.
+        """
+        try:
+            key_s = str(key)
+        except Exception:
+            return
+        for base in ("/data/params/d", "/data/params"):
+            _delete_path_silent(os.path.join(base, key_s))
+
+    def _read_raw_param_key_file(key: str):
+        try:
+            key_s = str(key)
+        except Exception:
+            return None
+        for base in ("/data/params/d", "/data/params"):
+            try:
+                pth = os.path.join(base, key_s)
+                if os.path.exists(pth):
+                    with open(pth, "rb") as f:
+                        return f.read()
+            except Exception:
+                pass
+        return None
+
+    def _read_text_file(path: str):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception:
+            return ""
+
+    def _write_text_file_atomic(path: str, value: str):
+        try:
+            d = os.path.dirname(path)
+            os.makedirs(d, exist_ok=True)
+            with tempfile.NamedTemporaryFile("w", delete=False, dir=d, prefix="ltp_ver_", suffix=".tmp", encoding="utf-8") as tf:
+                tf.write(str(value))
+                tf.flush()
+                os.fsync(tf.fileno())
+                tmp = tf.name
+            os.replace(tmp, path)
+        except Exception as e:
+            try:
+                cloudlog.warning("LiveTorque: version file write failed: %s" % str(e))
+            except Exception:
+                pass
+
     def _clear_ltp_persistent_state(reason: str, clear_runtime_anchor_params: bool = False):
         """Clear every persistent source that can override source anchors on startup."""
         try:
@@ -3273,44 +3343,40 @@ def main(sm=None, pm=None):
         except Exception:
             pass
 
-        try:
-            for pth in (LTP_STATE_PATH, LTP_STATE_PATH_PKL):
-                if os.path.exists(pth):
-                    os.remove(pth)
-        except Exception:
-            pass
+        # Warm-state files
+        for pth in (LTP_STATE_PATH, LTP_STATE_PATH_PKL):
+            _delete_path_silent(pth)
 
+        # Params cache files.  Do NOT call params.remove(); it is not available
+        # on common.params_pyx.Params in this fork.
         for key in ("LiveTorqueCarParams", "LiveTorqueParameters"):
-            try:
-                params.remove(key)
-            except Exception:
-                pass
+            _delete_param_key_file(key)
 
+        # Runtime user anchors that previously produced 3.0 / 0.12
+        # from TorqueMaxLatAccel=30 / TorqueFriction=120.
         if clear_runtime_anchor_params:
             for key in LTP_RUNTIME_ANCHOR_PARAM_KEYS:
-                try:
-                    params.remove(key)
-                except Exception:
-                    pass
+                _delete_param_key_file(key)
+
+        # Also clear the legacy version Param file if it exists; the source of
+        # truth is now LTP_VERSION_FILE_PATH because the Param key may not be
+        # registered in this 0.8.14 params schema.
+        _delete_param_key_file(LTP_VERSION_PARAM_KEY)
 
     startup_version_reset = False
 
     # VERSION이 바뀌면 source anchor 기준으로 완전 초기화한다.
-    # 단순히 VERSION만 올리면 warm-state는 스킵되더라도 LiveTorqueParameters/Runtime Param이
-    # 예전 filtered 값을 다시 섞을 수 있으므로, 부팅 초기에 먼저 제거한다.
+    # Params에 등록되지 않은 custom key는 UnknownKeyName을 낼 수 있으므로,
+    # VERSION 추적은 파일(/data/openpilot/ltp_logs/ltp_version.txt)로 한다.
     try:
-        saved_version = params.get(LTP_VERSION_PARAM_KEY, encoding="utf8")
-        saved_version = str(saved_version).strip() if saved_version is not None else ""
+        saved_version = _read_text_file(LTP_VERSION_FILE_PATH)
         if saved_version != str(VERSION):
             startup_version_reset = True
             _clear_ltp_persistent_state(
                 "VERSION changed %s -> %s" % (saved_version or "none", VERSION),
                 clear_runtime_anchor_params=bool(LTP_CLEAR_RUNTIME_ANCHOR_PARAMS_ON_VERSION_CHANGE),
             )
-            try:
-                params.put(LTP_VERSION_PARAM_KEY, str(VERSION).encode("utf8"))
-            except Exception:
-                pass
+            _write_text_file_atomic(LTP_VERSION_FILE_PATH, str(VERSION))
     except Exception:
         pass
 
@@ -3319,7 +3385,10 @@ def main(sm=None, pm=None):
 
     try:
         do_reset = (os.environ.get("LTP_RESET", "0") == "1")
-        v = params.get("LiveTorqueReset")
+        # LiveTorqueReset is not a registered Param in this fork, so do not
+        # call params.get/put for it.  Support a raw file only if the user
+        # manually created /data/params/d/LiveTorqueReset.
+        v = _read_raw_param_key_file("LiveTorqueReset")
         if v is not None and v.strip() in [b"1", b"true", b"True", b"YES", b"yes"]:
             do_reset = True
         if do_reset:
@@ -3327,14 +3396,8 @@ def main(sm=None, pm=None):
                 "manual reset",
                 clear_runtime_anchor_params=bool(LTP_CLEAR_RUNTIME_ANCHOR_PARAMS_ON_VERSION_CHANGE),
             )
-            try:
-                params.put("LiveTorqueReset", b"0")
-            except Exception:
-                pass
-            try:
-                params.put(LTP_VERSION_PARAM_KEY, str(VERSION).encode("utf8"))
-            except Exception:
-                pass
+            _delete_param_key_file("LiveTorqueReset")
+            _write_text_file_atomic(LTP_VERSION_FILE_PATH, str(VERSION))
     except Exception:
         pass
 
@@ -3457,7 +3520,9 @@ def main(sm=None, pm=None):
         if (now_wall - last_reset_check_wall) >= 0.5:
             last_reset_check_wall = now_wall
             try:
-                v = params.get("LiveTorqueReset")
+                # LiveTorqueReset is not a registered Param key here; avoid
+                # UnknownKeyName by checking the raw backing file only.
+                v = _read_raw_param_key_file("LiveTorqueReset")
                 if v is not None and v.strip() in [b"1", b"true", b"True", b"YES", b"yes"]:
                     cloudlog.warning("LiveTorque: runtime reset requested")
                     try:
@@ -3467,10 +3532,7 @@ def main(sm=None, pm=None):
                         )
                     except Exception:
                         pass
-                    try:
-                        params.put(LTP_VERSION_PARAM_KEY, str(VERSION).encode("utf8"))
-                    except Exception:
-                        pass
+                    _write_text_file_atomic(LTP_VERSION_FILE_PATH, str(VERSION))
                     try:
                         _reload_user_torque_params(estimator_ref=estimator, force_log=True)
                     except Exception:
@@ -3492,10 +3554,7 @@ def main(sm=None, pm=None):
                         estimator.decay = float(MIN_FILTER_DECAY)
                     except Exception:
                         pass
-                    try:
-                        params.put("LiveTorqueReset", b"0")
-                    except Exception:
-                        pass
+                    _delete_param_key_file("LiveTorqueReset")
             except Exception:
                 pass
         for which in sm.updated.keys():
