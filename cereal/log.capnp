@@ -1711,7 +1711,7 @@ struct LiveParametersData {
   roll @14 :Float32;
 }
 
-struct LiveTorqueParametersData {
+struct LiveTorqueParameters {
   liveValid @0 :Bool;
   latAccelFactorRaw @1 :Float32;
   latAccelOffsetRaw @2 :Float32;
@@ -1725,6 +1725,9 @@ struct LiveTorqueParametersData {
   points @10 :List(List(Float32));
   version @11 :Int32;
   useParams @12 :Bool;
+  bucketPoints @13 :Text;
+  restoreHash @14 :Text;
+  timestamp @15 :Float32;
 }
 
 struct LiveMapDataDEPRECATED {
