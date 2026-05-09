@@ -584,7 +584,7 @@ void NvgWindow::drawHud(QPainter &p) {
                       controls_state.getLatAccelFactor(),
                       controls_state.getFriction(),
                       controls_state.getTotalBucketPoints(),
-                      ontrols_state.getTotalCameraOffset(),
+                      controls_state.getTotalCameraOffset(),
                       controls_state.getSteerRatio(),
                       controls_state.getSteerActuatorDelay(),
                       controls_state.getMinTR(),
