@@ -103,6 +103,14 @@ LIVE_TORQUE_TUNING_ENABLED = True  # False면 라이브 튜닝(학습/적응) OF
 LAT_ACCEL_FACTOR_ANCHOR = 1.90
 FRICTION_ANCHOR = 0.255
 
+# Source anchors: do not let stale runtime Params such as
+# TorqueMaxLatAccel=30 / TorqueFriction=120 re-poison live tuning.
+SOURCE_LAT_ACCEL_FACTOR_ANCHOR = 1.90
+SOURCE_FRICTION_ANCHOR = 0.255
+# Default is locked. Set LTP_ALLOW_RUNTIME_ANCHORS=1 only when you intentionally
+# want UI Params to override the source anchors while running.
+LTP_ALLOW_RUNTIME_ANCHORS = os.environ.get("LTP_ALLOW_RUNTIME_ANCHORS", "0").strip() == "1"
+
 # -----------------------------
 # Force targets (disable CP/cache overrides)
 # -----------------------------
@@ -110,9 +118,9 @@ FORCE_TARGET_TUNING = True  # latAccelFactor/friction anchors are enforced
 
 # ✅ FORCE 밴드: 비대칭(하향 넓게, 상향 보수적으로)
 TARGET_FACTOR_BAND_UP = 0.06  # +6% (이쿼녹스 디젤: 고속 과민 방지)
-TARGET_FACTOR_BAND_DOWN = 0.18  # -18% (저속/중속 코너 보정 여지)
+TARGET_FACTOR_BAND_DOWN = 0.08  # -8%: base가 너무 둔하거나 과격하게 멀어지지 않게 제한
 
-TARGET_FRICTION_BAND = 0.18
+TARGET_FRICTION_BAND = 0.10
 
 # -----------------------------
 # Adaptive FORCE band relaxation
@@ -126,15 +134,17 @@ FORCE_RELAX_START_MULT = 0.8  # 10~55km/h에서 필요한 보정이 더 빨리 �
 FORCE_RELAX_FULL_MULT = 3.0  # 3.0 * min_points_total에서 완화 완료
 
 # 완화 완료 시 밴드(앵커 대비)
-FORCE_FACTOR_BAND_UP_MAX = 0.14  # +14%
-FORCE_FACTOR_BAND_DOWN_MAX = 0.30  # -30%
-FORCE_FRICTION_BAND_MAX = 0.28  # ±28%
+FORCE_FACTOR_BAND_UP_MAX = 0.06   # +6%: 1.90 기준 2.014 상한
+FORCE_FACTOR_BAND_DOWN_MAX = 0.12  # -12%: 1.90 기준 1.672 하한
+FORCE_FRICTION_BAND_MAX = 0.12     # ±12%: 0.255 기준 0.224~0.286
 
 # 절대 안전 클램프(혹시 모를 발산/오입력 방지)
-LAT_ACCEL_FACTOR_ABS_MIN = 1.20
-LAT_ACCEL_FACTOR_ABS_MAX = 4.50
-FRICTION_ABS_MIN = 0.05
-FRICTION_ABS_MAX = 0.60
+# 3.0/0.120 Runtime Param 오염 또는 과도한 raw fit 결과가 publish 값으로
+# 들어오지 못하게 base liveTorqueParameters 범위를 이쿼녹스 디젤 기준으로 좁힌다.
+LAT_ACCEL_FACTOR_ABS_MIN = 1.70
+LAT_ACCEL_FACTOR_ABS_MAX = 2.02
+FRICTION_ABS_MIN = 0.235
+FRICTION_ABS_MAX = 0.288
 # ✅ 직선 쏠림 보완: offset 학습 허용(단, 직선 샘플이 실제로 들어온 프레임에서만 업데이트 게이트)
 DISABLE_LATACCEL_OFFSET_LEARNING = True
 
@@ -372,7 +382,7 @@ RATE_LIM_STEADY_FRICTION_BLEND_W = 0.15  # 준정상 rate-limit 구간에서 fri
 # Applied profile: Equinox 2020 Diesel
 # - CarControllerParams matched: STEER_MAX=300, STEER_DELTA_UP=10, STEER_DELTA_DOWN=17, MIN_STEER_SPEED=3.0m/s
 # - Corner learning starts at 3.00m/s (~10.8km/h); straight/offset learning remains >=20km/h
-VERSION = 28  # logfix: file-based VERSION reset + no Params.remove dependency
+VERSION = 29  # anchor-lock + low-speed clip reduction tuning
 
 
 def slope2rot(slope):
@@ -3218,35 +3228,67 @@ def main(sm=None, pm=None):
         except Exception:
             pass
 
-        # TorqueMaxLatAccel (x0.1)
-        try:
-            v = params.get("TorqueMaxLatAccel", encoding="utf8")
-            if v is not None:
-                v = str(v).strip()
-            if v:
-                if _last_lat_raw is None or v != _last_lat_raw:
-                    torque_lat_accel_factor = float(Decimal(v) * Decimal('0.1'))  # LAT_ACCEL_FACTOR
-                    if np.isfinite(torque_lat_accel_factor) and torque_lat_accel_factor > 0.5:
-                        LAT_ACCEL_FACTOR_ANCHOR = float(torque_lat_accel_factor)
-                        _last_lat_raw = v
-                        changed = True
-        except (InvalidOperation, Exception):
-            pass
+        # Runtime anchor Params are dangerous in this fork: stale values such as
+        # TorqueMaxLatAccel=30 / TorqueFriction=120 turn into 3.0 / 0.120 and can
+        # re-poison the learner after VERSION reset.  Therefore FORCE_TARGET_TUNING
+        # locks the source anchors unless LTP_ALLOW_RUNTIME_ANCHORS=1 is explicitly set.
+        runtime_anchor_locked = bool(FORCE_TARGET_TUNING) and not bool(LTP_ALLOW_RUNTIME_ANCHORS)
+        if runtime_anchor_locked:
+            try:
+                raw_lat = _read_raw_param_key_file("TorqueMaxLatAccel")
+                raw_fric = _read_raw_param_key_file("TorqueFriction")
+                if raw_lat is not None or raw_fric is not None:
+                    _delete_param_key_file("TorqueMaxLatAccel")
+                    _delete_param_key_file("TorqueFriction")
+                    try:
+                        cloudlog.warning(
+                            "LiveTorque: ignored/deleted runtime anchors TorqueMaxLatAccel=%s TorqueFriction=%s; source anchors locked %.3f/%.3f"
+                            % ((raw_lat or b"").decode("utf-8", "ignore").strip(),
+                               (raw_fric or b"").decode("utf-8", "ignore").strip(),
+                               SOURCE_LAT_ACCEL_FACTOR_ANCHOR, SOURCE_FRICTION_ANCHOR)
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
-        # TorqueFriction (x0.001)
-        try:
-            v = params.get("TorqueFriction", encoding="utf8")
-            if v is not None:
-                v = str(v).strip()
-            if v:
-                if _last_fric_raw is None or v != _last_fric_raw:
-                    torque_friction = float(Decimal(v) * Decimal('0.001'))  # FRICTION
-                    if np.isfinite(torque_friction) and torque_friction > 0.01:
-                        FRICTION_ANCHOR = float(torque_friction)
-                        _last_fric_raw = v
-                        changed = True
-        except (InvalidOperation, Exception):
-            pass
+            if (abs(float(LAT_ACCEL_FACTOR_ANCHOR) - float(SOURCE_LAT_ACCEL_FACTOR_ANCHOR)) > 1e-6 or
+                    abs(float(FRICTION_ANCHOR) - float(SOURCE_FRICTION_ANCHOR)) > 1e-6):
+                changed = True
+            LAT_ACCEL_FACTOR_ANCHOR = float(SOURCE_LAT_ACCEL_FACTOR_ANCHOR)
+            FRICTION_ANCHOR = float(SOURCE_FRICTION_ANCHOR)
+            _last_lat_raw = None
+            _last_fric_raw = None
+        else:
+            # TorqueMaxLatAccel (x0.1) - opt-in only
+            try:
+                v = params.get("TorqueMaxLatAccel", encoding="utf8")
+                if v is not None:
+                    v = str(v).strip()
+                if v:
+                    if _last_lat_raw is None or v != _last_lat_raw:
+                        torque_lat_accel_factor = float(Decimal(v) * Decimal('0.1'))  # LAT_ACCEL_FACTOR
+                        if np.isfinite(torque_lat_accel_factor) and 0.5 < torque_lat_accel_factor < 5.0:
+                            LAT_ACCEL_FACTOR_ANCHOR = float(torque_lat_accel_factor)
+                            _last_lat_raw = v
+                            changed = True
+            except (InvalidOperation, Exception):
+                pass
+
+            # TorqueFriction (x0.001) - opt-in only
+            try:
+                v = params.get("TorqueFriction", encoding="utf8")
+                if v is not None:
+                    v = str(v).strip()
+                if v:
+                    if _last_fric_raw is None or v != _last_fric_raw:
+                        torque_friction = float(Decimal(v) * Decimal('0.001'))  # FRICTION
+                        if np.isfinite(torque_friction) and 0.01 < torque_friction < 1.0:
+                            FRICTION_ANCHOR = float(torque_friction)
+                            _last_fric_raw = v
+                            changed = True
+            except (InvalidOperation, Exception):
+                pass
 
         # Keep estimator's offline anchors and sanity bounds in sync (used for warm-start and fallbacks)
         try:
@@ -3255,10 +3297,10 @@ def main(sm=None, pm=None):
                 estimator_ref.offline_friction = float(FRICTION_ANCHOR)
                 estimator_ref.base_params['latAccelFactor'] = float(LAT_ACCEL_FACTOR_ANCHOR)
                 estimator_ref.base_params['frictionCoefficient'] = float(FRICTION_ANCHOR)
-                estimator_ref.min_lataccel_factor = (1.0 - FACTOR_SANITY) * float(LAT_ACCEL_FACTOR_ANCHOR)
-                estimator_ref.max_lataccel_factor = (1.0 + FACTOR_SANITY) * float(LAT_ACCEL_FACTOR_ANCHOR)
-                estimator_ref.min_friction = (1.0 - FRICTION_SANITY) * float(FRICTION_ANCHOR)
-                estimator_ref.max_friction = (1.0 + FRICTION_SANITY) * float(FRICTION_ANCHOR)
+                estimator_ref.min_lataccel_factor = max((1.0 - FACTOR_SANITY) * float(LAT_ACCEL_FACTOR_ANCHOR), float(LAT_ACCEL_FACTOR_ABS_MIN))
+                estimator_ref.max_lataccel_factor = min((1.0 + FACTOR_SANITY) * float(LAT_ACCEL_FACTOR_ANCHOR), float(LAT_ACCEL_FACTOR_ABS_MAX))
+                estimator_ref.min_friction = max((1.0 - FRICTION_SANITY) * float(FRICTION_ANCHOR), float(FRICTION_ABS_MIN))
+                estimator_ref.max_friction = min((1.0 + FRICTION_SANITY) * float(FRICTION_ANCHOR), float(FRICTION_ABS_MAX))
         except Exception:
             pass
 

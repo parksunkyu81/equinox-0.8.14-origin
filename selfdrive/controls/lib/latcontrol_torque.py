@@ -113,9 +113,9 @@ DYN_LAT_FACTOR_BP = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 
 #  - 10~30kph는 안전 클램프 하한/상한까지 사용해 강한 저속 코너 보조
 #  - 30~35kph는 저속 강한 개선을 그대로 연장
 #  - 35~45kph는 bridge 구간으로 LatAccelFactor/Friction을 점진 완화해 추종력과 안정성을 같이 확보
-DYN_LAT_FACTOR_V  = [1.88, 1.76, 1.74, 1.74, 1.74, 1.76, 1.78, 1.82, 1.90, 1.92, 1.94, 1.955, 1.955]
+DYN_LAT_FACTOR_V  = [1.88, 1.74, 1.72, 1.71, 1.72, 1.74, 1.78, 1.84, 1.90, 1.92, 1.94, 1.955, 1.955]
 DYN_FRICTION_BP   = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
-DYN_FRICTION_V    = [0.255, 0.276, 0.280, 0.280, 0.280, 0.278, 0.274, 0.268, 0.258, 0.254, 0.250, 0.246, 0.246]
+DYN_FRICTION_V    = [0.255, 0.282, 0.286, 0.288, 0.286, 0.282, 0.276, 0.268, 0.258, 0.254, 0.250, 0.246, 0.246]
 
 # 실제 CarController의 STEER_DELTA_UP/DOWN은 carcontroller 쪽에서 적용해야 한다.
 # 아래 맵은 이 파일 안에서는 torque slew와 디버그용 목표값으로만 사용한다.
@@ -128,9 +128,9 @@ DYN_DELTA_DOWN_V  = [14.0, 17.0, 17.0, 17.0, 16.0, 15.0, 15.0, 14.0, 14.0]
 # 코너 감지 민감도 보정.
 # 기존 임계가 높으면 완만한 저속 코너에서 corner_strength=0에 가까워져
 # effective LatAccelFactor/Friction이 표시상/체감상 거의 변하지 않는 문제가 있었다.
-DYN_CURV_STRENGTH_BP = [0.00025, 0.00160]
-DYN_LATACC_STRENGTH_BP = [0.05, 0.75]
-DYN_STEER_STRENGTH_BP = [0.015, 0.22]
+DYN_CURV_STRENGTH_BP = [0.00018, 0.00135]
+DYN_LATACC_STRENGTH_BP = [0.035, 0.65]
+DYN_STEER_STRENGTH_BP = [0.012, 0.18]
 
 # 저속/저중속 부스트 속도 게이트: 10~35kph 완전 ON, 35~45kph bridge로 점진 완화.
 # v4: 10~30kph 강한 개선을 35kph까지 유지하고, 35~45kph 추종력 공백을 제거한다.
@@ -147,13 +147,13 @@ DYN_HIGH_SPEED_GATE_BP = [45.0, 60.0, 80.0, 110.0, 130.0]
 DYN_HIGH_SPEED_GATE_V  = [0.0, 0.20, 0.75, 1.00, 1.00]
 
 # 부스트 램프/홀드. 프레임 기반이며 controls update 주기에 독립적으로 안전하게 동작한다.
-DYN_BOOST_RISE_STEP = 0.10
-DYN_BOOST_FALL_STEP = 0.030
-DYN_LOW_SPEED_HOLD_FRAMES = 80  # 약 0.8초 @100Hz 근처
+DYN_BOOST_RISE_STEP = 0.14
+DYN_BOOST_FALL_STEP = 0.024
+DYN_LOW_SPEED_HOLD_FRAMES = 110  # 약 1.1초 @100Hz 근처
 
 # limit 상황에서는 더 밀어붙이지 않고 부스트를 줄인다.
-DYN_STEER_LIMITED_BOOST_MULT = 0.60
-DYN_TORQUE_SLEW_ACTIVE_MULT = 0.75
+DYN_STEER_LIMITED_BOOST_MULT = 0.72
+DYN_TORQUE_SLEW_ACTIVE_MULT = 0.82
 
 # steeringPressed가 True라고 해서 저속 코너 dynamic boost를 0으로 끄면,
 # 운전자가 핸들을 살짝 잡은 일반 코너에서 LatAccelFactor/Friction 보조가 전혀 체감되지 않는다.
@@ -167,7 +167,7 @@ DYN_DRIVER_TORQUE_HARD_DISABLE = 30.0
 # v2: 이전 프레임의 강한 rate-limit/추종 gap을 직접 backoff 입력으로 사용한다.
 # 외부 인터페이스를 바꾸지 않고, 직전 프레임에서 low-speed slew 또는 stable torque slew가
 # 큰 gap을 만들었는지 저장했다가 다음 프레임 dynamic boost를 줄인다.
-DYN_RATE_LIMITED_STRONG_BOOST_MULT = 0.70
+DYN_RATE_LIMITED_STRONG_BOOST_MULT = 0.76
 DYN_RATE_LIMITED_STRONG_TRACKING_GAP = 0.45
 DYN_RATE_LIMITED_STRONG_OUTPUT_GAP = 0.18
 
@@ -447,9 +447,9 @@ class LatControlTorque(LatControl):
         # BUGFIX: 기존 corner_strength 임계가 높으면 완만한 코너에서 dynamic 값이 거의 안 변했다.
         # desired curvature / lateral accel / 이전 steer 중 하나라도 코너 힌트가 있으면 최소 부스트를 보장한다.
         turning_hint = bool(
-            (desired_curv_abs >= 0.00020) or
+            (desired_curv_abs >= 0.00018) or
             (desired_lat_abs >= 0.035) or
-            (steer_abs >= 0.015)
+            (steer_abs >= 0.012)
         )
         if (10.0 <= v_kph <= 35.0) and turning_hint and (not strong_driver_override):
             low35_min_boost = 0.90 if bool(strong_rate_limited) else 1.00
