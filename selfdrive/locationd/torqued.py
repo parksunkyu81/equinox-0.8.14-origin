@@ -163,7 +163,14 @@ LAT_ACCEL_FACTOR_ASSIST_RATE_STRONG_LIMIT = 0.13
 # B안: 직선 오프셋 업데이트는 '최근 구간(윈도우) 품질'로만 결정
 # 제한(limited) 코너 샘플은 저장하되, 업데이트 반영 비중을 낮춤(기본 30%)
 # ===== B-plan / Safety knobs =====
-LIMITED_CORNER_WEIGHT = 0.30
+LIMITED_CORNER_WEIGHT = 0.20
+LIMITED_CORNER_WEIGHT_MIN = 0.15
+LIMITED_CORNER_WEIGHT_MAX = 0.25
+LIMITED_SOFT_UPDATE_ENABLED = True
+LIMITED_SOFT_UPDATE_MIN_KPH = 10.0
+LIMITED_SOFT_UPDATE_MAX_KPH = 35.0
+LIMITED_SOFT_UPDATE_BLEND_LAT = 0.20
+LIMITED_SOFT_UPDATE_BLEND_FRICTION = 0.15
 
 # --- B안 Offset Update Presets ---
 # env: LTP_OFFSET_PRESET = conservative | balanced | aggressive
@@ -263,9 +270,9 @@ MIDLOW_CORNER_TIMES_SCALE = 0.80
 MAX_POINT_TIMES = 8
 
 # --- 고조향/리밋 샘플 수집 옵션 ---
-RATE_LIMITED_MIX_ENABLED = False
-RATE_LIMITED_MIX_KEEP_PROB_MULT = 0.20
-RATE_LIMITED_MIX_TIMES_MULT = 0.50
+RATE_LIMITED_MIX_ENABLED = False  # limited 샘플은 normal bucket에 섞지 않고 limited bucket에서 저가중치로만 반영
+RATE_LIMITED_MIX_KEEP_PROB_MULT = 0.08
+RATE_LIMITED_MIX_TIMES_MULT = 0.25
 RATE_LIMITED_MIX_ABS_STEER_MIN = 0.70
 RATE_LIMITED_MIX_ABS_STEER_MAX = 0.98
 
@@ -382,7 +389,7 @@ RATE_LIM_STEADY_FRICTION_BLEND_W = 0.15  # 준정상 rate-limit 구간에서 fri
 # Applied profile: Equinox 2020 Diesel
 # - CarControllerParams matched: STEER_MAX=300, STEER_DELTA_UP=10, STEER_DELTA_DOWN=17, MIN_STEER_SPEED=3.0m/s
 # - Corner learning starts at 3.00m/s (~10.8km/h); straight/offset learning remains >=20km/h
-VERSION = 29  # anchor-lock + low-speed clip reduction tuning
+VERSION = 30  # low-speed dynamic soften + limited low-weight learning reset
 
 
 def slope2rot(slope):
@@ -1417,8 +1424,9 @@ class TorqueEstimator:
         n1, sx1, sy1, sxx1, syy1, sxy1 = self.corner_points.aggregate_moments()
         n2, sx2, sy2, sxx2, syy2, sxy2 = self.limited_corner_points.aggregate_moments()
 
-        # ✅ (4) limited 반영 조건부 강화:
-        # clip/max/rate_limited 상황이면 limited_corner 반영 비중을 올려 "한계 근처" 기울기 추정이 너무 약해지지 않게 함
+        # limited corner는 버리지 않되, 정상 코너와 같은 비중으로 학습시키지 않는다.
+        # 2026-05-11 로그 기준 10~30kph clip/rate가 높으므로 limited 샘플은 0.15~0.25
+        # 저가중치로만 기울기 추정에 반영한다.
         w = float(LIMITED_CORNER_WEIGHT)
         try:
             limited_now = (bool(self.last_steer_clip) or bool(self.last_max_limited) or
@@ -1427,14 +1435,17 @@ class TorqueEstimator:
                         self.last_steer_desired is not None and np.isfinite(self.last_steer_desired)) else 0.0
 
             if limited_now:
-                # 한계 근처 데이터는 기울기 추정에 더 큰 비중 부여(특히 고조향)
-                w = max(w, 0.70)
+                if bool(self.last_rate_limited_strong):
+                    w = max(float(LIMITED_CORNER_WEIGHT_MIN), min(w, 0.18))
+                elif bool(self.last_steer_clip) or bool(self.last_max_limited):
+                    w = max(w, 0.22)
+                elif bool(self.last_rate_limited):
+                    w = max(w, 0.20)
                 if abs_s >= 0.70:
-                    w = max(w, 0.80)
-                if bool(self.last_steer_clip) or bool(self.last_max_limited):
-                    w = max(w, 0.85)
+                    w = max(w, 0.24)
+            w = float(np.clip(w, float(LIMITED_CORNER_WEIGHT_MIN), float(LIMITED_CORNER_WEIGHT_MAX)))
         except Exception:
-            pass
+            w = float(LIMITED_CORNER_WEIGHT)
 
         n = n1 + (w * n2)
         sx = sx1 + (w * sx2)
@@ -2081,20 +2092,21 @@ class TorqueEstimator:
                                 else:
                                     self.high_steer_kept_neg += 1
                     else:
-                        # ✅ limited corner: clip/max/rate-limit 구간을 더 적극적으로 수집
-                        keep_prob_l = float(keep_prob) * 0.55
+                        # limited corner: 버리지는 않되, normal corner보다 낮은 밀도/복제수로 저장한다.
+                        # 실제 반영 비중은 estimate_params_corner()에서 0.15~0.25로 제한된다.
+                        keep_prob_l = float(keep_prob) * 0.35
                         if is_clip or is_max_limited:
-                            keep_prob_l = float(keep_prob) * 0.75
+                            keep_prob_l = float(keep_prob) * 0.45
                         elif is_rate_limited_strong:
-                            keep_prob_l = float(keep_prob) * 0.65
+                            keep_prob_l = float(keep_prob) * 0.25
                         elif is_rate_limited:
-                            keep_prob_l = float(keep_prob) * 0.60
+                            keep_prob_l = float(keep_prob) * 0.35
 
-                        keep_prob_l = float(np.clip(keep_prob_l, 0.03, 0.55))
+                        keep_prob_l = float(np.clip(keep_prob_l, 0.02, 0.35))
 
-                        times_l = max(1, int(round(times * 0.75)))
+                        times_l = max(1, int(round(times * 0.40)))
                         if is_clip or is_max_limited:
-                            times_l = max(1, int(round(times * 0.90)))
+                            times_l = max(1, int(round(times * 0.50)))
 
                         if np.random.random() < keep_prob_l:
                             self.limited_corner_points.add_point(float(steer), float(lateral_acc), times=times_l)
@@ -2926,7 +2938,23 @@ class TorqueEstimator:
                 liveTorqueParameters.liveValid = True
 
                 # 최종 학습 업데이트 동결 조건
-                freeze_update_total = bool(freeze_update) or bool(qual_freeze_now) or bool(rate_transient_now)
+                # quality freeze 중이라도 10~35kph의 약한 limited 샘플은 완전 동결하지 않고
+                # 아래 upd blend에서 0.15~0.25 계열로 아주 낮게 반영한다.
+                try:
+                    v_kph_update = float(v) * 3.6
+                except Exception:
+                    v_kph_update = 0.0
+                limited_soft_update_now = bool(
+                    LIMITED_SOFT_UPDATE_ENABLED and
+                    bool(qual_freeze_now) and
+                    (not bool(freeze_update)) and
+                    (not bool(rate_transient_now)) and
+                    (not bool(rate_strong_now)) and
+                    (not bool(steer_pressed_now)) and
+                    (float(LIMITED_SOFT_UPDATE_MIN_KPH) <= v_kph_update <= float(LIMITED_SOFT_UPDATE_MAX_KPH)) and
+                    (bool(clip_now) or bool(rate_now))
+                )
+                freeze_update_total = bool(freeze_update) or bool(rate_transient_now) or (bool(qual_freeze_now) and (not limited_soft_update_now))
 
                 # -----------------------------
                 # Straight offset(latAO) update debug (candidate / gating / block reasons)
@@ -3006,6 +3034,22 @@ class TorqueEstimator:
                     if bool(clip_now):
                         try:
                             upd.pop('frictionCoefficient', None)
+                        except Exception:
+                            pass
+
+                    # quality freeze를 soft limited update로 통과한 경우에는 필터 입력 자체를 낮은 비중으로 축소한다.
+                    if bool(locals().get('limited_soft_update_now', False)):
+                        try:
+                            cur_latF = float(_sanitize_num(self.filtered_params['latAccelFactor'].x, self.offline_latAccelFactor))
+                            cur_fric = float(_sanitize_num(self.filtered_params['frictionCoefficient'].x, self.offline_friction))
+                            wF = float(np.clip(float(LIMITED_SOFT_UPDATE_BLEND_LAT), 0.0, 0.25))
+                            wR = float(np.clip(float(LIMITED_SOFT_UPDATE_BLEND_FRICTION), 0.0, 0.25))
+
+                            # limited 구간에서는 latAF를 더 낮추는 방향(더 공격적)으로 급히 끌고 가지 않는다.
+                            latF_tgt = float(max(float(latF_use), float(cur_latF))) if (bool(clip_now) or bool(rate_now)) else float(latF_use)
+                            upd['latAccelFactor'] = float(cur_latF + wF * (latF_tgt - cur_latF))
+                            if 'frictionCoefficient' in upd:
+                                upd['frictionCoefficient'] = float(cur_fric + wR * (float(fric_use) - cur_fric))
                         except Exception:
                             pass
 

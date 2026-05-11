@@ -95,7 +95,7 @@ STABLE_TORQUE_SLEW_ENABLED = True
 # 저속은 더 빠르게, 고속은 더 안정적으로 torque slew 제한.
 # 목적: 10~30kph 코너 추종력 확보 + 80~110kph 와리가리 억제.
 STABLE_TORQUE_SLEW_KPH_BP = [0.0, 10.0, 20.0, 30.0, 35.0, 40.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-STABLE_TORQUE_UP_V =       [0.065, 0.090, 0.095, 0.090, 0.080, 0.065, 0.050, 0.028, 0.021, 0.016, 0.013]
+STABLE_TORQUE_UP_V =       [0.065, 0.092, 0.098, 0.092, 0.080, 0.065, 0.050, 0.028, 0.021, 0.016, 0.013]
 STABLE_TORQUE_DOWN_V =     [0.085, 0.115, 0.120, 0.110, 0.100, 0.080, 0.065, 0.040, 0.032, 0.025, 0.020]
 STABLE_TORQUE_LIMITED_SHRINK = 0.85
 
@@ -106,16 +106,16 @@ STABLE_TORQUE_LIMITED_SHRINK = 0.85
 # 실제 torque 계산에만 임시 effective latAccelFactor/friction을 적용한다.
 DYN_TORQUE_PROFILE_ENABLED = True
 
-# 로그 기반 목표값: 저속은 강하게, 고속은 안정적으로.
-# 2026-05 logfix: 10~30kph에서 steer_clip/qual_freeze가 높아 저속 boost를 부드럽게 완화.
+# 로그 기반 목표값: 저속은 차가 실제로 받아줄 수 있는 범위로 완화하고, 고속은 안정성을 유지한다.
+# 2026-05-11 logfix: 10~30kph steer_clip/rate_limit가 높아 latAF/friction 목표를 한 단계 완화.
 DYN_LAT_FACTOR_BP = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
-# v4 10~45kph 통합 개선:
-#  - 10~30kph는 안전 클램프 하한/상한까지 사용해 강한 저속 코너 보조
-#  - 30~35kph는 저속 강한 개선을 그대로 연장
-#  - 35~45kph는 bridge 구간으로 LatAccelFactor/Friction을 점진 완화해 추종력과 안정성을 같이 확보
-DYN_LAT_FACTOR_V  = [1.88, 1.74, 1.72, 1.71, 1.72, 1.74, 1.78, 1.84, 1.90, 1.92, 1.94, 1.955, 1.955]
+# v5 10~45kph 통합 개선:
+#  - 10~30kph는 1.74~1.76 계열로 완화해 요구 토크가 적용 한계를 계속 앞지르지 않게 한다.
+#  - 30~35kph는 부드러운 bridge로 연결한다.
+#  - 60kph 이상은 기존 고속 안정 profile을 유지한다.
+DYN_LAT_FACTOR_V  = [1.88, 1.76, 1.75, 1.74, 1.75, 1.76, 1.80, 1.85, 1.90, 1.92, 1.94, 1.955, 1.955]
 DYN_FRICTION_BP   = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
-DYN_FRICTION_V    = [0.255, 0.282, 0.286, 0.288, 0.286, 0.282, 0.276, 0.268, 0.258, 0.254, 0.250, 0.246, 0.246]
+DYN_FRICTION_V    = [0.255, 0.276, 0.280, 0.282, 0.280, 0.276, 0.272, 0.268, 0.258, 0.254, 0.250, 0.246, 0.246]
 
 # 실제 CarController의 STEER_DELTA_UP/DOWN은 carcontroller 쪽에서 적용해야 한다.
 # 아래 맵은 이 파일 안에서는 torque slew와 디버그용 목표값으로만 사용한다.
@@ -147,13 +147,13 @@ DYN_HIGH_SPEED_GATE_BP = [45.0, 60.0, 80.0, 110.0, 130.0]
 DYN_HIGH_SPEED_GATE_V  = [0.0, 0.20, 0.75, 1.00, 1.00]
 
 # 부스트 램프/홀드. 프레임 기반이며 controls update 주기에 독립적으로 안전하게 동작한다.
-DYN_BOOST_RISE_STEP = 0.14
-DYN_BOOST_FALL_STEP = 0.024
-DYN_LOW_SPEED_HOLD_FRAMES = 110  # 약 1.1초 @100Hz 근처
+DYN_BOOST_RISE_STEP = 0.12
+DYN_BOOST_FALL_STEP = 0.035
+DYN_LOW_SPEED_HOLD_FRAMES = 75  # 약 0.75초 @100Hz 근처: clip/rate 반복 시 과한 boost 유지 방지
 
 # limit 상황에서는 더 밀어붙이지 않고 부스트를 줄인다.
-DYN_STEER_LIMITED_BOOST_MULT = 0.72
-DYN_TORQUE_SLEW_ACTIVE_MULT = 0.82
+DYN_STEER_LIMITED_BOOST_MULT = 0.70
+DYN_TORQUE_SLEW_ACTIVE_MULT = 0.76
 
 # steeringPressed가 True라고 해서 저속 코너 dynamic boost를 0으로 끄면,
 # 운전자가 핸들을 살짝 잡은 일반 코너에서 LatAccelFactor/Friction 보조가 전혀 체감되지 않는다.
@@ -167,9 +167,19 @@ DYN_DRIVER_TORQUE_HARD_DISABLE = 30.0
 # v2: 이전 프레임의 강한 rate-limit/추종 gap을 직접 backoff 입력으로 사용한다.
 # 외부 인터페이스를 바꾸지 않고, 직전 프레임에서 low-speed slew 또는 stable torque slew가
 # 큰 gap을 만들었는지 저장했다가 다음 프레임 dynamic boost를 줄인다.
-DYN_RATE_LIMITED_STRONG_BOOST_MULT = 0.76
-DYN_RATE_LIMITED_STRONG_TRACKING_GAP = 0.45
-DYN_RATE_LIMITED_STRONG_OUTPUT_GAP = 0.18
+DYN_RATE_LIMITED_STRONG_BOOST_MULT = 0.66
+DYN_RATE_LIMITED_STRONG_TRACKING_GAP = 0.40
+DYN_RATE_LIMITED_STRONG_OUTPUT_GAP = 0.16
+
+# 저속 코너 최소 boost 보장값. 제한이 감지되면 기존처럼 1.00으로 다시 밀어붙이지 않고
+# 0.72~0.86 범위로 후퇴시켜 steer_clip/rate_limit 반복을 줄인다.
+DYN_LOW35_MIN_BOOST_NORMAL = 0.92
+DYN_LOW35_MIN_BOOST_LIMITED = 0.82
+DYN_LOW35_MIN_BOOST_STRONG = 0.72
+DYN_BRIDGE_MIN_BOOST_NORMAL_BP = [35.0, 40.0, 45.0]
+DYN_BRIDGE_MIN_BOOST_NORMAL_V = [0.78, 0.65, 0.52]
+DYN_BRIDGE_MIN_BOOST_LIMITED_MULT = 0.82
+DYN_BRIDGE_MIN_BOOST_STRONG_MULT = 0.72
 
 # 최종 안전 클램프
 DYN_LAT_FACTOR_MIN = 1.68
@@ -452,14 +462,21 @@ class LatControlTorque(LatControl):
             (steer_abs >= 0.012)
         )
         if (10.0 <= v_kph <= 35.0) and turning_hint and (not strong_driver_override):
-            low35_min_boost = 0.90 if bool(strong_rate_limited) else 1.00
+            if bool(strong_rate_limited):
+                low35_min_boost = float(DYN_LOW35_MIN_BOOST_STRONG)
+            elif bool(steer_limited) or bool(getattr(self, '_stable_torque_slew_active', False)):
+                low35_min_boost = float(DYN_LOW35_MIN_BOOST_LIMITED)
+            else:
+                low35_min_boost = float(DYN_LOW35_MIN_BOOST_NORMAL)
             if bool(steering_pressed):
                 low35_min_boost *= float(DYN_STEERING_PRESSED_LOW_MIN_BOOST)
             low_boost_target = max(low_boost_target, low35_min_boost * low_gate)
         elif (35.0 < v_kph <= 45.0) and turning_hint and (not strong_driver_override):
-            bridge_min_boost = float(interp(v_kph, [35.0, 40.0, 45.0], [0.85, 0.72, 0.58]))
+            bridge_min_boost = float(interp(v_kph, DYN_BRIDGE_MIN_BOOST_NORMAL_BP, DYN_BRIDGE_MIN_BOOST_NORMAL_V))
             if bool(strong_rate_limited):
-                bridge_min_boost *= 0.82
+                bridge_min_boost *= float(DYN_BRIDGE_MIN_BOOST_STRONG_MULT)
+            elif bool(steer_limited) or bool(getattr(self, '_stable_torque_slew_active', False)):
+                bridge_min_boost *= float(DYN_BRIDGE_MIN_BOOST_LIMITED_MULT)
             if bool(steering_pressed):
                 bridge_min_boost *= float(DYN_STEERING_PRESSED_BRIDGE_MIN_BOOST)
             low_boost_target = max(low_boost_target, bridge_min_boost)

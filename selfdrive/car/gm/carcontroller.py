@@ -26,6 +26,17 @@ DYN_STEER_DELTA_UP_V  = [10.0, 14.0, 14.0, 14.0, 13.0, 12.0, 9.0, 8.0, 7.0, 7.0]
 DYN_STEER_DELTA_DOWN_BP = [0.0, 10.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
 DYN_STEER_DELTA_DOWN_V  = [14.0, 17.0, 17.0, 17.0, 16.0, 15.0, 15.0, 14.0, 14.0]
 
+# Conditional low-speed delta-up assist.  Keep the base map conservative, but
+# allow 14 -> 15 only in clean 20~30kph corners where the EPS is not near max
+# and the driver is not overriding.
+CLEAN_DELTA_UP_ENABLE = True
+CLEAN_DELTA_UP_MIN_KPH = 20.0
+CLEAN_DELTA_UP_MAX_KPH = 30.0
+CLEAN_DELTA_UP_VALUE = 15
+CLEAN_DELTA_UP_MIN_REQ = 0.18
+CLEAN_DELTA_UP_MAX_REQ = 0.82
+CLEAN_DELTA_UP_MAX_LAST = 0.78
+
 
 class CarController():
 
@@ -51,7 +62,47 @@ class CarController():
     #self.packer_ch = CANPacker(DBC[CP.carFingerprint]['chassis'])
 
 
-  def _dynamic_steer_deltas(self, v_ego):
+  def _clean_low_speed_delta_up_allowed(self, v_kph, new_steer, CS):
+    if not CLEAN_DELTA_UP_ENABLE:
+      return False
+
+    try:
+      v = float(v_kph)
+    except Exception:
+      v = 0.0
+    if v < CLEAN_DELTA_UP_MIN_KPH or v > CLEAN_DELTA_UP_MAX_KPH:
+      return False
+
+    try:
+      steering_pressed = bool(getattr(CS.out, 'steeringPressed', False)) or bool(getattr(CS, 'steeringPressed', False))
+    except Exception:
+      steering_pressed = False
+    if steering_pressed:
+      return False
+
+    try:
+      steer_max = float(getattr(self.params, 'STEER_MAX', 300))
+      if steer_max <= 1e-6:
+        steer_max = 300.0
+      req = float(new_steer) / steer_max
+      last = float(self.apply_steer_last) / steer_max
+    except Exception:
+      return False
+
+    abs_req = abs(req)
+    abs_last = abs(last)
+    if abs_req < CLEAN_DELTA_UP_MIN_REQ or abs_req > CLEAN_DELTA_UP_MAX_REQ:
+      return False
+    if abs_last > CLEAN_DELTA_UP_MAX_LAST:
+      return False
+
+    # Only help when torque is rising in the same direction.  Sign flips or
+    # near-center corrections should stay on the base map to avoid twitching.
+    same_direction = (req * last) >= -0.02
+    rising = abs_req > (abs_last + 0.015)
+    return bool(same_direction and rising)
+
+  def _dynamic_steer_deltas(self, v_ego, new_steer=None, CS=None):
     try:
       v_kph = float(v_ego) * CV.MS_TO_KPH
     except Exception:
@@ -63,6 +114,12 @@ class CarController():
     except Exception:
       up = int(getattr(self.params, 'STEER_DELTA_UP', 10))
       down = int(getattr(self.params, 'STEER_DELTA_DOWN', 17))
+
+    try:
+      if new_steer is not None and CS is not None and self._clean_low_speed_delta_up_allowed(v_kph, new_steer, CS):
+        up = max(up, int(CLEAN_DELTA_UP_VALUE))
+    except Exception:
+      pass
 
     return max(1, up), max(1, down)
 
@@ -89,7 +146,7 @@ class CarController():
         # immediately, so the rest of CarControllerParams stays unchanged.
         base_delta_up = int(getattr(P, 'STEER_DELTA_UP', 10))
         base_delta_down = int(getattr(P, 'STEER_DELTA_DOWN', 17))
-        dyn_delta_up, dyn_delta_down = self._dynamic_steer_deltas(CS.out.vEgo)
+        dyn_delta_up, dyn_delta_down = self._dynamic_steer_deltas(CS.out.vEgo, new_steer, CS)
         try:
           P.STEER_DELTA_UP = dyn_delta_up
           P.STEER_DELTA_DOWN = dyn_delta_down
