@@ -61,7 +61,7 @@ def manager_init() -> None:
     ("DisableOpFcw", "0"),
     ("ShowDebugUI", "0"),
     ("NewRadarInterface", "0"),
-    ("SafeDistanceSpeed", "1"),
+    ("StopAccelBoost", "1"),
 
     ("IsLiveTorque", "1"),
     ("IsLowSpeedFactor", "1"),

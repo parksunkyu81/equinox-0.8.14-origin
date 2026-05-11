@@ -747,7 +747,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                             this));
 
   toggles.append(new ParamControl("SafeDistanceSpeed",
-                                            "Activate safe distance speed",
+                                            "Activate stop accel boost",
                                             "",
                                             "../assets/offroad/icon_road.png",
                                             this));
