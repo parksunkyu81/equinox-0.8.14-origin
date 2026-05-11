@@ -37,6 +37,17 @@ CLEAN_DELTA_UP_MIN_REQ = 0.18
 CLEAN_DELTA_UP_MAX_REQ = 0.82
 CLEAN_DELTA_UP_MAX_LAST = 0.78
 
+STOP_ACCEL_BOOST_ENTRY_SPEED = 1.0
+STOP_ACCEL_BOOST_EXIT_SPEED = 15.0 * CV.KPH_TO_MS
+STOP_ACCEL_BOOST_MAX_FRAMES = 2.0 / DT_CTRL
+STOP_ACCEL_BOOST_MIN_DREL = 3.0
+STOP_ACCEL_BOOST_EXIT_DREL = 2.8
+STOP_ACCEL_BOOST_MAX_DREL = 18.0
+STOP_ACCEL_BOOST_MIN_VLEAD = 0.7
+STOP_ACCEL_BOOST_MIN_VREL = 0.4
+STOP_ACCEL_BOOST_EXIT_VREL = -0.5
+STOP_ACCEL_BOOST_EXIT_ACCEL = -0.25
+
 
 class CarController():
 
@@ -53,7 +64,10 @@ class CarController():
 
     self.lka_steering_cmd_counter_last = -1
     self.lka_icon_status_last = (False, False)
-    #self.RestartForceAccel = Params().get_bool('RestartForceAccel')
+    self.params_memory = Params()
+    self.stop_accel_boost = self.params_memory.get_bool('StopAccelBoost')
+    self.stop_accel_boost_active = False
+    self.stop_accel_boost_start_frame = 0
 
     self.params = CarControllerParams(CP)
 
@@ -123,6 +137,62 @@ class CarController():
 
     return max(1, up), max(1, down)
 
+  def _stop_accel_boost_lead(self, controls):
+    try:
+      return self.get_lead(controls.sm)
+    except Exception:
+      return None
+
+  def _stop_accel_boost_allowed(self, c, CS, frame, controls, actuators):
+    if not self.stop_accel_boost:
+      self.stop_accel_boost_active = False
+      return False, None
+
+    lead = self._stop_accel_boost_lead(controls)
+    common_allowed = c.active and CS.adaptive_Cruise and not CS.out.brakePressed and not CS.out.gasPressed
+    lead_valid = lead is not None and lead.status
+    if not common_allowed or not lead_valid:
+      self.stop_accel_boost_active = False
+      return False, lead
+
+    boost_timed_out = self.stop_accel_boost_active and frame - self.stop_accel_boost_start_frame > STOP_ACCEL_BOOST_MAX_FRAMES
+    if (CS.out.vEgo >= STOP_ACCEL_BOOST_EXIT_SPEED or
+            lead.dRel <= STOP_ACCEL_BOOST_EXIT_DREL or
+            lead.vRel < STOP_ACCEL_BOOST_EXIT_VREL or
+            actuators.accel < STOP_ACCEL_BOOST_EXIT_ACCEL or
+            boost_timed_out):
+      self.stop_accel_boost_active = False
+      return False, lead
+
+    if self.stop_accel_boost_active:
+      return True, lead
+
+    start_allowed = (CS.out.vEgo < STOP_ACCEL_BOOST_ENTRY_SPEED and
+                     STOP_ACCEL_BOOST_MIN_DREL < lead.dRel < STOP_ACCEL_BOOST_MAX_DREL and
+                     (lead.vLead > STOP_ACCEL_BOOST_MIN_VLEAD or lead.vRel > STOP_ACCEL_BOOST_MIN_VREL) and
+                     actuators.accel > -0.1)
+    if start_allowed:
+      self.stop_accel_boost_active = True
+      self.stop_accel_boost_start_frame = frame
+      return True, lead
+
+    return False, lead
+
+  def _stop_accel_boost_pedal(self, pedal_command, lead, v_ego):
+    if lead is None:
+      return pedal_command
+
+    boost_min = interp(lead.dRel,
+                       [STOP_ACCEL_BOOST_MIN_DREL, 8.0, STOP_ACCEL_BOOST_MAX_DREL],
+                       [0.06, 0.12, 0.18])
+    boost_min *= interp(lead.vLead,
+                        [STOP_ACCEL_BOOST_MIN_VLEAD, 2.0, 5.0],
+                        [0.7, 1.0, 1.2])
+    boost_min *= interp(v_ego,
+                        [0.0, 8.0 * CV.KPH_TO_MS, STOP_ACCEL_BOOST_EXIT_SPEED],
+                        [1.0, 0.65, 0.0])
+    return max(pedal_command, boost_min)
+
   def update(self, c, enabled, CS, frame, controls, actuators,
              hud_v_cruise, hud_show_lanes, hud_show_car, hud_alert):
 
@@ -170,8 +240,14 @@ class CarController():
       self.accel = clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX)
 
       if CS.CP.enableGasInterceptor:
+        if (frame % 50) == 0:
+          self.stop_accel_boost = self.params_memory.get_bool('StopAccelBoost')
+
+        restart_boost_allowed, restart_boost_lead = self._stop_accel_boost_allowed(c, CS, frame, controls, actuators)
+        allow_pedal = c.active and CS.adaptive_Cruise and (
+          CS.out.vEgo > V_CRUISE_ENABLE_MIN / CV.MS_TO_KPH or restart_boost_allowed)
         # 이것이 없으면 저속에서 너무 공격적입니다.
-        if c.active and CS.adaptive_Cruise and CS.out.vEgo > V_CRUISE_ENABLE_MIN / CV.MS_TO_KPH:
+        if allow_pedal:
 
           # 가속 멀티플라이어 설정
           acc_mult = interp(CS.out.vEgo,
@@ -180,8 +256,13 @@ class CarController():
                             )
           # 원래 가속 명령 계산
           pedal_command = acc_mult * actuators.accel
+          if restart_boost_allowed:
+            pedal_command = self._stop_accel_boost_pedal(pedal_command, restart_boost_lead, CS.out.vEgo)
           # 연비 향상을 위해 클리핑
           self.comma_pedal = clip(pedal_command, 0., 0.85)  # 최대 0.8까지만 허용하여 연비 개선
+
+          if restart_boost_allowed:
+            self.comma_pedal = clip(self.comma_pedal, 0., 0.35)
 
           # longitudinal with FrogPilot
           """zero = 0.15625  # 40/256
@@ -194,7 +275,7 @@ class CarController():
           """
           # End...
 
-        elif not c.active or not CS.adaptive_Cruise or CS.out.vEgo <= V_CRUISE_ENABLE_MIN / CV.MS_TO_KPH:
+        elif not allow_pedal:
           self.comma_pedal = 0.0
 
         if (frame % 4) == 0:
