@@ -638,7 +638,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
 
   QString accel_control = QString::fromStdString(Params().get("AccelControl"));
   if(accel_control.length() == 0)
-    accel_control = "ECO";
+    accel_control = "AUTO";
 
   QPushButton* accelControlBtn = new QPushButton("Accel mode : " + accel_control);
   accelControlBtn->setObjectName("accelControlBtn");
@@ -649,7 +649,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   connect(accelControl, &AccelControl::selected, [=]() {
      QString accel_control = QString::fromStdString(Params().get("AccelControl"));
      if(accel_control.length() == 0)
-       accel_control = "ECO";
+       accel_control = "AUTO";
      accelControlBtn->setText("Accel mode : " + accel_control);
      main_layout->setCurrentWidget(homeScreen);
   });
@@ -932,7 +932,7 @@ AccelControl::AccelControl(QWidget* parent): QWidget(parent) {
   QScroller::grabGesture(list->viewport(), QScroller::LeftMouseButtonGesture);
   list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
 
-  QStringList items = {"ECO", "NORMAL", "SPORT", "TRAFFIC"};
+  QStringList items = {"AUTO", "ECO", "NORMAL", "SPORT", "TRAFFIC"};
   list->addItems(items);
   list->setCurrentRow(0);
 
