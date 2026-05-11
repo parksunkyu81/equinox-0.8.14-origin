@@ -636,9 +636,34 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   layoutBtn_3->addSpacing(10);
   // =============================================================================================================== //
 
+  QString accel_control = QString::fromStdString(Params().get("AccelControl"));
+  if(accel_control.length() == 0)
+    accel_control = "ECO";
+
+  QPushButton* accelControlBtn = new QPushButton("Accel mode : " + accel_control);
+  accelControlBtn->setObjectName("accelControlBtn");
+  connect(accelControlBtn, &QPushButton::clicked, [=]() { main_layout->setCurrentWidget(accelControl); });
+
+  accelControl = new AccelControl(this);
+  connect(accelControl, &AccelControl::backPress, [=]() { main_layout->setCurrentWidget(homeScreen); });
+  connect(accelControl, &AccelControl::selected, [=]() {
+     QString accel_control = QString::fromStdString(Params().get("AccelControl"));
+     if(accel_control.length() == 0)
+       accel_control = "ECO";
+     accelControlBtn->setText("Accel mode : " + accel_control);
+     main_layout->setCurrentWidget(homeScreen);
+  });
+  main_layout->addWidget(accelControl);
+  QHBoxLayout* layoutBtn_5 = new QHBoxLayout(homeWidget);
+  layoutBtn_5->addWidget(accelControlBtn);
+  layoutBtn_5->addSpacing(10);
+  // =============================================================================================================== //
+
 
   vlayout->addSpacing(10);
   vlayout->addLayout(layoutBtn_3, 0);
+  vlayout->addSpacing(10);
+  vlayout->addLayout(layoutBtn_5, 0);
   vlayout->addSpacing(10);
   vlayout->addLayout(layoutBtn_1, 1);
   vlayout->addSpacing(10);
@@ -654,7 +679,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   setPalette(pal);
 
   setStyleSheet(R"(
-    #back_btn, #selectCarBtn, #lateralControlBtn, #cruiseGapBtn, #dynamicTRGapBtn, #minTrBtn, #globalDfModBtn {
+    #back_btn, #selectCarBtn, #lateralControlBtn, #cruiseGapBtn, #dynamicTRGapBtn, #minTrBtn, #globalDfModBtn, #accelControlBtn {
       font-size: 50px;
       margin: 0px;
       padding: 20px;
@@ -878,6 +903,54 @@ DynamicTRGap::DynamicTRGap(QWidget* parent): QWidget(parent) {
 
     //Params().put("LateralControl", list->currentItem()->text().toStdString());
     Params().put("DynamicTRGap", list->currentItem()->text().toStdString());
+    emit selected();
+
+    QTimer::singleShot(1000, []() {
+        Params().putBool("SoftRestartTriggered", false);
+      });
+
+    });
+
+  main_layout->addWidget(list);
+}
+
+AccelControl::AccelControl(QWidget* parent): QWidget(parent) {
+
+  QVBoxLayout* main_layout = new QVBoxLayout(this);
+  main_layout->setMargin(20);
+  main_layout->setSpacing(20);
+
+  // Back button
+  QPushButton* back = new QPushButton("Back");
+  back->setObjectName("back_btn");
+  back->setFixedSize(500, 100);
+  connect(back, &QPushButton::clicked, [=]() { emit backPress(); });
+  main_layout->addWidget(back, 0, Qt::AlignLeft);
+
+  QListWidget* list = new QListWidget(this);
+  list->setStyleSheet("QListView {padding: 40px; background-color: #393939; border-radius: 15px; height: 140px;} QListView::item{height: 100px}");
+  QScroller::grabGesture(list->viewport(), QScroller::LeftMouseButtonGesture);
+  list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+
+  QStringList items = {"ECO", "NORMAL", "SPORT", "TRAFFIC"};
+  list->addItems(items);
+  list->setCurrentRow(0);
+
+  QString selectedControl = QString::fromStdString(Params().get("AccelControl"));
+
+  int index = 0;
+  for(QString item : items) {
+    if(selectedControl == item) {
+        list->setCurrentRow(index);
+        break;
+    }
+    index++;
+  }
+
+  QObject::connect(list, QOverload<QListWidgetItem*>::of(&QListWidget::itemClicked),
+    [=](QListWidgetItem* item){
+
+    Params().put("AccelControl", list->currentItem()->text().toStdString());
     emit selected();
 
     QTimer::singleShot(1000, []() {

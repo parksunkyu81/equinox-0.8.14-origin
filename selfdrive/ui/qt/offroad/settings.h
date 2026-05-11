@@ -158,6 +158,19 @@ signals:
 
 };
 
+class AccelControl : public QWidget {
+  Q_OBJECT
+public:
+  explicit AccelControl(QWidget* parent = 0);
+
+private:
+
+signals:
+  void backPress();
+  void selected();
+
+};
+
 class CommunityPanel : public QWidget {
   Q_OBJECT
 
@@ -166,6 +179,7 @@ private:
   QWidget* homeScreen = nullptr;
   SelectCar* selectCar = nullptr;
   LateralControl* lateralControl = nullptr;
+  AccelControl* accelControl = nullptr;
   DynamicTRGap* dynamicTRGap = nullptr;
   MinTR* minTR = nullptr;
   GlobalDfMod* globalDfMod = nullptr;
