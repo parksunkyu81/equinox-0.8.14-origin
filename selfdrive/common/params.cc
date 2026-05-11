@@ -220,6 +220,7 @@ std::unordered_map<std::string, uint32_t> keys = {
     {"minTR", PERSISTENT},
     {"globalDfMod", PERSISTENT},
     {"AccelControl", PERSISTENT},
+    {"AccelProfileUI", PERSISTENT},
 
     // Temp
     {"CruiseGap1", PERSISTENT},
