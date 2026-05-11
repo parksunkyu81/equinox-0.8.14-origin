@@ -628,7 +628,6 @@ struct ControlsState @0x97ff69c53601abf1 {
   friction @86 :Float32;
   totalBucketPoints @87 :Float32;
   bucketPoints @89 :Text;
-  accelProfile @90 :Text;
 
 
   enum OpenpilotState @0xdbe58b96d2d1ac61 {
