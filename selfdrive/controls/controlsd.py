@@ -185,7 +185,6 @@ class Controls:
         self.roadLimitSpeedLeftDist = 0
 
         self.slow_on_curves = Params().get_bool('SccSmootherSlowOnCurves')
-        self.safe_distance_speed = params.get_bool('SafeDistanceSpeed')
         self.stop_accel_boost = Params().get_bool('StopAccelBoost')
 
         self.min_set_speed_clu = self.kph_to_clu(MIN_SET_SPEED_KPH)
@@ -397,7 +396,7 @@ class Controls:
             self.slowing_down = False
 
         lead_speed = self.get_long_lead_safe_speed(sm, CS, vEgo)
-        if self.safe_distance_speed and lead_speed >= self.min_set_speed_clu:
+        if self.stop_accel_boost and lead_speed >= self.min_set_speed_clu:
             if lead_speed < max_speed_clu:
                 max_speed_clu = min(max_speed_clu, lead_speed)
                 if not self.limited_lead:
