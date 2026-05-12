@@ -143,7 +143,7 @@ FORCE_FRICTION_BAND_MAX = 0.12     # ±12%: 0.255 기준 0.224~0.286
 # 들어오지 못하게 base liveTorqueParameters 범위를 이쿼녹스 디젤 기준으로 좁힌다.
 LAT_ACCEL_FACTOR_ABS_MIN = 1.70
 LAT_ACCEL_FACTOR_ABS_MAX = 2.02
-FRICTION_ABS_MIN = 0.235
+FRICTION_ABS_MIN = 0.245
 FRICTION_ABS_MAX = 0.288
 # ✅ 직선 쏠림 보완: offset 학습 허용(단, 직선 샘플이 실제로 들어온 프레임에서만 업데이트 게이트)
 DISABLE_LATACCEL_OFFSET_LEARNING = True
@@ -358,14 +358,14 @@ QUALITY_LOW_SPEED_KPH = 45.0
 # Clip enter/exit (high speed vs low speed)
 QUALITY_CLIP_FREEZE_ENTER_HIGH = 0.60
 QUALITY_CLIP_FREEZE_EXIT_HIGH  = 0.38
-QUALITY_CLIP_FREEZE_ENTER_LOW  = 0.82    # 저속 코너 학습은 살리되, 나쁜 데이터 과반영 방지
-QUALITY_CLIP_FREEZE_EXIT_LOW   = 0.58
+QUALITY_CLIP_FREEZE_ENTER_LOW  = 0.88    # 저속 코너: clip이 거의 지속될 때만 freeze
+QUALITY_CLIP_FREEZE_EXIT_LOW   = 0.68    # hysteresis 폭 축소: 저속 freeze가 더 빨리 해제됨
 # Both(clip+pressed) hysteresis (low-speed only)
-QUALITY_BOTH_FREEZE_ENTER_LOW  = 0.28
-QUALITY_BOTH_FREEZE_EXIT_LOW   = 0.20
+QUALITY_BOTH_FREEZE_ENTER_LOW  = 0.33
+QUALITY_BOTH_FREEZE_EXIT_LOW   = 0.25
 # Conditional shorter hold when just over threshold (clip/both only)
-QUALITY_NEAR_THRESH_MARGIN = 0.03
-QUALITY_FREEZE_HOLD_S_SHORT = 0.45
+QUALITY_NEAR_THRESH_MARGIN = 0.06
+QUALITY_FREEZE_HOLD_S_SHORT = 0.30
 
 
 # steeringPressed 디바운스 (스파이크 민감도 완화)
@@ -376,7 +376,7 @@ STEER_PRESSED_DRIVER_TORQUE_MIN = 0.80
 # steeringPressed + steer_clip 동시 발생 비율 (체감 악화 1순위 케이스)
 QUALITY_BOTH_FREEZE_RATIO = 0.18
 
-QUALITY_FREEZE_HOLD_S = 0.70  # 트리거 시 최소 홀드
+QUALITY_FREEZE_HOLD_S = 0.50  # 트리거 시 최소 홀드(저속 freeze 과유지 완화)
 
 # rate_limited 구간: 과도/준정상 분기 + latAccelFactor 하향 금지
 RATE_LIM_TRANSIENT_DES_DELTA = 0.012  # desired 변화량이 이 이상이면 과도로 간주(정규화 steer)
@@ -389,7 +389,7 @@ RATE_LIM_STEADY_FRICTION_BLEND_W = 0.15  # 준정상 rate-limit 구간에서 fri
 # Applied profile: Equinox 2020 Diesel
 # - CarControllerParams matched: STEER_MAX=300, STEER_DELTA_UP=10, STEER_DELTA_DOWN=17, MIN_STEER_SPEED=3.0m/s
 # - Corner learning starts at 3.00m/s (~10.8km/h); straight/offset learning remains >=20km/h
-VERSION = 30  # low-speed dynamic soften + limited low-weight learning reset
+VERSION = 31  # friction floor 0.245 + low-speed quality freeze/delta-up retune reset
 
 
 def slope2rot(slope):

@@ -115,7 +115,7 @@ DYN_LAT_FACTOR_BP = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 
 #  - 60kph 이상은 기존 고속 안정 profile을 유지한다.
 DYN_LAT_FACTOR_V  = [1.88, 1.76, 1.75, 1.74, 1.75, 1.76, 1.80, 1.85, 1.90, 1.92, 1.94, 1.955, 1.955]
 DYN_FRICTION_BP   = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
-DYN_FRICTION_V    = [0.255, 0.276, 0.280, 0.282, 0.280, 0.276, 0.272, 0.268, 0.258, 0.254, 0.250, 0.246, 0.246]
+DYN_FRICTION_V    = [0.255, 0.280, 0.284, 0.284, 0.282, 0.278, 0.274, 0.268, 0.258, 0.254, 0.250, 0.246, 0.246]
 
 # 실제 CarController의 STEER_DELTA_UP/DOWN은 carcontroller 쪽에서 적용해야 한다.
 # 아래 맵은 이 파일 안에서는 torque slew와 디버그용 목표값으로만 사용한다.
@@ -148,8 +148,8 @@ DYN_HIGH_SPEED_GATE_V  = [0.0, 0.20, 0.75, 1.00, 1.00]
 
 # 부스트 램프/홀드. 프레임 기반이며 controls update 주기에 독립적으로 안전하게 동작한다.
 DYN_BOOST_RISE_STEP = 0.12
-DYN_BOOST_FALL_STEP = 0.035
-DYN_LOW_SPEED_HOLD_FRAMES = 75  # 약 0.75초 @100Hz 근처: clip/rate 반복 시 과한 boost 유지 방지
+DYN_BOOST_FALL_STEP = 0.030
+DYN_LOW_SPEED_HOLD_FRAMES = 90  # 약 0.90초 @100Hz: 10~20kph friction 보조를 조금 더 유지
 
 # limit 상황에서는 더 밀어붙이지 않고 부스트를 줄인다.
 DYN_STEER_LIMITED_BOOST_MULT = 0.70
@@ -184,7 +184,7 @@ DYN_BRIDGE_MIN_BOOST_STRONG_MULT = 0.72
 # 최종 안전 클램프
 DYN_LAT_FACTOR_MIN = 1.68
 DYN_LAT_FACTOR_MAX = 1.96
-DYN_FRICTION_MIN = 0.244
+DYN_FRICTION_MIN = 0.245
 DYN_FRICTION_MAX = 0.288
 
 

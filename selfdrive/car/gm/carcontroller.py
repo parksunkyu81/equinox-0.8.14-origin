@@ -30,12 +30,13 @@ DYN_STEER_DELTA_DOWN_V  = [14.0, 17.0, 17.0, 17.0, 16.0, 15.0, 15.0, 14.0, 14.0]
 # allow 14 -> 15 only in clean 20~30kph corners where the EPS is not near max
 # and the driver is not overriding.
 CLEAN_DELTA_UP_ENABLE = True
-CLEAN_DELTA_UP_MIN_KPH = 20.0
-CLEAN_DELTA_UP_MAX_KPH = 30.0
+CLEAN_DELTA_UP_MIN_KPH = 18.0
+CLEAN_DELTA_UP_MAX_KPH = 32.0
 CLEAN_DELTA_UP_VALUE = 15
-CLEAN_DELTA_UP_MIN_REQ = 0.18
-CLEAN_DELTA_UP_MAX_REQ = 0.82
-CLEAN_DELTA_UP_MAX_LAST = 0.78
+CLEAN_DELTA_UP_MIN_REQ = 0.15
+CLEAN_DELTA_UP_MAX_REQ = 0.88
+CLEAN_DELTA_UP_MAX_LAST = 0.84
+CLEAN_DELTA_UP_RISING_MIN = 0.010
 
 STOP_ACCEL_BOOST_ENTRY_SPEED = 1.0
 STOP_ACCEL_BOOST_EXIT_SPEED = 20.0 * CV.KPH_TO_MS
@@ -115,7 +116,7 @@ class CarController():
     # Only help when torque is rising in the same direction.  Sign flips or
     # near-center corrections should stay on the base map to avoid twitching.
     same_direction = (req * last) >= -0.02
-    rising = abs_req > (abs_last + 0.015)
+    rising = abs_req > (abs_last + float(CLEAN_DELTA_UP_RISING_MIN))
     return bool(same_direction and rising)
 
   def _dynamic_steer_deltas(self, v_ego, new_steer=None, CS=None):
