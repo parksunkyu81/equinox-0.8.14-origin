@@ -21,18 +21,18 @@ CREEP_SPEED = 2.5   # 4km
 # happens here through apply_std_steer_torque_limits().  Low speed gets more
 # delta-up authority to reduce 10~30kph steer_clip, while high speed remains
 # conservative to avoid highway weave.
-DYN_STEER_DELTA_UP_BP = [0.0, 10.0, 30.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
-DYN_STEER_DELTA_UP_V  = [10.0, 14.0, 14.0, 14.0, 13.0, 12.0, 9.0, 8.0, 7.0, 7.0]
+DYN_STEER_DELTA_UP_BP = [0.0, 8.0, 10.0, 20.0, 30.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
+DYN_STEER_DELTA_UP_V  = [10.0, 13.0, 16.0, 16.0, 15.0, 14.0, 13.0, 12.0, 9.0, 8.0, 7.0, 7.0]
 DYN_STEER_DELTA_DOWN_BP = [0.0, 10.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
 DYN_STEER_DELTA_DOWN_V  = [14.0, 17.0, 17.0, 17.0, 16.0, 15.0, 15.0, 14.0, 14.0]
 
-# Conditional low-speed delta-up assist.  Keep the base map conservative, but
-# allow 14 -> 15 only in clean 20~30kph corners where the EPS is not near max
-# and the driver is not overriding.
+# Conditional low-speed delta-up assist. Keep the base map moderate, but allow
+# 10~28kph clean corners to climb to 17 when the EPS is not near max and the
+# driver is not overriding.
 CLEAN_DELTA_UP_ENABLE = True
-CLEAN_DELTA_UP_MIN_KPH = 18.0
-CLEAN_DELTA_UP_MAX_KPH = 32.0
-CLEAN_DELTA_UP_VALUE = 15
+CLEAN_DELTA_UP_MIN_KPH = 10.0
+CLEAN_DELTA_UP_MAX_KPH = 28.0
+CLEAN_DELTA_UP_VALUE = 17
 CLEAN_DELTA_UP_MIN_REQ = 0.15
 CLEAN_DELTA_UP_MAX_REQ = 0.88
 CLEAN_DELTA_UP_MAX_LAST = 0.84
