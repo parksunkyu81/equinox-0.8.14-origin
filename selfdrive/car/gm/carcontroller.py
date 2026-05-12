@@ -38,8 +38,9 @@ CLEAN_DELTA_UP_MAX_REQ = 0.82
 CLEAN_DELTA_UP_MAX_LAST = 0.78
 
 STOP_ACCEL_BOOST_ENTRY_SPEED = 1.0
-STOP_ACCEL_BOOST_EXIT_SPEED = 15.0 * CV.KPH_TO_MS
-STOP_ACCEL_BOOST_MAX_FRAMES = 2.0 / DT_CTRL
+STOP_ACCEL_BOOST_EXIT_SPEED = 20.0 * CV.KPH_TO_MS
+STOP_ACCEL_BOOST_MAX_FRAMES = 4.0 / DT_CTRL
+STOP_ACCEL_BOOST_GAIN = 1.10
 STOP_ACCEL_BOOST_MIN_DREL = 3.0
 STOP_ACCEL_BOOST_EXIT_DREL = 2.8
 STOP_ACCEL_BOOST_MAX_DREL = 18.0
@@ -191,6 +192,7 @@ class CarController():
     boost_min *= interp(v_ego,
                         [0.0, 8.0 * CV.KPH_TO_MS, STOP_ACCEL_BOOST_EXIT_SPEED],
                         [1.0, 0.65, 0.0])
+    boost_min *= STOP_ACCEL_BOOST_GAIN
     return max(pedal_command, boost_min)
 
   def update(self, c, enabled, CS, frame, controls, actuators,
