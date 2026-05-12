@@ -185,6 +185,7 @@ class Controls:
         self.roadLimitSpeedLeftDist = 0
 
         self.slow_on_curves = Params().get_bool('SccSmootherSlowOnCurves')
+        self.safe_distance_speed = params.get_bool('SafeDistanceSpeed')
         self.stop_accel_boost = Params().get_bool('StopAccelBoost')
 
         self.min_set_speed_clu = self.kph_to_clu(MIN_SET_SPEED_KPH)
