@@ -44,10 +44,11 @@ STOP_ACCEL_BOOST_GAIN = 1.10
 STOP_ACCEL_BOOST_MIN_DREL = 3.0
 STOP_ACCEL_BOOST_EXIT_DREL = 2.8
 STOP_ACCEL_BOOST_MAX_DREL = 18.0
-STOP_ACCEL_BOOST_MIN_VLEAD = 0.7
-STOP_ACCEL_BOOST_MIN_VREL = 0.4
+STOP_ACCEL_BOOST_MIN_VLEAD = 0.25
+STOP_ACCEL_BOOST_MIN_VREL = 0.15
 STOP_ACCEL_BOOST_EXIT_VREL = -0.5
 STOP_ACCEL_BOOST_EXIT_ACCEL = -0.25
+STOP_ACCEL_BOOST_START_ACCEL = -0.4
 
 
 class CarController():
@@ -171,7 +172,7 @@ class CarController():
     start_allowed = (CS.out.vEgo < STOP_ACCEL_BOOST_ENTRY_SPEED and
                      STOP_ACCEL_BOOST_MIN_DREL < lead.dRel < STOP_ACCEL_BOOST_MAX_DREL and
                      (lead.vLead > STOP_ACCEL_BOOST_MIN_VLEAD or lead.vRel > STOP_ACCEL_BOOST_MIN_VREL) and
-                     actuators.accel > -0.1)
+                     actuators.accel > STOP_ACCEL_BOOST_START_ACCEL)
     if start_allowed:
       self.stop_accel_boost_active = True
       self.stop_accel_boost_start_frame = frame
