@@ -44,8 +44,6 @@ MAX_SET_SPEED_KPH = V_CRUISE_MAX
 
 SOFT_DISABLE_TIME = 3  # seconds
 STOP_ACCEL_BOOST_HOLD_MAX_VEGO = 1.0
-STOP_ACCEL_BOOST_HOLD_MIN_DREL = 1.0
-STOP_ACCEL_BOOST_HOLD_MAX_DREL = 25.0
 STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VLEAD = 0.30
 STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VREL = 0.15
 # controlsAllowed mismatch는 CAN/pandaState 수신 타이밍 차이로 순간 발생할 수 있으므로
@@ -299,7 +297,7 @@ class Controls:
             return False
 
         lead = self.get_lead(self.sm)
-        if lead is None or not (STOP_ACCEL_BOOST_HOLD_MIN_DREL < lead.dRel < STOP_ACCEL_BOOST_HOLD_MAX_DREL):
+        if lead is None or lead.dRel <= 0.0:
             return False
 
         return not self.stop_accel_boost_lead_moving(lead)
@@ -606,7 +604,8 @@ class Controls:
         stock_long_is_braking = self.enabled and not self.CP.openpilotLongitudinalControl and CS.aEgo < -1.25
         model_fcw = self.sm['modelV2'].meta.hardBrakePredicted and not CS.brakePressed and not stock_long_is_braking
         planner_fcw = self.sm['longitudinalPlan'].fcw and self.enabled
-        if not self.disable_op_fcw and (planner_fcw or model_fcw):
+        stationary_lead_hold = self.stop_accel_boost_hold_stationary_lead(CS)
+        if not self.disable_op_fcw and not stationary_lead_hold and (planner_fcw or model_fcw):
             self.events.add(EventName.fcw)
 
         if TICI:

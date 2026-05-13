@@ -40,8 +40,8 @@ CLEAN_DELTA_UP_RISING_MIN = 0.018  # v32: 진짜 clean rising corner에서만 de
 
 STOP_ACCEL_BOOST_ENTRY_SPEED = 1.0
 STOP_ACCEL_BOOST_EXIT_SPEED = 20.0 * CV.KPH_TO_MS
-STOP_ACCEL_BOOST_MAX_FRAMES = 4.0 / DT_CTRL
-STOP_ACCEL_BOOST_GAIN = 1.10
+STOP_ACCEL_BOOST_MAX_FRAMES = 5.5 / DT_CTRL
+STOP_ACCEL_BOOST_GAIN = 1.25
 STOP_ACCEL_BOOST_MIN_DREL = 3.0
 STOP_ACCEL_BOOST_EXIT_DREL = 2.8
 STOP_ACCEL_BOOST_MAX_DREL = 18.0
@@ -50,9 +50,9 @@ STOP_ACCEL_BOOST_MIN_VREL = 0.15
 STOP_ACCEL_BOOST_EXIT_VREL = -0.5
 STOP_ACCEL_BOOST_EXIT_ACCEL = -5.0
 STOP_ACCEL_BOOST_START_ACCEL = -5.0
-STOP_ACCEL_BOOST_MIN_PEDAL = 0.17
-STOP_ACCEL_BOOST_MIN_PEDAL_FRAMES = 0.8 / DT_CTRL
-STOP_ACCEL_BOOST_MIN_PEDAL_SPEED = 5.0 * CV.KPH_TO_MS
+STOP_ACCEL_BOOST_MIN_PEDAL = 0.20
+STOP_ACCEL_BOOST_MIN_PEDAL_FRAMES = 2.0 / DT_CTRL
+STOP_ACCEL_BOOST_MIN_PEDAL_SPEED = 20.0 * CV.KPH_TO_MS
 
 
 class CarController():
@@ -199,13 +199,13 @@ class CarController():
 
     boost_min = interp(lead.dRel,
                        [STOP_ACCEL_BOOST_MIN_DREL, 8.0, STOP_ACCEL_BOOST_MAX_DREL],
-                       [0.06, 0.12, 0.18])
+                       [0.08, 0.14, 0.20])
     boost_min *= interp(lead.vLead,
                         [STOP_ACCEL_BOOST_MIN_VLEAD, 2.0, 5.0],
                         [0.7, 1.0, 1.2])
     boost_min *= interp(v_ego,
                         [0.0, 8.0 * CV.KPH_TO_MS, STOP_ACCEL_BOOST_EXIT_SPEED],
-                        [1.0, 0.65, 0.0])
+                        [1.0, 0.90, 0.55])
     boost_min *= STOP_ACCEL_BOOST_GAIN
 
     boost_elapsed = frame - self.stop_accel_boost_start_frame
