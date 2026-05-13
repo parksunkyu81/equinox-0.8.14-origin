@@ -42,8 +42,8 @@ STOP_ACCEL_BOOST_ENTRY_SPEED = 1.0
 STOP_ACCEL_BOOST_EXIT_SPEED = 20.0 * CV.KPH_TO_MS
 STOP_ACCEL_BOOST_MAX_FRAMES = 5.5 / DT_CTRL
 STOP_ACCEL_BOOST_GAIN = 1.25
-STOP_ACCEL_BOOST_MIN_DREL = 3.0
-STOP_ACCEL_BOOST_EXIT_DREL = 2.8
+STOP_ACCEL_BOOST_START_DREL = 7.0
+STOP_ACCEL_BOOST_EXIT_DREL = 5.0
 STOP_ACCEL_BOOST_MAX_DREL = 18.0
 STOP_ACCEL_BOOST_MIN_VLEAD = 0.30
 STOP_ACCEL_BOOST_MIN_VREL = 0.15
@@ -167,7 +167,7 @@ class CarController():
 
     boost_timed_out = self.stop_accel_boost_active and frame - self.stop_accel_boost_start_frame > STOP_ACCEL_BOOST_MAX_FRAMES
     if (CS.out.vEgo >= STOP_ACCEL_BOOST_EXIT_SPEED or
-            lead.dRel <= STOP_ACCEL_BOOST_EXIT_DREL or
+            lead.dRel < STOP_ACCEL_BOOST_EXIT_DREL or
             lead.vRel < STOP_ACCEL_BOOST_EXIT_VREL or
             actuators.accel < STOP_ACCEL_BOOST_EXIT_ACCEL or
             boost_timed_out):
@@ -183,7 +183,7 @@ class CarController():
       return True, lead
 
     start_allowed = (CS.out.vEgo < STOP_ACCEL_BOOST_ENTRY_SPEED and
-                     STOP_ACCEL_BOOST_MIN_DREL < lead.dRel < STOP_ACCEL_BOOST_MAX_DREL and
+                     STOP_ACCEL_BOOST_START_DREL <= lead.dRel < STOP_ACCEL_BOOST_MAX_DREL and
                      lead_moving and
                      actuators.accel > STOP_ACCEL_BOOST_START_ACCEL)
     if start_allowed:
@@ -198,7 +198,7 @@ class CarController():
       return pedal_command
 
     boost_min = interp(lead.dRel,
-                       [STOP_ACCEL_BOOST_MIN_DREL, 8.0, STOP_ACCEL_BOOST_MAX_DREL],
+                       [STOP_ACCEL_BOOST_START_DREL, 10.0, STOP_ACCEL_BOOST_MAX_DREL],
                        [0.08, 0.14, 0.20])
     boost_min *= interp(lead.vLead,
                         [STOP_ACCEL_BOOST_MIN_VLEAD, 2.0, 5.0],

@@ -44,6 +44,7 @@ MAX_SET_SPEED_KPH = V_CRUISE_MAX
 
 SOFT_DISABLE_TIME = 3  # seconds
 STOP_ACCEL_BOOST_HOLD_MAX_VEGO = 1.0
+STOP_ACCEL_BOOST_START_MIN_DREL = 5.0
 STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VLEAD = 0.30
 STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VREL = 0.15
 # controlsAllowed mismatch는 CAN/pandaState 수신 타이밍 차이로 순간 발생할 수 있으므로
@@ -292,6 +293,9 @@ class Controls:
                lead.vLead > STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VLEAD and \
                lead.vRel > STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VREL
 
+    def stop_accel_boost_lead_safe_to_start(self, lead):
+        return lead is not None and lead.status and lead.dRel >= STOP_ACCEL_BOOST_START_MIN_DREL
+
     def stop_accel_boost_hold_stationary_lead(self, CS):
         if not self.stop_accel_boost or not CS.adaptiveCruise or CS.vEgo > STOP_ACCEL_BOOST_HOLD_MAX_VEGO:
             return False
@@ -300,7 +304,8 @@ class Controls:
         if lead is None or lead.dRel <= 0.0:
             return False
 
-        return not self.stop_accel_boost_lead_moving(lead)
+        return not (self.stop_accel_boost_lead_moving(lead) and
+                    self.stop_accel_boost_lead_safe_to_start(lead))
 
     def get_long_lead_safe_speed(self, sm, CS, vEgo):
         if CS.adaptiveCruise:
