@@ -50,6 +50,7 @@ T_IDXS_LST = [index_function(idx, max_val=MAX_T, max_idx=N) for idx in range(N+1
 T_IDXS = np.array(T_IDXS_LST)
 T_DIFFS = np.diff(T_IDXS, prepend=[0.])
 MIN_ACCEL = -3.5
+LEAD_COAST_MIN_ACCEL = -1.2
 T_FOLLOW = 1.45
 COMFORT_BRAKE = 2.5   # 2.5, 전방차량이 서있거나, 감속하면 좀 더 일찍 속도롤 줄임
 STOP_DISTANCE = 5.5   # 6.0
@@ -370,7 +371,10 @@ class LongitudinalMpc:
     self.set_weights(prev_accel_constraint=prev_accel_constraint, v_lead0=lead_xv_0[0, 1], v_lead1=lead_xv_1[0, 1])
 
     # set accel limits in params
-    self.params[:,0] = interp(float(self.status), [0.0, 1.0], [self.cruise_min_a, MIN_ACCEL])
+    # This car uses a comma pedal path and the driver handles braking, so keep
+    # lead-following plans coast-biased instead of dropping straight to MIN_ACCEL.
+    lead_min_a = max(MIN_ACCEL, min(self.cruise_min_a, LEAD_COAST_MIN_ACCEL))
+    self.params[:,0] = interp(float(self.status), [0.0, 1.0], [self.cruise_min_a, lead_min_a])
     self.params[:,1] = self.cruise_max_a
 
     # 움직이는 리드로부터 안전한 거리를 추정하기 위해 우리는 얼마나 많이 멈추는지 계산합니다.

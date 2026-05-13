@@ -180,7 +180,7 @@ LIMITED_SOFT_UPDATE_BLEND_FRICTION = 0.15
 LTP_OFFSET_PRESET = os.environ.get("LTP_OFFSET_PRESET", "balanced").lower().strip()
 _LTP_OFFSET_PRESETS = {
     "conservative": {"min_ok_abs": 45, "min_ok_frac": 0.70, "min_ratio": 0.90, "step_max": 0.002, "cooldown_s": 8.0},
-    "balanced": {"min_ok_abs": 35, "min_ok_frac": 0.65, "min_ratio": 0.85, "step_max": 0.003, "cooldown_s": 5.0},
+    "balanced": {"min_ok_abs": 45, "min_ok_frac": 0.75, "min_ratio": 0.92, "step_max": 0.002, "cooldown_s": 8.0},  # v32: latAO 후보 과다/쿨다운 block 완화
     "aggressive": {"min_ok_abs": 30, "min_ok_frac": 0.60, "min_ratio": 0.80, "step_max": 0.005, "cooldown_s": 3.0},
 }
 _LTP_OFFSET_CFG = _LTP_OFFSET_PRESETS.get(LTP_OFFSET_PRESET, _LTP_OFFSET_PRESETS["balanced"])
@@ -192,11 +192,12 @@ OFFSET_UPDATE_MAX_STEP = float(_LTP_OFFSET_CFG["step_max"])
 OFFSET_UPDATE_MIN_INTERVAL_S = float(_LTP_OFFSET_CFG["cooldown_s"])
 
 # 직선 오프셋(윈도우) 아웃라이어 제거(MAD 기반)
-STRAIGHT_MAD_K = 3.5
+STRAIGHT_MAD_K = 2.8  # v32: offset window outlier 제거 강화
 STRAIGHT_MAD_EPS = 1e-3
+STRAIGHT_OFFSET_MAX_ABS_MED = 0.075  # v32: latAO 후보 자체를 더 엄격히 제한
 
 # Straight offset / soft liveValid helpers
-STRAIGHT_OK_RECENT_S = 2.5  # straight_ok가 최근에 있었는지(오프셋 업데이트 트리거)
+STRAIGHT_OK_RECENT_S = 1.5  # v32: 최근 직선성이 확실한 경우만 오프셋 후보 인정
 SOFT_LIVEVALID_MIN_S = 6.0  # 재시작/저속에서 빠르게 liveValid 진입(안전한 클램프 값 사용)
 SOFT_LIVEVALID_MIN_POINTS_LOWSPD = 250
 SOFT_LIVEVALID_MIN_POINTS_MIDSPD = 450
@@ -231,7 +232,7 @@ FIT_POINTS_TOTAL_QLOG = 600
 
 # Velocity thresholds (m/s). 10 km/h ≈ 2.78 m/s
 MIN_VEL_MS = 11.11  # 40 km/h (직선/오프셋 임계 상향: 직선 학습 비중↓) (직선/기본 임계 유지)
-MIN_VEL_MS_BIAS = 5.56  # 20 km/h (직선 bias/오프셋 업데이트 최소 속도 - 저속 학습 조기 진입)
+MIN_VEL_MS_BIAS = 8.33  # 30 km/h: v32 offset 후보는 저속 노이즈를 배제
 MIN_VEL_MS_STRAIGHT = 5.56  # 20 km/h (직선 포인트 수집 최소 속도 - 저속에서도 샘플 수집)
 
 # 직선 샘플링에서 rate-limit 차단을 완화(오검출/경미한 제한은 허용)
@@ -301,11 +302,11 @@ STRAIGHT_BUCKET_BOUNDS = [(-STRAIGHT_STEER_MAX, STRAIGHT_STEER_MAX)]
 MIN_BUCKET_POINTS_STRAIGHT = np.array([200])
 
 # 직선 판별 파라미터
-STRAIGHT_YAW_RATE_MAX = 0.04  # rad/s (≈2.9°/s)
-STRAIGHT_LATACC_MAX = 0.15  # ✅ m/s^2
+STRAIGHT_YAW_RATE_MAX = 0.030  # rad/s, v32: offset 후보 직진성 강화
+STRAIGHT_LATACC_MAX = 0.10  # m/s^2, v32: latAO 후보 과다 생성 억제
 
 # 직선 오프셋(Offset) 학습용: '거의 0 조향'만 허용
-STRAIGHT_STEER_MAX_FOR_OFFSET = 0.09  # normalized steer
+STRAIGHT_STEER_MAX_FOR_OFFSET = 0.060  # normalized steer, v32: 거의 0조향일 때만 offset 후보
 STRAIGHT_SAMPLE_RECENT_S = 1.0
 
 # warm-up
@@ -389,7 +390,7 @@ RATE_LIM_STEADY_FRICTION_BLEND_W = 0.15  # 준정상 rate-limit 구간에서 fri
 # Applied profile: Equinox 2020 Diesel
 # - CarControllerParams matched: STEER_MAX=300, STEER_DELTA_UP=10, STEER_DELTA_DOWN=17, MIN_STEER_SPEED=3.0m/s
 # - Corner learning starts at 3.00m/s (~10.8km/h); straight/offset learning remains >=20km/h
-VERSION = 31  # friction floor 0.245 + low-speed quality freeze/delta-up retune reset
+VERSION = 32  # 10~20kph clip relief + stricter latAO candidate + 80kph+ guard retune
 
 
 def slope2rot(slope):
@@ -778,7 +779,7 @@ class TorqueEstimator:
         self.last_is_frozen = False
         self.stop_freeze_until = 0.0
 
-        self._straight_bias_win_s = 10.0
+        self._straight_bias_win_s = 8.0  # v32: 오래된 직선 샘플이 cooldown block 후보를 계속 만들지 않게 단축
         self._straight_bias = deque()
         self.last_straight_sampled = False
         self.last_straight_w = 0.0
@@ -1471,6 +1472,8 @@ class TorqueEstimator:
             return float('nan'), ok_n, total, ratio
 
         med = float(np.median(vals))
+        if abs(med) > float(STRAIGHT_OFFSET_MAX_ABS_MED):
+            return float('nan'), ok_n, total, ratio
         abs_dev = [abs(v - med) for v in vals]
         mad = float(np.median(abs_dev)) if len(abs_dev) else 0.0
 
@@ -1482,6 +1485,8 @@ class TorqueEstimator:
 
         try:
             off = float(np.median(vals))
+            if abs(off) > float(STRAIGHT_OFFSET_MAX_ABS_MED):
+                off = float('nan')
         except Exception:
             off = float('nan')
         return off, ok_n, total, ratio
@@ -2904,7 +2909,7 @@ class TorqueEstimator:
                     np.isfinite(latOffset_s) and
                     (self._straight_win_ok >= int(min_ok_win)) and
                     (self._straight_win_ok_ratio >= STRAIGHT_OK_MIN_RATIO) and
-                    (abs(float(latOffset_s)) <= 0.15)
+                    (abs(float(latOffset_s)) <= float(STRAIGHT_OFFSET_MAX_ABS_MED))
             )
 
             latFactor_blend = latFactor_c
@@ -2917,7 +2922,7 @@ class TorqueEstimator:
             steer_ok = [s[1] for s in win if isinstance(s, (list, tuple)) and len(s) >= 6 and bool(s[5]) and (
                         s[1] is not None) and np.isfinite(s[1])]
             bias_mean = _mean_safe(steer_ok)
-            bias_ok = (bias_mean is None) or (abs(float(bias_mean)) <= float(STRAIGHT_STEER_MAX_FOR_OFFSET) * 0.50)
+            bias_ok = (bias_mean is None) or (abs(float(bias_mean)) <= float(STRAIGHT_STEER_MAX_FOR_OFFSET) * 0.35)
 
             if straight_offset_ok and bias_ok:
                 w_off = min(float(w), 0.10)
@@ -2962,7 +2967,7 @@ class TorqueEstimator:
                 #  - offset_gate_pass: candidate + cooldown + no clip/rate + not freeze_update_total
                 # -----------------------------
                 try:
-                    offset_candidate = bool(straight_offset_ok and bias_ok and np.isfinite(latOffset_s))
+                    offset_candidate = bool((not DISABLE_LATACCEL_OFFSET_LEARNING) and straight_offset_ok and bias_ok and np.isfinite(latOffset_s))
                 except Exception:
                     offset_candidate = False
                 try:
@@ -3161,7 +3166,7 @@ class TorqueEstimator:
                         np.isfinite(latOffset_s) and
                         (self._straight_win_ok >= int(min_ok_win)) and
                         (self._straight_win_ok_ratio >= STRAIGHT_OK_MIN_RATIO) and
-                        (abs(float(latOffset_s)) <= 0.15)
+                        (abs(float(latOffset_s)) <= float(STRAIGHT_OFFSET_MAX_ABS_MED))
                 )
 
                 if (not freeze_update) and straight_offset_ok and self._offset_update_allowed():

@@ -55,15 +55,15 @@ HS_CURV_GUARD_ON_KPH = 40.0
 
 # update 1회당 desired_curvature 최대 변화량
 HS_CURV_DELTA_MAX_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-HS_CURV_DELTA_MAX_V = [0.00100, 0.00072, 0.00052, 0.00038, 0.00024, 0.00016]
+HS_CURV_DELTA_MAX_V = [0.00100, 0.00072, 0.00050, 0.00032, 0.00020, 0.00014]  # v32: 80~110kph 고속 곡률 변화 더 보수화
 
 # desired_curvature_rate 절대값 제한
 HS_CURV_RATE_MAX_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-HS_CURV_RATE_MAX_V = [0.030, 0.023, 0.017, 0.012, 0.008, 0.005]
+HS_CURV_RATE_MAX_V = [0.030, 0.023, 0.016, 0.010, 0.0065, 0.0045]  # v32: 80~110kph rate spike 억제
 
 # 저역통과 필터 alpha (작을수록 더 부드러움)
 HS_CURV_ALPHA_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-HS_CURV_ALPHA_V = [0.58, 0.50, 0.42, 0.34, 0.24, 0.16]
+HS_CURV_ALPHA_V = [0.58, 0.50, 0.40, 0.30, 0.20, 0.14]  # v32: 고속 desired_curvature LPF 강화
 
 # 좌/우 부호가 갑자기 뒤집히는 경우 완화
 HS_SIGN_FLIP_MIN_CURV = 0.0008
@@ -95,8 +95,8 @@ STABLE_TORQUE_SLEW_ENABLED = True
 # 저속은 더 빠르게, 고속은 더 안정적으로 torque slew 제한.
 # 목적: 10~30kph 코너 추종력 확보 + 80~110kph 와리가리 억제.
 STABLE_TORQUE_SLEW_KPH_BP = [0.0, 10.0, 20.0, 30.0, 35.0, 40.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-STABLE_TORQUE_UP_V =       [0.065, 0.092, 0.098, 0.092, 0.080, 0.065, 0.050, 0.028, 0.021, 0.016, 0.013]
-STABLE_TORQUE_DOWN_V =     [0.085, 0.115, 0.120, 0.110, 0.100, 0.080, 0.065, 0.040, 0.032, 0.025, 0.020]
+STABLE_TORQUE_UP_V =       [0.065, 0.092, 0.098, 0.090, 0.078, 0.062, 0.048, 0.026, 0.018, 0.014, 0.012]  # v32: 80~110kph output slew 보수화
+STABLE_TORQUE_DOWN_V =     [0.085, 0.115, 0.120, 0.108, 0.098, 0.078, 0.062, 0.038, 0.029, 0.022, 0.018]
 STABLE_TORQUE_LIMITED_SHRINK = 0.85
 
 # ==============================
@@ -113,9 +113,9 @@ DYN_LAT_FACTOR_BP = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 
 #  - 10~30kph는 1.74~1.76 계열로 완화해 요구 토크가 적용 한계를 계속 앞지르지 않게 한다.
 #  - 30~35kph는 부드러운 bridge로 연결한다.
 #  - 60kph 이상은 기존 고속 안정 profile을 유지한다.
-DYN_LAT_FACTOR_V  = [1.88, 1.76, 1.75, 1.74, 1.75, 1.76, 1.80, 1.85, 1.90, 1.92, 1.94, 1.955, 1.955]
+DYN_LAT_FACTOR_V  = [1.88, 1.78, 1.77, 1.76, 1.76, 1.77, 1.81, 1.86, 1.91, 1.93, 1.95, 1.96, 1.96]  # v32: 10~20kph 과요구 완화, 80kph+ 안정형
 DYN_FRICTION_BP   = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
-DYN_FRICTION_V    = [0.255, 0.280, 0.284, 0.284, 0.282, 0.278, 0.274, 0.268, 0.258, 0.254, 0.250, 0.246, 0.246]
+DYN_FRICTION_V    = [0.255, 0.282, 0.286, 0.286, 0.282, 0.278, 0.272, 0.266, 0.256, 0.252, 0.248, 0.246, 0.246]  # v32: 10~20kph static friction 유지, 고속 friction 낮춤
 
 # 실제 CarController의 STEER_DELTA_UP/DOWN은 carcontroller 쪽에서 적용해야 한다.
 # 아래 맵은 이 파일 안에서는 torque slew와 디버그용 목표값으로만 사용한다.
@@ -144,12 +144,15 @@ DYN_MID_SPEED_GATE_V  = [0.25, 0.45, 0.55, 0.55, 0.30, 0.0]
 
 # 고속 안정 게이트: 60kph 이상에서는 조향을 둔감하게 만들어 와리가리 억제.
 DYN_HIGH_SPEED_GATE_BP = [45.0, 60.0, 80.0, 110.0, 130.0]
-DYN_HIGH_SPEED_GATE_V  = [0.0, 0.20, 0.75, 1.00, 1.00]
+DYN_HIGH_SPEED_GATE_V  = [0.0, 0.30, 0.85, 1.00, 1.00]  # v32: 60~90kph부터 안정 profile 조기 반영
 
 # 부스트 램프/홀드. 프레임 기반이며 controls update 주기에 독립적으로 안전하게 동작한다.
-DYN_BOOST_RISE_STEP = 0.12
-DYN_BOOST_FALL_STEP = 0.030
-DYN_LOW_SPEED_HOLD_FRAMES = 90  # 약 0.90초 @100Hz: 10~20kph friction 보조를 조금 더 유지
+DYN_BOOST_RISE_STEP = 0.10
+# v32: 10~20kph clip이 42%까지 오른 원인을 줄이기 위해 저속 코너 부스트 상승을 별도 완화한다.
+DYN_BOOST_RISE_LOW1020_STEP = 0.065
+DYN_BOOST_RISE_LOW2035_STEP = 0.085
+DYN_BOOST_FALL_STEP = 0.035
+DYN_LOW_SPEED_HOLD_FRAMES = 70  # 약 0.70초 @100Hz: 과한 저속 boost hold 완화
 
 # limit 상황에서는 더 밀어붙이지 않고 부스트를 줄인다.
 DYN_STEER_LIMITED_BOOST_MULT = 0.70
@@ -173,9 +176,9 @@ DYN_RATE_LIMITED_STRONG_OUTPUT_GAP = 0.16
 
 # 저속 코너 최소 boost 보장값. 제한이 감지되면 기존처럼 1.00으로 다시 밀어붙이지 않고
 # 0.72~0.86 범위로 후퇴시켜 steer_clip/rate_limit 반복을 줄인다.
-DYN_LOW35_MIN_BOOST_NORMAL = 0.92
-DYN_LOW35_MIN_BOOST_LIMITED = 0.82
-DYN_LOW35_MIN_BOOST_STRONG = 0.72
+DYN_LOW35_MIN_BOOST_NORMAL = 0.86  # v32: 10~20kph 작은/완만 코너에서 과요구 완화
+DYN_LOW35_MIN_BOOST_LIMITED = 0.76
+DYN_LOW35_MIN_BOOST_STRONG = 0.66
 DYN_BRIDGE_MIN_BOOST_NORMAL_BP = [35.0, 40.0, 45.0]
 DYN_BRIDGE_MIN_BOOST_NORMAL_V = [0.78, 0.65, 0.52]
 DYN_BRIDGE_MIN_BOOST_LIMITED_MULT = 0.82
@@ -183,7 +186,7 @@ DYN_BRIDGE_MIN_BOOST_STRONG_MULT = 0.72
 
 # 최종 안전 클램프
 DYN_LAT_FACTOR_MIN = 1.68
-DYN_LAT_FACTOR_MAX = 1.96
+DYN_LAT_FACTOR_MAX = 1.965
 DYN_FRICTION_MIN = 0.245
 DYN_FRICTION_MAX = 0.288
 
@@ -468,6 +471,14 @@ class LatControlTorque(LatControl):
                 low35_min_boost = float(DYN_LOW35_MIN_BOOST_LIMITED)
             else:
                 low35_min_boost = float(DYN_LOW35_MIN_BOOST_NORMAL)
+
+            # v32: 10~20kph는 clip이 가장 높았던 구간이다.
+            # 최소 boost를 그대로 강제하면 desired torque가 적용 한계를 앞질러
+            # steer_clip만 늘 수 있어 20kph까지는 단계적으로 낮춘다.
+            low_speed_clip_relief = float(interp(v_kph, [10.0, 15.0, 20.0, 30.0, 35.0],
+                                                 [0.78, 0.82, 0.88, 1.00, 1.00]))
+            low35_min_boost *= low_speed_clip_relief
+
             if bool(steering_pressed):
                 low35_min_boost *= float(DYN_STEERING_PRESSED_LOW_MIN_BOOST)
             low_boost_target = max(low_boost_target, low35_min_boost * low_gate)
@@ -491,7 +502,13 @@ class LatControlTorque(LatControl):
         # 램프 적용: 갑자기 토크 성격이 바뀌지 않도록 함.
         cur_boost = float(getattr(self, '_dyn_corner_boost', 0.0) or 0.0)
         if low_boost_target > cur_boost:
-            cur_boost = min(low_boost_target, cur_boost + float(DYN_BOOST_RISE_STEP))
+            # v32: 10~20kph는 상승을 가장 느리게, 20~35kph는 중간, 그 외는 기본값.
+            rise_step = float(DYN_BOOST_RISE_STEP)
+            if 10.0 <= v_kph < 20.0:
+                rise_step = float(DYN_BOOST_RISE_LOW1020_STEP)
+            elif 20.0 <= v_kph < 35.0:
+                rise_step = float(DYN_BOOST_RISE_LOW2035_STEP)
+            cur_boost = min(low_boost_target, cur_boost + rise_step)
         else:
             cur_boost = max(low_boost_target, cur_boost - float(DYN_BOOST_FALL_STEP))
         cur_boost = float(clip(cur_boost, 0.0, 1.0))

@@ -22,21 +22,21 @@ CREEP_SPEED = 2.5   # 4km
 # delta-up authority to reduce 10~30kph steer_clip, while high speed remains
 # conservative to avoid highway weave.
 DYN_STEER_DELTA_UP_BP = [0.0, 8.0, 10.0, 20.0, 30.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
-DYN_STEER_DELTA_UP_V  = [10.0, 13.0, 16.0, 16.0, 15.0, 14.0, 13.0, 12.0, 9.0, 8.0, 7.0, 7.0]
+DYN_STEER_DELTA_UP_V  = [10.0, 12.0, 15.0, 15.0, 14.0, 13.0, 12.0, 11.0, 8.0, 7.0, 6.0, 6.0]  # v32: 10~20kph 과한 상승/80kph+ 고속 변화율 완화
 DYN_STEER_DELTA_DOWN_BP = [0.0, 10.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
-DYN_STEER_DELTA_DOWN_V  = [14.0, 17.0, 17.0, 17.0, 16.0, 15.0, 15.0, 14.0, 14.0]
+DYN_STEER_DELTA_DOWN_V  = [14.0, 16.0, 16.0, 16.0, 15.0, 14.0, 14.0, 13.0, 13.0]  # v32: unwind도 고속에서 조금 더 부드럽게
 
 # Conditional low-speed delta-up assist. Keep the base map moderate, but allow
 # 10~28kph clean corners to climb to 17 when the EPS is not near max and the
 # driver is not overriding.
 CLEAN_DELTA_UP_ENABLE = True
 CLEAN_DELTA_UP_MIN_KPH = 10.0
-CLEAN_DELTA_UP_MAX_KPH = 28.0
-CLEAN_DELTA_UP_VALUE = 17
-CLEAN_DELTA_UP_MIN_REQ = 0.15
-CLEAN_DELTA_UP_MAX_REQ = 0.88
-CLEAN_DELTA_UP_MAX_LAST = 0.84
-CLEAN_DELTA_UP_RISING_MIN = 0.010
+CLEAN_DELTA_UP_MAX_KPH = 24.0
+CLEAN_DELTA_UP_VALUE = 16
+CLEAN_DELTA_UP_MIN_REQ = 0.20
+CLEAN_DELTA_UP_MAX_REQ = 0.78
+CLEAN_DELTA_UP_MAX_LAST = 0.72
+CLEAN_DELTA_UP_RISING_MIN = 0.018  # v32: 진짜 clean rising corner에서만 delta-up 보조
 
 STOP_ACCEL_BOOST_ENTRY_SPEED = 1.0
 STOP_ACCEL_BOOST_EXIT_SPEED = 20.0 * CV.KPH_TO_MS
@@ -48,8 +48,11 @@ STOP_ACCEL_BOOST_MAX_DREL = 18.0
 STOP_ACCEL_BOOST_MIN_VLEAD = 0.10
 STOP_ACCEL_BOOST_MIN_VREL = 0.05
 STOP_ACCEL_BOOST_EXIT_VREL = -0.5
-STOP_ACCEL_BOOST_EXIT_ACCEL = -1.0
-STOP_ACCEL_BOOST_START_ACCEL = -1.0
+STOP_ACCEL_BOOST_EXIT_ACCEL = -5.0
+STOP_ACCEL_BOOST_START_ACCEL = -5.0
+STOP_ACCEL_BOOST_MIN_PEDAL = 0.17
+STOP_ACCEL_BOOST_MIN_PEDAL_FRAMES = 0.8 / DT_CTRL
+STOP_ACCEL_BOOST_MIN_PEDAL_SPEED = 5.0 * CV.KPH_TO_MS
 
 
 class CarController():
@@ -146,6 +149,10 @@ class CarController():
     except Exception:
       return None
 
+  def _stop_accel_boost_lead_moving(self, lead):
+    return lead is not None and lead.status and (
+      lead.vLead > STOP_ACCEL_BOOST_MIN_VLEAD or lead.vRel > STOP_ACCEL_BOOST_MIN_VREL)
+
   def _stop_accel_boost_allowed(self, c, CS, frame, controls, actuators):
     if not self.stop_accel_boost:
       self.stop_accel_boost_active = False
@@ -172,7 +179,7 @@ class CarController():
 
     start_allowed = (CS.out.vEgo < STOP_ACCEL_BOOST_ENTRY_SPEED and
                      STOP_ACCEL_BOOST_MIN_DREL < lead.dRel < STOP_ACCEL_BOOST_MAX_DREL and
-                     (lead.vLead > STOP_ACCEL_BOOST_MIN_VLEAD or lead.vRel > STOP_ACCEL_BOOST_MIN_VREL) and
+                     self._stop_accel_boost_lead_moving(lead) and
                      actuators.accel > STOP_ACCEL_BOOST_START_ACCEL)
     if start_allowed:
       self.stop_accel_boost_active = True
@@ -181,7 +188,7 @@ class CarController():
 
     return False, lead
 
-  def _stop_accel_boost_pedal(self, pedal_command, lead, v_ego):
+  def _stop_accel_boost_pedal(self, pedal_command, lead, v_ego, frame):
     if lead is None:
       return pedal_command
 
@@ -195,6 +202,11 @@ class CarController():
                         [0.0, 8.0 * CV.KPH_TO_MS, STOP_ACCEL_BOOST_EXIT_SPEED],
                         [1.0, 0.65, 0.0])
     boost_min *= STOP_ACCEL_BOOST_GAIN
+
+    boost_elapsed = frame - self.stop_accel_boost_start_frame
+    if v_ego < STOP_ACCEL_BOOST_MIN_PEDAL_SPEED and boost_elapsed <= STOP_ACCEL_BOOST_MIN_PEDAL_FRAMES:
+      boost_min = max(boost_min, STOP_ACCEL_BOOST_MIN_PEDAL)
+
     return max(pedal_command, boost_min)
 
   def update(self, c, enabled, CS, frame, controls, actuators,
@@ -261,7 +273,7 @@ class CarController():
           # 원래 가속 명령 계산
           pedal_command = acc_mult * actuators.accel
           if restart_boost_allowed:
-            pedal_command = self._stop_accel_boost_pedal(pedal_command, restart_boost_lead, CS.out.vEgo)
+            pedal_command = self._stop_accel_boost_pedal(pedal_command, restart_boost_lead, CS.out.vEgo, frame)
           # 연비 향상을 위해 클리핑
           self.comma_pedal = clip(pedal_command, 0., 0.85)  # 최대 0.8까지만 허용하여 연비 개선
 

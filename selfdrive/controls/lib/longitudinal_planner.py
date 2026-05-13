@@ -39,11 +39,11 @@ _A_CRUISE_MAX_BP = _A_CRUISE_MIN_BP
 # 음수 = 감속 허용치 / gas cut 허용치
 # 저속 -1.5는 유지하되, 고속으로 갈수록 부드럽게 완화
 _A_CRUISE_MIN_V_FOLLOWING = [
-  -1.50,  # 0 km/h  : 저속 추종 강한 감속 허용
-  -1.50,  # 10 km/h : 정체/저속 추종 대응
-  -1.40,  # 20 km/h : 기존 -1.5와 -1.2 사이 완충
-  -1.20,  # 30 km/h : 기존값 유지
-  -1.10,  # 40 km/h : 중속 진입 완화
+  -0.90,  # 0 km/h  : manual-brake style, prefer coast over strong gas cut
+  -1.00,  # 10 km/h : traffic following with light decel reserve
+  -1.00,  # 20 km/h : keep restart recovery from staying deeply negative
+  -0.95,  # 30 km/h : gentle lift-off behavior
+  -0.90,  # 40 km/h : coast-biased following
   -1.00,  # 55 km/h : 기존값 유지
   -0.90,  # 70 km/h : 고속 진입 완화
   -0.80,  # 85 km/h : 기존값 유지
@@ -119,12 +119,14 @@ _A_TOTAL_MAX_V = [
 ]
 
 def calc_cruise_accel_limits(v_ego):
-    a_cruise_min = interp(v_ego, _A_CRUISE_MIN_BP, _A_CRUISE_MIN_V_FOLLOWING)
-    a_cruise_max = interp(v_ego, _A_CRUISE_MAX_BP, _A_CRUISE_MAX_V_FOLLOWING)
+    v_ego_kph = v_ego * CV.MS_TO_KPH
+    a_cruise_min = interp(v_ego_kph, _A_CRUISE_MIN_BP, _A_CRUISE_MIN_V_FOLLOWING)
+    a_cruise_max = interp(v_ego_kph, _A_CRUISE_MAX_BP, _A_CRUISE_MAX_V_FOLLOWING)
     return [a_cruise_min, a_cruise_max]
 
 def limit_accel_in_turns(v_ego, angle_steers, a_target, CP):
-    a_total_max = interp(v_ego, _A_TOTAL_MAX_BP, _A_TOTAL_MAX_V)
+    v_ego_kph = v_ego * CV.MS_TO_KPH
+    a_total_max = interp(v_ego_kph, _A_TOTAL_MAX_BP, _A_TOTAL_MAX_V)
     a_y = v_ego ** 2 * angle_steers * CV.DEG_TO_RAD / (CP.steerRatio * CP.wheelbase)
     a_x_allowed = math.sqrt(max(a_total_max ** 2 - a_y ** 2, 0.))
     return [a_target[0], min(a_target[1], a_x_allowed)]
