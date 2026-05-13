@@ -45,8 +45,8 @@ STOP_ACCEL_BOOST_GAIN = 1.10
 STOP_ACCEL_BOOST_MIN_DREL = 3.0
 STOP_ACCEL_BOOST_EXIT_DREL = 2.8
 STOP_ACCEL_BOOST_MAX_DREL = 18.0
-STOP_ACCEL_BOOST_MIN_VLEAD = 0.10
-STOP_ACCEL_BOOST_MIN_VREL = 0.05
+STOP_ACCEL_BOOST_MIN_VLEAD = 0.30
+STOP_ACCEL_BOOST_MIN_VREL = 0.15
 STOP_ACCEL_BOOST_EXIT_VREL = -0.5
 STOP_ACCEL_BOOST_EXIT_ACCEL = -5.0
 STOP_ACCEL_BOOST_START_ACCEL = -5.0
@@ -150,8 +150,8 @@ class CarController():
       return None
 
   def _stop_accel_boost_lead_moving(self, lead):
-    return lead is not None and lead.status and (
-      lead.vLead > STOP_ACCEL_BOOST_MIN_VLEAD or lead.vRel > STOP_ACCEL_BOOST_MIN_VREL)
+    return lead is not None and lead.status and \
+      lead.vLead > STOP_ACCEL_BOOST_MIN_VLEAD and lead.vRel > STOP_ACCEL_BOOST_MIN_VREL
 
   def _stop_accel_boost_allowed(self, c, CS, frame, controls, actuators):
     if not self.stop_accel_boost:
@@ -174,12 +174,17 @@ class CarController():
       self.stop_accel_boost_active = False
       return False, lead
 
+    lead_moving = self._stop_accel_boost_lead_moving(lead)
+    if not lead_moving:
+      self.stop_accel_boost_active = False
+      return False, lead
+
     if self.stop_accel_boost_active:
       return True, lead
 
     start_allowed = (CS.out.vEgo < STOP_ACCEL_BOOST_ENTRY_SPEED and
                      STOP_ACCEL_BOOST_MIN_DREL < lead.dRel < STOP_ACCEL_BOOST_MAX_DREL and
-                     self._stop_accel_boost_lead_moving(lead) and
+                     lead_moving and
                      actuators.accel > STOP_ACCEL_BOOST_START_ACCEL)
     if start_allowed:
       self.stop_accel_boost_active = True

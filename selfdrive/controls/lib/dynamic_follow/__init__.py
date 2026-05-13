@@ -14,6 +14,10 @@ from common.data_collector import DataCollector
 
 travis = False
 DEFAULT_TR = 1.3   #1.45
+STOP_ACCEL_BOOST_TR_MAX_SPEED = 20.0 * CV.KPH_TO_MS
+STOP_ACCEL_BOOST_TR_RAMP_END_SPEED = 30.0 * CV.KPH_TO_MS
+STOP_ACCEL_BOOST_TR_LOW = 1.00
+STOP_ACCEL_BOOST_TR_HIGH = 1.05
 
 
 class DistanceModController:
@@ -249,6 +253,19 @@ class DynamicFollow:
 
     return [y - (y * global_df_mod * interp(x, speeds, mods)) for x, y in zip(x_vel, y_dist)]
 
+  def _stop_accel_boost_tr(self, TR):
+    if not self.stop_accel_boost or not self.lead_data.status:
+      return TR
+
+    if self.car_data.v_ego > STOP_ACCEL_BOOST_TR_RAMP_END_SPEED:
+      return TR
+
+    boost_TR = interp(self.car_data.v_ego,
+                      [0.0, STOP_ACCEL_BOOST_TR_MAX_SPEED, STOP_ACCEL_BOOST_TR_RAMP_END_SPEED],
+                      [STOP_ACCEL_BOOST_TR_LOW, STOP_ACCEL_BOOST_TR_HIGH, TR])
+    boost_TR = max(boost_TR, self.min_TR)
+    return min(TR, boost_TR)
+
   def _get_TR(self):
     """if self.df_manager.is_auto:  # decide which profile to use, model profile will be updated before this
       df_profile = self.model_profile
@@ -270,11 +287,11 @@ class DynamicFollow:
       #y_dist = [1.15, 1.3781, 1.3791, 1.3457, 1.3134, 1.3145, 1.318, 1.3485, 1.257, 1.144, 0.979, 0.9461, 0.9156]
       y_dist = [1.23, 1.21, 1.18, 1.1781, 1.1791, 1.1457, 1.1134, 1.1145, 1.118, 1.1485, 0.957, 0.944, 0.879, 0.8461, 0.8156]
     elif df_profile == self.df_profiles.stock:  # default to stock
-      return 1.45
+      return self._stop_accel_boost_tr(1.45)
     elif df_profile == self.df_profiles.auto:
-      return DEFAULT_TR
+      return self._stop_accel_boost_tr(DEFAULT_TR)
     elif df_profile == self.df_profiles.roadtrip:  # previous stock following distance
-      return 1.8
+      return self._stop_accel_boost_tr(1.8)
     else:
       raise Exception('Unknown profile type: {}'.format(df_profile))
 
@@ -298,6 +315,7 @@ class DynamicFollow:
 
     TR *= v_rel_dist_factor
     TR *= a_lead_dist_factor
+    TR = self._stop_accel_boost_tr(TR)
 
     return float(clip(TR, self.min_TR, 2.7))
 
@@ -352,12 +370,14 @@ class DynamicFollow:
     #self.car_data.cruise_enabled = CS.adaptive_Cruise
 
   def _get_live_params(self):
+    params = Params()
     #self.global_df_mod = self.op_params.get('global_df_mod')
-    self.global_df_mod = float(Params().get("globalDfMod", encoding="utf8"))
+    self.global_df_mod = float(params.get("globalDfMod", encoding="utf8"))
     if self.global_df_mod != 1.:
       self.global_df_mod = clip(self.global_df_mod, 0.85, 2.5)
 
     #self.min_TR = self.op_params.get('min_TR')
-    self.min_TR = float(Params().get("minTR", encoding="utf8"))
+    self.min_TR = float(params.get("minTR", encoding="utf8"))
     if self.min_TR != 1.:
       self.min_TR = clip(self.min_TR, 0.85, 2.7)
+    self.stop_accel_boost = params.get_bool("StopAccelBoost")

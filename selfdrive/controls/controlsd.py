@@ -43,6 +43,11 @@ MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
 
 SOFT_DISABLE_TIME = 3  # seconds
+STOP_ACCEL_BOOST_HOLD_MAX_VEGO = 1.0
+STOP_ACCEL_BOOST_HOLD_MIN_DREL = 1.0
+STOP_ACCEL_BOOST_HOLD_MAX_DREL = 25.0
+STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VLEAD = 0.30
+STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VREL = 0.15
 # controlsAllowed mismatch는 CAN/pandaState 수신 타이밍 차이로 순간 발생할 수 있으므로
 # 연속 mismatch만 controlsMismatch로 처리한다. 100Hz 기준 10프레임 = 약 100ms.
 CONTROLS_ALLOWED_MISMATCH_FRAMES = 10
@@ -283,6 +288,21 @@ class Controls:
         if radar.leadOne.status:
             return radar.leadOne
         return None
+
+    def stop_accel_boost_lead_moving(self, lead):
+        return lead is not None and lead.status and \
+               lead.vLead > STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VLEAD and \
+               lead.vRel > STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VREL
+
+    def stop_accel_boost_hold_stationary_lead(self, CS):
+        if not self.stop_accel_boost or not CS.adaptiveCruise or CS.vEgo > STOP_ACCEL_BOOST_HOLD_MAX_VEGO:
+            return False
+
+        lead = self.get_lead(self.sm)
+        if lead is None or not (STOP_ACCEL_BOOST_HOLD_MIN_DREL < lead.dRel < STOP_ACCEL_BOOST_HOLD_MAX_DREL):
+            return False
+
+        return not self.stop_accel_boost_lead_moving(lead)
 
     def get_long_lead_safe_speed(self, sm, CS, vEgo):
         if CS.adaptiveCruise:
@@ -835,6 +855,9 @@ class Controls:
             t_since_plan = (self.sm.frame - self.sm.rcv_frame['longitudinalPlan']) * DT_CTRL
 
             actuators.accel = self.LoC.update(self.active, CS, long_plan, pid_accel_limits, t_since_plan)
+            if self.active and self.stop_accel_boost_hold_stationary_lead(CS):
+                actuators.accel = min(actuators.accel, 0.0)
+                self.LoC.reset(v_pid=CS.vEgo)
 
             # Steering PID loop and lateral MPC
             # lat_active = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
