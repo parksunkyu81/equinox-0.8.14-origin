@@ -42,7 +42,7 @@ STOP_ACCEL_BOOST_ENTRY_SPEED = 1.0
 STOP_ACCEL_BOOST_EXIT_SPEED = 20.0 * CV.KPH_TO_MS
 STOP_ACCEL_BOOST_MAX_FRAMES = 5.5 / DT_CTRL
 STOP_ACCEL_BOOST_GAIN = 1.25
-STOP_ACCEL_BOOST_START_DREL = 5.5
+STOP_ACCEL_BOOST_START_DREL = 5.2
 STOP_ACCEL_BOOST_EXIT_DREL = 5.0
 STOP_ACCEL_BOOST_MAX_DREL = 18.0
 STOP_ACCEL_BOOST_MIN_VLEAD = 0.30
@@ -159,7 +159,8 @@ class CarController():
       return False, None
 
     lead = self._stop_accel_boost_lead(controls)
-    common_allowed = c.active and CS.adaptive_Cruise and not CS.out.brakePressed and not CS.out.gasPressed
+    common_allowed = c.active and CS.adaptive_Cruise and bool(CS.out.autoHold) and \
+      not CS.out.brakePressed and not CS.out.gasPressed
     lead_valid = lead is not None and lead.status
     if not common_allowed or not lead_valid:
       self.stop_accel_boost_active = False
