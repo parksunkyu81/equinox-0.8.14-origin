@@ -153,10 +153,10 @@ DISABLE_LATACCEL_OFFSET_LEARNING = True
 # make the published value slightly more assertive when clip-quality persists and
 # there is no real EPS/max-limit evidence.
 LAT_ACCEL_FACTOR_AGGRESSIVE_ASSIST = True
-LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE = 0.955  # assist는 최대 -4.5%까지만 개입
-LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA = 0.10
-LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START = 0.16
-LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL = 0.44
+LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE = 0.940  # allow stronger temporary assist when clip-quality persists
+LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA = 0.12
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START = 0.10
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL = 0.34
 LAT_ACCEL_FACTOR_ASSIST_RATE_STRONG_LIMIT = 0.13
 
 # ===== Live Torque Tuning "B-plan" + Warm Start =====
