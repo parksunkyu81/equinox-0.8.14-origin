@@ -159,7 +159,7 @@ class CarController():
       return False, None
 
     lead = self._stop_accel_boost_lead(controls)
-    common_allowed = c.active and CS.adaptive_Cruise and bool(CS.out.autoHold) and \
+    common_allowed = c.active and CS.adaptive_Cruise and not bool(CS.out.autoHold) and \
       not CS.out.brakePressed and not CS.out.gasPressed
     lead_valid = lead is not None and lead.status
     if not common_allowed or not lead_valid:
