@@ -243,6 +243,11 @@ class Controls:
 
         self.limited_lead = False
 
+        # 커브 운행중 (2026-05-18)
+        self.is_curv_driving = False
+        # 커브 스피드 (2026-05-18)
+        self.curv_speed = 0.0
+
         # TODO: no longer necessary, aside from process replay
         self.sm['liveParameters'].valid = True
 
@@ -370,7 +375,7 @@ class Controls:
 
         return 0
 
-    def cal_curve_speed(self, sm, v_ego, frame):
+    """def cal_curve_speed(self, sm, v_ego, frame):
 
         lateralPlan = sm['lateralPlan']
         if len(lateralPlan.curvatures) == CONTROL_N:
@@ -387,7 +392,198 @@ class Controls:
             if np.isnan(self.curve_speed_ms):
                 self.curve_speed_ms = 255.
         else:
+            self.curve_speed_ms = 255."""
+
+    def cal_curve_speed(self, sm, v_ego, frame):
+        lateralPlan = sm['lateralPlan']
+        if len(lateralPlan.curvatures) != CONTROL_N:
             self.curve_speed_ms = 255.
+            self.is_curv_driving = False
+            self.curv_speed = float(self.curve_speed_ms * self.speed_conv_to_clu)
+            return
+
+        curvatures = np.asarray(lateralPlan.curvatures, dtype=np.float32)
+        n = len(curvatures)
+
+        # ===== 1) 모델 샘플 간격/제어 주기(없으면 안전한 기본값) =====
+        DT_MDL = getattr(self, "DT_MDL", 0.2)  # curvatures 시간 간격(초). 보통 0.2s 근처
+        DT_CTRL = getattr(self, "DT_CTRL", 0.05)  # 이 함수가 도는 주기(초)
+
+        horizon_s = (n - 1) * DT_MDL
+
+        # ===== 2) 속도 기반 lookahead window 자동 결정 =====
+        v = float(max(v_ego, 0.0))
+        v_kph = v * 3.6
+
+        # "언제부터 보기 시작할지"(너무 가까운 구간은 노이즈/조향 순간변화가 섞이기 쉬움)
+        ahead_start_s = float(np.interp(v, [0.0, 13.9, 27.8], [1.0, 1.2, 1.5]))
+
+        # "어디까지 볼지"(속도 높을수록 더 멀리)
+        ahead_end_s = float(np.interp(v, [0.0, 13.9, 27.8, 33.3], [3.0, 3.6, 4.4, 4.8]))
+        ahead_end_s = min(ahead_end_s, horizon_s)
+
+        # 대표 곡률 분위수(저속은 더 공격적, 고속은 더 부드럽게)
+        perc = float(np.interp(v, [0.0, 13.9, 27.8], [92.0, 90.0, 85.0]))
+
+        i0 = int(round(ahead_start_s / DT_MDL))
+        i1 = int(round(ahead_end_s / DT_MDL))
+
+        i0 = max(0, min(i0, n - 1))
+        i1 = max(i0 + 1, min(i1, n))  # slice end
+
+        seg = np.abs(curvatures[i0:i1])
+
+        # ===== 2-1) 대표 곡률(curv_abs) 산출 =====
+        # 기존: 분위수 + top-k mean (스파이크 감지)
+        # 추가: upper_mean (지속 완만 커브 감지)
+        if seg.size > 0:
+            curv_p = float(np.percentile(seg, perc))
+            seg_sorted = np.sort(seg)
+
+            # 속도 높을수록 k를 조금 키워 과민을 줄이면서도 스파이크는 잡게
+            k = int(np.interp(v, [0.0, 13.9, 27.8], [3, 4, 5]))
+            k = max(1, min(k, int(seg_sorted.size)))
+
+            topk_mean = float(np.mean(seg_sorted[-k:])) if seg_sorted.size >= k else float(np.max(seg_sorted))
+
+            # ✅ upper_mean: 상위 50% 평균 (seg가 너무 작으면 영향 최소화)
+            if seg_sorted.size >= 8:
+                upper = seg_sorted[int(0.5 * seg_sorted.size):]
+                upper_mean = float(np.mean(upper)) if upper.size > 0 else float(curv_p)
+            else:
+                upper_mean = float(curv_p)
+
+            # 기본 결합(스파이크 + 분위수)
+            curv_abs = max(curv_p, topk_mean * 0.95)
+
+            # upper_mean 보강은 노이즈 바닥 이상일 때만 (과민 방지)
+            # -> 아래 mild_curv_min(완만 코너 인정 최소 곡률)의 60% 정도를 노이즈 바닥으로 사용
+            #    (완만 코너 감지 강화는 하되, 직진/차선변경 노이즈는 배제)
+            # mild_curv_min은 아래에서 계산하지만, 여기서는 우선 임시로 속도 기반으로 근사합니다.
+            # (정확한 mild_curv_min은 3-1에서 다시 계산하며, extra 적용은 그쪽에서만 합니다.)
+            mild_curv_min_tmp = float(np.interp(
+                v_kph,
+                [0, 30, 60, 100, 130],
+                [0.0100, 0.0034, 0.00145, 0.00082, 0.00061]
+            ))
+            noise_floor = mild_curv_min_tmp * 0.60
+
+            if upper_mean > noise_floor:
+                curv_abs = max(curv_abs, upper_mean * 0.90)
+        else:
+            curv_abs = float(abs(curvatures[-1]))
+
+        curv_abs = max(float(curv_abs), 1e-4)
+
+        # ===== 3) 허용 횡가속 기반 안전 속도 계산 =====
+        a_y_max = 2.975 - v * 0.0375
+        a_y_max = float(np.clip(a_y_max, 1.2, 3.0))
+
+        v_curvature = sqrt(a_y_max / curv_abs)
+
+        # 보수 계수(기본)
+        scc_curvature_factor = 0.96
+        base_factor = float(np.interp(v, [0.0, 13.9, 27.8], [0.86, 0.83, 0.80]))
+        model_speed = v_curvature * base_factor * scc_curvature_factor
+
+        # ===== 3-1) ✅ 완만 코너 감지 강화(과민 방지): 5kph 단위 mild_curv_min + extra =====
+        # speed breakpoints (kph)
+        MILD_KPH_BP = [
+            0, 5, 10, 15, 20, 25, 30,
+            35, 40, 45, 50, 55, 60,
+            65, 70, 75, 80, 85, 90, 95,
+            100, 105, 110, 115, 120, 125, 130
+        ]
+
+        # mild curvature min threshold (1/m)
+        MILD_CURV_MIN_VAL = [
+            0.0100, 0.0090, 0.0080, 0.0065, 0.0052, 0.0042, 0.0034,  # 0~30kph
+            0.0028, 0.0023, 0.0020, 0.0018, 0.0016, 0.00145,  # 35~60kph
+            0.00133, 0.00122, 0.00112, 0.00105, 0.00098, 0.00092, 0.00087,  # 65~95kph
+            0.00082, 0.00078, 0.00074, 0.00070, 0.00067, 0.00064, 0.00061  # 100~130kph
+        ]
+
+        # extra factor: model_speed *= extra (1보다 작을수록 더 일찍/더 보수 감속)
+        EXTRA_VAL = [
+            1.000, 1.000, 1.000, 0.998, 0.995, 0.992, 0.990,  # 0~30
+            0.988, 0.985, 0.982, 0.979, 0.976, 0.973,  # 35~60
+            0.970, 0.968, 0.966, 0.964, 0.962, 0.960, 0.958,  # 65~95
+            0.956, 0.954, 0.952, 0.950, 0.949, 0.948, 0.947  # 100~130
+        ]
+
+        mild_curv_min = float(np.interp(v_kph, MILD_KPH_BP, MILD_CURV_MIN_VAL))
+        extra = float(np.interp(v_kph, MILD_KPH_BP, EXTRA_VAL))
+
+        # ---- (권장) 차선변경/깜빡이 중에는 extra 적용 금지(직진/차선변경 과민 방지) ----
+        in_lane_change = False
+        try:
+            in_lane_change = int(getattr(lateralPlan, "laneChangeState", 0)) != 0
+        except Exception:
+            in_lane_change = False
+
+        blinker_on = False
+        try:
+            cs = sm['carState']
+            blinker_on = bool(getattr(cs, "leftBlinker", False) or getattr(cs, "rightBlinker", False))
+        except Exception:
+            blinker_on = False
+
+        # ---- (적용) 완만 코너로 의미 있을 때만 model_speed 보수화 ----
+        if (curv_abs > mild_curv_min) and (not in_lane_change) and (not blinker_on):
+            model_speed *= extra
+
+        # ===== 4) 코너 감속 ON/OFF 히스테리시스(깜빡임 방지) =====
+        ON_THRESH = 0.992
+        OFF_THRESH = 1.03
+
+        if not getattr(self, "is_curv_driving", False):
+            if model_speed < v * ON_THRESH:
+                self.is_curv_driving = True
+        else:
+            if model_speed > v * OFF_THRESH:
+                self.is_curv_driving = False
+
+        # ===== 5) 목표 속도 결정 + 자연스러운 램프(변화율 제한) =====
+        if self.is_curv_driving:
+            desired = float(max(model_speed, MIN_CURVE_SPEED))
+
+            prev = float(getattr(self, "curve_speed_ms", 255.0))
+            if prev > 200.0:  # 센티널 상태에서 처음 진입 시
+                prev = v
+
+            # 기본 램프 제한
+            decel_base = float(np.interp(v, [0.0, 13.9, 27.8], [0.9, 1.1, 1.3]))  # m/s^2
+            accel_limit = 2.0
+
+            # "커브가 가까운데 속도가 아직 높으면" 필요한 감속을 자동으로 더 허용
+            if seg.size > 0:
+                imax = int(np.argmax(seg))
+                t_peak = max((i0 + imax) * DT_MDL, 0.1)  # sec (0 방지)
+
+                a_req = (prev * prev - desired * desired) / max(2.0 * max(prev, 1e-3) * t_peak, 1e-3)
+                a_req = float(np.clip(a_req, 0.0, 2.8))  # 상한: 2.0~3.2 정도 취향 조절
+            else:
+                a_req = 0.0
+
+            decel_limit = max(decel_base, a_req)
+
+            # 원하는 값(desired)으로 서서히 수렴
+            if desired < prev:
+                new_speed = max(desired, prev - decel_limit * DT_CTRL)
+            else:
+                new_speed = min(desired, prev + accel_limit * DT_CTRL)
+
+            # 현재 속도보다 위로 튀지 않게(제한값이므로)
+            self.curve_speed_ms = float(min(new_speed, v))
+        else:
+            self.curve_speed_ms = 255.
+
+        # ===== 6) NaN 방어 + 표시 단위 변환 =====
+        if np.isnan(self.curve_speed_ms) or self.curve_speed_ms <= 0.0:
+            self.curve_speed_ms = 255.
+            self.is_curv_driving = False
+
+        self.curv_speed = float(self.curve_speed_ms * self.speed_conv_to_clu)
 
 
     # [크루즈 MAX 속도 설정] #
@@ -1101,6 +1297,10 @@ class Controls:
         controlsState.latAccelOffset = self.torque_latAccelOffset
         controlsState.friction = self.torque_friction
         controlsState.totalBucketPoints = self.totalBucketPoints
+
+        # curv driving (20260518)
+        controlsState.curvDriving = bool(self.is_curv_driving)
+        controlsState.curvSpeed = float(self.curv_speed)
 
         # Dynamic TR
         #controlsState.cruiseGap = int(Params().get("cruiseGap", encoding="utf8"))

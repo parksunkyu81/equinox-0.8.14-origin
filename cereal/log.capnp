@@ -629,6 +629,11 @@ struct ControlsState @0x97ff69c53601abf1 {
   totalBucketPoints @87 :Float32;
   bucketPoints @89 :Text;
 
+  # Curv
+  curvDriving @90 :Bool;
+  curvSpeed @91 :Float32;
+
+
 
   enum OpenpilotState @0xdbe58b96d2d1ac61 {
     disabled @0;

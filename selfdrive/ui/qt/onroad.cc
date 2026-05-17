@@ -722,6 +722,41 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     p.setOpacity(1.0);
   }
 
+  // 5. curv speed
+  x = icon_start_x + (icon_step * 4);
+  bool curv = controls_state.getCurvDriving();
+  int curvSpeed = (int)controls_state.getCurvSpeed();
+
+  QColor circleColor2;
+
+  if (curv) {
+    circleColor2 = QColor(0, 200, 83, 235);
+  } else {
+    circleColor2 = QColor(0, 0, 0, 235);
+    curvSpeed = 0;
+  }
+
+  p.setPen(Qt::NoPen);
+  p.setBrush(circleColor2);
+  p.drawEllipse(x - radius / 2, y2 - radius / 2, radius, radius);
+
+  QString curvText;
+  if (curv) {
+    curvText = "CURV:ON";
+  } else {
+    curvText = "CURV:OFF";
+  }
+
+  QColor curvColor = QColor(255, 255, 255, 200);
+  configFont(p, "Open Sans", 40.f, "Bold");
+  drawTextWithColor(p, x, y1 - 20, curvText, curvColor);
+
+  QString strCurvSpeed = QString("%1km/h").arg(curvSpeed);
+  configFont(p, "Open Sans", 40.f, "Bold");
+  drawTextWithColor(p, x, y1 + 50, strCurvSpeed, curvColor);
+  p.setOpacity(1.0);
+
+
 
   // ================================================================================================================ //
   x = 140;
@@ -793,15 +828,18 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   textColor = QColor(255, 255, 255, 200);
 
   if(accel > 0) {
-    str = "ACCEL";
+    //str = "ACCEL";
+    str = "가속";
     textColor = QColor(120, 255, 120, 200);
   }
   else if(accel == 0.0) {
-    str = "──";
+    //str = "──";
+    str = "브레이크";
     textColor = QColor(255, 185, 15, 200);
   }
   else {
-    str = "DECEL";
+    //str = "DECEL";
+    str = "감속";
     textColor = QColor(254, 32, 32, 200);
   }
 
@@ -848,7 +886,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // 5. long control state
   x = icon_start_x + (icon_step * 4);
   int longControlState = (int)controls_state.getLongControlState();
-  const char* long_state[] = {"off", "pid", "stopping", "starting"};
+  const char* long_state[] = {"꺼짐", "켜짐", "정지", "출발"};
   p.setPen(Qt::NoPen);
   p.setBrush(blackColor(200));
   p.drawEllipse(x - radius / 2, y2 - radius / 2, radius, radius);
@@ -1938,7 +1976,7 @@ void NvgWindow::drawDebugText(QPainter &p) {
   float ufAccelCmd = controls_state.getUfAccelCmd();
   float accel = car_control.getActuators().getAccel();
 
-  const char* long_state[] = {"off", "pid", "stopping", "starting"};
+  const char* long_state[] = {"꺼짐", "켜짐", "정지", "출발"};
 
   configFont(p, "Open Sans", 50, "Regular");
   p.setPen(QColor(255, 255, 255, 200));
