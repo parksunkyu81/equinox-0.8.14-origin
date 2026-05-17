@@ -738,7 +738,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
   p.setPen(Qt::NoPen);
   p.setBrush(circleColor2);
-  p.drawEllipse(x - radius / 2, y2 - radius / 2, radius, radius);
+  p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
 
   QString curvText;
   if (curv) {
