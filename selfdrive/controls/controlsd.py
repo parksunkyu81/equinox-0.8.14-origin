@@ -47,6 +47,10 @@ STOP_ACCEL_BOOST_HOLD_MAX_VEGO = 1.0
 STOP_ACCEL_BOOST_START_MIN_DREL = 5.0
 STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VLEAD = 0.30
 STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VREL = 0.15
+FCW_MIN_CLOSING_SPEED = 0.8
+FCW_URGENT_TTC = 1.6
+FCW_CRITICAL_TTC = 1.0
+FCW_DECEL_SUPPRESS = -0.8
 # controlsAllowed mismatch는 CAN/pandaState 수신 타이밍 차이로 순간 발생할 수 있으므로
 # 연속 mismatch만 controlsMismatch로 처리한다. 100Hz 기준 10프레임 = 약 100ms.
 CONTROLS_ALLOWED_MISMATCH_FRAMES = int(0.5 / DT_CTRL)
@@ -306,6 +310,27 @@ class Controls:
 
         return not (self.stop_accel_boost_lead_moving(lead) and
                     self.stop_accel_boost_lead_safe_to_start(lead))
+
+    def op_fcw_dangerous_lead(self, CS):
+        lead = self.get_lead(self.sm)
+        if lead is None or lead.dRel <= 0.0:
+            return False
+
+        closing_speed = -lead.vRel
+        if closing_speed <= 0.0:
+            return False
+
+        ttc = lead.dRel / max(closing_speed, 0.1)
+        close_distance = max(4.5, CS.vEgo * 0.65 + 2.5)
+        critical_distance = max(3.0, CS.vEgo * 0.25 + 1.5)
+
+        close_and_urgent = lead.dRel <= close_distance and closing_speed >= FCW_MIN_CLOSING_SPEED and ttc <= FCW_URGENT_TTC
+        critical_now = lead.dRel <= critical_distance and ttc <= FCW_CRITICAL_TTC
+        if not (close_and_urgent or critical_now):
+            return False
+
+        already_decelerating = CS.aEgo <= FCW_DECEL_SUPPRESS
+        return not already_decelerating or critical_now
 
     def get_long_lead_safe_speed(self, sm, CS, vEgo):
         if CS.adaptiveCruise:
@@ -610,7 +635,7 @@ class Controls:
         model_fcw = self.sm['modelV2'].meta.hardBrakePredicted and not CS.brakePressed and not stock_long_is_braking
         planner_fcw = self.sm['longitudinalPlan'].fcw and self.enabled
         stationary_lead_hold = self.stop_accel_boost_hold_stationary_lead(CS)
-        if not self.disable_op_fcw and not stationary_lead_hold and (planner_fcw or model_fcw):
+        if not self.disable_op_fcw and not stationary_lead_hold and self.op_fcw_dangerous_lead(CS) and (planner_fcw or model_fcw):
             self.events.add(EventName.fcw)
 
         if TICI:
