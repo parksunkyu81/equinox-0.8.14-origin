@@ -49,7 +49,7 @@ STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VLEAD = 0.30
 STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VREL = 0.15
 # controlsAllowed mismatch는 CAN/pandaState 수신 타이밍 차이로 순간 발생할 수 있으므로
 # 연속 mismatch만 controlsMismatch로 처리한다. 100Hz 기준 10프레임 = 약 100ms.
-CONTROLS_ALLOWED_MISMATCH_FRAMES = 10
+CONTROLS_ALLOWED_MISMATCH_FRAMES = int(0.5 / DT_CTRL)
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
@@ -522,7 +522,7 @@ class Controls:
 
         # Panda safety 설정 불일치는 즉시 controlsMismatch로 처리한다.
         # 단, pandaStates 자체가 invalid/stale이면 아래 usbError/commIssue 경로에서 처리한다.
-        if self.sm.valid["pandaStates"]:
+        if self.initialized and self.sm.valid["pandaStates"]:
             for i, pandaState in enumerate(self.sm['pandaStates']):
                 # All pandas must match the list of safetyConfigs,
                 # and if outside this list, must be silent or noOutput.
