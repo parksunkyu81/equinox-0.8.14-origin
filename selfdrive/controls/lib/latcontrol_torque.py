@@ -95,7 +95,7 @@ STABLE_TORQUE_SLEW_ENABLED = True
 # 저속은 더 빠르게, 고속은 더 안정적으로 torque slew 제한.
 # 목적: 10~30kph 코너 추종력 확보 + 80~110kph 와리가리 억제.
 STABLE_TORQUE_SLEW_KPH_BP = [0.0, 10.0, 20.0, 30.0, 35.0, 40.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-STABLE_TORQUE_UP_V =       [0.065, 0.092, 0.098, 0.090, 0.078, 0.062, 0.048, 0.026, 0.018, 0.014, 0.012]  # v32: 80~110kph output slew 보수화
+STABLE_TORQUE_UP_V =       [0.065, 0.098, 0.104, 0.096, 0.080, 0.062, 0.048, 0.026, 0.018, 0.014, 0.012]  # v34: 10~35kph only, keep 40kph+ conservative
 STABLE_TORQUE_DOWN_V =     [0.085, 0.115, 0.120, 0.108, 0.098, 0.078, 0.062, 0.038, 0.029, 0.022, 0.018]
 STABLE_TORQUE_LIMITED_SHRINK = 0.85
 
@@ -113,9 +113,9 @@ DYN_LAT_FACTOR_BP = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 
 #  - 10~30kph는 1.74~1.76 계열로 완화해 요구 토크가 적용 한계를 계속 앞지르지 않게 한다.
 #  - 30~35kph는 부드러운 bridge로 연결한다.
 #  - 60kph 이상은 기존 고속 안정 profile을 유지한다.
-DYN_LAT_FACTOR_V  = [1.88, 1.76, 1.745, 1.74, 1.75, 1.76, 1.80, 1.86, 1.91, 1.93, 1.95, 1.96, 1.96]  # v33: 10~35kph clip-heavy logs need more authority
+DYN_LAT_FACTOR_V  = [1.88, 1.73, 1.71, 1.72, 1.74, 1.76, 1.80, 1.86, 1.91, 1.93, 1.95, 1.96, 1.96]  # v34: safe first target for 10~35kph clip reduction
 DYN_FRICTION_BP   = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
-DYN_FRICTION_V    = [0.255, 0.286, 0.290, 0.290, 0.286, 0.282, 0.274, 0.266, 0.256, 0.252, 0.248, 0.246, 0.246]  # v33: strengthen 10~35kph static-friction assist
+DYN_FRICTION_V    = [0.255, 0.292, 0.296, 0.294, 0.288, 0.282, 0.274, 0.266, 0.256, 0.252, 0.248, 0.246, 0.246]  # v34: stronger static-friction assist only below 25kph
 
 # 실제 CarController의 STEER_DELTA_UP/DOWN은 carcontroller 쪽에서 적용해야 한다.
 # 아래 맵은 이 파일 안에서는 torque slew와 디버그용 목표값으로만 사용한다.
@@ -151,8 +151,8 @@ DYN_BOOST_RISE_STEP = 0.10
 # v32: 10~20kph clip이 42%까지 오른 원인을 줄이기 위해 저속 코너 부스트 상승을 별도 완화한다.
 # v33: let low-speed effective torque reach the target earlier in the
 # 10~35kph bands where 2026-05-13/14 logs still show repeated steer_clip.
-DYN_BOOST_RISE_LOW1020_STEP = 0.080
-DYN_BOOST_RISE_LOW2035_STEP = 0.095
+DYN_BOOST_RISE_LOW1020_STEP = 0.095
+DYN_BOOST_RISE_LOW2035_STEP = 0.105
 DYN_BOOST_FALL_STEP = 0.035
 DYN_LOW_SPEED_HOLD_FRAMES = 70  # 약 0.70초 @100Hz: 과한 저속 boost hold 완화
 
@@ -178,8 +178,8 @@ DYN_RATE_LIMITED_STRONG_OUTPUT_GAP = 0.16
 
 # 저속 코너 최소 boost 보장값. 제한이 감지되면 기존처럼 1.00으로 다시 밀어붙이지 않고
 # 0.72~0.86 범위로 후퇴시켜 steer_clip/rate_limit 반복을 줄인다.
-DYN_LOW35_MIN_BOOST_NORMAL = 0.86  # v32: 10~20kph 작은/완만 코너에서 과요구 완화
-DYN_LOW35_MIN_BOOST_LIMITED = 0.76
+DYN_LOW35_MIN_BOOST_NORMAL = 0.90  # v34: raise only clean 10~35kph minimum boost
+DYN_LOW35_MIN_BOOST_LIMITED = 0.78
 DYN_LOW35_MIN_BOOST_STRONG = 0.66
 DYN_BRIDGE_MIN_BOOST_NORMAL_BP = [35.0, 40.0, 45.0]
 DYN_BRIDGE_MIN_BOOST_NORMAL_V = [0.78, 0.65, 0.52]
@@ -190,8 +190,7 @@ DYN_BRIDGE_MIN_BOOST_STRONG_MULT = 0.72
 DYN_LAT_FACTOR_MIN = 1.68
 DYN_LAT_FACTOR_MAX = 1.965
 DYN_FRICTION_MIN = 0.245
-DYN_FRICTION_MAX = 0.288
-
+DYN_FRICTION_MAX = 0.296
 
 class LatControlTorque(LatControl):
     def __init__(self, CP, CI):
@@ -478,7 +477,7 @@ class LatControlTorque(LatControl):
             # 최소 boost를 그대로 강제하면 desired torque가 적용 한계를 앞질러
             # steer_clip만 늘 수 있어 20kph까지는 단계적으로 낮춘다.
             low_speed_clip_relief = float(interp(v_kph, [10.0, 15.0, 20.0, 30.0, 35.0],
-                                                 [0.78, 0.82, 0.88, 1.00, 1.00]))
+                                                 [0.84, 0.88, 0.93, 1.00, 1.00]))
             low35_min_boost *= low_speed_clip_relief
 
             if bool(steering_pressed):

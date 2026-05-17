@@ -153,11 +153,11 @@ DISABLE_LATACCEL_OFFSET_LEARNING = True
 # make the published value slightly more assertive when clip-quality persists and
 # there is no real EPS/max-limit evidence.
 LAT_ACCEL_FACTOR_AGGRESSIVE_ASSIST = True
-LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE = 0.940  # allow stronger temporary assist when clip-quality persists
-LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA = 0.12
-LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START = 0.10
-LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL = 0.34
-LAT_ACCEL_FACTOR_ASSIST_RATE_STRONG_LIMIT = 0.13
+LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE = 0.930  # v34: stronger temporary assist for 10~35kph clip-heavy windows
+LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA = 0.14
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START = 0.08
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL = 0.30
+LAT_ACCEL_FACTOR_ASSIST_RATE_STRONG_LIMIT = 0.10
 
 # ===== Live Torque Tuning "B-plan" + Warm Start =====
 # B안: 직선 오프셋 업데이트는 '최근 구간(윈도우) 품질'로만 결정

@@ -22,7 +22,7 @@ CREEP_SPEED = 2.5   # 4km
 # delta-up authority to reduce 10~30kph steer_clip, while high speed remains
 # conservative to avoid highway weave.
 DYN_STEER_DELTA_UP_BP = [0.0, 8.0, 10.0, 20.0, 30.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
-DYN_STEER_DELTA_UP_V  = [10.0, 12.0, 15.0, 15.0, 14.0, 13.0, 12.0, 11.0, 8.0, 7.0, 6.0, 6.0]  # v32: 10~20kph 과한 상승/80kph+ 고속 변화율 완화
+DYN_STEER_DELTA_UP_V  = [10.0, 12.0, 16.0, 16.0, 15.0, 13.0, 12.0, 11.0, 8.0, 7.0, 6.0, 6.0]  # v34: 10~35kph clip reduction, 35kph+ unchanged
 DYN_STEER_DELTA_DOWN_BP = [0.0, 10.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
 DYN_STEER_DELTA_DOWN_V  = [14.0, 16.0, 16.0, 16.0, 15.0, 14.0, 14.0, 13.0, 13.0]  # v32: unwind도 고속에서 조금 더 부드럽게
 
@@ -31,8 +31,8 @@ DYN_STEER_DELTA_DOWN_V  = [14.0, 16.0, 16.0, 16.0, 15.0, 14.0, 14.0, 13.0, 13.0]
 # driver is not overriding.
 CLEAN_DELTA_UP_ENABLE = True
 CLEAN_DELTA_UP_MIN_KPH = 10.0
-CLEAN_DELTA_UP_MAX_KPH = 24.0
-CLEAN_DELTA_UP_VALUE = 16
+CLEAN_DELTA_UP_MAX_KPH = 28.0
+CLEAN_DELTA_UP_VALUE = 17
 CLEAN_DELTA_UP_MIN_REQ = 0.20
 CLEAN_DELTA_UP_MAX_REQ = 0.78
 CLEAN_DELTA_UP_MAX_LAST = 0.72
