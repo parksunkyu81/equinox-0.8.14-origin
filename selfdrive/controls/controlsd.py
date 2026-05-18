@@ -51,6 +51,13 @@ FCW_MIN_CLOSING_SPEED = 0.8
 FCW_URGENT_TTC = 1.6
 FCW_CRITICAL_TTC = 1.0
 FCW_DECEL_SUPPRESS = -0.8
+LOW_SPEED_CURVE_SLOWDOWN_MIN_KPH = 10.0
+LOW_SPEED_CURVE_SLOWDOWN_MAX_KPH = 35.0
+LOW_SPEED_CURVE_SLOWDOWN_FLOOR_KPH = 8.0
+LOW_SPEED_CURVE_SLOWDOWN_MIN_RATIO = 1.10
+LOW_SPEED_CURVE_SLOWDOWN_FULL_RATIO = 2.00
+LOW_SPEED_CURVE_SLOWDOWN_KPH_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
+LOW_SPEED_CURVE_SLOWDOWN_MAX_DROP_KPH = [1.0, 2.0, 3.2, 4.8, 3.0]
 # controlsAllowed mismatch는 CAN/pandaState 수신 타이밍 차이로 순간 발생할 수 있으므로
 # 연속 mismatch만 controlsMismatch로 처리한다. 100Hz 기준 10프레임 = 약 100ms.
 CONTROLS_ALLOWED_MISMATCH_FRAMES = int(0.5 / DT_CTRL)
@@ -245,6 +252,7 @@ class Controls:
 
         # 커브 운행중 (2026-05-18)
         self.is_curv_driving = False
+        self.low_speed_curv_slowdown = False
         # 커브 스피드 (2026-05-18)
         self.curv_speed = 0.0
 
@@ -399,6 +407,7 @@ class Controls:
         if len(lateralPlan.curvatures) != CONTROL_N:
             self.curve_speed_ms = 255.
             self.is_curv_driving = False
+            self.low_speed_curv_slowdown = False
             self.curv_speed = float(self.curve_speed_ms * self.speed_conv_to_clu)
             return
 
@@ -407,7 +416,7 @@ class Controls:
 
         # ===== 1) 모델 샘플 간격/제어 주기(없으면 안전한 기본값) =====
         DT_MDL = getattr(self, "DT_MDL", 0.2)  # curvatures 시간 간격(초). 보통 0.2s 근처
-        DT_CTRL = getattr(self, "DT_CTRL", 0.05)  # 이 함수가 도는 주기(초)
+        DT_CTRL = getattr(self, "DT_CTRL", globals().get("DT_CTRL", 0.01))  # 이 함수가 도는 주기(초)
 
         horizon_s = (n - 1) * DT_MDL
 
@@ -532,20 +541,46 @@ class Controls:
         if (curv_abs > mild_curv_min) and (not in_lane_change) and (not blinker_on):
             model_speed *= extra
 
+        low_speed_eps_slowdown = False
+        if (LOW_SPEED_CURVE_SLOWDOWN_MIN_KPH <= v_kph <= LOW_SPEED_CURVE_SLOWDOWN_MAX_KPH and
+                (not in_lane_change) and (not blinker_on)):
+            curve_ratio = curv_abs / max(mild_curv_min, 1e-6)
+            if curve_ratio >= LOW_SPEED_CURVE_SLOWDOWN_MIN_RATIO:
+                shortage = float(np.interp(
+                    curve_ratio,
+                    [LOW_SPEED_CURVE_SLOWDOWN_MIN_RATIO, LOW_SPEED_CURVE_SLOWDOWN_FULL_RATIO],
+                    [0.0, 1.0]
+                ))
+                max_drop_kph = float(np.interp(
+                    v_kph,
+                    LOW_SPEED_CURVE_SLOWDOWN_KPH_BP,
+                    LOW_SPEED_CURVE_SLOWDOWN_MAX_DROP_KPH
+                ))
+                low_speed_drop_ms = max_drop_kph * CV.KPH_TO_MS * shortage
+                low_speed_floor_ms = LOW_SPEED_CURVE_SLOWDOWN_FLOOR_KPH * CV.KPH_TO_MS
+                low_speed_model_speed = float(max(v - low_speed_drop_ms, low_speed_floor_ms))
+                if low_speed_model_speed < v * 0.995:
+                    low_speed_eps_slowdown = True
+                    model_speed = min(model_speed, low_speed_model_speed)
+
         # ===== 4) 코너 감속 ON/OFF 히스테리시스(깜빡임 방지) =====
         ON_THRESH = 0.992
         OFF_THRESH = 1.03
 
         if not getattr(self, "is_curv_driving", False):
-            if model_speed < v * ON_THRESH:
+            if low_speed_eps_slowdown or model_speed < v * ON_THRESH:
                 self.is_curv_driving = True
         else:
-            if model_speed > v * OFF_THRESH:
+            if (not low_speed_eps_slowdown) and model_speed > v * OFF_THRESH:
                 self.is_curv_driving = False
+        self.low_speed_curv_slowdown = bool(low_speed_eps_slowdown and self.is_curv_driving)
 
         # ===== 5) 목표 속도 결정 + 자연스러운 램프(변화율 제한) =====
         if self.is_curv_driving:
-            desired = float(max(model_speed, MIN_CURVE_SPEED))
+            if self.low_speed_curv_slowdown:
+                desired = float(max(model_speed, LOW_SPEED_CURVE_SLOWDOWN_FLOOR_KPH * CV.KPH_TO_MS))
+            else:
+                desired = float(max(model_speed, MIN_CURVE_SPEED))
 
             prev = float(getattr(self, "curve_speed_ms", 255.0))
             if prev > 200.0:  # 센티널 상태에서 처음 진입 시
@@ -577,11 +612,13 @@ class Controls:
             self.curve_speed_ms = float(min(new_speed, v))
         else:
             self.curve_speed_ms = 255.
+            self.low_speed_curv_slowdown = False
 
         # ===== 6) NaN 방어 + 표시 단위 변환 =====
         if np.isnan(self.curve_speed_ms) or self.curve_speed_ms <= 0.0:
             self.curve_speed_ms = 255.
             self.is_curv_driving = False
+            self.low_speed_curv_slowdown = False
 
         self.curv_speed = float(self.curve_speed_ms * self.speed_conv_to_clu)
 
@@ -602,7 +639,8 @@ class Controls:
 
         curv_limit = 0
         self.cal_curve_speed(sm, vEgo, frame)
-        if self.slow_on_curves and SLOW_ON_CURVES and self.curve_speed_ms >= MIN_CURVE_SPEED:
+        if self.slow_on_curves and SLOW_ON_CURVES and \
+                (self.curve_speed_ms >= MIN_CURVE_SPEED or bool(getattr(self, "low_speed_curv_slowdown", False))):
             max_speed_clu = min(self.v_cruise_kph * CV.KPH_TO_MS, self.curve_speed_ms) * self.speed_conv_to_clu
             curv_limit = int(max_speed_clu)
         else:

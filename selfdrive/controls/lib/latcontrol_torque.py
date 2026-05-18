@@ -192,6 +192,25 @@ DYN_LAT_FACTOR_MAX = 1.965
 DYN_FRICTION_MIN = 0.245
 DYN_FRICTION_MAX = 0.296
 
+# Low-speed steering supervisor.
+# Predict the next 0.6s of curvature and precharge static friction before the
+# 10~35kph EPS delay turns into steer_clip. This is intentionally short-lived
+# and fades out above 35kph.
+LS_PRECHARGE_ENABLED = True
+LS_PRECHARGE_MIN_KPH = 10.0
+LS_PRECHARGE_MAX_KPH = 35.0
+LS_PRECHARGE_LOOKAHEAD_S = 0.60
+LS_PRECHARGE_HOLD_FRAMES = 35
+LS_PRECHARGE_CURV_DELTA_MIN = 0.00018
+LS_PRECHARGE_CURV_MIN_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
+LS_PRECHARGE_CURV_MIN_V = [0.0075, 0.0060, 0.0045, 0.0032, 0.0028]
+LS_PRECHARGE_MIN_BOOST_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
+LS_PRECHARGE_MIN_BOOST_V = [0.92, 0.96, 0.96, 0.92, 0.84]
+LS_PRECHARGE_FRICTION_KICK_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
+LS_PRECHARGE_FRICTION_KICK_V = [0.014, 0.018, 0.017, 0.012, 0.008]
+LS_PRECHARGE_LAT_FACTOR_DROP_MAX = 0.018
+LS_PRECHARGE_FRICTION_MAX = 0.305
+
 class LatControlTorque(LatControl):
     def __init__(self, CP, CI):
         super().__init__(CP, CI)
@@ -231,6 +250,9 @@ class LatControlTorque(LatControl):
         self._dyn_last_rate_limited_strong = False
         self._dyn_last_target_delta_up = 10.0
         self._dyn_last_target_delta_down = 14.0
+        self._ls_precharge_frames = 0
+        self._ls_precharge_strength = 0.0
+        self._ls_precharge_active = False
 
     def _get_bool_param_default(self, name, default_value):
         """Read Params bool safely; use default_value when the key is missing."""
@@ -383,7 +405,7 @@ class LatControlTorque(LatControl):
     def _get_dynamic_torque_params(self, v_ego, desired_curvature, desired_lateral_accel,
                                    actual_lateral_accel, steer_limited=False, steering_pressed=False,
                                    last_actuators=None, rate_limited_strong=False, rate_limit_err=0.0,
-                                   driver_steering_torque=0.0):
+                                   driver_steering_torque=0.0, desired_curvature_rate=0.0):
         """
         속도/코너 강도 기반 effective torque params.
         - liveTorqueParameters 학습값은 건드리지 않는다.
@@ -405,7 +427,9 @@ class LatControlTorque(LatControl):
         total_pts = base_params.get('totalBucketPoints', 0)
 
         v_kph = self._safe_float(v_ego, 0.0) * 3.6
-        desired_curv_abs = abs(self._safe_float(desired_curvature, 0.0))
+        desired_curv = self._safe_float(desired_curvature, 0.0)
+        desired_curv_rate = self._safe_float(desired_curvature_rate, 0.0)
+        desired_curv_abs = abs(desired_curv)
         desired_lat_abs = abs(self._safe_float(desired_lateral_accel, 0.0))
 
         try:
@@ -455,6 +479,41 @@ class LatControlTorque(LatControl):
         if bool(getattr(self, '_stable_torque_slew_active', False)):
             low_boost_target *= float(DYN_TORQUE_SLEW_ACTIVE_MULT)
             mid_boost_target *= float(DYN_TORQUE_SLEW_ACTIVE_MULT)
+
+        predicted_curv_abs = abs(desired_curv + desired_curv_rate * float(LS_PRECHARGE_LOOKAHEAD_S))
+        precharge_min_curv = float(interp(v_kph, LS_PRECHARGE_CURV_MIN_BP, LS_PRECHARGE_CURV_MIN_V))
+        curve_is_rising = predicted_curv_abs > (desired_curv_abs + float(LS_PRECHARGE_CURV_DELTA_MIN))
+        precharge_candidate = bool(
+            LS_PRECHARGE_ENABLED and
+            LS_PRECHARGE_MIN_KPH <= v_kph <= LS_PRECHARGE_MAX_KPH and
+            predicted_curv_abs >= precharge_min_curv and
+            curve_is_rising and
+            (not bool(steering_pressed)) and
+            (not bool(strong_driver_override)) and
+            (not bool(strong_rate_limited))
+        )
+
+        if precharge_candidate:
+            strength = float(interp(predicted_curv_abs / max(precharge_min_curv, 1e-6), [1.0, 1.8], [0.35, 1.0]))
+            self._ls_precharge_strength = max(float(getattr(self, '_ls_precharge_strength', 0.0) or 0.0),
+                                              float(clip(strength, 0.0, 1.0)))
+            self._ls_precharge_frames = int(LS_PRECHARGE_HOLD_FRAMES)
+        elif int(getattr(self, '_ls_precharge_frames', 0) or 0) > 0:
+            self._ls_precharge_frames -= 1
+            self._ls_precharge_strength *= 0.96
+        else:
+            self._ls_precharge_strength = 0.0
+
+        precharge_active = bool(
+            int(getattr(self, '_ls_precharge_frames', 0) or 0) > 0 and
+            float(getattr(self, '_ls_precharge_strength', 0.0) or 0.0) > 0.05 and
+            (not bool(steering_pressed)) and
+            (not bool(strong_rate_limited))
+        )
+        if precharge_active:
+            precharge_min_boost = float(interp(v_kph, LS_PRECHARGE_MIN_BOOST_BP, LS_PRECHARGE_MIN_BOOST_V))
+            low_boost_target = max(low_boost_target,
+                                   precharge_min_boost * low_gate * float(self._ls_precharge_strength))
 
         # 10~35km/h는 로그상 clip/rate가 가장 심한 저속~저중속 코너 영역이므로
         # 작은 코너 요구라도 부스트를 충분히 확보한다.
@@ -525,8 +584,15 @@ class LatControlTorque(LatControl):
         eff_lat = base_lat + (target_lat - base_lat) * blend
         eff_fric = base_fric + (target_fric - base_fric) * blend
 
+        if precharge_active:
+            precharge_strength = float(clip(float(self._ls_precharge_strength), 0.0, 1.0)) * low_gate
+            eff_lat -= float(LS_PRECHARGE_LAT_FACTOR_DROP_MAX) * precharge_strength
+            eff_fric += float(interp(v_kph, LS_PRECHARGE_FRICTION_KICK_BP,
+                                     LS_PRECHARGE_FRICTION_KICK_V)) * precharge_strength
+
         eff_lat = float(clip(eff_lat, DYN_LAT_FACTOR_MIN, DYN_LAT_FACTOR_MAX))
-        eff_fric = float(clip(eff_fric, DYN_FRICTION_MIN, DYN_FRICTION_MAX))
+        eff_fric_max = float(LS_PRECHARGE_FRICTION_MAX if precharge_active else DYN_FRICTION_MAX)
+        eff_fric = float(clip(eff_fric, DYN_FRICTION_MIN, eff_fric_max))
 
         self._dyn_last_corner_strength = corner_strength
         self._dyn_last_low_speed_gate = low_gate
@@ -535,6 +601,7 @@ class LatControlTorque(LatControl):
         self._dyn_last_rate_limited_strong = bool(strong_rate_limited)
         self._dyn_last_target_delta_up = float(interp(v_kph, DYN_DELTA_UP_BP, DYN_DELTA_UP_V))
         self._dyn_last_target_delta_down = float(interp(v_kph, DYN_DELTA_DOWN_BP, DYN_DELTA_DOWN_V))
+        self._ls_precharge_active = bool(precharge_active)
 
         self._dyn_last_effective_params = {
             'latAccelFactor': eff_lat,
@@ -574,6 +641,8 @@ class LatControlTorque(LatControl):
             'targetDeltaUp': float(getattr(self, '_dyn_last_target_delta_up', 0.0) or 0.0),
             'targetDeltaDown': float(getattr(self, '_dyn_last_target_delta_down', 0.0) or 0.0),
             'rateLimitedStrong': bool(getattr(self, '_dyn_last_rate_limited_strong', False)),
+            'lowSpeedPrecharge': bool(getattr(self, '_ls_precharge_active', False)),
+            'lowSpeedPrechargeStrength': float(getattr(self, '_ls_precharge_strength', 0.0) or 0.0),
         }
 
     def _guard_output_torque_slew(self, v_ego, output_torque, steering_pressed=False, steer_limited=False):
@@ -625,6 +694,9 @@ class LatControlTorque(LatControl):
             self._dyn_prev_rate_limit_err = 0.0
             self._dyn_effective_active = False
             self._dyn_last_blend = 0.0
+            self._ls_precharge_frames = 0
+            self._ls_precharge_strength = 0.0
+            self._ls_precharge_active = False
             if hasattr(self, '_dyn_base_live_torque_params'):
                 self.live_torque_params = dict(self._dyn_base_live_torque_params)
         else:
@@ -665,7 +737,8 @@ class LatControlTorque(LatControl):
                 last_actuators=last_actuators,
                 rate_limited_strong=getattr(self, '_dyn_prev_rate_limited_strong', False),
                 rate_limit_err=getattr(self, '_dyn_prev_rate_limit_err', 0.0),
-                driver_steering_torque=getattr(CS, 'steeringTorque', 0.0)
+                driver_steering_torque=getattr(CS, 'steeringTorque', 0.0),
+                desired_curvature_rate=desired_curvature_rate
             )
 
             pid_log.error = self.torque_from_lateral_accel(lateral_accel_value=error,
