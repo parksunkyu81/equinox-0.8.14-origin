@@ -54,8 +54,9 @@ FCW_DECEL_SUPPRESS = -0.8
 LOW_SPEED_CURVE_SLOWDOWN_MIN_KPH = 10.0
 LOW_SPEED_CURVE_SLOWDOWN_MAX_KPH = 35.0
 LOW_SPEED_CURVE_SLOWDOWN_FLOOR_KPH = 8.0
-LOW_SPEED_CURVE_SLOWDOWN_MIN_RATIO = 1.10
-LOW_SPEED_CURVE_SLOWDOWN_FULL_RATIO = 2.00
+LOW_SPEED_CURVE_SLOWDOWN_MIN_RATIO = 1.55
+LOW_SPEED_CURVE_SLOWDOWN_FULL_RATIO = 2.60
+LOW_SPEED_CURVE_SLOWDOWN_MIN_DROP_KPH = 0.8
 LOW_SPEED_CURVE_SLOWDOWN_KPH_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
 LOW_SPEED_CURVE_SLOWDOWN_MAX_DROP_KPH = [1.0, 2.0, 3.2, 4.8, 3.0]
 # controlsAllowed mismatch는 CAN/pandaState 수신 타이밍 차이로 순간 발생할 수 있으므로
@@ -559,7 +560,8 @@ class Controls:
                 low_speed_drop_ms = max_drop_kph * CV.KPH_TO_MS * shortage
                 low_speed_floor_ms = LOW_SPEED_CURVE_SLOWDOWN_FLOOR_KPH * CV.KPH_TO_MS
                 low_speed_model_speed = float(max(v - low_speed_drop_ms, low_speed_floor_ms))
-                if low_speed_model_speed < v * 0.995:
+                low_speed_drop_kph = low_speed_drop_ms * CV.MS_TO_KPH
+                if low_speed_drop_kph >= LOW_SPEED_CURVE_SLOWDOWN_MIN_DROP_KPH and low_speed_model_speed < v * 0.995:
                     low_speed_eps_slowdown = True
                     model_speed = min(model_speed, low_speed_model_speed)
 
