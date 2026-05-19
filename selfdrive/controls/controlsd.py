@@ -54,9 +54,10 @@ FCW_DECEL_SUPPRESS = -0.8
 LOW_SPEED_CURVE_SLOWDOWN_MIN_KPH = 10.0
 LOW_SPEED_CURVE_SLOWDOWN_MAX_KPH = 35.0
 LOW_SPEED_CURVE_SLOWDOWN_FLOOR_KPH = 8.0
-LOW_SPEED_CURVE_SLOWDOWN_MIN_RATIO = 1.55
-LOW_SPEED_CURVE_SLOWDOWN_FULL_RATIO = 2.60
-LOW_SPEED_CURVE_SLOWDOWN_MIN_DROP_KPH = 0.8
+LOW_SPEED_CURVE_SLOWDOWN_MIN_RATIO = 1.20
+LOW_SPEED_CURVE_SLOWDOWN_FULL_RATIO = 2.20
+LOW_SPEED_CURVE_SLOWDOWN_MIN_DROP_KPH = 0.5
+LOW_SPEED_CURVE_SLOWDOWN_CLIP_HOLD_FRAMES = int(1.6 / DT_CTRL)
 LOW_SPEED_CURVE_SLOWDOWN_KPH_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
 LOW_SPEED_CURVE_SLOWDOWN_MAX_DROP_KPH = [1.0, 2.0, 3.2, 4.8, 3.0]
 # controlsAllowed mismatch는 CAN/pandaState 수신 타이밍 차이로 순간 발생할 수 있으므로
@@ -254,6 +255,7 @@ class Controls:
         # 커브 운행중 (2026-05-18)
         self.is_curv_driving = False
         self.low_speed_curv_slowdown = False
+        self.low_speed_steer_clip_hold_frames = 0
         # 커브 스피드 (2026-05-18)
         self.curv_speed = 0.0
 
@@ -538,12 +540,15 @@ class Controls:
         except Exception:
             blinker_on = False
 
+        low_speed_clip_feedback = int(getattr(self, "low_speed_steer_clip_hold_frames", 0) or 0) > 0
+
         # ---- (적용) 완만 코너로 의미 있을 때만 model_speed 보수화 ----
         if (curv_abs > mild_curv_min) and (not in_lane_change) and (not blinker_on):
             model_speed *= extra
 
         low_speed_eps_slowdown = False
-        if (LOW_SPEED_CURVE_SLOWDOWN_MIN_KPH <= v_kph <= LOW_SPEED_CURVE_SLOWDOWN_MAX_KPH and
+        if (low_speed_clip_feedback and
+                LOW_SPEED_CURVE_SLOWDOWN_MIN_KPH <= v_kph <= LOW_SPEED_CURVE_SLOWDOWN_MAX_KPH and
                 (not in_lane_change) and (not blinker_on)):
             curve_ratio = curv_abs / max(mild_curv_min, 1e-6)
             if curve_ratio >= LOW_SPEED_CURVE_SLOWDOWN_MIN_RATIO:
@@ -568,12 +573,13 @@ class Controls:
         # ===== 4) 코너 감속 ON/OFF 히스테리시스(깜빡임 방지) =====
         ON_THRESH = 0.992
         OFF_THRESH = 1.03
+        normal_curve_allowed = v >= MIN_CURVE_SPEED
 
         if not getattr(self, "is_curv_driving", False):
-            if low_speed_eps_slowdown or model_speed < v * ON_THRESH:
+            if low_speed_eps_slowdown or (normal_curve_allowed and model_speed < v * ON_THRESH):
                 self.is_curv_driving = True
         else:
-            if (not low_speed_eps_slowdown) and model_speed > v * OFF_THRESH:
+            if (not low_speed_eps_slowdown) and ((not normal_curve_allowed) or model_speed > v * OFF_THRESH):
                 self.is_curv_driving = False
         self.low_speed_curv_slowdown = bool(low_speed_eps_slowdown and self.is_curv_driving)
 
@@ -1263,6 +1269,23 @@ class Controls:
             self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
             CC.actuatorsOutput = self.last_actuators
             self.steer_limited = abs(CC.actuators.steer - CC.actuatorsOutput.steer) > 1e-2
+
+        try:
+            lac_saturated = bool(getattr(lac_log, "active", False) and getattr(lac_log, "saturated", False))
+        except Exception:
+            lac_saturated = False
+        low_speed_steer_clip_now = bool(
+            self.active and
+            LOW_SPEED_CURVE_SLOWDOWN_MIN_KPH <= CS.vEgo * CV.MS_TO_KPH <= LOW_SPEED_CURVE_SLOWDOWN_MAX_KPH and
+            not CS.steeringPressed and
+            (bool(self.steer_limited) or lac_saturated)
+        )
+        if low_speed_steer_clip_now:
+            self.low_speed_steer_clip_hold_frames = int(LOW_SPEED_CURVE_SLOWDOWN_CLIP_HOLD_FRAMES)
+        elif int(getattr(self, "low_speed_steer_clip_hold_frames", 0) or 0) > 0:
+            self.low_speed_steer_clip_hold_frames -= 1
+        else:
+            self.low_speed_steer_clip_hold_frames = 0
 
         force_decel = (self.sm['driverMonitoringState'].awarenessStatus < 0.) or \
                       (self.state == State.softDisabling)
