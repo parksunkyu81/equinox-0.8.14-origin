@@ -55,19 +55,19 @@ HS_CURV_GUARD_ON_KPH = 40.0
 
 # update 1회당 desired_curvature 최대 변화량
 HS_CURV_DELTA_MAX_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-HS_CURV_DELTA_MAX_V = [0.00100, 0.00072, 0.00050, 0.00032, 0.00020, 0.00014]  # v32: 80~110kph 고속 곡률 변화 더 보수화
+HS_CURV_DELTA_MAX_V = [0.00100, 0.00072, 0.00050, 0.00028, 0.00018, 0.00013]  # v35: calmer 90~110kph curvature changes
 
 # desired_curvature_rate 절대값 제한
 HS_CURV_RATE_MAX_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-HS_CURV_RATE_MAX_V = [0.030, 0.023, 0.016, 0.010, 0.0065, 0.0045]  # v32: 80~110kph rate spike 억제
+HS_CURV_RATE_MAX_V = [0.030, 0.023, 0.016, 0.0085, 0.0055, 0.0040]  # v35: suppress highway weave from rate spikes
 
 # 저역통과 필터 alpha (작을수록 더 부드러움)
 HS_CURV_ALPHA_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-HS_CURV_ALPHA_V = [0.58, 0.50, 0.40, 0.30, 0.20, 0.14]  # v32: 고속 desired_curvature LPF 강화
+HS_CURV_ALPHA_V = [0.58, 0.50, 0.40, 0.24, 0.16, 0.12]  # v35: stronger 90~110kph LPF for highway stability
 
 # 좌/우 부호가 갑자기 뒤집히는 경우 완화
-HS_SIGN_FLIP_MIN_CURV = 0.0008
-HS_SIGN_FLIP_KEEP_RATIO = 0.12
+HS_SIGN_FLIP_MIN_CURV = 0.00045
+HS_SIGN_FLIP_KEEP_RATIO = 0.08
 
 # steer_limited / saturated 직후 몇 프레임 더 보수적으로 유지할지
 HS_LIMIT_HOLD_BP = [30.0, 60.0, 90.0, 110.0, 130.0]
@@ -95,8 +95,8 @@ STABLE_TORQUE_SLEW_ENABLED = True
 # 저속은 더 빠르게, 고속은 더 안정적으로 torque slew 제한.
 # 목적: 10~30kph 코너 추종력 확보 + 80~110kph 와리가리 억제.
 STABLE_TORQUE_SLEW_KPH_BP = [0.0, 10.0, 20.0, 30.0, 35.0, 40.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-STABLE_TORQUE_UP_V =       [0.065, 0.098, 0.104, 0.096, 0.080, 0.062, 0.048, 0.026, 0.018, 0.014, 0.012]  # v34: 10~35kph only, keep 40kph+ conservative
-STABLE_TORQUE_DOWN_V =     [0.085, 0.115, 0.120, 0.108, 0.098, 0.078, 0.062, 0.038, 0.029, 0.022, 0.018]
+STABLE_TORQUE_UP_V =       [0.065, 0.098, 0.104, 0.096, 0.080, 0.062, 0.048, 0.026, 0.016, 0.012, 0.010]  # v35: calmer 90~110kph torque rise
+STABLE_TORQUE_DOWN_V =     [0.085, 0.115, 0.120, 0.108, 0.098, 0.078, 0.062, 0.038, 0.026, 0.020, 0.016]
 STABLE_TORQUE_LIMITED_SHRINK = 0.85
 
 # ==============================
@@ -113,9 +113,9 @@ DYN_LAT_FACTOR_BP = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 
 #  - 10~30kph는 1.74~1.76 계열로 완화해 요구 토크가 적용 한계를 계속 앞지르지 않게 한다.
 #  - 30~35kph는 부드러운 bridge로 연결한다.
 #  - 60kph 이상은 기존 고속 안정 profile을 유지한다.
-DYN_LAT_FACTOR_V  = [1.88, 1.73, 1.71, 1.72, 1.74, 1.76, 1.80, 1.86, 1.91, 1.93, 1.95, 1.96, 1.96]  # v34: safe first target for 10~35kph clip reduction
+DYN_LAT_FACTOR_V  = [1.88, 1.73, 1.71, 1.72, 1.74, 1.76, 1.80, 1.86, 1.91, 1.94, 1.965, 1.965, 1.965]  # v35: reduce 90~100kph highway weave
 DYN_FRICTION_BP   = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
-DYN_FRICTION_V    = [0.255, 0.292, 0.296, 0.294, 0.288, 0.282, 0.274, 0.266, 0.256, 0.252, 0.248, 0.246, 0.246]  # v34: stronger static-friction assist only below 25kph
+DYN_FRICTION_V    = [0.255, 0.292, 0.296, 0.294, 0.288, 0.282, 0.274, 0.266, 0.256, 0.248, 0.245, 0.245, 0.245]  # v35: lighter high-speed center friction kick
 
 # 실제 CarController의 STEER_DELTA_UP/DOWN은 carcontroller 쪽에서 적용해야 한다.
 # 아래 맵은 이 파일 안에서는 torque slew와 디버그용 목표값으로만 사용한다.
@@ -143,8 +143,8 @@ DYN_MID_SPEED_GATE_BP = [35.0, 40.0, 45.0, 55.0, 60.0, 70.0]
 DYN_MID_SPEED_GATE_V  = [0.25, 0.45, 0.55, 0.55, 0.30, 0.0]
 
 # 고속 안정 게이트: 60kph 이상에서는 조향을 둔감하게 만들어 와리가리 억제.
-DYN_HIGH_SPEED_GATE_BP = [45.0, 60.0, 80.0, 110.0, 130.0]
-DYN_HIGH_SPEED_GATE_V  = [0.0, 0.30, 0.85, 1.00, 1.00]  # v32: 60~90kph부터 안정 profile 조기 반영
+DYN_HIGH_SPEED_GATE_BP = [45.0, 60.0, 75.0, 85.0, 100.0, 130.0]
+DYN_HIGH_SPEED_GATE_V  = [0.0, 0.35, 0.85, 1.00, 1.00, 1.00]  # v35: apply stabilizing high-speed profile before 90kph
 
 # 부스트 램프/홀드. 프레임 기반이며 controls update 주기에 독립적으로 안전하게 동작한다.
 DYN_BOOST_RISE_STEP = 0.10
@@ -152,7 +152,7 @@ DYN_BOOST_RISE_STEP = 0.10
 # v33: let low-speed effective torque reach the target earlier in the
 # 10~35kph bands where 2026-05-13/14 logs still show repeated steer_clip.
 DYN_BOOST_RISE_LOW1020_STEP = 0.095
-DYN_BOOST_RISE_LOW2035_STEP = 0.105
+DYN_BOOST_RISE_LOW2035_STEP = 0.108
 DYN_BOOST_FALL_STEP = 0.035
 DYN_LOW_SPEED_HOLD_FRAMES = 70  # 약 0.70초 @100Hz: 과한 저속 boost hold 완화
 
@@ -199,15 +199,15 @@ DYN_FRICTION_MAX = 0.296
 LS_PRECHARGE_ENABLED = True
 LS_PRECHARGE_MIN_KPH = 10.0
 LS_PRECHARGE_MAX_KPH = 35.0
-LS_PRECHARGE_LOOKAHEAD_S = 0.70
-LS_PRECHARGE_HOLD_FRAMES = 42
-LS_PRECHARGE_CURV_DELTA_MIN = 0.00014
+LS_PRECHARGE_LOOKAHEAD_S = 0.78
+LS_PRECHARGE_HOLD_FRAMES = 46
+LS_PRECHARGE_CURV_DELTA_MIN = 0.00012
 LS_PRECHARGE_CURV_MIN_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
-LS_PRECHARGE_CURV_MIN_V = [0.0068, 0.0054, 0.0041, 0.0031, 0.0028]
+LS_PRECHARGE_CURV_MIN_V = [0.0066, 0.0052, 0.0039, 0.0029, 0.00265]
 LS_PRECHARGE_MIN_BOOST_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
-LS_PRECHARGE_MIN_BOOST_V = [0.96, 0.99, 0.98, 0.93, 0.84]
+LS_PRECHARGE_MIN_BOOST_V = [0.97, 1.00, 0.99, 0.94, 0.85]
 LS_PRECHARGE_FRICTION_KICK_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
-LS_PRECHARGE_FRICTION_KICK_V = [0.014, 0.018, 0.017, 0.012, 0.008]
+LS_PRECHARGE_FRICTION_KICK_V = [0.014, 0.018, 0.017, 0.013, 0.008]
 LS_PRECHARGE_LAT_FACTOR_DROP_MAX = 0.018
 LS_PRECHARGE_FRICTION_MAX = 0.305
 

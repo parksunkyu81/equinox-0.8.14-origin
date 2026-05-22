@@ -22,9 +22,9 @@ CREEP_SPEED = 2.5   # 4km
 # delta-up authority to reduce 10~30kph steer_clip, while high speed remains
 # conservative to avoid highway weave.
 DYN_STEER_DELTA_UP_BP = [0.0, 8.0, 10.0, 20.0, 30.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
-DYN_STEER_DELTA_UP_V  = [10.0, 12.0, 16.0, 16.0, 15.0, 13.0, 12.0, 11.0, 8.0, 7.0, 6.0, 6.0]  # v34: 10~35kph clip reduction, 35kph+ unchanged
+DYN_STEER_DELTA_UP_V  = [10.0, 12.0, 16.0, 16.0, 15.0, 13.0, 12.0, 11.0, 8.0, 6.0, 5.0, 5.0]  # v35: calmer 90~100kph command rise
 DYN_STEER_DELTA_DOWN_BP = [0.0, 10.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
-DYN_STEER_DELTA_DOWN_V  = [14.0, 16.0, 16.0, 16.0, 15.0, 14.0, 14.0, 13.0, 13.0]  # v32: unwind도 고속에서 조금 더 부드럽게
+DYN_STEER_DELTA_DOWN_V  = [14.0, 16.0, 16.0, 16.0, 15.0, 14.0, 13.0, 12.0, 12.0]  # v35: smoother high-speed unwind
 
 # Conditional low-speed delta-up assist. Keep the base map moderate, but allow
 # 10~28kph clean corners to climb to 17 when the EPS is not near max and the
@@ -37,6 +37,21 @@ CLEAN_DELTA_UP_MIN_REQ = 0.20
 CLEAN_DELTA_UP_MAX_REQ = 0.78
 CLEAN_DELTA_UP_MAX_LAST = 0.72
 CLEAN_DELTA_UP_RISING_MIN = 0.018  # v32: 진짜 clean rising corner에서만 delta-up 보조
+
+# Curvature-based low-speed delta assist. This only opens the GM command
+# rise rate in clean 10~35kph corner entry, then fades out before highway
+# speeds. It is intentionally separate from high-speed stability tuning.
+CURVE_DELTA_ASSIST_ENABLE = True
+CURVE_DELTA_MIN_KPH = 10.0
+CURVE_DELTA_MAX_KPH = 35.0
+CURVE_DELTA_LOOKAHEAD_S = 0.55
+CURVE_DELTA_CURV_RISING_MIN = 0.00010
+CURVE_DELTA_CURV_MIN_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
+CURVE_DELTA_CURV_MIN_V = [0.0065, 0.0052, 0.0040, 0.0030, 0.0027]
+CURVE_DELTA_UP_MAX_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
+CURVE_DELTA_UP_MAX_V = [18.0, 19.0, 18.0, 16.5, 14.5]
+CURVE_DELTA_DOWN_MAX_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
+CURVE_DELTA_DOWN_MAX_V = [17.0, 18.0, 17.0, 16.5, 16.0]
 
 STOP_ACCEL_BOOST_ENTRY_SPEED = 1.0
 STOP_ACCEL_BOOST_EXIT_SPEED = 20.0 * CV.KPH_TO_MS
@@ -122,7 +137,62 @@ class CarController():
     rising = abs_req > (abs_last + float(CLEAN_DELTA_UP_RISING_MIN))
     return bool(same_direction and rising)
 
-  def _dynamic_steer_deltas(self, v_ego, new_steer=None, CS=None):
+  def _low_speed_curve_delta_assist(self, v_kph, new_steer, CS, controls):
+    if not CURVE_DELTA_ASSIST_ENABLE or controls is None:
+      return None
+
+    try:
+      v = float(v_kph)
+    except Exception:
+      v = 0.0
+    if v < CURVE_DELTA_MIN_KPH or v > CURVE_DELTA_MAX_KPH:
+      return None
+
+    try:
+      steering_pressed = bool(getattr(CS.out, 'steeringPressed', False)) or bool(getattr(CS, 'steeringPressed', False))
+    except Exception:
+      steering_pressed = False
+    if steering_pressed:
+      return None
+
+    try:
+      steer_max = float(getattr(self.params, 'STEER_MAX', 300))
+      if steer_max <= 1e-6:
+        steer_max = 300.0
+      req = float(new_steer) / steer_max
+      last = float(self.apply_steer_last) / steer_max
+    except Exception:
+      return None
+
+    abs_req = abs(req)
+    abs_last = abs(last)
+    if abs_req < 0.18 or abs_req > CLEAN_DELTA_UP_MAX_REQ or abs_last > CLEAN_DELTA_UP_MAX_LAST:
+      return None
+
+    same_direction = (req * last) >= -0.02
+    torque_rising = abs_req > (abs_last + 0.012)
+    if (not same_direction) or (not torque_rising):
+      return None
+
+    try:
+      curv = float(getattr(controls, 'desired_curvature', 0.0) or 0.0)
+      curv_rate = float(getattr(controls, 'desired_curvature_rate', 0.0) or 0.0)
+    except Exception:
+      return None
+
+    curv_abs = abs(curv)
+    predicted_curv_abs = abs(curv + curv_rate * float(CURVE_DELTA_LOOKAHEAD_S))
+    curv_min = float(interp(v, CURVE_DELTA_CURV_MIN_BP, CURVE_DELTA_CURV_MIN_V))
+    curve_rising = predicted_curv_abs > (curv_abs + float(CURVE_DELTA_CURV_RISING_MIN))
+    if predicted_curv_abs < curv_min or not curve_rising:
+      return None
+
+    strength = float(clip(interp(predicted_curv_abs / max(curv_min, 1e-6), [1.0, 1.8], [0.20, 1.0]), 0.0, 1.0))
+    max_up = float(interp(v, CURVE_DELTA_UP_MAX_BP, CURVE_DELTA_UP_MAX_V))
+    max_down = float(interp(v, CURVE_DELTA_DOWN_MAX_BP, CURVE_DELTA_DOWN_MAX_V))
+    return strength, max_up, max_down
+
+  def _dynamic_steer_deltas(self, v_ego, new_steer=None, CS=None, controls=None):
     try:
       v_kph = float(v_ego) * CV.MS_TO_KPH
     except Exception:
@@ -138,6 +208,15 @@ class CarController():
     try:
       if new_steer is not None and CS is not None and self._clean_low_speed_delta_up_allowed(v_kph, new_steer, CS):
         up = max(up, int(CLEAN_DELTA_UP_VALUE))
+    except Exception:
+      pass
+
+    try:
+      curve_assist = self._low_speed_curve_delta_assist(v_kph, new_steer, CS, controls)
+      if curve_assist is not None:
+        strength, max_up, max_down = curve_assist
+        up = max(up, int(round(float(up) + (float(max_up) - float(up)) * strength)))
+        down = max(down, int(round(float(down) + (float(max_down) - float(down)) * strength)))
     except Exception:
       pass
 
@@ -238,7 +317,7 @@ class CarController():
         # immediately, so the rest of CarControllerParams stays unchanged.
         base_delta_up = int(getattr(P, 'STEER_DELTA_UP', 10))
         base_delta_down = int(getattr(P, 'STEER_DELTA_DOWN', 17))
-        dyn_delta_up, dyn_delta_down = self._dynamic_steer_deltas(CS.out.vEgo, new_steer, CS)
+        dyn_delta_up, dyn_delta_down = self._dynamic_steer_deltas(CS.out.vEgo, new_steer, CS, controls)
         try:
           P.STEER_DELTA_UP = dyn_delta_up
           P.STEER_DELTA_DOWN = dyn_delta_down
