@@ -132,6 +132,26 @@ DYN_CURV_STRENGTH_BP = [0.00018, 0.00135]
 DYN_LATACC_STRENGTH_BP = [0.035, 0.65]
 DYN_STEER_STRENGTH_BP = [0.012, 0.18]
 
+# Straight-road confidence gate. When the road is almost straight, tiny model
+# curvature should not wake low-speed corner boost, precharge, or friction kick.
+DYN_STRAIGHT_KPH_BP = [10.0, 15.0, 20.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 130.0]
+DYN_STRAIGHT_CURV_MAX_V = [0.0026, 0.0022, 0.0019, 0.0016, 0.0015, 0.0012, 0.00090, 0.00065, 0.00050, 0.00035]
+DYN_STRAIGHT_RATE_MAX_V = [0.0040, 0.0034, 0.0028, 0.0022, 0.0020, 0.0015, 0.0010, 0.00070, 0.00050, 0.00035]
+DYN_STRAIGHT_STEER_MAX_V = [0.040, 0.038, 0.035, 0.032, 0.030, 0.027, 0.024, 0.021, 0.018, 0.016]
+DYN_CURVE_CONFIRM_MIN_V = [0.0068, 0.0056, 0.0044, 0.0035, 0.0032, 0.0024, 0.00155, 0.00105, 0.00075, 0.00055]
+DYN_STRAIGHT_PREDICT_S = 0.45
+
+# Low-speed curve-coupled torque target. Strong confirmed corners get a
+# coordinated target: faster command rise is paired with slightly stronger
+# torque gain and static friction compensation.
+DYN_CURVE_RATIO_BP = [1.0, 1.35, 2.2]
+DYN_CURVE_RATIO_V = [0.0, 0.45, 1.0]
+DYN_CURVE_LAT_FACTOR_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
+DYN_CURVE_LAT_FACTOR_V = [1.70, 1.68, 1.69, 1.73, 1.77]
+DYN_CURVE_FRICTION_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
+DYN_CURVE_FRICTION_V = [0.300, 0.305, 0.303, 0.292, 0.282]
+DYN_CURVE_FRICTION_MAX = 0.305
+
 # 저속/저중속 부스트 속도 게이트: 10~35kph 완전 ON, 35~45kph bridge로 점진 완화.
 # v4: 10~30kph 강한 개선을 35kph까지 유지하고, 35~45kph 추종력 공백을 제거한다.
 DYN_LOW_SPEED_GATE_BP = [0.0, 8.0, 10.0, 30.0, 35.0, 40.0, 45.0, 50.0]
@@ -439,10 +459,26 @@ class LatControlTorque(LatControl):
         except Exception:
             steer_abs = 0.0
 
+        straight_curv_max = float(interp(v_kph, DYN_STRAIGHT_KPH_BP, DYN_STRAIGHT_CURV_MAX_V))
+        straight_rate_max = float(interp(v_kph, DYN_STRAIGHT_KPH_BP, DYN_STRAIGHT_RATE_MAX_V))
+        straight_steer_max = float(interp(v_kph, DYN_STRAIGHT_KPH_BP, DYN_STRAIGHT_STEER_MAX_V))
+        curve_confirm_min = float(interp(v_kph, DYN_STRAIGHT_KPH_BP, DYN_CURVE_CONFIRM_MIN_V))
+        straight_predicted_curv_abs = abs(desired_curv + desired_curv_rate * float(DYN_STRAIGHT_PREDICT_S))
+        straight_road = bool(
+            v_kph >= 10.0 and
+            desired_curv_abs <= straight_curv_max and
+            straight_predicted_curv_abs <= curve_confirm_min * 0.65 and
+            abs(desired_curv_rate) <= straight_rate_max and
+            steer_abs <= straight_steer_max and
+            (not bool(steering_pressed))
+        )
+
         curv_w = float(interp(desired_curv_abs, DYN_CURV_STRENGTH_BP, [0.0, 1.0]))
         latacc_w = float(interp(desired_lat_abs, DYN_LATACC_STRENGTH_BP, [0.0, 1.0]))
         steer_w = float(interp(steer_abs, DYN_STEER_STRENGTH_BP, [0.0, 1.0]))
         corner_strength = float(clip(max(curv_w, latacc_w, steer_w), 0.0, 1.0))
+        if straight_road:
+            corner_strength = 0.0
 
         low_gate = float(clip(interp(v_kph, DYN_LOW_SPEED_GATE_BP, DYN_LOW_SPEED_GATE_V), 0.0, 1.0))
         mid_gate = float(clip(interp(v_kph, DYN_MID_SPEED_GATE_BP, DYN_MID_SPEED_GATE_V), 0.0, 1.0))
@@ -483,9 +519,15 @@ class LatControlTorque(LatControl):
         predicted_curv_abs = abs(desired_curv + desired_curv_rate * float(LS_PRECHARGE_LOOKAHEAD_S))
         precharge_min_curv = float(interp(v_kph, LS_PRECHARGE_CURV_MIN_BP, LS_PRECHARGE_CURV_MIN_V))
         curve_is_rising = predicted_curv_abs > (desired_curv_abs + float(LS_PRECHARGE_CURV_DELTA_MIN))
+        curve_ratio = max(desired_curv_abs, predicted_curv_abs) / max(curve_confirm_min, 1e-6)
+        curve_dynamic_strength = 0.0 if straight_road else float(clip(
+            interp(curve_ratio, DYN_CURVE_RATIO_BP, DYN_CURVE_RATIO_V), 0.0, 1.0
+        ))
+        curve_confirmed = bool(curve_dynamic_strength > 1e-4)
         precharge_candidate = bool(
             LS_PRECHARGE_ENABLED and
             LS_PRECHARGE_MIN_KPH <= v_kph <= LS_PRECHARGE_MAX_KPH and
+            (not straight_road) and
             predicted_curv_abs >= precharge_min_curv and
             curve_is_rising and
             (not bool(steering_pressed)) and
@@ -507,6 +549,7 @@ class LatControlTorque(LatControl):
         precharge_active = bool(
             int(getattr(self, '_ls_precharge_frames', 0) or 0) > 0 and
             float(getattr(self, '_ls_precharge_strength', 0.0) or 0.0) > 0.05 and
+            (not straight_road) and
             (not bool(steering_pressed)) and
             (not bool(strong_rate_limited))
         )
@@ -519,11 +562,7 @@ class LatControlTorque(LatControl):
         # 작은 코너 요구라도 부스트를 충분히 확보한다.
         # BUGFIX: 기존 corner_strength 임계가 높으면 완만한 코너에서 dynamic 값이 거의 안 변했다.
         # desired curvature / lateral accel / 이전 steer 중 하나라도 코너 힌트가 있으면 최소 부스트를 보장한다.
-        turning_hint = bool(
-            (desired_curv_abs >= 0.00018) or
-            (desired_lat_abs >= 0.035) or
-            (steer_abs >= 0.012)
-        )
+        turning_hint = bool(curve_confirmed)
         if (10.0 <= v_kph <= 35.0) and turning_hint and (not strong_driver_override):
             if bool(strong_rate_limited):
                 low35_min_boost = float(DYN_LOW35_MIN_BOOST_STRONG)
@@ -553,6 +592,11 @@ class LatControlTorque(LatControl):
             low_boost_target = max(low_boost_target, bridge_min_boost)
 
         # 코너 종료 후 짧게 유지한 뒤 천천히 감쇠.
+        if straight_road:
+            self._dyn_corner_hold_frames = 0
+            low_boost_target = 0.0
+            self._ls_precharge_frames = 0
+            self._ls_precharge_strength = 0.0
         if low_boost_target > 0.08:
             self._dyn_corner_hold_frames = int(DYN_LOW_SPEED_HOLD_FRAMES)
         elif self._dyn_corner_hold_frames > 0:
@@ -576,6 +620,12 @@ class LatControlTorque(LatControl):
 
         target_lat = float(interp(v_kph, DYN_LAT_FACTOR_BP, DYN_LAT_FACTOR_V))
         target_fric = float(interp(v_kph, DYN_FRICTION_BP, DYN_FRICTION_V))
+        if 10.0 <= v_kph <= 35.0 and curve_confirmed:
+            curve_lat = float(interp(v_kph, DYN_CURVE_LAT_FACTOR_BP, DYN_CURVE_LAT_FACTOR_V))
+            curve_fric = float(interp(v_kph, DYN_CURVE_FRICTION_BP, DYN_CURVE_FRICTION_V))
+            curve_torque_w = float(clip(curve_dynamic_strength, 0.0, 1.0))
+            target_lat += (curve_lat - target_lat) * curve_torque_w
+            target_fric += (curve_fric - target_fric) * curve_torque_w
 
         # 저속은 코너 강도 기반, 중속은 완만한 코너 보조, 고속은 안정 게이트 기반으로 블렌딩.
         blend = float(clip(max(cur_boost, mid_boost_target, high_gate), 0.0, 1.0))
@@ -591,13 +641,16 @@ class LatControlTorque(LatControl):
                                      LS_PRECHARGE_FRICTION_KICK_V)) * precharge_strength
 
         eff_lat = float(clip(eff_lat, DYN_LAT_FACTOR_MIN, DYN_LAT_FACTOR_MAX))
-        eff_fric_max = float(LS_PRECHARGE_FRICTION_MAX if precharge_active else DYN_FRICTION_MAX)
+        eff_fric_max = float(max(DYN_CURVE_FRICTION_MAX, LS_PRECHARGE_FRICTION_MAX)
+                             if (precharge_active or curve_confirmed) else DYN_FRICTION_MAX)
         eff_fric = float(clip(eff_fric, DYN_FRICTION_MIN, eff_fric_max))
 
         self._dyn_last_corner_strength = corner_strength
         self._dyn_last_low_speed_gate = low_gate
         self._dyn_last_mid_speed_gate = mid_gate
         self._dyn_last_high_speed_gate = high_gate
+        self._dyn_last_straight_road = bool(straight_road)
+        self._dyn_last_curve_dynamic_strength = float(curve_dynamic_strength)
         self._dyn_last_rate_limited_strong = bool(strong_rate_limited)
         self._dyn_last_target_delta_up = float(interp(v_kph, DYN_DELTA_UP_BP, DYN_DELTA_UP_V))
         self._dyn_last_target_delta_down = float(interp(v_kph, DYN_DELTA_DOWN_BP, DYN_DELTA_DOWN_V))
@@ -633,6 +686,8 @@ class LatControlTorque(LatControl):
             'low_gate': float(getattr(self, '_dyn_last_low_speed_gate', 0.0) or 0.0),
             'mid_gate': float(getattr(self, '_dyn_last_mid_speed_gate', 0.0) or 0.0),
             'high_gate': float(getattr(self, '_dyn_last_high_speed_gate', 0.0) or 0.0),
+            'straightRoad': bool(getattr(self, '_dyn_last_straight_road', False)),
+            'curveDynamicStrength': float(getattr(self, '_dyn_last_curve_dynamic_strength', 0.0) or 0.0),
             'latAccelFactor': float(eff.get('latAccelFactor', base.get('latAccelFactor', 0.0)) or 0.0),
             'friction': float(eff.get('friction', base.get('friction', 0.0)) or 0.0),
             'latAccelOffset': float(eff.get('latAccelOffset', base.get('latAccelOffset', 0.0)) or 0.0),

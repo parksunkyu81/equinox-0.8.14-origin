@@ -540,7 +540,9 @@ class Controls:
         except Exception:
             blinker_on = False
 
-        low_speed_clip_feedback = int(getattr(self, "low_speed_steer_clip_hold_frames", 0) or 0) > 0
+        # Low-speed steer clip is now reported to the driver as steerSaturated
+        # instead of lowering curve speed here.
+        low_speed_clip_feedback = False
 
         # ---- (적용) 완만 코너로 의미 있을 때만 model_speed 보수화 ----
         if (curv_abs > mild_curv_min) and (not in_lane_change) and (not blinker_on):
@@ -1170,6 +1172,15 @@ class Controls:
 
                 if left_deviation or right_deviation:
                     self.events.add(EventName.steerSaturated)
+
+        low_speed_steer_clip_alert = bool(
+            self.active and
+            LOW_SPEED_CURVE_SLOWDOWN_MIN_KPH <= CS.vEgo * CV.MS_TO_KPH <= LOW_SPEED_CURVE_SLOWDOWN_MAX_KPH and
+            not CS.steeringPressed and
+            int(getattr(self, "low_speed_steer_clip_hold_frames", 0) or 0) > 0
+        )
+        if low_speed_steer_clip_alert:
+            self.events.add(EventName.steerSaturated)
 
         # Ensure no NaNs/Infs
         for p in ACTUATOR_FIELDS:

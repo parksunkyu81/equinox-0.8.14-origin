@@ -49,9 +49,12 @@ CURVE_DELTA_CURV_RISING_MIN = 0.00010
 CURVE_DELTA_CURV_MIN_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
 CURVE_DELTA_CURV_MIN_V = [0.0065, 0.0052, 0.0040, 0.0030, 0.0027]
 CURVE_DELTA_UP_MAX_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
-CURVE_DELTA_UP_MAX_V = [18.0, 19.0, 18.0, 16.5, 14.5]
+CURVE_DELTA_UP_MAX_V = [19.0, 20.0, 19.0, 17.5, 15.0]
 CURVE_DELTA_DOWN_MAX_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
-CURVE_DELTA_DOWN_MAX_V = [17.0, 18.0, 17.0, 16.5, 16.0]
+CURVE_DELTA_DOWN_MAX_V = [18.0, 19.0, 18.0, 17.0, 16.0]
+CURVE_DELTA_STRAIGHT_CURV_MAX_V = [0.0026, 0.0022, 0.0019, 0.0016, 0.0015]
+CURVE_DELTA_STRAIGHT_RATE_MAX_V = [0.0040, 0.0034, 0.0028, 0.0022, 0.0020]
+CURVE_DELTA_STRAIGHT_STEER_MAX_V = [0.040, 0.038, 0.035, 0.032, 0.030]
 
 STOP_ACCEL_BOOST_ENTRY_SPEED = 1.0
 STOP_ACCEL_BOOST_EXIT_SPEED = 20.0 * CV.KPH_TO_MS
@@ -97,7 +100,35 @@ class CarController():
     #self.packer_ch = CANPacker(DBC[CP.carFingerprint]['chassis'])
 
 
-  def _clean_low_speed_delta_up_allowed(self, v_kph, new_steer, CS):
+  def _low_speed_straight_road(self, v_kph, controls, abs_last):
+    if controls is None:
+      return False
+
+    try:
+      v = float(v_kph)
+      curv = float(getattr(controls, 'desired_curvature', 0.0) or 0.0)
+      curv_rate = float(getattr(controls, 'desired_curvature_rate', 0.0) or 0.0)
+    except Exception:
+      return False
+
+    if v < CURVE_DELTA_MIN_KPH or v > CURVE_DELTA_MAX_KPH:
+      return False
+
+    curv_abs = abs(curv)
+    predicted_curv_abs = abs(curv + curv_rate * float(CURVE_DELTA_LOOKAHEAD_S))
+    curv_min = float(interp(v, CURVE_DELTA_CURV_MIN_BP, CURVE_DELTA_CURV_MIN_V))
+    straight_curv_max = float(interp(v, CURVE_DELTA_CURV_MIN_BP, CURVE_DELTA_STRAIGHT_CURV_MAX_V))
+    straight_rate_max = float(interp(v, CURVE_DELTA_CURV_MIN_BP, CURVE_DELTA_STRAIGHT_RATE_MAX_V))
+    straight_steer_max = float(interp(v, CURVE_DELTA_CURV_MIN_BP, CURVE_DELTA_STRAIGHT_STEER_MAX_V))
+
+    return bool(
+      curv_abs <= straight_curv_max and
+      predicted_curv_abs <= curv_min * 0.65 and
+      abs(curv_rate) <= straight_rate_max and
+      abs_last <= straight_steer_max
+    )
+
+  def _clean_low_speed_delta_up_allowed(self, v_kph, new_steer, CS, controls=None):
     if not CLEAN_DELTA_UP_ENABLE:
       return False
 
@@ -129,6 +160,8 @@ class CarController():
     if abs_req < CLEAN_DELTA_UP_MIN_REQ or abs_req > CLEAN_DELTA_UP_MAX_REQ:
       return False
     if abs_last > CLEAN_DELTA_UP_MAX_LAST:
+      return False
+    if self._low_speed_straight_road(v_kph, controls, abs_last):
       return False
 
     # Only help when torque is rising in the same direction.  Sign flips or
@@ -168,6 +201,8 @@ class CarController():
     abs_last = abs(last)
     if abs_req < 0.18 or abs_req > CLEAN_DELTA_UP_MAX_REQ or abs_last > CLEAN_DELTA_UP_MAX_LAST:
       return None
+    if self._low_speed_straight_road(v, controls, abs_last):
+      return None
 
     same_direction = (req * last) >= -0.02
     torque_rising = abs_req > (abs_last + 0.012)
@@ -206,7 +241,7 @@ class CarController():
       down = int(getattr(self.params, 'STEER_DELTA_DOWN', 17))
 
     try:
-      if new_steer is not None and CS is not None and self._clean_low_speed_delta_up_allowed(v_kph, new_steer, CS):
+      if new_steer is not None and CS is not None and self._clean_low_speed_delta_up_allowed(v_kph, new_steer, CS, controls):
         up = max(up, int(CLEAN_DELTA_UP_VALUE))
     except Exception:
       pass
