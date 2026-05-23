@@ -60,7 +60,6 @@ HIGH_SPEED_CURVE_DELTA_ASSIST_ENABLE = True
 HIGH_SPEED_CURVE_DELTA_MIN_KPH = 55.0
 HIGH_SPEED_CURVE_DELTA_MAX_KPH = 115.0
 HIGH_SPEED_CURVE_DELTA_LOOKAHEAD_S = 0.70
-HIGH_SPEED_CURVE_DELTA_RISING_MIN = 0.000035
 HIGH_SPEED_CURVE_DELTA_CURV_BP = [55.0, 60.0, 80.0, 100.0, 115.0]
 HIGH_SPEED_CURVE_DELTA_CURV_V = [0.00125, 0.00110, 0.00080, 0.00058, 0.00050]
 HIGH_SPEED_CURVE_DELTA_UP_MAX_BP = [55.0, 60.0, 80.0, 100.0, 115.0]
@@ -285,9 +284,8 @@ class CarController():
     curv_abs = abs(curv)
     predicted_curv_abs = abs(curv + curv_rate * float(HIGH_SPEED_CURVE_DELTA_LOOKAHEAD_S))
     curv_min = float(interp(v, HIGH_SPEED_CURVE_DELTA_CURV_BP, HIGH_SPEED_CURVE_DELTA_CURV_V))
-    curve_rising = predicted_curv_abs > (curv_abs + float(HIGH_SPEED_CURVE_DELTA_RISING_MIN))
     curve_strength = max(curv_abs, predicted_curv_abs) / max(curv_min, 1e-6)
-    if curve_strength < 1.0 and not curve_rising:
+    if curve_strength < 1.0:
       return None
 
     strength = float(clip(interp(curve_strength, [0.85, 1.7], [0.20, 1.0]), 0.0, 1.0))

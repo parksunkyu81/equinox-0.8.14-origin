@@ -79,9 +79,15 @@ HS_LIMIT_ALPHA_SHRINK = 0.75
 # High-speed straight-road weave guard. Only tiny near-center curvature requests
 # are attenuated; real curve requests remain on the normal path.
 HS_CENTER_DAMPING_BP = [60.0, 80.0, 100.0, 130.0]
-HS_CENTER_DAMPING_CURV_V = [0.00018, 0.00024, 0.00022, 0.00018]
-HS_CENTER_DAMPING_RATE_V = [0.0018, 0.0014, 0.0010, 0.0008]
-HS_CENTER_DAMPING_GAIN_V = [0.55, 0.35, 0.25, 0.20]
+HS_CENTER_DAMPING_CURV_V = [0.00034, 0.00030, 0.00026, 0.00022]
+HS_CENTER_DAMPING_RATE_V = [0.0022, 0.0018, 0.0013, 0.0009]
+HS_CENTER_DAMPING_GAIN_V = [0.30, 0.24, 0.18, 0.14]
+HS_CENTER_HOLD_MIN_KPH = 60.0
+HS_CENTER_HOLD_PREDICT_S = 0.55
+HS_CENTER_HOLD_ENTER_V = [0.00024, 0.00022, 0.00019, 0.00016]
+HS_CENTER_HOLD_EXIT_V = [0.00046, 0.00040, 0.00034, 0.00028]
+HS_CENTER_HOLD_RATE_EXIT_V = [0.0028, 0.0022, 0.0016, 0.0011]
+HS_CENTER_HOLD_FRAMES = 30
 
 # Low-speed adaptive slew guard.
 # It does not reduce steady-state steering authority. It only slows a sudden
@@ -109,6 +115,8 @@ STABLE_TORQUE_DOWN_V =     [0.085, 0.115, 0.120, 0.108, 0.098, 0.078, 0.062, 0.0
 STABLE_TORQUE_LIMITED_SHRINK = 0.85
 STABLE_TORQUE_CURVE_RELIEF_BP = [55.0, 70.0, 90.0, 110.0, 130.0]
 STABLE_TORQUE_CURVE_RELIEF_V = [1.20, 1.32, 1.45, 1.55, 1.35]
+HS_ACTUAL_CURVE_CONFIRM_BP = [55.0, 60.0, 80.0, 100.0, 115.0, 130.0]
+HS_ACTUAL_CURVE_CONFIRM_V = [0.00125, 0.00110, 0.00080, 0.00058, 0.00050, 0.00045]
 
 # ==============================
 # Dynamic effective torque profile
@@ -354,6 +362,29 @@ class LatControlTorque(LatControl):
         prev = float(getattr(self, "_hs_prev_desired_curvature", 0.0) or 0.0)
         hold_frames = int(max(0, getattr(self, "_hs_guard_hold_frames", 0) or 0))
 
+        if v_kph < HS_CENTER_HOLD_MIN_KPH:
+            self._hs_center_hold_frames = 0
+            self._hs_center_hold_active = False
+        else:
+            predicted_abs = abs(curv_in + rate_in * float(HS_CENTER_HOLD_PREDICT_S))
+            center_abs = max(abs(curv_in), predicted_abs)
+            enter_curv = float(interp(v_kph, HS_CENTER_DAMPING_BP, HS_CENTER_HOLD_ENTER_V))
+            exit_curv = float(interp(v_kph, HS_CENTER_DAMPING_BP, HS_CENTER_HOLD_EXIT_V))
+            exit_rate = float(interp(v_kph, HS_CENTER_DAMPING_BP, HS_CENTER_HOLD_RATE_EXIT_V))
+            center_hold_frames = int(max(0, getattr(self, "_hs_center_hold_frames", 0) or 0))
+            actual_curve = bool(center_abs >= exit_curv or (center_abs >= enter_curv and abs(rate_in) >= exit_rate))
+            enter_center_hold = bool(center_abs <= enter_curv and abs(rate_in) <= exit_rate)
+            keep_center_hold = bool(center_hold_frames > 0 and not actual_curve)
+
+            if enter_center_hold or keep_center_hold:
+                self._hs_center_hold_frames = int(HS_CENTER_HOLD_FRAMES)
+                self._hs_center_hold_active = True
+                curv_in = 0.0
+                rate_in = 0.0
+            else:
+                self._hs_center_hold_frames = 0
+                self._hs_center_hold_active = False
+
         center_curv = float(interp(v_kph, HS_CENTER_DAMPING_BP, HS_CENTER_DAMPING_CURV_V))
         center_rate = float(interp(v_kph, HS_CENTER_DAMPING_BP, HS_CENTER_DAMPING_RATE_V))
         if abs(curv_in) <= center_curv and abs(rate_in) <= center_rate:
@@ -541,6 +572,14 @@ class LatControlTorque(LatControl):
         curve_dynamic_strength = 0.0 if straight_road else float(clip(
             interp(curve_ratio, DYN_CURVE_RATIO_BP, DYN_CURVE_RATIO_V), 0.0, 1.0
         ))
+        hs_actual_curve_min = float(interp(v_kph, HS_ACTUAL_CURVE_CONFIRM_BP, HS_ACTUAL_CURVE_CONFIRM_V))
+        hs_actual_curve_strength = max(desired_curv_abs, predicted_curv_abs) / max(hs_actual_curve_min, 1e-6)
+        hs_actual_curve_confirmed = bool(
+            v_kph >= 55.0 and
+            (not straight_road) and
+            (not bool(getattr(self, '_hs_center_hold_active', False))) and
+            hs_actual_curve_strength >= 1.0
+        )
         curve_confirmed = bool(curve_dynamic_strength > 1e-4)
         precharge_candidate = bool(
             LS_PRECHARGE_ENABLED and
@@ -669,6 +708,8 @@ class LatControlTorque(LatControl):
         self._dyn_last_high_speed_gate = high_gate
         self._dyn_last_straight_road = bool(straight_road)
         self._dyn_last_curve_dynamic_strength = float(curve_dynamic_strength)
+        self._dyn_last_high_speed_curve_confirmed = bool(hs_actual_curve_confirmed)
+        self._dyn_last_high_speed_curve_strength = float(hs_actual_curve_strength)
         self._dyn_last_rate_limited_strong = bool(strong_rate_limited)
         self._dyn_last_target_delta_up = float(interp(v_kph, DYN_DELTA_UP_BP, DYN_DELTA_UP_V))
         self._dyn_last_target_delta_down = float(interp(v_kph, DYN_DELTA_DOWN_BP, DYN_DELTA_DOWN_V))
@@ -706,6 +747,9 @@ class LatControlTorque(LatControl):
             'high_gate': float(getattr(self, '_dyn_last_high_speed_gate', 0.0) or 0.0),
             'straightRoad': bool(getattr(self, '_dyn_last_straight_road', False)),
             'curveDynamicStrength': float(getattr(self, '_dyn_last_curve_dynamic_strength', 0.0) or 0.0),
+            'highSpeedCurveConfirmed': bool(getattr(self, '_dyn_last_high_speed_curve_confirmed', False)),
+            'highSpeedCurveStrength': float(getattr(self, '_dyn_last_high_speed_curve_strength', 0.0) or 0.0),
+            'highSpeedCenterHold': bool(getattr(self, '_hs_center_hold_active', False)),
             'latAccelFactor': float(eff.get('latAccelFactor', base.get('latAccelFactor', 0.0)) or 0.0),
             'friction': float(eff.get('friction', base.get('friction', 0.0)) or 0.0),
             'latAccelOffset': float(eff.get('latAccelOffset', base.get('latAccelOffset', 0.0)) or 0.0),
@@ -740,9 +784,9 @@ class LatControlTorque(LatControl):
             STABLE_TORQUE_UP_V if increasing_abs else STABLE_TORQUE_DOWN_V
         ))
         if increasing_abs and v_kph >= 55.0:
-            curve_strength = float(getattr(self, '_dyn_last_curve_dynamic_strength', 0.0) or 0.0)
-            straight_road = bool(getattr(self, '_dyn_last_straight_road', False))
-            if (not straight_road) and curve_strength > 0.15:
+            curve_confirmed = bool(getattr(self, '_dyn_last_high_speed_curve_confirmed', False))
+            curve_strength = float(getattr(self, '_dyn_last_high_speed_curve_strength', 0.0) or 0.0)
+            if curve_confirmed:
                 relief = float(interp(v_kph, STABLE_TORQUE_CURVE_RELIEF_BP, STABLE_TORQUE_CURVE_RELIEF_V))
                 lim *= 1.0 + ((relief - 1.0) * float(clip(curve_strength, 0.0, 1.0)))
         if bool(steer_limited):
@@ -766,6 +810,8 @@ class LatControlTorque(LatControl):
             self._hs_prev_desired_curvature = 0.0
             self._hs_prev_desired_curvature_rate = 0.0
             self._hs_guard_hold_frames = 0
+            self._hs_center_hold_frames = 0
+            self._hs_center_hold_active = False
             self._stable_prev_output_torque = 0.0
             self._stable_torque_slew_gap = 0.0
             self._stable_torque_slew_active = False
@@ -773,6 +819,8 @@ class LatControlTorque(LatControl):
             self._dyn_prev_rate_limit_err = 0.0
             self._dyn_effective_active = False
             self._dyn_last_blend = 0.0
+            self._dyn_last_high_speed_curve_confirmed = False
+            self._dyn_last_high_speed_curve_strength = 0.0
             self._ls_precharge_frames = 0
             self._ls_precharge_strength = 0.0
             self._ls_precharge_active = False
