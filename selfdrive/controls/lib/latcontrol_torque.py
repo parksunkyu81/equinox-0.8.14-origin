@@ -115,8 +115,10 @@ STABLE_TORQUE_DOWN_V =     [0.085, 0.115, 0.120, 0.108, 0.098, 0.078, 0.062, 0.0
 STABLE_TORQUE_LIMITED_SHRINK = 0.85
 STABLE_TORQUE_CURVE_RELIEF_BP = [55.0, 70.0, 90.0, 110.0, 130.0]
 STABLE_TORQUE_CURVE_RELIEF_V = [1.20, 1.32, 1.45, 1.55, 1.35]
-HS_ACTUAL_CURVE_CONFIRM_BP = [55.0, 60.0, 80.0, 100.0, 115.0, 130.0]
-HS_ACTUAL_CURVE_CONFIRM_V = [0.00125, 0.00110, 0.00080, 0.00058, 0.00050, 0.00045]
+HS_ACTUAL_CURVE_CONFIRM_BP = [45.0, 50.0, 55.0, 60.0, 80.0, 100.0, 115.0, 130.0]
+HS_ACTUAL_CURVE_CONFIRM_V = [0.00175, 0.00150, 0.00125, 0.00105, 0.00074, 0.00054, 0.00047, 0.00043]
+HS_NEAR_CURVE_RELIEF_RATIO = 0.72
+HS_FULL_CURVE_RELIEF_RATIO = 1.55
 
 # ==============================
 # Dynamic effective torque profile
@@ -574,12 +576,13 @@ class LatControlTorque(LatControl):
         ))
         hs_actual_curve_min = float(interp(v_kph, HS_ACTUAL_CURVE_CONFIRM_BP, HS_ACTUAL_CURVE_CONFIRM_V))
         hs_actual_curve_strength = max(desired_curv_abs, predicted_curv_abs) / max(hs_actual_curve_min, 1e-6)
-        hs_actual_curve_confirmed = bool(
-            v_kph >= 55.0 and
+        hs_near_curve_confirmed = bool(
+            v_kph >= 45.0 and
             (not straight_road) and
             (not bool(getattr(self, '_hs_center_hold_active', False))) and
-            hs_actual_curve_strength >= 1.0
+            hs_actual_curve_strength >= float(HS_NEAR_CURVE_RELIEF_RATIO)
         )
+        hs_actual_curve_confirmed = bool(hs_near_curve_confirmed and hs_actual_curve_strength >= 1.0)
         curve_confirmed = bool(curve_dynamic_strength > 1e-4)
         precharge_candidate = bool(
             LS_PRECHARGE_ENABLED and
@@ -708,6 +711,7 @@ class LatControlTorque(LatControl):
         self._dyn_last_high_speed_gate = high_gate
         self._dyn_last_straight_road = bool(straight_road)
         self._dyn_last_curve_dynamic_strength = float(curve_dynamic_strength)
+        self._dyn_last_high_speed_near_curve_confirmed = bool(hs_near_curve_confirmed)
         self._dyn_last_high_speed_curve_confirmed = bool(hs_actual_curve_confirmed)
         self._dyn_last_high_speed_curve_strength = float(hs_actual_curve_strength)
         self._dyn_last_rate_limited_strong = bool(strong_rate_limited)
@@ -747,6 +751,7 @@ class LatControlTorque(LatControl):
             'high_gate': float(getattr(self, '_dyn_last_high_speed_gate', 0.0) or 0.0),
             'straightRoad': bool(getattr(self, '_dyn_last_straight_road', False)),
             'curveDynamicStrength': float(getattr(self, '_dyn_last_curve_dynamic_strength', 0.0) or 0.0),
+            'highSpeedNearCurveConfirmed': bool(getattr(self, '_dyn_last_high_speed_near_curve_confirmed', False)),
             'highSpeedCurveConfirmed': bool(getattr(self, '_dyn_last_high_speed_curve_confirmed', False)),
             'highSpeedCurveStrength': float(getattr(self, '_dyn_last_high_speed_curve_strength', 0.0) or 0.0),
             'highSpeedCenterHold': bool(getattr(self, '_hs_center_hold_active', False)),
@@ -784,11 +789,15 @@ class LatControlTorque(LatControl):
             STABLE_TORQUE_UP_V if increasing_abs else STABLE_TORQUE_DOWN_V
         ))
         if increasing_abs and v_kph >= 55.0:
-            curve_confirmed = bool(getattr(self, '_dyn_last_high_speed_curve_confirmed', False))
+            curve_confirmed = bool(getattr(self, '_dyn_last_high_speed_near_curve_confirmed', False))
             curve_strength = float(getattr(self, '_dyn_last_high_speed_curve_strength', 0.0) or 0.0)
             if curve_confirmed:
                 relief = float(interp(v_kph, STABLE_TORQUE_CURVE_RELIEF_BP, STABLE_TORQUE_CURVE_RELIEF_V))
-                lim *= 1.0 + ((relief - 1.0) * float(clip(curve_strength, 0.0, 1.0)))
+                relief_strength = float(clip(
+                    interp(curve_strength,
+                           [HS_NEAR_CURVE_RELIEF_RATIO, HS_FULL_CURVE_RELIEF_RATIO],
+                           [0.20, 1.0]), 0.0, 1.0))
+                lim *= 1.0 + ((relief - 1.0) * relief_strength)
         if bool(steer_limited):
             lim *= float(STABLE_TORQUE_LIMITED_SHRINK)
 
@@ -819,6 +828,7 @@ class LatControlTorque(LatControl):
             self._dyn_prev_rate_limit_err = 0.0
             self._dyn_effective_active = False
             self._dyn_last_blend = 0.0
+            self._dyn_last_high_speed_near_curve_confirmed = False
             self._dyn_last_high_speed_curve_confirmed = False
             self._dyn_last_high_speed_curve_strength = 0.0
             self._ls_precharge_frames = 0
