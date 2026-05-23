@@ -75,7 +75,7 @@ class CarInterface(CarInterfaceBase):
         # Start with a baseline lateral tuning for all GM vehicles. Override tuning as needed in each model section below.
         ret.enableGasInterceptor = 0x201 in fingerprint[0]
         #ret.minEnableSpeed = 18 * CV.MPH_TO_MS
-        ret.minSteerSpeed = 1.0 * CV.KPH_TO_MS
+        ret.minSteerSpeed = 10.0 * CV.KPH_TO_MS
         ret.minEnableSpeed = -1
         #ret.steerRateCost = 0.35  # def : 2.0
 

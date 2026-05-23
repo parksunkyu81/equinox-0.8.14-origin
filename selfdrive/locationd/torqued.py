@@ -37,7 +37,7 @@ LTP_EPS_SAT_RATIO = 0.95       # steer_out_can close to steer_max => saturation 
 - 수동조향/비활성/정지 시 포인트 수집 차단 강화
 
 [응답성 패치]
-- 코너 전용 속도 임계 하향(20→1km/h, MIN_STEER_SPEED=1km/h 기준)
+- 코너 전용 속도 임계 하향(20→10km/h, MIN_STEER_SPEED=10km/h 기준)
 - 곡선에서 latAccelFactor **감소를 빠르게**, 증가는 느리게 (언더스티어(못 도는 느낌) 완화)
 - 코너 포인트 채택 확률 소폭 상향(12%→18%)
 - 워밍업 중 직선 블렌딩 상한 완화(0.6→0.45)
@@ -248,8 +248,8 @@ MIDSPD_KPH_OUT_HI = 70.0
 MIDSPD_DELTA_UP_GAIN = 0.24  # 이쿼녹스 디젤: 중속 반응 보강, 과한 튐 방지
 MIDSPD_DELTA_DOWN_GAIN = 0.14
 
-MIN_VEL_CURVE_MS = 1.0 / 3.6  # 1.0 km/h, aligned with steering activation
-FREEZE_UPDATE_MS = 1.0 / 3.6  # 1.0 km/h 이상 저속 코너에서는 업데이트 동결 해제
+MIN_VEL_CURVE_MS = 10.0 / 3.6  # 10km/h, aligned with steering activation
+FREEZE_UPDATE_MS = 10.0 / 3.6  # 10km/h 이상 저속 코너에서는 업데이트 동결 해제
 PARK_VEL_MS = 0.30  # 정지/파킹 판정
 FREEZE_AFTER_STOP_S = 2.0  # 정지 후 추가 홀드
 
@@ -258,7 +258,7 @@ CORNER_KEEP_PROB = 0.18  # ✅ 코너 포인트 채택 확률(12% → 18%)
 STRAIGHT_KEEP_PROB = 0.07  # ✅ 직선 포인트 채택 확률(2% → 5%)
 
 # 이쿼녹스 디젤 저속 코너 학습 보정
-# - 1~20km/h 코너 데이터는 수집하되 영향력을 낮춰 저속 와리가리/유턴 노이즈 과반영을 방지
+# - 10~20km/h 코너 데이터는 수집하되 영향력을 낮춰 저속 와리가리/유턴 노이즈 과반영을 방지
 # - 20~30km/h는 거의 정상 반영, 30km/h 이상은 기존 반영
 LOWSPD_CORNER_KPH = 20.0
 MIDLOW_CORNER_KPH = 30.0
@@ -388,8 +388,8 @@ RATE_LIM_STEADY_FRICTION_BLEND_W = 0.15  # 준정상 rate-limit 구간에서 fri
 
 
 # Applied profile: Equinox 2020 Diesel
-# - CarControllerParams matched: STEER_MAX=300, STEER_DELTA_UP=10, STEER_DELTA_DOWN=17, MIN_STEER_SPEED=1km/h
-# - Corner learning starts at 1km/h; straight/offset learning remains >=20km/h
+# - CarControllerParams matched: STEER_MAX=300, STEER_DELTA_UP=10, STEER_DELTA_DOWN=17, MIN_STEER_SPEED=10km/h
+# - Corner learning starts at 10km/h; straight/offset learning remains >=20km/h
 VERSION = 32  # 10~20kph clip relief + stricter latAO candidate + 80kph+ guard retune
 
 
@@ -2026,7 +2026,7 @@ class TorqueEstimator:
                 min_steer = 0.005
                 max_latacc = LAT_ACC_THRESHOLD + 1.0
 
-                # === 코너 데이터 수집 (1km/h부터, MIN_STEER_SPEED=1km/h 기준) ===
+                # === 코너 데이터 수집 (10km/h부터, MIN_STEER_SPEED=10km/h 기준) ===
                 if (not any(steer_override)) and (lat_active) and (vego >= MIN_VEL_CURVE_MS) and (
                         abs(steer) > min_steer) and (abs(lateral_acc) <= max_latacc) and (not is_frozen):
                     abs_s = abs(steer)
@@ -2075,7 +2075,7 @@ class TorqueEstimator:
 
                     times = int(np.clip(times_lat * times_steer, 1, 8))
 
-                    # 1~30km/h 저속 코너 샘플은 학습하되 영향력은 낮춤
+                    # 10~30km/h 저속 코너 샘플은 학습하되 영향력은 낮춤
                     # - 유턴/주차장/골목 저속 조향은 lateral accel이 작고 EPS 특성이 달라 전체 튜닝을 과하게 끌 수 있음
                     # - 그래서 포인트 채택 확률과 복제 횟수를 속도별로 줄여 안정성을 확보
                     v_kph_sample = float(vego) * 3.6
@@ -2687,7 +2687,7 @@ class TorqueEstimator:
 
         # ✅ (3) 저속 코너에서 업데이트 동결 해제:
         # - 정지/파킹(last_is_frozen)은 그대로 동결
-        # - 속도 < 약 1km/h 이더라도 curve_active가 아니면 동결
+        # - 속도 < 약 10km/h 이더라도 curve_active가 아니면 동결
         v = float(self.last_vego) if (self.last_vego is not None and np.isfinite(self.last_vego)) else 0.0
         yaw_abs = abs(float(self.last_yaw_rate)) if (
                     self.last_yaw_rate is not None and np.isfinite(self.last_yaw_rate)) else 0.0
