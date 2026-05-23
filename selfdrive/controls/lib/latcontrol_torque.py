@@ -234,22 +234,21 @@ DYN_FRICTION_MIN = 0.245
 DYN_FRICTION_MAX = 0.296
 
 # Low-speed steering supervisor.
-# Predict the next 0.6s of curvature and precharge static friction before the
-# 10~35kph EPS delay turns into steer_clip. This is intentionally short-lived
-# and fades out above 35kph.
+# Predict farther into 10~35kph curve entry and precharge static friction before
+# the EPS delay turns into late steering. This still fades out above 35kph.
 LS_PRECHARGE_ENABLED = True
 LS_PRECHARGE_MIN_KPH = 10.0
 LS_PRECHARGE_MAX_KPH = 35.0
-LS_PRECHARGE_LOOKAHEAD_S = 0.78
-LS_PRECHARGE_HOLD_FRAMES = 46
-LS_PRECHARGE_CURV_DELTA_MIN = 0.00012
+LS_PRECHARGE_LOOKAHEAD_S = 1.10
+LS_PRECHARGE_HOLD_FRAMES = 70
+LS_PRECHARGE_CURV_DELTA_MIN = 0.00008
 LS_PRECHARGE_CURV_MIN_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
-LS_PRECHARGE_CURV_MIN_V = [0.0066, 0.0052, 0.0039, 0.0029, 0.00265]
+LS_PRECHARGE_CURV_MIN_V = [0.0059, 0.0047, 0.0035, 0.00265, 0.00245]
 LS_PRECHARGE_MIN_BOOST_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
-LS_PRECHARGE_MIN_BOOST_V = [0.97, 1.00, 0.99, 0.94, 0.85]
+LS_PRECHARGE_MIN_BOOST_V = [1.00, 1.00, 1.00, 0.97, 0.90]
 LS_PRECHARGE_FRICTION_KICK_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
-LS_PRECHARGE_FRICTION_KICK_V = [0.014, 0.018, 0.017, 0.013, 0.008]
-LS_PRECHARGE_LAT_FACTOR_DROP_MAX = 0.018
+LS_PRECHARGE_FRICTION_KICK_V = [0.017, 0.020, 0.019, 0.015, 0.010]
+LS_PRECHARGE_LAT_FACTOR_DROP_MAX = 0.022
 LS_PRECHARGE_FRICTION_MAX = 0.305
 
 class LatControlTorque(LatControl):
@@ -610,8 +609,7 @@ class LatControlTorque(LatControl):
             int(getattr(self, '_ls_precharge_frames', 0) or 0) > 0 and
             float(getattr(self, '_ls_precharge_strength', 0.0) or 0.0) > 0.05 and
             (not straight_road) and
-            (not bool(steering_pressed)) and
-            (not bool(strong_rate_limited))
+            (not bool(steering_pressed))
         )
         if precharge_active:
             precharge_min_boost = float(interp(v_kph, LS_PRECHARGE_MIN_BOOST_BP, LS_PRECHARGE_MIN_BOOST_V))
