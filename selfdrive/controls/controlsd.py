@@ -540,38 +540,11 @@ class Controls:
         except Exception:
             blinker_on = False
 
-        # Low-speed steer clip is now reported to the driver as steerSaturated
-        # instead of lowering curve speed here.
-        low_speed_clip_feedback = False
-
         # ---- (적용) 완만 코너로 의미 있을 때만 model_speed 보수화 ----
         if (curv_abs > mild_curv_min) and (not in_lane_change) and (not blinker_on):
             model_speed *= extra
 
         low_speed_eps_slowdown = False
-        if (low_speed_clip_feedback and
-                LOW_SPEED_CURVE_SLOWDOWN_MIN_KPH <= v_kph <= LOW_SPEED_CURVE_SLOWDOWN_MAX_KPH and
-                (not in_lane_change) and (not blinker_on)):
-            curve_ratio = curv_abs / max(mild_curv_min, 1e-6)
-            if curve_ratio >= LOW_SPEED_CURVE_SLOWDOWN_MIN_RATIO:
-                shortage = float(np.interp(
-                    curve_ratio,
-                    [LOW_SPEED_CURVE_SLOWDOWN_MIN_RATIO, LOW_SPEED_CURVE_SLOWDOWN_FULL_RATIO],
-                    [0.0, 1.0]
-                ))
-                max_drop_kph = float(np.interp(
-                    v_kph,
-                    LOW_SPEED_CURVE_SLOWDOWN_KPH_BP,
-                    LOW_SPEED_CURVE_SLOWDOWN_MAX_DROP_KPH
-                ))
-                low_speed_drop_ms = max_drop_kph * CV.KPH_TO_MS * shortage
-                low_speed_floor_ms = LOW_SPEED_CURVE_SLOWDOWN_FLOOR_KPH * CV.KPH_TO_MS
-                low_speed_model_speed = float(max(v - low_speed_drop_ms, low_speed_floor_ms))
-                low_speed_drop_kph = low_speed_drop_ms * CV.MS_TO_KPH
-                if low_speed_drop_kph >= LOW_SPEED_CURVE_SLOWDOWN_MIN_DROP_KPH and low_speed_model_speed < v * 0.995:
-                    low_speed_eps_slowdown = True
-                    model_speed = min(model_speed, low_speed_model_speed)
-
         # ===== 4) 코너 감속 ON/OFF 히스테리시스(깜빡임 방지) =====
         ON_THRESH = 0.992
         OFF_THRESH = 1.03
@@ -749,9 +722,9 @@ class Controls:
             self.events.add(EventName.lowMemory)
 
         # TODO: enable this once loggerd CPU usage is more reasonable
-        cpus = list(self.sm['deviceState'].cpuUsagePercent)[:(-1 if EON else None)]
-        if max(cpus, default=0) > 95 and not SIMULATION:
-          self.events.add(EventName.highCpuUsage)
+        #cpus = list(self.sm['deviceState'].cpuUsagePercent)[:(-1 if EON else None)]
+        #if max(cpus, default=0) > 95 and not SIMULATION:
+        #  self.events.add(EventName.highCpuUsage)
 
         # Alert if fan isn't spinning for 5 seconds
         if self.sm['peripheralState'].pandaType in (PandaType.uno, PandaType.dos):
@@ -1100,7 +1073,7 @@ class Controls:
         CC.enabled = self.enabled
         # Check which actuators can be enabled
         CC.latActive = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
-                       CS.vEgo > self.CP.minSteerSpeed and not CS.standstill \
+                       CS.vEgo >= self.CP.minSteerSpeed and not CS.standstill \
                        and abs(CS.steeringAngleDeg) < self.CP.maxSteeringAngleDeg
         CC.longActive = self.active and not self.events.any(ET.OVERRIDE) and self.CP.openpilotLongitudinalControl
 
@@ -1134,7 +1107,7 @@ class Controls:
 
             # Steering PID loop and lateral MPC
             # lat_active = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
-            #             CS.vEgo > self.CP.minSteerSpeed and not CS.standstill \
+            #             CS.vEgo >= self.CP.minSteerSpeed and not CS.standstill \
             #             and abs(CS.steeringAngleDeg) < self.CP.maxSteeringAngleDeg
 
             self.desired_curvature, self.desired_curvature_rate = get_lag_adjusted_curvature(self.CP, CS.vEgo,
@@ -1172,15 +1145,6 @@ class Controls:
 
                 if left_deviation or right_deviation:
                     self.events.add(EventName.steerSaturated)
-
-        low_speed_steer_clip_alert = bool(
-            self.active and
-            LOW_SPEED_CURVE_SLOWDOWN_MIN_KPH <= CS.vEgo * CV.MS_TO_KPH <= LOW_SPEED_CURVE_SLOWDOWN_MAX_KPH and
-            not CS.steeringPressed and
-            int(getattr(self, "low_speed_steer_clip_hold_frames", 0) or 0) > 0
-        )
-        if low_speed_steer_clip_alert:
-            self.events.add(EventName.steerSaturated)
 
         # Ensure no NaNs/Infs
         for p in ACTUATOR_FIELDS:
@@ -1281,22 +1245,8 @@ class Controls:
             CC.actuatorsOutput = self.last_actuators
             self.steer_limited = abs(CC.actuators.steer - CC.actuatorsOutput.steer) > 1e-2
 
-        try:
-            lac_saturated = bool(getattr(lac_log, "active", False) and getattr(lac_log, "saturated", False))
-        except Exception:
-            lac_saturated = False
-        low_speed_steer_clip_now = bool(
-            self.active and
-            LOW_SPEED_CURVE_SLOWDOWN_MIN_KPH <= CS.vEgo * CV.MS_TO_KPH <= LOW_SPEED_CURVE_SLOWDOWN_MAX_KPH and
-            not CS.steeringPressed and
-            (bool(self.steer_limited) or lac_saturated)
-        )
-        if low_speed_steer_clip_now:
-            self.low_speed_steer_clip_hold_frames = int(LOW_SPEED_CURVE_SLOWDOWN_CLIP_HOLD_FRAMES)
-        elif int(getattr(self, "low_speed_steer_clip_hold_frames", 0) or 0) > 0:
-            self.low_speed_steer_clip_hold_frames -= 1
-        else:
-            self.low_speed_steer_clip_hold_frames = 0
+        # Disabled: 10~35km/h steer_clip feedback must not reduce target speed.
+        self.low_speed_steer_clip_hold_frames = 0
 
         force_decel = (self.sm['driverMonitoringState'].awarenessStatus < 0.) or \
                       (self.state == State.softDisabling)

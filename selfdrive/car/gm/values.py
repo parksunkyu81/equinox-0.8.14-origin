@@ -21,7 +21,7 @@ class CarControllerParams():
         self.STEER_STEP = 4  # control frames per command
         self.STEER_DELTA_UP = 10     # DEF : 7
         self.STEER_DELTA_DOWN = 17   # DEF : 17
-        self.MIN_STEER_SPEED = 3.  # m/s
+        self.MIN_STEER_SPEED = 1.0 * CV.KPH_TO_MS
         self.STEER_DRIVER_ALLOWANCE = 65 #50
         self.STEER_DRIVER_MULTIPLIER = 4
         self.STEER_DRIVER_FACTOR = 100

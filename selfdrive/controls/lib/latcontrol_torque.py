@@ -55,15 +55,15 @@ HS_CURV_GUARD_ON_KPH = 40.0
 
 # update 1회당 desired_curvature 최대 변화량
 HS_CURV_DELTA_MAX_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-HS_CURV_DELTA_MAX_V = [0.00100, 0.00072, 0.00050, 0.00028, 0.00018, 0.00013]  # v35: calmer 90~110kph curvature changes
+HS_CURV_DELTA_MAX_V = [0.00100, 0.00072, 0.00058, 0.00038, 0.00026, 0.00017]
 
 # desired_curvature_rate 절대값 제한
 HS_CURV_RATE_MAX_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-HS_CURV_RATE_MAX_V = [0.030, 0.023, 0.016, 0.0085, 0.0055, 0.0040]  # v35: suppress highway weave from rate spikes
+HS_CURV_RATE_MAX_V = [0.030, 0.023, 0.018, 0.011, 0.0070, 0.0048]
 
 # 저역통과 필터 alpha (작을수록 더 부드러움)
 HS_CURV_ALPHA_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-HS_CURV_ALPHA_V = [0.58, 0.50, 0.40, 0.24, 0.16, 0.12]  # v35: stronger 90~110kph LPF for highway stability
+HS_CURV_ALPHA_V = [0.58, 0.50, 0.44, 0.32, 0.22, 0.15]
 
 # 좌/우 부호가 갑자기 뒤집히는 경우 완화
 HS_SIGN_FLIP_MIN_CURV = 0.00045
@@ -76,13 +76,22 @@ HS_LIMIT_HOLD_V = [4.0, 6.0, 8.0, 12.0, 16.0]
 HS_LIMIT_DELTA_SHRINK = 0.55
 HS_LIMIT_ALPHA_SHRINK = 0.75
 
+# High-speed straight-road weave guard. Only tiny near-center curvature requests
+# are attenuated; real curve requests remain on the normal path.
+HS_CENTER_DAMPING_BP = [60.0, 80.0, 100.0, 130.0]
+HS_CENTER_DAMPING_CURV_V = [0.00018, 0.00024, 0.00022, 0.00018]
+HS_CENTER_DAMPING_RATE_V = [0.0018, 0.0014, 0.0010, 0.0008]
+HS_CENTER_DAMPING_GAIN_V = [0.55, 0.35, 0.25, 0.20]
+
 # Low-speed adaptive slew guard.
 # It does not reduce steady-state steering authority. It only slows a sudden
 # jump when the requested steer is far ahead of the last actually applied steer.
 LS_ADAPTIVE_SLEW_MIN_KPH = 8.0
 LS_ADAPTIVE_SLEW_FULL_ON_KPH = 12.0
 LS_ADAPTIVE_SLEW_FULL_OFF_KPH = 28.0
-LS_ADAPTIVE_SLEW_MAX_KPH = 34.0
+# Disabled after field feedback: in 10~35kph curve entry it could hold back a
+# large corrective steer request exactly when the EPS needed to catch up.
+LS_ADAPTIVE_SLEW_MAX_KPH = 8.0
 LS_ADAPTIVE_SLEW_GAP_START = 0.45
 LS_ADAPTIVE_SLEW_GAP_FULL = 1.00
 LS_ADAPTIVE_SLEW_ALLOW_GAP_BP = [8.0, 12.0, 20.0, 28.0, 34.0]
@@ -95,9 +104,11 @@ STABLE_TORQUE_SLEW_ENABLED = True
 # 저속은 더 빠르게, 고속은 더 안정적으로 torque slew 제한.
 # 목적: 10~30kph 코너 추종력 확보 + 80~110kph 와리가리 억제.
 STABLE_TORQUE_SLEW_KPH_BP = [0.0, 10.0, 20.0, 30.0, 35.0, 40.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-STABLE_TORQUE_UP_V =       [0.065, 0.098, 0.104, 0.096, 0.080, 0.062, 0.048, 0.026, 0.016, 0.012, 0.010]  # v35: calmer 90~110kph torque rise
-STABLE_TORQUE_DOWN_V =     [0.085, 0.115, 0.120, 0.108, 0.098, 0.078, 0.062, 0.038, 0.026, 0.020, 0.016]
+STABLE_TORQUE_UP_V =       [0.065, 0.098, 0.104, 0.096, 0.080, 0.062, 0.048, 0.030, 0.022, 0.017, 0.013]
+STABLE_TORQUE_DOWN_V =     [0.085, 0.115, 0.120, 0.108, 0.098, 0.078, 0.062, 0.042, 0.031, 0.024, 0.018]
 STABLE_TORQUE_LIMITED_SHRINK = 0.85
+STABLE_TORQUE_CURVE_RELIEF_BP = [55.0, 70.0, 90.0, 110.0, 130.0]
+STABLE_TORQUE_CURVE_RELIEF_V = [1.20, 1.32, 1.45, 1.55, 1.35]
 
 # ==============================
 # Dynamic effective torque profile
@@ -342,6 +353,13 @@ class LatControlTorque(LatControl):
 
         prev = float(getattr(self, "_hs_prev_desired_curvature", 0.0) or 0.0)
         hold_frames = int(max(0, getattr(self, "_hs_guard_hold_frames", 0) or 0))
+
+        center_curv = float(interp(v_kph, HS_CENTER_DAMPING_BP, HS_CENTER_DAMPING_CURV_V))
+        center_rate = float(interp(v_kph, HS_CENTER_DAMPING_BP, HS_CENTER_DAMPING_RATE_V))
+        if abs(curv_in) <= center_curv and abs(rate_in) <= center_rate:
+            damping_gain = float(interp(v_kph, HS_CENTER_DAMPING_BP, HS_CENTER_DAMPING_GAIN_V))
+            curv_in *= damping_gain
+            rate_in *= damping_gain
 
         # 고속에서 좌/우 부호가 갑자기 뒤집히면 일단 보수적으로 눌러줌
         if (abs(prev) >= HS_SIGN_FLIP_MIN_CURV and
@@ -721,6 +739,12 @@ class LatControlTorque(LatControl):
             STABLE_TORQUE_SLEW_KPH_BP,
             STABLE_TORQUE_UP_V if increasing_abs else STABLE_TORQUE_DOWN_V
         ))
+        if increasing_abs and v_kph >= 55.0:
+            curve_strength = float(getattr(self, '_dyn_last_curve_dynamic_strength', 0.0) or 0.0)
+            straight_road = bool(getattr(self, '_dyn_last_straight_road', False))
+            if (not straight_road) and curve_strength > 0.15:
+                relief = float(interp(v_kph, STABLE_TORQUE_CURVE_RELIEF_BP, STABLE_TORQUE_CURVE_RELIEF_V))
+                lim *= 1.0 + ((relief - 1.0) * float(clip(curve_strength, 0.0, 1.0)))
         if bool(steer_limited):
             lim *= float(STABLE_TORQUE_LIMITED_SHRINK)
 

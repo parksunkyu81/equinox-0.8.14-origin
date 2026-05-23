@@ -7,17 +7,17 @@ from common.realtime import DT_CTRL
 # ============================================================
 # Equinox 2020 Diesel optimized LatControl base
 # ------------------------------------------------------------
-# 기존 MIN_STEER_SPEED = 0.3m/s 는 약 1.08km/h라 너무 낮음.
+# 1km/h부터 lateral controller와 GM LKAS command path를 함께 활성화.
 # 이쿼녹스 2020 디젤 토크 튜닝 기준:
-# - CarControllerParams.MIN_STEER_SPEED = 3.0m/s
-# - torqued.py 코너 학습 시작 = 3.0m/s
-# - latcontrol_torque.py 유효 조향 시작 = 3.0m/s
+# - CarControllerParams.MIN_STEER_SPEED = 1km/h
+# - torqued.py 코너 학습 시작 = 1km/h
+# - latcontrol_torque.py 유효 조향 시작 = 1km/h
 #
-# 따라서 공통 LatControl 기준도 3.0m/s로 맞추는 것이 일관성 있음.
-# 3.0m/s = 약 10.8km/h
+# 따라서 공통 LatControl 기준도 1km/h로 맞추는 것이 일관성 있음.
+# 1km/h = 약 0.278m/s
 # ============================================================
 
-MIN_STEER_SPEED = 3.0
+MIN_STEER_SPEED = 1.0 / 3.6
 
 # Saturation 판단은 너무 저속에서 하면 오검출이 많음.
 # 기존 10.0m/s = 36km/h 기준 유지.
