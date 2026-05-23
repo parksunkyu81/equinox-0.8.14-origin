@@ -32,7 +32,7 @@ DYN_STEER_DELTA_DOWN_V  = [14.0, 16.0, 16.0, 16.0, 15.0, 14.0, 12.0, 11.0, 11.0]
 CLEAN_DELTA_UP_ENABLE = True
 CLEAN_DELTA_UP_MIN_KPH = 10.0
 CLEAN_DELTA_UP_MAX_KPH = 28.0
-CLEAN_DELTA_UP_VALUE = 17
+CLEAN_DELTA_UP_VALUE = 20
 CLEAN_DELTA_UP_MIN_REQ = 0.20
 CLEAN_DELTA_UP_MAX_REQ = 0.86
 CLEAN_DELTA_UP_MAX_LAST = 0.80
@@ -49,9 +49,11 @@ CURVE_DELTA_CURV_RISING_MIN = 0.00010
 CURVE_DELTA_CURV_MIN_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
 CURVE_DELTA_CURV_MIN_V = [0.0065, 0.0052, 0.0040, 0.0030, 0.0027]
 CURVE_DELTA_UP_MAX_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
-CURVE_DELTA_UP_MAX_V = [20.0, 22.0, 21.0, 19.0, 16.5]
+CURVE_DELTA_UP_MAX_V = [23.0, 25.0, 25.0, 24.0, 23.0]
 CURVE_DELTA_DOWN_MAX_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
-CURVE_DELTA_DOWN_MAX_V = [20.0, 21.0, 20.0, 18.5, 17.0]
+CURVE_DELTA_DOWN_MAX_V = [22.0, 24.0, 24.0, 23.0, 22.0]
+CURVE_DELTA_STRENGTH_RATIO_BP = [1.00, 1.35, 2.00]
+CURVE_DELTA_STRENGTH_RATIO_V = [0.0, 0.35, 1.0]
 CURVE_DELTA_STRAIGHT_CURV_MAX_V = [0.0026, 0.0022, 0.0019, 0.0016, 0.0015]
 CURVE_DELTA_STRAIGHT_RATE_MAX_V = [0.0040, 0.0034, 0.0028, 0.0022, 0.0020]
 CURVE_DELTA_STRAIGHT_STEER_MAX_V = [0.040, 0.038, 0.035, 0.032, 0.030]
@@ -233,7 +235,9 @@ class CarController():
     if predicted_curv_abs < curv_min or not curve_rising:
       return None
 
-    strength = float(clip(interp(predicted_curv_abs / max(curv_min, 1e-6), [1.0, 1.8], [0.20, 1.0]), 0.0, 1.0))
+    curve_ratio = predicted_curv_abs / max(curv_min, 1e-6)
+    strength = float(clip(interp(curve_ratio, CURVE_DELTA_STRENGTH_RATIO_BP,
+                                 CURVE_DELTA_STRENGTH_RATIO_V), 0.0, 1.0))
     max_up = float(interp(v, CURVE_DELTA_UP_MAX_BP, CURVE_DELTA_UP_MAX_V))
     max_down = float(interp(v, CURVE_DELTA_DOWN_MAX_BP, CURVE_DELTA_DOWN_MAX_V))
     return strength, max_up, max_down
