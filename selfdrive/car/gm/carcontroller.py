@@ -18,11 +18,13 @@ CREEP_SPEED = 2.5   # 4km
 
 # Equinox 2020 diesel dynamic steering torque delta map.
 # The latcontrol_torque dynamic debug map is only advisory; actual rate limiting
-# happens here through apply_std_steer_torque_limits().  Low speed gets more
-# delta-up authority to reduce 10~30kph steer_clip, while high speed remains
-# conservative to avoid highway weave.
+# happens here through apply_std_steer_torque_limits(). Keep the final CAN
+# command inside GM/Panda rate limits so the camera/PSCM never sees an
+# out-of-family LKASteeringCmd ramp.
+GM_SAFE_STEER_DELTA_UP = 20
+GM_SAFE_STEER_DELTA_DOWN = 17
 DYN_STEER_DELTA_UP_BP = [0.0, 8.0, 10.0, 20.0, 30.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
-DYN_STEER_DELTA_UP_V  = [10.0, 12.0, 17.0, 18.0, 16.0, 13.0, 12.0, 11.0, 8.0, 6.0, 5.0, 5.0]
+DYN_STEER_DELTA_UP_V  = [8.0, 12.0, 16.0, 20.0, 18.0, 14.0, 11.0, 9.0, 8.0, 6.0, 5.0, 5.0]
 DYN_STEER_DELTA_DOWN_BP = [0.0, 10.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
 DYN_STEER_DELTA_DOWN_V  = [14.0, 16.0, 16.0, 16.0, 15.0, 14.0, 12.0, 11.0, 11.0]
 
@@ -32,7 +34,7 @@ DYN_STEER_DELTA_DOWN_V  = [14.0, 16.0, 16.0, 16.0, 15.0, 14.0, 12.0, 11.0, 11.0]
 CLEAN_DELTA_UP_ENABLE = True
 CLEAN_DELTA_UP_MIN_KPH = 10.0
 CLEAN_DELTA_UP_MAX_KPH = 28.0
-CLEAN_DELTA_UP_VALUE = 22
+CLEAN_DELTA_UP_VALUE = GM_SAFE_STEER_DELTA_UP
 CLEAN_DELTA_UP_MIN_REQ = 0.20
 CLEAN_DELTA_UP_MAX_REQ = 0.86
 CLEAN_DELTA_UP_MAX_LAST = 0.80
@@ -49,9 +51,9 @@ CURVE_DELTA_CURV_RISING_MIN = 0.00006
 CURVE_DELTA_CURV_MIN_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
 CURVE_DELTA_CURV_MIN_V = [0.0055, 0.0043, 0.0033, 0.00255, 0.00235]
 CURVE_DELTA_UP_MAX_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
-CURVE_DELTA_UP_MAX_V = [26.0, 28.0, 28.0, 27.0, 26.0]
+CURVE_DELTA_UP_MAX_V = [18.0, 20.0, 20.0, 18.0, 14.0]
 CURVE_DELTA_DOWN_MAX_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
-CURVE_DELTA_DOWN_MAX_V = [25.0, 27.0, 27.0, 26.0, 25.0]
+CURVE_DELTA_DOWN_MAX_V = [17.0, 17.0, 17.0, 16.0, 16.0]
 CURVE_DELTA_STRENGTH_RATIO_BP = [0.88, 1.20, 1.80]
 CURVE_DELTA_STRENGTH_RATIO_V = [0.15, 0.50, 1.0]
 CURVE_DELTA_STRAIGHT_CURV_MAX_V = [0.0026, 0.0022, 0.0019, 0.0016, 0.0015]
@@ -67,7 +69,7 @@ HIGH_SPEED_CURVE_DELTA_CURV_V = [0.00175, 0.00150, 0.00125, 0.00105, 0.00074, 0.
 HIGH_SPEED_CURVE_DELTA_STRENGTH_RATIO_BP = [0.72, 1.0, 1.55]
 HIGH_SPEED_CURVE_DELTA_STRENGTH_RATIO_V = [0.18, 0.45, 1.0]
 HIGH_SPEED_CURVE_DELTA_UP_MAX_BP = [45.0, 50.0, 55.0, 60.0, 80.0, 100.0, 115.0]
-HIGH_SPEED_CURVE_DELTA_UP_MAX_V = [15.0, 14.0, 13.0, 12.0, 10.0, 8.0, 7.0]
+HIGH_SPEED_CURVE_DELTA_UP_MAX_V = [9.0, 9.0, 9.0, 8.0, 8.0, 7.0, 6.0]
 HIGH_SPEED_CURVE_DELTA_DOWN_MAX_BP = [45.0, 50.0, 55.0, 60.0, 80.0, 100.0, 115.0]
 HIGH_SPEED_CURVE_DELTA_DOWN_MAX_V = [16.0, 16.0, 15.0, 15.0, 14.0, 13.0, 12.0]
 
@@ -337,7 +339,7 @@ class CarController():
     except Exception:
       pass
 
-    return max(1, up), max(1, down)
+    return max(1, min(up, GM_SAFE_STEER_DELTA_UP)), max(1, min(down, GM_SAFE_STEER_DELTA_DOWN))
 
   def _stop_accel_boost_lead(self, controls):
     try:
