@@ -73,9 +73,9 @@ _A_CRUISE_MAX_V = [
   0.792,  # 30 km/h
   0.755,  # 40 km/h
   0.735,  # 55 km/h
-  0.700,  # 70 km/h
-  0.756,  # 85 km/h
-  0.68,  # 100 km/h
+  0.770,  # 70 km/h : +10% for better highway speed recovery
+  0.832,  # 85 km/h : +10% for better highway speed recovery
+  0.748,  # 100 km/h: +10% for better highway speed recovery
 ]
 
 # 앞차 추종 중 최대 가속도
@@ -88,9 +88,9 @@ _A_CRUISE_MAX_V_FOLLOWING = [
   0.93,  # 30 km/h
   0.89,  # 40 km/h
   0.86,  # 55 km/h
-  0.82,  # 70 km/h
-  0.840,  # 85 km/h
-  0.74,  # 100 km/h
+  0.902,  # 70 km/h : +10% for better highway speed recovery
+  0.924,  # 85 km/h : +10% for better highway speed recovery
+  0.814,  # 100 km/h: +10% for better highway speed recovery
 ]
 
 """_A_TOTAL_MAX_V = [2.5, 3.0, 4.0]  # 회전 시 가속 제한을 낮춤
@@ -113,9 +113,9 @@ _A_TOTAL_MAX_V = [
   2.65,  # 30 km/h  : 저중속 코너 안정성 우선
   2.90,  # 40 km/h  : 시내 속도에서는 예측 가능한 가속 유지
   3.12,  # 55 km/h  : 55~60km/h 부근 갑작스러운 가속 해제 방지
-  3.35,  # 70 km/h  : 시내 흐름을 따라갈 정도의 재가속 여유 유지
-  3.95,  # 85 km/h  : 고속 코너에서 과한 페달 제한
-  4.20,  # 100 km/h : 고속 직진/완만한 곡률에서 답답함 방지
+  3.69,  # 70 km/h  : +10% accel room in mild highway curves
+  4.35,  # 85 km/h  : +10% accel room in mild highway curves
+  4.62,  # 100 km/h : +10% accel room in mild highway curves
 ]
 
 def calc_cruise_accel_limits(v_ego):
