@@ -99,7 +99,7 @@ BURST_SAMPLE_LIMIT = 2400
 # -----------------------------
 # 이쿼녹스 토크 디폴트값 (요청값)
 # -----------------------------
-LIVE_TORQUE_TUNING_ENABLED = False  # False면 라이브 튜닝(학습/적응) OFF, 고정값만 publish
+LIVE_TORQUE_TUNING_ENABLED = True  # bounded live tuning; unsafe learned values are clipped below
 LAT_ACCEL_FACTOR_ANCHOR = 2.05
 FRICTION_ANCHOR = 0.230
 
@@ -128,32 +128,32 @@ DYN_LOG_FRICTION_MAX = 0.235
 FORCE_TARGET_TUNING = True  # latAccelFactor/friction anchors are enforced
 
 # ✅ FORCE 밴드: 비대칭(하향 넓게, 상향 보수적으로)
-TARGET_FACTOR_BAND_UP = 0.00  # locked fixed torque profile
-TARGET_FACTOR_BAND_DOWN = 0.00  # locked fixed torque profile
+TARGET_FACTOR_BAND_UP = 0.035
+TARGET_FACTOR_BAND_DOWN = 0.025
 
-TARGET_FRICTION_BAND = 0.00
+TARGET_FRICTION_BAND = 0.065
 
 # -----------------------------
 # Adaptive FORCE band relaxation
 #  - 초기에는 앵커 근처(안전)로 강하게 묶고,
 #  - 코너 포인트가 충분히 쌓이면(force band를 점진적으로 확장) raw 추정을 반영
 # -----------------------------
-FORCE_BAND_RELAX_ENABLED = False  # fixed live torque output
+FORCE_BAND_RELAX_ENABLED = False  # keep live tuning in a narrow safety band
 
 # relax 시작/완전 해제 구간(코너+limited 코너 포인트 기준)
 FORCE_RELAX_START_MULT = 0.8  # 10~55km/h에서 필요한 보정이 더 빨리 살아나기 시작
 FORCE_RELAX_FULL_MULT = 3.0  # 3.0 * min_points_total에서 완화 완료
 
 # 완화 완료 시 밴드(앵커 대비)
-FORCE_FACTOR_BAND_UP_MAX = 0.04  # disabled by FORCE_BAND_RELAX_ENABLED = False  # fixed live torque output
-FORCE_FACTOR_BAND_DOWN_MAX = 0.04  # disabled by FORCE_BAND_RELAX_ENABLED = False  # fixed live torque output
+FORCE_FACTOR_BAND_UP_MAX = 0.04  # disabled by FORCE_BAND_RELAX_ENABLED = False
+FORCE_FACTOR_BAND_DOWN_MAX = 0.04  # disabled by FORCE_BAND_RELAX_ENABLED = False
 FORCE_FRICTION_BAND_MAX = 0.35  # ±35%
 
 # 절대 안전 클램프(혹시 모를 발산/오입력 방지)
-LAT_ACCEL_FACTOR_ABS_MIN = 2.05
-LAT_ACCEL_FACTOR_ABS_MAX = 2.05
-FRICTION_ABS_MIN = 0.230
-FRICTION_ABS_MAX = 0.230
+LAT_ACCEL_FACTOR_ABS_MIN = 2.00
+LAT_ACCEL_FACTOR_ABS_MAX = 2.12
+FRICTION_ABS_MIN = 0.220
+FRICTION_ABS_MAX = 0.245
 # ✅ 직선 쏠림 보완: offset 학습 허용(단, 직선 샘플이 실제로 들어온 프레임에서만 업데이트 게이트)
 DISABLE_LATACCEL_OFFSET_LEARNING = True
 
@@ -452,7 +452,7 @@ QUALITY_STEER_PRESSED_LOW_SPEED_KPH = 30.0
 QUALITY_STEER_PRESSED_EXTEND_GUARD_KPH = 30.0
 QUALITY_FREEZE_HOLD_S = 0.65
 
-VERSION = 34  # fixed torque profile; clear unsafe live-tuning warm state
+VERSION = 35  # bounded live torque tuning; clear fixed-profile and unsafe warm states
 
 
 def slope2rot(slope):
@@ -3683,23 +3683,94 @@ def main(sm=None, pm=None):
     def _reload_user_torque_params(estimator_ref=None, force_log: bool = False):
         global LIVE_TORQUE_TUNING_ENABLED, LAT_ACCEL_FACTOR_ANCHOR, FRICTION_ANCHOR
         nonlocal _last_is_live, _last_lat_raw, _last_fric_raw
-        LIVE_TORQUE_TUNING_ENABLED = False
-        LAT_ACCEL_FACTOR_ANCHOR = 2.05
-        FRICTION_ANCHOR = 0.230
-        _last_is_live = False
-        _last_lat_raw = None
-        _last_fric_raw = None
+
+        def _param_bool(name, default):
+            try:
+                raw = params.get(name)
+                if raw is None:
+                    return bool(default)
+                val = raw.strip().lower()
+                if val in [b"1", b"true", b"yes", b"on"]:
+                    return True
+                if val in [b"0", b"false", b"no", b"off"]:
+                    return False
+            except Exception:
+                pass
+            return bool(default)
+
+        def _param_float_scaled(name, default, scale_kind):
+            try:
+                raw = params.get(name)
+                if raw is None:
+                    return float(default), None
+                text = raw.decode("utf-8", errors="ignore").strip()
+                if not text:
+                    return float(default), raw
+                val = float(text)
+                if scale_kind == "lat":
+                    if abs(val) > 100.0:
+                        val *= 0.01
+                    elif abs(val) > 10.0:
+                        val *= 0.1
+                elif scale_kind == "friction":
+                    if abs(val) > 1.0:
+                        val *= 0.001
+                if not np.isfinite(val):
+                    return float(default), raw
+                return float(val), raw
+            except Exception:
+                return float(default), None
+
+        is_live_param = _param_bool("IsLiveTorque", True)
+        is_live = True
+        lat_raw, lat_param_raw = _param_float_scaled("TorqueMaxLatAccel", 2.05, "lat")
+        fric_raw, fric_param_raw = _param_float_scaled("TorqueFriction", 0.230, "friction")
+
+        lat_anchor = float(lat_raw) if (
+            LAT_ACCEL_FACTOR_ABS_MIN <= float(lat_raw) <= LAT_ACCEL_FACTOR_ABS_MAX
+        ) else 2.05
+        fric_anchor = float(fric_raw) if (
+            FRICTION_ABS_MIN <= float(fric_raw) <= FRICTION_ABS_MAX
+        ) else 0.230
+
+        LIVE_TORQUE_TUNING_ENABLED = bool(is_live)
+        LAT_ACCEL_FACTOR_ANCHOR = lat_anchor
+        FRICTION_ANCHOR = fric_anchor
         try:
             if estimator_ref is not None:
                 estimator_ref.offline_latAccelFactor = float(LAT_ACCEL_FACTOR_ANCHOR)
                 estimator_ref.offline_friction = float(FRICTION_ANCHOR)
+                minF, maxF, minR, maxR = estimator_ref._dynamic_bands()
+                estimator_ref.filtered_params['latAccelFactor'].x = float(
+                    np.clip(_sanitize_num(estimator_ref.filtered_params['latAccelFactor'].x, LAT_ACCEL_FACTOR_ANCHOR),
+                            minF, maxF))
+                estimator_ref.filtered_params['frictionCoefficient'].x = float(
+                    np.clip(_sanitize_num(estimator_ref.filtered_params['frictionCoefficient'].x, FRICTION_ANCHOR),
+                            minR, maxR))
+                estimator_ref.filtered_params['latAccelOffset'].x = float(
+                    np.clip(_sanitize_num(estimator_ref.filtered_params['latAccelOffset'].x, 0.0),
+                            -estimator_ref.max_offset_abs, estimator_ref.max_offset_abs))
         except Exception:
             pass
-        if force_log:
+        changed = (
+            _last_is_live != bool(is_live) or
+            _last_lat_raw != lat_param_raw or
+            _last_fric_raw != fric_param_raw
+        )
+        if force_log or changed:
             try:
-                cloudlog.info("LiveTorque: fixed safe profile IsLiveTorque=False LAT_ACCEL_FACTOR_ANCHOR=2.05000 FRICTION_ANCHOR=0.23000")
+                cloudlog.info(
+                    f"LiveTorque: bounded live tuning IsLiveTorque={bool(is_live)} "
+                    f"LAT_ACCEL_FACTOR_ANCHOR={LAT_ACCEL_FACTOR_ANCHOR:.5f} "
+                    f"FRICTION_ANCHOR={FRICTION_ANCHOR:.5f} "
+                    f"rawIsLiveParam={bool(is_live_param)} "
+                    f"rawLatParam={lat_param_raw!r} rawFricParam={fric_param_raw!r}"
+                )
             except Exception:
                 pass
+        _last_is_live = bool(is_live)
+        _last_lat_raw = lat_param_raw
+        _last_fric_raw = fric_param_raw
 
     # Initial load (once at startup)    _reload_user_torque_params(estimator_ref=None, force_log=True)
 
