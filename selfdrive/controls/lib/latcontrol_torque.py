@@ -143,7 +143,7 @@ DYN_FRICTION_V    = [0.235, 0.258, 0.262, 0.260, 0.254, 0.248, 0.244, 0.240, 0.2
 DYN_DELTA_UP_BP   = [0.0, 10.0, 30.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
 DYN_DELTA_UP_V    = [8.0, 16.0, 20.0, 14.0, 11.0, 9.0, 8.0, 6.0, 5.0, 5.0]
 DYN_DELTA_DOWN_BP = [0.0, 10.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
-DYN_DELTA_DOWN_V  = [14.0, 17.0, 17.0, 17.0, 16.0, 15.0, 15.0, 14.0, 14.0]
+DYN_DELTA_DOWN_V  = [14.0, 17.0, 17.0, 17.0, 16.0, 15.0, 13.0, 10.0, 9.0]
 
 # 코너 강도 판정. 세 값 중 가장 큰 값을 사용한다.
 # 코너 감지 민감도 보정.
@@ -229,7 +229,7 @@ DYN_BRIDGE_MIN_BOOST_STRONG_MULT = 0.72
 
 # 최종 안전 클램프
 DYN_LAT_FACTOR_MIN = 1.78
-DYN_LAT_FACTOR_MAX = 1.965
+DYN_LAT_FACTOR_MAX = 2.25  # keep 100kph+ anti-weave targets from being clipped
 DYN_FRICTION_MIN = 0.220
 DYN_FRICTION_MAX = 0.262
 

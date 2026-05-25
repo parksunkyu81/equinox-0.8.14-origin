@@ -26,7 +26,7 @@ GM_SAFE_STEER_DELTA_DOWN = 17
 DYN_STEER_DELTA_UP_BP = [0.0, 8.0, 10.0, 20.0, 30.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
 DYN_STEER_DELTA_UP_V  = [8.0, 12.0, 16.0, 20.0, 18.0, 14.0, 11.0, 9.0, 8.0, 6.0, 5.0, 5.0]
 DYN_STEER_DELTA_DOWN_BP = [0.0, 10.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
-DYN_STEER_DELTA_DOWN_V  = [14.0, 16.0, 16.0, 16.0, 15.0, 14.0, 12.0, 11.0, 11.0]
+DYN_STEER_DELTA_DOWN_V  = [14.0, 16.0, 16.0, 16.0, 15.0, 14.0, 12.0, 10.0, 9.0]
 
 # Conditional low-speed delta-up assist. Keep the base map moderate, but allow
 # 10~28kph clean corners to climb to 17 when the EPS is not near max and the
@@ -334,8 +334,8 @@ class CarController():
       high_curve_assist = self._high_speed_curve_delta_assist(v_kph, new_steer, CS, controls)
       if high_curve_assist is not None:
         strength, max_up, max_down = high_curve_assist
-        up = max(up, int(round(float(up) + (float(max_up) - float(up)) * strength)))
-        down = max(down, int(round(float(down) + (float(max_down) - float(down)) * strength)))
+        up = int(round(float(up) + (float(max_up) - float(up)) * strength))
+        down = int(round(float(down) + (float(max_down) - float(down)) * strength))
     except Exception:
       pass
 

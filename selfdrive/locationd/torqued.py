@@ -141,7 +141,7 @@ FORCE_FRICTION_BAND_MAX = 0.12     # ±12%: 0.255 기준 0.224~0.286
 # 절대 안전 클램프(혹시 모를 발산/오입력 방지)
 # 3.0/0.120 Runtime Param 오염 또는 과도한 raw fit 결과가 publish 값으로
 # 들어오지 못하게 base liveTorqueParameters 범위를 이쿼녹스 디젤 기준으로 좁힌다.
-LAT_ACCEL_FACTOR_ABS_MIN = 1.70
+LAT_ACCEL_FACTOR_ABS_MIN = 1.82
 LAT_ACCEL_FACTOR_ABS_MAX = 2.02
 FRICTION_ABS_MIN = 0.245
 FRICTION_ABS_MAX = 0.288
@@ -158,6 +158,7 @@ LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA = 0.14
 LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START = 0.08
 LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL = 0.30
 LAT_ACCEL_FACTOR_ASSIST_RATE_STRONG_LIMIT = 0.10
+LAT_ACCEL_FACTOR_ASSIST_MAX_KPH = 35.0  # keep this helper in the low-speed clip band only
 
 # ===== Live Torque Tuning "B-plan" + Warm Start =====
 # B안: 직선 오프셋 업데이트는 '최근 구간(윈도우) 품질'로만 결정
@@ -1617,6 +1618,8 @@ class TorqueEstimator:
 
             v_ego = float(self.last_vego) if (self.last_vego is not None and np.isfinite(self.last_vego)) else 0.0
             if (not bool(getattr(self, "last_lat_active", False))) or (v_ego < float(MIN_VEL_CURVE_MS)):
+                return base
+            if (v_ego * 3.6) >= float(LAT_ACCEL_FACTOR_ASSIST_MAX_KPH):
                 return base
 
             eps_or_max_guard = bool(
