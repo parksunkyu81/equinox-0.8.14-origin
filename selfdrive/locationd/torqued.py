@@ -37,18 +37,18 @@ LTP_EPS_SAT_RATIO = 0.95       # steer_out_can close to steer_max => saturation 
 - 수동조향/비활성/정지 시 포인트 수집 차단 강화
 
 [응답성 패치]
-- 코너 전용 속도 임계 하향(20→10km/h, MIN_STEER_SPEED=10km/h 기준)
+- 코너 전용 속도 임계 하향(30→20km/h)
 - 곡선에서 latAccelFactor **감소를 빠르게**, 증가는 느리게 (언더스티어(못 도는 느낌) 완화)
 - 코너 포인트 채택 확률 소폭 상향(12%→18%)
 - 워밍업 중 직선 블렌딩 상한 완화(0.6→0.45)
 
 [요청 통합]
 (1) 캐시 복원 points(코너+직선 혼합) → steer 기준으로 코너/직선 버킷에 분리 적재
-(2) STEER_DELTA_DOWN_DIAG는 실제 CarControllerParams 기준 17 유지
+(2) STEER_DELTA_DOWN_DIAG 실제값과 불일치(17) → 20으로 수정
 (3) FORCE_TARGET_TUNING 밴드(±5%)가 너무 타이트 → ±8%로 완화
     + 추가: FORCE 밴드를 비대칭으로 하향을 더 넓힘(언더스티어 탈출 여지 확대)
 (4) limited 반영 조건부 강화(clip/max/rate_limited 상황에서 limited_corner 반영 가중치 상향)
-(5) 10km/h 이상 저속 코너(curve_active)에서는 업데이트 동결을 해제(정지/파킹 동결은 유지)
+(5) 저속 코너(curve_active)에서는 업데이트 동결을 해제(정지/파킹 동결은 유지)
 
 """
 
@@ -99,17 +99,28 @@ BURST_SAMPLE_LIMIT = 2400
 # -----------------------------
 # 이쿼녹스 토크 디폴트값 (요청값)
 # -----------------------------
-LIVE_TORQUE_TUNING_ENABLED = True  # False면 라이브 튜닝(학습/적응) OFF, 고정값만 publish
-LAT_ACCEL_FACTOR_ANCHOR = 1.90
-FRICTION_ANCHOR = 0.255
+LIVE_TORQUE_TUNING_ENABLED = False  # False면 라이브 튜닝(학습/적응) OFF, 고정값만 publish
+LAT_ACCEL_FACTOR_ANCHOR = 2.05
+FRICTION_ANCHOR = 0.230
 
-# Source anchors: do not let stale runtime Params such as
-# TorqueMaxLatAccel=30 / TorqueFriction=120 re-poison live tuning.
-SOURCE_LAT_ACCEL_FACTOR_ANCHOR = 1.90
-SOURCE_FRICTION_ANCHOR = 0.255
-# Default is locked. Set LTP_ALLOW_RUNTIME_ANCHORS=1 only when you intentionally
-# want UI Params to override the source anchors while running.
-LTP_ALLOW_RUNTIME_ANCHORS = os.environ.get("LTP_ALLOW_RUNTIME_ANCHORS", "0").strip() == "1"
+# --- LatControl dynamic effective torque display helper ---
+# 실제 dynamic torque 적용은 latcontrol_torque.py 내부에서 수행한다.
+# torqued는 liveTorqueParameters의 학습/앵커 값을 publish하므로, 기존 ltp_log의 latAF_f/fric_f만 보면
+# 코너에서도 값이 안 변하는 것처럼 보인다. 아래 값은 ltp_log 검증용 추정 표시값이며 제어 publish 값은 건드리지 않는다.
+DYN_LOG_LAT_FACTOR_BP = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
+DYN_LOG_LAT_FACTOR_V  = [2.05, 2.05, 2.05, 2.05, 2.05, 2.05, 2.05, 2.05, 2.05, 2.08, 2.10, 2.10, 2.10]
+DYN_LOG_FRICTION_BP   = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
+DYN_LOG_FRICTION_V    = [0.230, 0.230, 0.230, 0.230, 0.230, 0.230, 0.230, 0.230, 0.230, 0.228, 0.225, 0.225, 0.225]
+DYN_LOG_LOW_GATE_BP   = [0.0, 8.0, 10.0, 30.0, 35.0, 40.0, 45.0, 50.0]
+DYN_LOG_LOW_GATE_V    = [0.0, 0.0, 1.00, 1.00, 1.00, 0.70, 0.40, 0.0]
+DYN_LOG_MID_GATE_BP   = [35.0, 40.0, 45.0, 55.0, 60.0, 70.0]
+DYN_LOG_MID_GATE_V    = [0.25, 0.45, 0.55, 0.55, 0.30, 0.0]
+DYN_LOG_HIGH_GATE_BP  = [45.0, 60.0, 80.0, 110.0, 130.0]
+DYN_LOG_HIGH_GATE_V   = [0.0, 0.20, 0.75, 1.00, 1.00]
+DYN_LOG_LAT_FACTOR_MIN = 2.00
+DYN_LOG_LAT_FACTOR_MAX = 2.12
+DYN_LOG_FRICTION_MIN = 0.220
+DYN_LOG_FRICTION_MAX = 0.235
 
 # -----------------------------
 # Force targets (disable CP/cache overrides)
@@ -117,34 +128,32 @@ LTP_ALLOW_RUNTIME_ANCHORS = os.environ.get("LTP_ALLOW_RUNTIME_ANCHORS", "0").str
 FORCE_TARGET_TUNING = True  # latAccelFactor/friction anchors are enforced
 
 # ✅ FORCE 밴드: 비대칭(하향 넓게, 상향 보수적으로)
-TARGET_FACTOR_BAND_UP = 0.06  # +6% (이쿼녹스 디젤: 고속 과민 방지)
-TARGET_FACTOR_BAND_DOWN = 0.08  # -8%: base가 너무 둔하거나 과격하게 멀어지지 않게 제한
+TARGET_FACTOR_BAND_UP = 0.00  # locked fixed torque profile
+TARGET_FACTOR_BAND_DOWN = 0.00  # locked fixed torque profile
 
-TARGET_FRICTION_BAND = 0.10
+TARGET_FRICTION_BAND = 0.00
 
 # -----------------------------
 # Adaptive FORCE band relaxation
 #  - 초기에는 앵커 근처(안전)로 강하게 묶고,
 #  - 코너 포인트가 충분히 쌓이면(force band를 점진적으로 확장) raw 추정을 반영
 # -----------------------------
-FORCE_BAND_RELAX_ENABLED = True
+FORCE_BAND_RELAX_ENABLED = False  # fixed live torque output
 
 # relax 시작/완전 해제 구간(코너+limited 코너 포인트 기준)
 FORCE_RELAX_START_MULT = 0.8  # 10~55km/h에서 필요한 보정이 더 빨리 살아나기 시작
 FORCE_RELAX_FULL_MULT = 3.0  # 3.0 * min_points_total에서 완화 완료
 
 # 완화 완료 시 밴드(앵커 대비)
-FORCE_FACTOR_BAND_UP_MAX = 0.06   # +6%: 1.90 기준 2.014 상한
-FORCE_FACTOR_BAND_DOWN_MAX = 0.12  # -12%: 1.90 기준 1.672 하한
-FORCE_FRICTION_BAND_MAX = 0.12     # ±12%: 0.255 기준 0.224~0.286
+FORCE_FACTOR_BAND_UP_MAX = 0.04  # disabled by FORCE_BAND_RELAX_ENABLED = False  # fixed live torque output
+FORCE_FACTOR_BAND_DOWN_MAX = 0.04  # disabled by FORCE_BAND_RELAX_ENABLED = False  # fixed live torque output
+FORCE_FRICTION_BAND_MAX = 0.35  # ±35%
 
 # 절대 안전 클램프(혹시 모를 발산/오입력 방지)
-# 3.0/0.120 Runtime Param 오염 또는 과도한 raw fit 결과가 publish 값으로
-# 들어오지 못하게 base liveTorqueParameters 범위를 이쿼녹스 디젤 기준으로 좁힌다.
-LAT_ACCEL_FACTOR_ABS_MIN = 1.82
-LAT_ACCEL_FACTOR_ABS_MAX = 2.02
-FRICTION_ABS_MIN = 0.245
-FRICTION_ABS_MAX = 0.288
+LAT_ACCEL_FACTOR_ABS_MIN = 2.05
+LAT_ACCEL_FACTOR_ABS_MAX = 2.05
+FRICTION_ABS_MIN = 0.230
+FRICTION_ABS_MAX = 0.230
 # ✅ 직선 쏠림 보완: offset 학습 허용(단, 직선 샘플이 실제로 들어온 프레임에서만 업데이트 게이트)
 DISABLE_LATACCEL_OFFSET_LEARNING = True
 
@@ -152,26 +161,18 @@ DISABLE_LATACCEL_OFFSET_LEARNING = True
 # Lower latAccelFactor commands more steering torque. Keep the learner stable, but
 # make the published value slightly more assertive when clip-quality persists and
 # there is no real EPS/max-limit evidence.
-LAT_ACCEL_FACTOR_AGGRESSIVE_ASSIST = True
-LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE = 0.930  # v34: stronger temporary assist for 10~35kph clip-heavy windows
-LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA = 0.14
-LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START = 0.08
-LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL = 0.30
-LAT_ACCEL_FACTOR_ASSIST_RATE_STRONG_LIMIT = 0.10
-LAT_ACCEL_FACTOR_ASSIST_MAX_KPH = 35.0  # keep this helper in the low-speed clip band only
+LAT_ACCEL_FACTOR_AGGRESSIVE_ASSIST = False  # fixed profile: never lower latAccelFactor while driving
+LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE = 0.930  # up to -7.0%
+LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA = 0.16   # absolute cap, e.g. 1.88 -> not below 1.72 by assist alone
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START = 0.16
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL = 0.36
+LAT_ACCEL_FACTOR_ASSIST_RATE_STRONG_LIMIT = 0.18
 
 # ===== Live Torque Tuning "B-plan" + Warm Start =====
 # B안: 직선 오프셋 업데이트는 '최근 구간(윈도우) 품질'로만 결정
 # 제한(limited) 코너 샘플은 저장하되, 업데이트 반영 비중을 낮춤(기본 30%)
 # ===== B-plan / Safety knobs =====
-LIMITED_CORNER_WEIGHT = 0.20
-LIMITED_CORNER_WEIGHT_MIN = 0.15
-LIMITED_CORNER_WEIGHT_MAX = 0.25
-LIMITED_SOFT_UPDATE_ENABLED = True
-LIMITED_SOFT_UPDATE_MIN_KPH = 10.0
-LIMITED_SOFT_UPDATE_MAX_KPH = 35.0
-LIMITED_SOFT_UPDATE_BLEND_LAT = 0.20
-LIMITED_SOFT_UPDATE_BLEND_FRICTION = 0.15
+LIMITED_CORNER_WEIGHT = 0.30
 
 # --- B안 Offset Update Presets ---
 # env: LTP_OFFSET_PRESET = conservative | balanced | aggressive
@@ -181,7 +182,7 @@ LIMITED_SOFT_UPDATE_BLEND_FRICTION = 0.15
 LTP_OFFSET_PRESET = os.environ.get("LTP_OFFSET_PRESET", "balanced").lower().strip()
 _LTP_OFFSET_PRESETS = {
     "conservative": {"min_ok_abs": 45, "min_ok_frac": 0.70, "min_ratio": 0.90, "step_max": 0.002, "cooldown_s": 8.0},
-    "balanced": {"min_ok_abs": 45, "min_ok_frac": 0.75, "min_ratio": 0.92, "step_max": 0.002, "cooldown_s": 8.0},  # v32: latAO 후보 과다/쿨다운 block 완화
+    "balanced": {"min_ok_abs": 35, "min_ok_frac": 0.65, "min_ratio": 0.85, "step_max": 0.003, "cooldown_s": 5.0},
     "aggressive": {"min_ok_abs": 30, "min_ok_frac": 0.60, "min_ratio": 0.80, "step_max": 0.005, "cooldown_s": 3.0},
 }
 _LTP_OFFSET_CFG = _LTP_OFFSET_PRESETS.get(LTP_OFFSET_PRESET, _LTP_OFFSET_PRESETS["balanced"])
@@ -193,12 +194,11 @@ OFFSET_UPDATE_MAX_STEP = float(_LTP_OFFSET_CFG["step_max"])
 OFFSET_UPDATE_MIN_INTERVAL_S = float(_LTP_OFFSET_CFG["cooldown_s"])
 
 # 직선 오프셋(윈도우) 아웃라이어 제거(MAD 기반)
-STRAIGHT_MAD_K = 2.8  # v32: offset window outlier 제거 강화
+STRAIGHT_MAD_K = 3.5
 STRAIGHT_MAD_EPS = 1e-3
-STRAIGHT_OFFSET_MAX_ABS_MED = 0.075  # v32: latAO 후보 자체를 더 엄격히 제한
 
 # Straight offset / soft liveValid helpers
-STRAIGHT_OK_RECENT_S = 1.5  # v32: 최근 직선성이 확실한 경우만 오프셋 후보 인정
+STRAIGHT_OK_RECENT_S = 2.5  # straight_ok가 최근에 있었는지(오프셋 업데이트 트리거)
 SOFT_LIVEVALID_MIN_S = 6.0  # 재시작/저속에서 빠르게 liveValid 진입(안전한 클램프 값 사용)
 SOFT_LIVEVALID_MIN_POINTS_LOWSPD = 250
 SOFT_LIVEVALID_MIN_POINTS_MIDSPD = 450
@@ -211,16 +211,8 @@ LTP_STATE_PATH = os.path.join(LTP_LOG_DIR, "ltp_state.json")
 LTP_STATE_PATH_PKL = os.path.join(LTP_LOG_DIR, "ltp_state.pkl")
 
 # Warm restore compatibility
-LTP_WARM_COMPAT_MAX_VERSION_GAP = 0  # major tuning change: do not restore old bucket/filter state across VERSION changes
+LTP_WARM_COMPAT_MAX_VERSION_GAP = 0  # strict reset: VERSION mismatch must not restore old live-torque state
 LTP_STATE_SAVE_MIN_DELTA_PTS = 300  # save sooner when many new points are added
-
-# VERSION 변경 시 이전 warm-state/LiveTorqueParameters/사용자 anchor Param을 확실히 버린다.
-# 기존에는 VERSION mismatch로 warm-state만 스킵하고, 종료 시 EMA merge나 Runtime Param이
-# 예전 값을 다시 주입할 수 있어서 source anchor(1.90/0.255)로 초기화되지 않는 문제가 있었다.
-LTP_VERSION_PARAM_KEY = "LiveTorqueLastAppliedVersion"  # legacy only; may be unknown in 0.8.14 Params
-LTP_VERSION_FILE_PATH = os.path.join(LTP_LOG_DIR, "ltp_version.txt")
-LTP_CLEAR_RUNTIME_ANCHOR_PARAMS_ON_VERSION_CHANGE = True
-LTP_RUNTIME_ANCHOR_PARAM_KEYS = ("TorqueMaxLatAccel", "TorqueFriction")
 
 # Tunables
 # -----------------------------
@@ -233,8 +225,8 @@ FIT_POINTS_TOTAL_QLOG = 600
 
 # Velocity thresholds (m/s). 10 km/h ≈ 2.78 m/s
 MIN_VEL_MS = 11.11  # 40 km/h (직선/오프셋 임계 상향: 직선 학습 비중↓) (직선/기본 임계 유지)
-MIN_VEL_MS_BIAS = 8.33  # 30 km/h: v32 offset 후보는 저속 노이즈를 배제
-MIN_VEL_MS_STRAIGHT = 5.56  # 20 km/h (직선 포인트 수집 최소 속도 - 저속에서도 샘플 수집)
+MIN_VEL_MS_BIAS = 2.78  # 10 km/h (직선 bias/오프셋 업데이트 최소 속도 - 저속 학습 조기 진입)
+MIN_VEL_MS_STRAIGHT = 2.78  # 10 km/h (직선 포인트 수집 최소 속도 - 저속에서도 샘플 수집)
 
 # 직선 샘플링에서 rate-limit 차단을 완화(오검출/경미한 제한은 허용)
 STRAIGHT_RATE_LIM_ALLOW_DELTA = 0.02  # |desired-applied|가 이 값 이하이면 rate-limit이어도 직선 OK
@@ -246,35 +238,51 @@ MIDSPD_KPH_IN_LO = 25.0
 MIDSPD_KPH_IN_HI = 30.0
 MIDSPD_KPH_OUT_LO = 60.0
 MIDSPD_KPH_OUT_HI = 70.0
-MIDSPD_DELTA_UP_GAIN = 0.24  # 이쿼녹스 디젤: 중속 반응 보강, 과한 튐 방지
-MIDSPD_DELTA_DOWN_GAIN = 0.14
+MIDSPD_DELTA_UP_GAIN = 0.00   # SAFETY: do not increase steering delta in mid-speed curves
+MIDSPD_DELTA_DOWN_GAIN = 0.00
 
-MIN_VEL_CURVE_MS = 10.0 / 3.6  # 10km/h, aligned with steering activation
-FREEZE_UPDATE_MS = 10.0 / 3.6  # 10km/h 이상 저속 코너에서는 업데이트 동결 해제
+MIN_VEL_CURVE_MS = 2.78  # ✅ 10 km/h (코너 전용 임계)
+FREEZE_UPDATE_MS = 2.78  # ✅ 10 km/h (이하에서는 기본적으로 동결하되, curve_active면 해제)
 PARK_VEL_MS = 0.30  # 정지/파킹 판정
 FREEZE_AFTER_STOP_S = 2.0  # 정지 후 추가 홀드
 
 # Sample decimation (버킷 폭증 억제)
-CORNER_KEEP_PROB = 0.18  # ✅ 코너 포인트 채택 확률(12% → 18%)
-STRAIGHT_KEEP_PROB = 0.07  # ✅ 직선 포인트 채택 확률(2% → 5%)
+CORNER_KEEP_PROB = 0.18  # 기본 코너 포인트 채택 확률
+STRAIGHT_KEEP_PROB = 0.04  # 기본 직선 포인트 채택 확률: 고속 직선 과학습 방지
 
-# 이쿼녹스 디젤 저속 코너 학습 보정
-# - 10~20km/h 코너 데이터는 수집하되 영향력을 낮춰 저속 와리가리/유턴 노이즈 과반영을 방지
-# - 20~30km/h는 거의 정상 반영, 30km/h 이상은 기존 반영
-LOWSPD_CORNER_KPH = 20.0
-MIDLOW_CORNER_KPH = 30.0
-LOWSPD_CORNER_KEEP_SCALE = 0.50
-LOWSPD_CORNER_TIMES_SCALE = 0.55
-MIDLOW_CORNER_KEEP_SCALE = 0.75
-MIDLOW_CORNER_TIMES_SCALE = 0.80
+# --- Context-aware learning policy ---
+# 목적:
+#  - 고속도로 직선만 오래 주행할 때는 직선 샘플을 거의 학습하지 않음
+#  - 20~60km/h 완만한 코너/S자 반복은 좋은 코너 샘플로 보고 학습 비율을 높임
+HIGHWAY_STRAIGHT_MIN_KPH = 80.0
+HIGHWAY_STRAIGHT_YAW_MAX = 0.015
+HIGHWAY_STRAIGHT_LATACC_MAX = 0.06
+HIGHWAY_STRAIGHT_STEER_MAX = 0.05
+HIGHWAY_STRAIGHT_PROB_MULT = 0.10  # 완전 차단 대신 10%만 남겨 고속 직진 안정 샘플은 최소 유지
+FAST_STRAIGHT_MIN_KPH = 60.0
+FAST_STRAIGHT_PROB_MULT = 0.45
+
+MID_CURVE_MIN_KPH = 20.0
+MID_CURVE_MAX_KPH = 60.0
+MID_CURVE_YAW_MIN = 0.035
+MID_CURVE_YAW_MAX = 0.18
+MID_CURVE_LATACC_MIN = 0.25
+MID_CURVE_LATACC_MAX = 2.20
+MID_CURVE_STEER_MIN = 0.08
+MID_CURVE_KEEP_MULT = 1.70  # 0.18 -> 약 0.31
+S_CURVE_KEEP_MULT = 1.25    # S자 반복이면 약 0.39까지
+S_CURVE_LOOKBACK_S = 8.0
+S_CURVE_MIN_SIGN_GAP_S = 0.8
+MID_CURVE_TIMES_BONUS = 1
+S_CURVE_TIMES_BONUS = 1
 
 # Point replication cap (times)
 MAX_POINT_TIMES = 8
 
 # --- 고조향/리밋 샘플 수집 옵션 ---
-RATE_LIMITED_MIX_ENABLED = False  # limited 샘플은 normal bucket에 섞지 않고 limited bucket에서 저가중치로만 반영
-RATE_LIMITED_MIX_KEEP_PROB_MULT = 0.08
-RATE_LIMITED_MIX_TIMES_MULT = 0.25
+RATE_LIMITED_MIX_ENABLED = False
+RATE_LIMITED_MIX_KEEP_PROB_MULT = 0.20
+RATE_LIMITED_MIX_TIMES_MULT = 0.50
 RATE_LIMITED_MIX_ABS_STEER_MIN = 0.70
 RATE_LIMITED_MIX_ABS_STEER_MAX = 0.98
 
@@ -303,11 +311,11 @@ STRAIGHT_BUCKET_BOUNDS = [(-STRAIGHT_STEER_MAX, STRAIGHT_STEER_MAX)]
 MIN_BUCKET_POINTS_STRAIGHT = np.array([200])
 
 # 직선 판별 파라미터
-STRAIGHT_YAW_RATE_MAX = 0.030  # rad/s, v32: offset 후보 직진성 강화
-STRAIGHT_LATACC_MAX = 0.10  # m/s^2, v32: latAO 후보 과다 생성 억제
+STRAIGHT_YAW_RATE_MAX = 0.04  # rad/s (≈2.9°/s)
+STRAIGHT_LATACC_MAX = 0.15  # ✅ m/s^2
 
 # 직선 오프셋(Offset) 학습용: '거의 0 조향'만 허용
-STRAIGHT_STEER_MAX_FOR_OFFSET = 0.060  # normalized steer, v32: 거의 0조향일 때만 offset 후보
+STRAIGHT_STEER_MAX_FOR_OFFSET = 0.09  # normalized steer
 STRAIGHT_SAMPLE_RECENT_S = 1.0
 
 # warm-up
@@ -316,8 +324,8 @@ EMA_ALPHA = 0.1
 
 # ✅ 비대칭 적응(곡선 즉응성 향상) - (이번 적용에서 "감소 빠르게 / 증가 느리게"로 변경)
 CURVE_YAWRATE_MIN = 0.05  # 곡률 감지 최소 요레이트(rad/s)
-CURVE_UP_FAST_MULT = 0.40  # (기존 변수는 유지하되, update 로직을 바꿔 실사용 의미가 달라짐)
-CURVE_DOWN_SLOW_MULT = 1.5
+CURVE_UP_FAST_MULT = 1.00  # SAFETY: no fast latAF decrease in curves
+CURVE_DOWN_SLOW_MULT = 1.00
 STRAIGHT_WARMUP_MAX_W = 0.25
 
 # latActive gate / 직선 오프셋 업데이트 게이트
@@ -332,8 +340,8 @@ MIN_ENGAGE_BUFFER = 2  # secs
 # Controller diagnostics (for steer limit flags)
 # -----------------------------
 STEER_MAX_DIAG = 300
-STEER_DELTA_UP_DIAG = 10
-STEER_DELTA_DOWN_DIAG = 17
+STEER_DELTA_UP_DIAG = 10  # SAFETY: match lower controller delta-up target; 14 was too abrupt
+STEER_DELTA_DOWN_DIAG = 14  # SAFETY: unwind still faster than up, but less snappy
 STEER_SAT_THRESHOLD = 0.98
 STEER_CLIP_EPS = 0.05  # ignore small desired/applied gaps that are normal actuator lag
 STEER_CLIP_MIN_DES = 0.18  # ignore 'clip' inference when desired is small
@@ -349,9 +357,9 @@ QUALITY_WIN_S = 10.0
 QUALITY_MIN_SAMPLES = 10
 
 QUALITY_CLIP_FREEZE_RATIO = 0.35  # legacy fallback; hysteresis thresholds below are used
-QUALITY_RATE_FREEZE_RATIO = 0.30  # rate_limited(약+강) 비율
-QUALITY_RATE_STRONG_FREEZE_RATIO = 0.22  # strong rate_limited 비율
-QUALITY_STEER_PRESSED_FREEZE_RATIO = 0.30  # steeringPressed 비율
+QUALITY_RATE_FREEZE_RATIO = 0.25  # rate_limited(약+강) 비율
+QUALITY_RATE_STRONG_FREEZE_RATIO = 0.18  # strong rate_limited 비율
+QUALITY_STEER_PRESSED_FREEZE_RATIO = 0.55  # steeringPressed 비율
 # Quality freeze should react to real sustained under-actuation, not every mild steer lag.
 QUALITY_CLIP_MIN_DES = 0.25
 QUALITY_CLIP_MIN_DELTA_ERR = 0.18
@@ -359,26 +367,25 @@ QUALITY_CLIP_MIN_DELTA_ERR = 0.18
 QUALITY_LOW_SPEED_KPH = 45.0
 # Clip enter/exit (high speed vs low speed)
 QUALITY_CLIP_FREEZE_ENTER_HIGH = 0.60
-QUALITY_CLIP_FREEZE_EXIT_HIGH  = 0.38
-QUALITY_CLIP_FREEZE_ENTER_LOW  = 0.88    # 저속 코너: clip이 거의 지속될 때만 freeze
-QUALITY_CLIP_FREEZE_EXIT_LOW   = 0.68    # hysteresis 폭 축소: 저속 freeze가 더 빨리 해제됨
+QUALITY_CLIP_FREEZE_EXIT_HIGH  = 0.40
+QUALITY_CLIP_FREEZE_ENTER_LOW  = 0.80    # 저속 코너에서 clip이 조금 있다고 바로 학습을 얼리지 않게
+QUALITY_CLIP_FREEZE_EXIT_LOW   = 0.55
 # Both(clip+pressed) hysteresis (low-speed only)
-QUALITY_BOTH_FREEZE_ENTER_LOW  = 0.33
-QUALITY_BOTH_FREEZE_EXIT_LOW   = 0.25
+QUALITY_BOTH_FREEZE_ENTER_LOW  = 0.28
+QUALITY_BOTH_FREEZE_EXIT_LOW   = 0.20
 # Conditional shorter hold when just over threshold (clip/both only)
-QUALITY_NEAR_THRESH_MARGIN = 0.06
-QUALITY_FREEZE_HOLD_S_SHORT = 0.30
+QUALITY_NEAR_THRESH_MARGIN = 0.03
+QUALITY_FREEZE_HOLD_S_SHORT = 0.75
 
 
 # steeringPressed 디바운스 (스파이크 민감도 완화)
-STEER_PRESSED_ON_FRAMES = 2  # ≈20ms @100Hz
-STEER_PRESSED_OFF_FRAMES = 7  # ≈70ms @100Hz
-STEER_PRESSED_DRIVER_TORQUE_MIN = 0.80
+STEER_PRESSED_ON_FRAMES = 3  # ≈30ms @100Hz
+STEER_PRESSED_OFF_FRAMES = 5  # ≈50ms @100Hz
 
 # steeringPressed + steer_clip 동시 발생 비율 (체감 악화 1순위 케이스)
 QUALITY_BOTH_FREEZE_RATIO = 0.18
 
-QUALITY_FREEZE_HOLD_S = 0.50  # 트리거 시 최소 홀드(저속 freeze 과유지 완화)
+QUALITY_FREEZE_HOLD_S = 0.90  # 트리거 시 최소 홀드
 
 # rate_limited 구간: 과도/준정상 분기 + latAccelFactor 하향 금지
 RATE_LIM_TRANSIENT_DES_DELTA = 0.012  # desired 변화량이 이 이상이면 과도로 간주(정규화 steer)
@@ -387,11 +394,65 @@ RATE_LIM_TRANSIENT_HOLD_S = 0.6  # 과도 판단을 잠깐 유지(초)
 RATE_LIM_STEADY_BLEND_W = 0.20  # 준정상 rate-limit 구간에서 업데이트 반영 비중(0~1)
 RATE_LIM_STEADY_FRICTION_BLEND_W = 0.15  # 준정상 rate-limit 구간에서 friction 반영 비중(0~1)
 
+# Log-based gentle steering optimization (2026-04-28).
+# The goal is to reduce false freezes and under-assist at low/mid speed without
+# treating every short driver touch or transient rate limit as poor learn data.
+LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE = 0.930
+LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA = 0.16
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START = 0.14
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL = 0.42
+LAT_ACCEL_FACTOR_ASSIST_RATE_STRONG_LIMIT = 0.18
+LAT_ACCEL_FACTOR_ASSIST_LOW_SPEED_KPH = 30.0
+LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE_LOW_SPEED = 0.900
+LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA_LOW_SPEED = 0.20
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START_LOW_SPEED = 0.10
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL_LOW_SPEED = 0.34
+LAT_ACCEL_FACTOR_ASSIST_RATE_STRONG_LIMIT_LOW_SPEED = 0.30
+LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_ENABLED = False
+LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_MIN_KPH = 32.0
+LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_MAX_KPH = 120.0
+LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_STEER_MIN = 0.48
+LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_STEER_EXIT = 0.42
+LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_RATE_STRONG_LIMIT = 0.32
+LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_RATE_STRONG_HOLD_LIMIT = 0.35
+LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_HOLD_S = 1.0
+LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE_BIG_CORNER = 0.890
+LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA_BIG_CORNER = 0.24
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START_BIG_CORNER = 0.07
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL_BIG_CORNER = 0.30
+LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_ENABLED = False
+LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_MIN_KPH = 20.0
+LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_MAX_KPH = 65.0
+LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_STEER_MIN = 0.42
+LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_STEER_EXIT = 0.36
+LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_DRIVER_TORQUE_MAX = 1.20
+LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_RATE_STRONG_LIMIT = 0.35
+LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_RATE_STRONG_HOLD_LIMIT = 0.38
+LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_HOLD_S = 1.30
+LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE_WIDE_CORNER = 0.875
+LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA_WIDE_CORNER = 0.30
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START_WIDE_CORNER = 0.05
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL_WIDE_CORNER = 0.26
 
-# Applied profile: Equinox 2020 Diesel
-# - CarControllerParams matched: STEER_MAX=300, STEER_DELTA_UP=10, STEER_DELTA_DOWN=17, MIN_STEER_SPEED=10km/h
-# - Corner learning starts at 10km/h; straight/offset learning remains >=20km/h
-VERSION = 33  # reset unsafe low-latAF warm state; restrict assist to low-speed only
+MIDSPD_DELTA_UP_GAIN = 0.00
+MIDSPD_DELTA_DOWN_GAIN = 0.00
+
+QUALITY_RATE_FREEZE_RATIO = 0.33
+QUALITY_RATE_STRONG_FREEZE_RATIO = 0.24
+QUALITY_CLIP_FREEZE_ENTER_HIGH = 0.64
+QUALITY_CLIP_FREEZE_EXIT_HIGH = 0.40
+QUALITY_CLIP_FREEZE_ENTER_LOW = 0.88
+QUALITY_CLIP_FREEZE_EXIT_LOW = 0.62
+QUALITY_FREEZE_HOLD_S_SHORT = 0.45
+STEER_PRESSED_ON_FRAMES = 2
+STEER_PRESSED_OFF_FRAMES = 7
+STEER_PRESSED_DRIVER_TORQUE_MIN = 1.20
+QUALITY_STEER_PRESSED_FREEZE_RATIO_LOW_SPEED = 0.55
+QUALITY_STEER_PRESSED_LOW_SPEED_KPH = 30.0
+QUALITY_STEER_PRESSED_EXTEND_GUARD_KPH = 30.0
+QUALITY_FREEZE_HOLD_S = 0.65
+
+VERSION = 34  # fixed torque profile; clear unsafe live-tuning warm state
 
 
 def slope2rot(slope):
@@ -780,11 +841,20 @@ class TorqueEstimator:
         self.last_is_frozen = False
         self.stop_freeze_until = 0.0
 
-        self._straight_bias_win_s = 8.0  # v32: 오래된 직선 샘플이 cooldown block 후보를 계속 만들지 않게 단축
+        self._straight_bias_win_s = 10.0
         self._straight_bias = deque()
         self.last_straight_sampled = False
         self.last_straight_w = 0.0
         self._last_straight_sampled_t = -1e9
+
+        # Context-aware LTP learning diagnostics/state
+        self._ltp_highway_straight = False
+        self._ltp_mid_curve_good = False
+        self._ltp_s_curve_like = False
+        self._ltp_corner_keep_prob_last = 0.0
+        self._ltp_corner_times_last = 1
+        self._ltp_straight_prob_last = 0.0
+        self._s_curve_sign_hist = deque(maxlen=48)
 
         self.last_lat_active = False
         self.last_steer_desired = None
@@ -858,6 +928,10 @@ class TorqueEstimator:
         self._latAF_assist_scale = 1.0
         self._latAF_assist_delta = 0.0
         self._latAF_assist_clip_ratio = 0.0
+        self._latAF_assist_big_corner = False
+        self._latAF_assist_big_corner_hold_until = 0.0
+        self._latAF_assist_wide_corner = False
+        self._latAF_assist_wide_corner_hold_until = 0.0
 
         initial_params = {
             'latAccelFactor': self.offline_latAccelFactor,
@@ -889,7 +963,9 @@ class TorqueEstimator:
                 try:
                     cache_ltp = log.Event.from_bytes(torque_cache).liveTorqueParameters
                     cache_CP = car.CarParams.from_bytes(params_cache)
-                    if self.get_restore_key(cache_CP, cache_ltp.version) == self.get_restore_key(CP, VERSION):
+                    cache_key = self.get_restore_key(cache_CP, cache_ltp.version)
+                    cur_key = self.get_restore_key(CP, VERSION)
+                    if cache_key == cur_key:
                         if cache_ltp.liveValid:
                             if FORCE_TARGET_TUNING:
                                 initial_params = {
@@ -922,17 +998,20 @@ class TorqueEstimator:
                                     self.corner_points.add_point(x, y, times=1)
 
                         cloudlog.info("restored torque params from EMA cache (split corner/straight)")
+                    else:
+                        try:
+                            params.remove("LiveTorqueCarParams")
+                            params.remove("LiveTorqueParameters")
+                            cloudlog.warning(f"LiveTorque: ignored stale Params cache cache_key={cache_key} current_key={cur_key}")
+                        except Exception:
+                            cloudlog.exception("LiveTorque: failed to remove stale Params cache after key mismatch")
                 except Exception:
                     cloudlog.exception("failed to restore cached torque params")
                     try:
-                        # Do not call params.remove(); unavailable in some 0.8.14 forks.
-                        for _k in ("LiveTorqueCarParams", "LiveTorqueParameters"):
-                            for _base in ("/data/params/d", "/data/params"):
-                                _p = os.path.join(_base, _k)
-                                if os.path.exists(_p):
-                                    os.remove(_p)
+                        params.remove("LiveTorqueCarParams")
+                        params.remove("LiveTorqueParameters")
                     except Exception as e:
-                        cloudlog.warning(f"torque cache file remove error: {e}")
+                        cloudlog.warning(f"torque cache remove error: {e}")
 
         self.filtered_params = {
             'latAccelFactor': FirstOrderFilter(initial_params['latAccelFactor'], self.decay, DT_MDL),
@@ -963,22 +1042,122 @@ class TorqueEstimator:
         return float(clip(w, 0.0, 1.0))
 
     def straight_weight(self, vego: float, yaw_rate: float, t: float) -> float:
+        """
+        직선 샘플은 코너 토크 학습을 보조하는 용도다.
+        고속도로 직선만 오래 달릴 때 직선 버킷이 과도하게 쌓이지 않도록
+        속도가 높고 yaw/latAcc가 작은 구간은 매우 낮은 가중치만 준다.
+        """
         if yaw_rate is None or abs(yaw_rate) > STRAIGHT_YAW_RATE_MAX:
             return 0.0
         if vego is None:
             return 0.0
 
-        if vego < 20.0:
-            w = 0.05
-        elif vego < 33.0:
-            w = 0.10
-        else:
-            w = 0.15
+        try:
+            v_kph = float(vego) * 3.6
+        except Exception:
+            return 0.0
 
-        if (self.start_time is not None) and (t - self.start_time < WARMUP_SECS):
-            w *= 1.5
+        if v_kph < 20.0:
+            w = 0.04
+        elif v_kph < 60.0:
+            w = 0.08
+        elif v_kph < 80.0:
+            w = 0.04
+        else:
+            w = 0.015
+
+        # 워밍업 중에도 고속 직선은 과학습하지 않도록 증폭을 제한한다.
+        if (self.start_time is not None) and (t - self.start_time < WARMUP_SECS) and v_kph < 80.0:
+            w *= 1.35
 
         return float(max(0.0, min(STRAIGHT_WARMUP_MAX_W, w)))
+
+    def _is_highway_straight(self, v_kph: float, yaw_rate: float, lateral_acc: float, steer: float, steer_app=None) -> bool:
+        try:
+            app_ok = True
+            if steer_app is not None and np.isfinite(float(steer_app)):
+                app_ok = abs(float(steer_app)) <= HIGHWAY_STRAIGHT_STEER_MAX
+            return bool(
+                float(v_kph) >= HIGHWAY_STRAIGHT_MIN_KPH and
+                abs(float(yaw_rate)) <= HIGHWAY_STRAIGHT_YAW_MAX and
+                abs(float(lateral_acc)) <= HIGHWAY_STRAIGHT_LATACC_MAX and
+                abs(float(steer)) <= HIGHWAY_STRAIGHT_STEER_MAX and
+                app_ok
+            )
+        except Exception:
+            return False
+
+    def _mid_curve_good(self, v_kph: float, yaw_rate: float, lateral_acc: float, steer: float) -> bool:
+        try:
+            return bool(
+                MID_CURVE_MIN_KPH <= float(v_kph) <= MID_CURVE_MAX_KPH and
+                MID_CURVE_YAW_MIN <= abs(float(yaw_rate)) <= MID_CURVE_YAW_MAX and
+                MID_CURVE_LATACC_MIN <= abs(float(lateral_acc)) <= MID_CURVE_LATACC_MAX and
+                abs(float(steer)) >= MID_CURVE_STEER_MIN
+            )
+        except Exception:
+            return False
+
+    def _update_s_curve_learning_state(self, t: float, yaw_rate: float, mid_curve_good: bool) -> bool:
+        """최근 8초 안에 좌/우 완만 코너가 모두 있으면 S자 반복으로 판단한다."""
+        try:
+            now = float(t)
+            # 오래된 sign 기록 제거
+            while len(self._s_curve_sign_hist) > 0 and (now - float(self._s_curve_sign_hist[0][0])) > S_CURVE_LOOKBACK_S:
+                self._s_curve_sign_hist.popleft()
+
+            if bool(mid_curve_good):
+                sign = 1 if float(yaw_rate) > 0.0 else -1
+                if sign != 0:
+                    if len(self._s_curve_sign_hist) == 0:
+                        self._s_curve_sign_hist.append((now, sign))
+                    else:
+                        last_t, last_sign = self._s_curve_sign_hist[-1]
+                        # 같은 방향은 너무 자주 누적하지 않고, 방향 전환은 바로 기록한다.
+                        if sign != int(last_sign) or (now - float(last_t)) >= S_CURVE_MIN_SIGN_GAP_S:
+                            self._s_curve_sign_hist.append((now, sign))
+
+            signs = [int(sg) for tt, sg in self._s_curve_sign_hist if (now - float(tt)) <= S_CURVE_LOOKBACK_S]
+            return bool((1 in signs) and (-1 in signs) and len(signs) >= 2)
+        except Exception:
+            return False
+
+    def _apply_context_learning_policy(self, keep_prob: float, times: int, v_kph: float, yaw_rate: float,
+                                       lateral_acc: float, steer: float, is_limited: bool) -> tuple:
+        """
+        clean한 20~60km/h 완만 코너/S자 반복은 코너 샘플 비중을 올리고,
+        제한/clip/rate-limit 구간은 limited bucket에서만 낮은 비중으로 반영되도록 기본 keep_prob만 조정한다.
+        """
+        try:
+            mid_good = self._mid_curve_good(v_kph, yaw_rate, lateral_acc, steer)
+            s_like = self._update_s_curve_learning_state(float(self.last_time or 0.0), yaw_rate, mid_good)
+
+            self._ltp_mid_curve_good = bool(mid_good)
+            self._ltp_s_curve_like = bool(s_like and mid_good)
+
+            kp = float(keep_prob)
+            tm = int(times)
+
+            if mid_good:
+                kp *= MID_CURVE_KEEP_MULT
+                if not is_limited:
+                    tm += MID_CURVE_TIMES_BONUS
+
+            if mid_good and s_like:
+                kp *= S_CURVE_KEEP_MULT
+                if not is_limited:
+                    tm += S_CURVE_TIMES_BONUS
+
+            # limited 샘플은 뒤에서 keep_prob_l로 다시 낮추므로 여기서는 과도하게 키우지 않음.
+            max_kp = 0.92 if not is_limited else 0.70
+            kp = float(np.clip(kp, 0.02, max_kp))
+            tm = int(np.clip(tm, 1, MAX_POINT_TIMES))
+
+            self._ltp_corner_keep_prob_last = float(kp)
+            self._ltp_corner_times_last = int(tm)
+            return kp, tm
+        except Exception:
+            return float(keep_prob), int(times)
 
     def _get_lat_active(self, t: float) -> bool:
         try:
@@ -1088,6 +1267,35 @@ class TorqueEstimator:
         which = CP.lateralTuning.which()
         return (CP.carFingerprint, which, version)
 
+    def _clear_live_torque_persistent_cache(self, reason: str = "version_mismatch"):
+        """
+        VERSION을 올렸을 때 예전 warm-state/Params 캐시가 다시 복원되지 않도록
+        디스크 warm-state와 Params 캐시를 같이 삭제한다.
+
+        기존 버그 원인:
+        - ltp_state.json의 ltpVersion 차이가 LTP_WARM_COMPAT_MAX_VERSION_GAP 이하이면
+          VERSION이 달라도 필터/버킷을 복원했다.
+        - 그래서 VERSION=25로 올려도 이전 학습값이 살아났다.
+        """
+        try:
+            for path in (str(LTP_STATE_PATH), str(LTP_STATE_PATH_PKL)):
+                try:
+                    if path and os.path.exists(path):
+                        os.remove(path)
+                        cloudlog.warning(f"LiveTorque: removed stale warm state {path} reason={reason}")
+                except Exception:
+                    cloudlog.exception(f"LiveTorque: failed to remove stale warm state {path}")
+
+            try:
+                params = Params()
+                params.remove("LiveTorqueCarParams")
+                params.remove("LiveTorqueParameters")
+                cloudlog.warning(f"LiveTorque: removed stale Params cache reason={reason}")
+            except Exception:
+                cloudlog.exception("LiveTorque: failed to remove stale Params cache")
+        except Exception:
+            cloudlog.exception("LiveTorque: clear persistent cache failed")
+
     def _try_restore_warm_state(self, CP):
         try:
             path_json = str(LTP_STATE_PATH)
@@ -1121,19 +1329,22 @@ class TorqueEstimator:
 
             ltp_ver = st.get("ltpVersion", None)
             restore_buckets = True
-            if ltp_ver is not None:
-                try:
-                    gap = abs(int(ltp_ver) - int(self.version))
-                    if gap > int(LTP_WARM_COMPAT_MAX_VERSION_GAP):
-                        # VERSION이 바뀐 경우에는 이전 anchor/filter/bucket을 모두 버린다.
-                        # 기존 filtered 값만 복원해도 새 anchor(예: 1.90/0.255)를 오래 덮어써서
-                        # 첫 주행 튜닝이 꼬일 수 있다.
-                        cloudlog.warning(
-                            f"LiveTorque: warm state skipped due to VERSION mismatch (saved={ltp_ver}, current={self.version})"
-                        )
-                        return False, {}, self.decay
-                except Exception:
+            # VERSION을 올린 경우에는 예전 학습값/버킷/필터를 절대 복원하지 않는다.
+            # 기존 로직은 버전 차이가 3 이하이면 filtered-only 또는 bucket restore를 허용해서
+            # VERSION=25로 올려도 초기화가 되지 않는 문제가 있었다.
+            try:
+                if ltp_ver is None or int(ltp_ver) != int(self.version):
+                    self._clear_live_torque_persistent_cache(
+                        f"warm_state_ltp_version_mismatch:{ltp_ver}->{self.version}"
+                    )
+                    cloudlog.warning(
+                        f"LiveTorque: warm state ignored due to VERSION mismatch "
+                        f"ltpVersion={ltp_ver} current={self.version}"
+                    )
                     return False, {}, self.decay
+            except Exception:
+                self._clear_live_torque_persistent_cache("warm_state_ltp_version_invalid")
+                return False, {}, self.decay
 
             filt = st.get("filtered", {}) or {}
             decay = float(filt.get("decay", self.decay))
@@ -1426,9 +1637,8 @@ class TorqueEstimator:
         n1, sx1, sy1, sxx1, syy1, sxy1 = self.corner_points.aggregate_moments()
         n2, sx2, sy2, sxx2, syy2, sxy2 = self.limited_corner_points.aggregate_moments()
 
-        # limited corner는 버리지 않되, 정상 코너와 같은 비중으로 학습시키지 않는다.
-        # 2026-05-11 로그 기준 10~30kph clip/rate가 높으므로 limited 샘플은 0.15~0.25
-        # 저가중치로만 기울기 추정에 반영한다.
+        # ✅ (4) limited 반영 조건부 강화:
+        # clip/max/rate_limited 상황이면 limited_corner 반영 비중을 올려 "한계 근처" 기울기 추정이 너무 약해지지 않게 함
         w = float(LIMITED_CORNER_WEIGHT)
         try:
             limited_now = (bool(self.last_steer_clip) or bool(self.last_max_limited) or
@@ -1437,17 +1647,14 @@ class TorqueEstimator:
                         self.last_steer_desired is not None and np.isfinite(self.last_steer_desired)) else 0.0
 
             if limited_now:
-                if bool(self.last_rate_limited_strong):
-                    w = max(float(LIMITED_CORNER_WEIGHT_MIN), min(w, 0.18))
-                elif bool(self.last_steer_clip) or bool(self.last_max_limited):
-                    w = max(w, 0.22)
-                elif bool(self.last_rate_limited):
-                    w = max(w, 0.20)
+                # 한계 근처 데이터는 기울기 추정에 더 큰 비중 부여(특히 고조향)
+                w = max(w, 0.70)
                 if abs_s >= 0.70:
-                    w = max(w, 0.24)
-            w = float(np.clip(w, float(LIMITED_CORNER_WEIGHT_MIN), float(LIMITED_CORNER_WEIGHT_MAX)))
+                    w = max(w, 0.80)
+                if bool(self.last_steer_clip) or bool(self.last_max_limited):
+                    w = max(w, 0.85)
         except Exception:
-            w = float(LIMITED_CORNER_WEIGHT)
+            pass
 
         n = n1 + (w * n2)
         sx = sx1 + (w * sx2)
@@ -1473,8 +1680,6 @@ class TorqueEstimator:
             return float('nan'), ok_n, total, ratio
 
         med = float(np.median(vals))
-        if abs(med) > float(STRAIGHT_OFFSET_MAX_ABS_MED):
-            return float('nan'), ok_n, total, ratio
         abs_dev = [abs(v - med) for v in vals]
         mad = float(np.median(abs_dev)) if len(abs_dev) else 0.0
 
@@ -1486,8 +1691,6 @@ class TorqueEstimator:
 
         try:
             off = float(np.median(vals))
-            if abs(off) > float(STRAIGHT_OFFSET_MAX_ABS_MED):
-                off = float('nan')
         except Exception:
             off = float('nan')
         return off, ok_n, total, ratio
@@ -1504,7 +1707,7 @@ class TorqueEstimator:
 
         yaw = abs(self.last_yaw_rate) if self.last_yaw_rate is not None else 0.0
         v = self.last_vego if self.last_vego is not None else 0.0
-        curve_active = (v >= MIN_VEL_CURVE_MS) and (yaw > CURVE_YAWRATE_MIN)
+        curve_active = (v > MIN_VEL_CURVE_MS) and (yaw > CURVE_YAWRATE_MIN)
 
         for param, value in params.items():
             if not _finite(value):
@@ -1521,14 +1724,10 @@ class TorqueEstimator:
                 except Exception:
                     pass
 
-            # ✅ (2) latAccelFactor 감소를 더 빠르게 / 증가는 느리게 (언더스티어 완화)
-            if param == 'latAccelFactor' and curve_active:
-                if value < cur:
-                    # 감소는 빠르게(더 잘 도는 쪽)
-                    decay_use = max(MIN_FILTER_DECAY * 0.40, base_decay * 0.40)
-                elif value > cur:
-                    # 증가는 느리게(과대추정 방지)
-                    decay_use = min(MAX_FILTER_DECAY, base_decay * 1.5)
+            # SAFETY: do not dynamically lower latAccelFactor faster in curves.
+            # The previous curve-only fast decrease increased steering assist during
+            # clipping/rate-limit windows and caused noticeable left-right hunting,
+            # especially at highway speeds. Keep the normal filter decay instead.
 
             self.filtered_params[param].update_alpha(decay_use)
             self.filtered_params[param].update(value)
@@ -1600,6 +1799,8 @@ class TorqueEstimator:
         self._latAF_assist_scale = 1.0
         self._latAF_assist_delta = 0.0
         self._latAF_assist_clip_ratio = 0.0
+        self._latAF_assist_big_corner = False
+        self._latAF_assist_wide_corner = False
 
         try:
             if not bool(LAT_ACCEL_FACTOR_AGGRESSIVE_ASSIST):
@@ -1619,8 +1820,21 @@ class TorqueEstimator:
             v_ego = float(self.last_vego) if (self.last_vego is not None and np.isfinite(self.last_vego)) else 0.0
             if (not bool(getattr(self, "last_lat_active", False))) or (v_ego < float(MIN_VEL_CURVE_MS)):
                 return base
-            if (v_ego * 3.6) >= float(LAT_ACCEL_FACTOR_ASSIST_MAX_KPH):
-                return base
+            v_kph_assist = float(v_ego * 3.6)
+            low_speed_assist = bool(
+                (v_kph_assist > 0.0) and
+                (v_kph_assist <= float(LAT_ACCEL_FACTOR_ASSIST_LOW_SPEED_KPH))
+            )
+            steer_des_abs = 0.0
+            try:
+                steer_des_abs = abs(float(getattr(self, "last_steer_desired", 0.0) or 0.0))
+            except Exception:
+                steer_des_abs = 0.0
+            steer_app_abs = 0.0
+            try:
+                steer_app_abs = abs(float(getattr(self, "last_steer_applied", 0.0) or 0.0))
+            except Exception:
+                steer_app_abs = 0.0
 
             eps_or_max_guard = bool(
                 getattr(self, "last_max_limited", False) or
@@ -1628,23 +1842,122 @@ class TorqueEstimator:
                 getattr(self, "_lc_eps_damp", False)
             )
             rate_strong_ratio = float(getattr(self, "_qual_rate_strong_ratio", 0.0) or 0.0)
+            now = time.monotonic()
+            steer_abs = max(steer_des_abs, steer_app_abs)
+            try:
+                driver_torque_abs = abs(float(getattr(self, "_last_driver_torque", 0.0) or 0.0))
+            except Exception:
+                driver_torque_abs = 0.0
+            wide_corner_safe = bool(
+                bool(LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_ENABLED) and
+                (v_kph_assist >= float(LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_MIN_KPH)) and
+                (v_kph_assist <= float(LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_MAX_KPH)) and
+                (not eps_or_max_guard) and
+                (driver_torque_abs < float(LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_DRIVER_TORQUE_MAX))
+            )
+            wide_corner_raw = bool(
+                wide_corner_safe and
+                (steer_abs >= float(LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_STEER_MIN)) and
+                (rate_strong_ratio < float(LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_RATE_STRONG_LIMIT)) and
+                (
+                    (clip_ratio >= float(LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START_WIDE_CORNER)) or
+                    bool(getattr(self, "last_steer_clip", False)) or
+                    bool(getattr(self, "last_rate_limited_strong", False))
+                )
+            )
+            if wide_corner_raw:
+                self._latAF_assist_wide_corner_hold_until = float(now + float(LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_HOLD_S))
+            wide_corner_held = bool(
+                wide_corner_safe and
+                (now <= float(getattr(self, "_latAF_assist_wide_corner_hold_until", 0.0) or 0.0)) and
+                (steer_abs >= float(LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_STEER_EXIT)) and
+                (rate_strong_ratio < float(LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_RATE_STRONG_HOLD_LIMIT))
+            )
+            wide_corner_candidate = bool(
+                wide_corner_raw or wide_corner_held
+            )
+            big_corner_safe = bool(
+                bool(LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_ENABLED) and
+                (not low_speed_assist) and
+                (v_kph_assist >= float(LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_MIN_KPH)) and
+                (v_kph_assist <= float(LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_MAX_KPH)) and
+                (not eps_or_max_guard)
+            )
+            big_corner_raw = bool(
+                big_corner_safe and
+                (steer_abs >= float(LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_STEER_MIN)) and
+                (rate_strong_ratio < float(LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_RATE_STRONG_LIMIT))
+            )
+            if big_corner_raw:
+                self._latAF_assist_big_corner_hold_until = float(now + float(LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_HOLD_S))
+            big_corner_held = bool(
+                big_corner_safe and
+                (now <= float(getattr(self, "_latAF_assist_big_corner_hold_until", 0.0) or 0.0)) and
+                (steer_abs >= float(LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_STEER_EXIT)) and
+                (rate_strong_ratio < float(LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_RATE_STRONG_HOLD_LIMIT))
+            )
+            big_corner_candidate = bool(
+                big_corner_raw or big_corner_held
+            )
+            rate_strong_limit = float(
+                LAT_ACCEL_FACTOR_ASSIST_RATE_STRONG_LIMIT_LOW_SPEED if low_speed_assist else
+                LAT_ACCEL_FACTOR_ASSIST_RATE_STRONG_LIMIT
+            )
             rate_strong_guard = bool(
-                getattr(self, "last_rate_limited_strong", False) or
-                (rate_strong_ratio >= float(LAT_ACCEL_FACTOR_ASSIST_RATE_STRONG_LIMIT))
+                (getattr(self, "last_rate_limited_strong", False) and not low_speed_assist and not big_corner_candidate and not wide_corner_candidate) or
+                (rate_strong_ratio >= rate_strong_limit and not big_corner_candidate and not wide_corner_candidate)
             )
             if eps_or_max_guard or rate_strong_guard:
                 return base
 
-            start = float(LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START)
-            full = float(LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL)
-            if full <= start or clip_ratio <= start:
+            if wide_corner_candidate:
+                start = float(LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START_WIDE_CORNER)
+                full = float(LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL_WIDE_CORNER)
+            elif big_corner_candidate:
+                start = float(LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START_BIG_CORNER)
+                full = float(LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL_BIG_CORNER)
+            else:
+                start = float(
+                    LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START_LOW_SPEED if low_speed_assist else
+                    LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START
+                )
+                full = float(
+                    LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL_LOW_SPEED if low_speed_assist else
+                    LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL
+                )
+            assist_clip_ratio = clip_ratio
+            if wide_corner_held or big_corner_held:
+                assist_clip_ratio = max(float(assist_clip_ratio), float(start) + 0.035)
+            if (wide_corner_candidate or big_corner_candidate) and (
+                bool(getattr(self, "last_steer_clip", False)) or
+                bool(getattr(self, "last_rate_limited_strong", False))
+            ):
+                assist_clip_ratio = max(float(assist_clip_ratio), float(start) + 0.04)
+            if full <= start or assist_clip_ratio <= start:
                 return base
 
-            weight = float(np.clip((clip_ratio - start) / (full - start), 0.0, 1.0))
-            scale = 1.0 - ((1.0 - float(LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE)) * weight)
+            weight = float(np.clip((assist_clip_ratio - start) / (full - start), 0.0, 1.0))
+            if wide_corner_candidate:
+                min_scale = float(LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE_WIDE_CORNER)
+            elif big_corner_candidate:
+                min_scale = float(LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE_BIG_CORNER)
+            else:
+                min_scale = float(
+                    LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE_LOW_SPEED if low_speed_assist else
+                    LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE
+                )
+            scale = 1.0 - ((1.0 - min_scale) * weight)
             assisted = float(base * scale)
 
-            max_delta = max(0.0, float(LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA))
+            if wide_corner_candidate:
+                max_delta = max(0.0, float(LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA_WIDE_CORNER))
+            elif big_corner_candidate:
+                max_delta = max(0.0, float(LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA_BIG_CORNER))
+            else:
+                max_delta = max(0.0, float(
+                    LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA_LOW_SPEED if low_speed_assist else
+                    LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA
+                ))
             if max_delta > 0.0:
                 assisted = max(base - max_delta, assisted)
 
@@ -1653,6 +1966,8 @@ class TorqueEstimator:
                 self._latAF_assist_active = True
                 self._latAF_assist_scale = float(assisted / base) if abs(base) > 1e-9 else 1.0
                 self._latAF_assist_delta = float(base - assisted)
+                self._latAF_assist_big_corner = bool(big_corner_candidate)
+                self._latAF_assist_wide_corner = bool(wide_corner_candidate)
                 return assisted
         except Exception:
             pass
@@ -2029,8 +2344,8 @@ class TorqueEstimator:
                 min_steer = 0.005
                 max_latacc = LAT_ACC_THRESHOLD + 1.0
 
-                # === 코너 데이터 수집 (10km/h부터, MIN_STEER_SPEED=10km/h 기준) ===
-                if (not any(steer_override)) and (lat_active) and (vego >= MIN_VEL_CURVE_MS) and (
+                # === 코너 데이터 수집 (20 km/h부터) ===
+                if (not any(steer_override)) and (lat_active) and (vego > MIN_VEL_CURVE_MS) and (
                         abs(steer) > min_steer) and (abs(lateral_acc) <= max_latacc) and (not is_frozen):
                     abs_s = abs(steer)
 
@@ -2078,18 +2393,10 @@ class TorqueEstimator:
 
                     times = int(np.clip(times_lat * times_steer, 1, 8))
 
-                    # 10~30km/h 저속 코너 샘플은 학습하되 영향력은 낮춤
-                    # - 유턴/주차장/골목 저속 조향은 lateral accel이 작고 EPS 특성이 달라 전체 튜닝을 과하게 끌 수 있음
-                    # - 그래서 포인트 채택 확률과 복제 횟수를 속도별로 줄여 안정성을 확보
-                    v_kph_sample = float(vego) * 3.6
-                    if v_kph_sample < float(LOWSPD_CORNER_KPH):
-                        keep_prob *= float(LOWSPD_CORNER_KEEP_SCALE)
-                        times = max(1, int(round(float(times) * float(LOWSPD_CORNER_TIMES_SCALE))))
-                    elif v_kph_sample < float(MIDLOW_CORNER_KPH):
-                        keep_prob *= float(MIDLOW_CORNER_KEEP_SCALE)
-                        times = max(1, int(round(float(times) * float(MIDLOW_CORNER_TIMES_SCALE))))
-
-                    keep_prob = float(np.clip(keep_prob, 0.02, 0.95))
+                    v_kph = float(vego) * 3.6
+                    keep_prob, times = self._apply_context_learning_policy(
+                        keep_prob, times, v_kph, yaw_rate, lateral_acc, steer, is_limited
+                    )
 
                     if not is_limited:
                         if np.random.random() < keep_prob:
@@ -2100,21 +2407,20 @@ class TorqueEstimator:
                                 else:
                                     self.high_steer_kept_neg += 1
                     else:
-                        # limited corner: 버리지는 않되, normal corner보다 낮은 밀도/복제수로 저장한다.
-                        # 실제 반영 비중은 estimate_params_corner()에서 0.15~0.25로 제한된다.
-                        keep_prob_l = float(keep_prob) * 0.35
+                        # ✅ limited corner: clip/max/rate-limit 구간을 더 적극적으로 수집
+                        keep_prob_l = float(keep_prob) * 0.55
                         if is_clip or is_max_limited:
-                            keep_prob_l = float(keep_prob) * 0.45
+                            keep_prob_l = float(keep_prob) * 0.75
                         elif is_rate_limited_strong:
-                            keep_prob_l = float(keep_prob) * 0.25
+                            keep_prob_l = float(keep_prob) * 0.65
                         elif is_rate_limited:
-                            keep_prob_l = float(keep_prob) * 0.35
+                            keep_prob_l = float(keep_prob) * 0.60
 
-                        keep_prob_l = float(np.clip(keep_prob_l, 0.02, 0.35))
+                        keep_prob_l = float(np.clip(keep_prob_l, 0.03, 0.55))
 
-                        times_l = max(1, int(round(times * 0.40)))
+                        times_l = max(1, int(round(times * 0.75)))
                         if is_clip or is_max_limited:
-                            times_l = max(1, int(round(times * 0.50)))
+                            times_l = max(1, int(round(times * 0.90)))
 
                         if np.random.random() < keep_prob_l:
                             self.limited_corner_points.add_point(float(steer), float(lateral_acc), times=times_l)
@@ -2131,16 +2437,29 @@ class TorqueEstimator:
                                         else:
                                             self.high_steer_kept_neg += 1
 
-                # === 직선 전용 버킷 수집 (직선은 40km/h 유지) ===
+                # === 직선 전용 버킷 수집 ===
+                # 고속도로 직선만 오래 주행하는 경우에는 학습 비중을 거의 없애고,
+                # 저/중속 코너 학습이 직선 데이터에 눌리지 않도록 한다.
                 self.last_straight_sampled = False
+                self._ltp_straight_prob_last = 0.0
+                self._ltp_highway_straight = False
                 if (abs(steer) <= STRAIGHT_STEER_MAX) and (vego > MIN_VEL_MS_STRAIGHT) and (
                         abs(lateral_acc) < STRAIGHT_LATACC_MAX) and (not any(steer_override)) and (lat_active) and (
                 not is_frozen) and (not self.last_steer_clip) and (not self.last_max_limited) and (
                 not self.last_rate_limited_strong) and (len(self.straight_points) < STRAIGHT_POINTS_SOFT_CAP):
+                    v_kph = float(vego) * 3.6
                     w = self.straight_weight(vego, yaw_rate, t)
                     self.last_straight_w = float(w)
                     if w > 0.0:
                         prob = STRAIGHT_KEEP_PROB * (w / max(STRAIGHT_WARMUP_MAX_W, 1e-3))
+                        highway_straight = self._is_highway_straight(v_kph, yaw_rate, lateral_acc, steer, steer_app)
+                        self._ltp_highway_straight = bool(highway_straight)
+                        if highway_straight:
+                            prob *= HIGHWAY_STRAIGHT_PROB_MULT
+                        elif v_kph >= FAST_STRAIGHT_MIN_KPH:
+                            prob *= FAST_STRAIGHT_PROB_MULT
+                        prob = float(np.clip(prob, 0.0, STRAIGHT_KEEP_PROB))
+                        self._ltp_straight_prob_last = float(prob)
                         if np.random.random() < prob:
                             self.straight_points.add_point(float(steer), float(lateral_acc), times=1)
                             self.last_straight_sampled = True
@@ -2307,6 +2626,12 @@ class TorqueEstimator:
             "latAO_blk": getattr(self, "_latAO_blk", None),
             "straight_sampled": bool(getattr(self, "last_straight_sampled", False)),
             "straight_w_last": round(float(getattr(self, "last_straight_w", 0.0) or 0.0), 6),
+            "ltp_highway_straight": bool(getattr(self, "_ltp_highway_straight", False)),
+            "ltp_mid_curve_good": bool(getattr(self, "_ltp_mid_curve_good", False)),
+            "ltp_s_curve_like": bool(getattr(self, "_ltp_s_curve_like", False)),
+            "ltp_corner_keep_prob": round(float(getattr(self, "_ltp_corner_keep_prob_last", 0.0) or 0.0), 6),
+            "ltp_corner_times": int(getattr(self, "_ltp_corner_times_last", 1) or 1),
+            "ltp_straight_prob": round(float(getattr(self, "_ltp_straight_prob_last", 0.0) or 0.0), 6),
         }
         return sample
 
@@ -2509,6 +2834,96 @@ class TorqueEstimator:
         self._burst_active = None
         return path
 
+    def _estimate_dynamic_display_params(self, base_lat: float, base_fric: float):
+        """Return latcontrol_torque dynamic-effective estimate for ltp_log only.
+
+        Do not publish these values as liveTorqueParameters; latcontrol_torque applies
+        the real per-frame effective params internally. This is only to make logs show
+        why latAF_f/fric_f can stay fixed while applied torque profile changes.
+        """
+        try:
+            base_lat = float(base_lat)
+            if not np.isfinite(base_lat):
+                base_lat = float(LAT_ACCEL_FACTOR_ANCHOR)
+        except Exception:
+            base_lat = float(LAT_ACCEL_FACTOR_ANCHOR)
+        try:
+            base_fric = float(base_fric)
+            if not np.isfinite(base_fric):
+                base_fric = float(FRICTION_ANCHOR)
+        except Exception:
+            base_fric = float(FRICTION_ANCHOR)
+
+        try:
+            v_ms = float(self.last_vego) if (self.last_vego is not None and np.isfinite(self.last_vego)) else 0.0
+            v_kph = v_ms * 3.6
+        except Exception:
+            v_ms = 0.0
+            v_kph = 0.0
+        try:
+            yaw_abs = abs(float(self.last_yaw_rate)) if (self.last_yaw_rate is not None and np.isfinite(self.last_yaw_rate)) else 0.0
+        except Exception:
+            yaw_abs = 0.0
+        try:
+            curv_abs = yaw_abs / max(abs(v_ms), 0.1)
+        except Exception:
+            curv_abs = 0.0
+        try:
+            lat_acc_abs = abs((float(v_ms) * float(yaw_abs)))
+        except Exception:
+            lat_acc_abs = 0.0
+        try:
+            steer_des_abs = abs(float(self.last_steer_desired)) if (self.last_steer_desired is not None and np.isfinite(self.last_steer_desired)) else 0.0
+        except Exception:
+            steer_des_abs = 0.0
+        try:
+            steer_app_abs = abs(float(self.last_steer_applied)) if (self.last_steer_applied is not None and np.isfinite(self.last_steer_applied)) else 0.0
+        except Exception:
+            steer_app_abs = 0.0
+        steer_abs = max(steer_des_abs, steer_app_abs)
+
+        curv_w = float(np.interp(curv_abs, [0.00025, 0.00160], [0.0, 1.0]))
+        lat_w = float(np.interp(lat_acc_abs, [0.05, 0.75], [0.0, 1.0]))
+        steer_w = float(np.interp(steer_abs, [0.015, 0.22], [0.0, 1.0]))
+        corner_strength = float(np.clip(max(curv_w, lat_w, steer_w), 0.0, 1.0))
+
+        low_gate = float(np.clip(np.interp(v_kph, DYN_LOG_LOW_GATE_BP, DYN_LOG_LOW_GATE_V), 0.0, 1.0))
+        mid_gate = float(np.clip(np.interp(v_kph, DYN_LOG_MID_GATE_BP, DYN_LOG_MID_GATE_V), 0.0, 1.0))
+        high_gate = float(np.clip(np.interp(v_kph, DYN_LOG_HIGH_GATE_BP, DYN_LOG_HIGH_GATE_V), 0.0, 1.0))
+        turning_hint = bool((curv_abs >= 0.00020) or (lat_acc_abs >= 0.035) or (steer_abs >= 0.015))
+
+        low_boost = corner_strength * low_gate
+        mid_boost = corner_strength * mid_gate
+        steering_pressed = bool(getattr(self, "_last_steer_override_db", getattr(self, "_last_steer_override", False)))
+        try:
+            driver_torque_abs = abs(float(getattr(self, "_last_driver_torque", 0.0) or 0.0))
+        except Exception:
+            driver_torque_abs = 0.0
+        strong_driver_override = bool(steering_pressed) and (driver_torque_abs >= 30.0)
+
+        if strong_driver_override:
+            low_boost = 0.0
+            mid_boost = 0.0
+        elif steering_pressed:
+            low_boost *= 0.65
+            mid_boost *= 0.55
+
+        if (10.0 <= v_kph <= 35.0) and turning_hint and (not strong_driver_override):
+            min_boost = 1.00 * (0.65 if steering_pressed else 1.00)
+            low_boost = max(low_boost, low_gate * min_boost)
+        elif (35.0 < v_kph <= 45.0) and turning_hint and (not strong_driver_override):
+            min_boost = float(np.interp(v_kph, [35.0, 40.0, 45.0], [0.85, 0.72, 0.58]))
+            if steering_pressed:
+                min_boost *= 0.55
+            low_boost = max(low_boost, min_boost)
+
+        blend = float(np.clip(max(low_boost, mid_boost, high_gate), 0.0, 1.0))
+        target_lat = float(np.interp(v_kph, DYN_LOG_LAT_FACTOR_BP, DYN_LOG_LAT_FACTOR_V))
+        target_fric = float(np.interp(v_kph, DYN_LOG_FRICTION_BP, DYN_LOG_FRICTION_V))
+        eff_lat = float(np.clip(base_lat + (target_lat - base_lat) * blend, DYN_LOG_LAT_FACTOR_MIN, DYN_LOG_LAT_FACTOR_MAX))
+        eff_fric = float(np.clip(base_fric + (target_fric - base_fric) * blend, DYN_LOG_FRICTION_MIN, DYN_LOG_FRICTION_MAX))
+        return eff_lat, eff_fric, blend, corner_strength, low_gate, mid_gate, high_gate
+
     def _log_to_file(self, msg):
         try:
             os.makedirs(self._log_dir, exist_ok=True)
@@ -2547,6 +2962,15 @@ class TorqueEstimator:
             # --- LTP debug: EPS damping frequency and dt (schema-independent) ---
             now_mono = float(self.last_time) if (self.last_time is not None and np.isfinite(self.last_time)) else float(time.monotonic())
             eps_evt, eps_damp, ltp_dt = self._eps_proxy_state(now_mono, update_state=True)
+
+            try:
+                dyn_latAF, dyn_fric, dyn_blend, dyn_corner_strength, dyn_low_gate, dyn_mid_gate, dyn_high_gate = self._estimate_dynamic_display_params(
+                    float(ltp.latAccelFactorFiltered), float(ltp.frictionCoefficientFiltered)
+                )
+            except Exception:
+                dyn_latAF, dyn_fric, dyn_blend, dyn_corner_strength, dyn_low_gate, dyn_mid_gate, dyn_high_gate = (
+                    float(ltp.latAccelFactorFiltered), float(ltp.frictionCoefficientFiltered), 0.0, 0.0, 0.0, 0.0, 0.0
+                )
 
             rec = {
                 "ts": now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -2623,10 +3047,19 @@ class TorqueEstimator:
                 "latAF_assist_scale": round(float(getattr(self, "_latAF_assist_scale", 1.0) or 1.0), 4),
                 "latAF_assist_delta": round(float(getattr(self, "_latAF_assist_delta", 0.0) or 0.0), 5),
                 "latAF_assist_clip_ratio": round(float(getattr(self, "_latAF_assist_clip_ratio", 0.0) or 0.0), 4),
+                "latAF_assist_big_corner": bool(getattr(self, "_latAF_assist_big_corner", False)),
+                "latAF_assist_wide_corner": bool(getattr(self, "_latAF_assist_wide_corner", False)),
                 "latAO_raw": round(float(ltp.latAccelOffsetRaw), 5),
                 "latAO_f": round(float(ltp.latAccelOffsetFiltered), 5),
                 "fric_raw": round(float(ltp.frictionCoefficientRaw), 5),
                 "fric_f": round(float(ltp.frictionCoefficientFiltered), 5),
+                "dyn_latAF_eff_est": round(float(dyn_latAF), 5),
+                "dyn_fric_eff_est": round(float(dyn_fric), 5),
+                "dyn_blend_est": round(float(dyn_blend), 4),
+                "dyn_corner_strength_est": round(float(dyn_corner_strength), 4),
+                "dyn_low_gate_est": round(float(dyn_low_gate), 4),
+                "dyn_mid_gate_est": round(float(dyn_mid_gate), 4),
+                "dyn_high_gate_est": round(float(dyn_high_gate), 4),
                 "total_pts": int(ltp.totalBucketPoints),
                 "decay": round(float(ltp.decay), 3),
                 "resets": int(self.resets),
@@ -2690,11 +3123,11 @@ class TorqueEstimator:
 
         # ✅ (3) 저속 코너에서 업데이트 동결 해제:
         # - 정지/파킹(last_is_frozen)은 그대로 동결
-        # - 속도 < 약 10km/h 이더라도 curve_active가 아니면 동결
+        # - 속도 < 20km/h 이더라도 curve_active면 동결하지 않음
         v = float(self.last_vego) if (self.last_vego is not None and np.isfinite(self.last_vego)) else 0.0
         yaw_abs = abs(float(self.last_yaw_rate)) if (
                     self.last_yaw_rate is not None and np.isfinite(self.last_yaw_rate)) else 0.0
-        curve_active_now = (v >= MIN_VEL_CURVE_MS) and (yaw_abs > CURVE_YAWRATE_MIN)
+        curve_active_now = (v > MIN_VEL_CURVE_MS) and (yaw_abs > CURVE_YAWRATE_MIN)
 
         freeze_update = bool(self.last_is_frozen) or ((v < FREEZE_UPDATE_MS) and (not curve_active_now))
 
@@ -2816,7 +3249,23 @@ class TorqueEstimator:
 
                 rate_trig = (rate_ratio >= float(QUALITY_RATE_FREEZE_RATIO))
                 rate_strong_trig = (rate_strong_ratio >= float(QUALITY_RATE_STRONG_FREEZE_RATIO))
-                pressed_trig = (steer_pressed_ratio >= float(QUALITY_STEER_PRESSED_FREEZE_RATIO))
+                pressed_low_speed = bool(
+                    (v_kph_now > 0.0) and
+                    (v_kph_now <= float(QUALITY_STEER_PRESSED_LOW_SPEED_KPH))
+                )
+                pressed_thr_active = float(
+                    QUALITY_STEER_PRESSED_FREEZE_RATIO_LOW_SPEED if pressed_low_speed else
+                    QUALITY_STEER_PRESSED_FREEZE_RATIO
+                )
+                enabled_now = getattr(self, "_last_enabled_cc", None)
+                pressed_extend_guard = bool(
+                    (v_kph_now <= float(QUALITY_STEER_PRESSED_EXTEND_GUARD_KPH)) or
+                    (enabled_now is False)
+                )
+                pressed_trig = bool(
+                    (not pressed_extend_guard) and
+                    (steer_pressed_ratio >= pressed_thr_active)
+                )
 
                 freeze_by_ratio = (clip_trig or both_trig or rate_trig or rate_strong_trig or pressed_trig)
                 if freeze_by_ratio:
@@ -2840,12 +3289,12 @@ class TorqueEstimator:
                         try:
                             clip_thr = float(clip_enter)
                             both_thr = float(QUALITY_BOTH_FREEZE_ENTER_LOW if low_speed else QUALITY_BOTH_FREEZE_RATIO)
-                            pressed_thr = float(QUALITY_STEER_PRESSED_FREEZE_RATIO)
+                            pressed_thr = float(pressed_thr_active)
                             rate_strong_thr = float(QUALITY_RATE_STRONG_FREEZE_RATIO)
 
                             if bool(clip_trig) or (float(clip_ratio) >= clip_thr):
                                 trig_list.append("clip")
-                            if bool(pressed_trig) or (float(steer_pressed_ratio) >= pressed_thr):
+                            if (not pressed_extend_guard) and (bool(pressed_trig) or (float(steer_pressed_ratio) >= pressed_thr)):
                                 trig_list.append("pressed")
                             if bool(rate_strong_trig) or (float(rate_strong_ratio) >= rate_strong_thr):
                                 trig_list.append("rate_strong")
@@ -2854,7 +3303,7 @@ class TorqueEstimator:
 
                             scores = {
                                 "clip": (float(clip_ratio) / clip_thr) if clip_thr > 1e-9 else 0.0,
-                                "pressed": (float(steer_pressed_ratio) / pressed_thr) if pressed_thr > 1e-9 else 0.0,
+                                "pressed": ((float(steer_pressed_ratio) / pressed_thr) if ((not pressed_extend_guard) and pressed_thr > 1e-9) else 0.0),
                                 "rate_strong": (float(rate_strong_ratio) / rate_strong_thr) if rate_strong_thr > 1e-9 else 0.0,
                                 "both": (float(both_ratio) / both_thr) if both_thr > 1e-9 else 0.0,
                             }
@@ -2877,6 +3326,8 @@ class TorqueEstimator:
                             "rate_strong_ratio": float(rate_strong_ratio),
                             "both_ratio": float(both_ratio),
                             "low_speed": bool(low_speed),
+                            "pressed_extend_guard": bool(pressed_extend_guard),
+                            "enabled_cs": (None if enabled_now is None else bool(enabled_now)),
                         }
                     self._qual_freeze_until = float(new_until)
             else:
@@ -2912,7 +3363,7 @@ class TorqueEstimator:
                     np.isfinite(latOffset_s) and
                     (self._straight_win_ok >= int(min_ok_win)) and
                     (self._straight_win_ok_ratio >= STRAIGHT_OK_MIN_RATIO) and
-                    (abs(float(latOffset_s)) <= float(STRAIGHT_OFFSET_MAX_ABS_MED))
+                    (abs(float(latOffset_s)) <= 0.15)
             )
 
             latFactor_blend = latFactor_c
@@ -2925,7 +3376,7 @@ class TorqueEstimator:
             steer_ok = [s[1] for s in win if isinstance(s, (list, tuple)) and len(s) >= 6 and bool(s[5]) and (
                         s[1] is not None) and np.isfinite(s[1])]
             bias_mean = _mean_safe(steer_ok)
-            bias_ok = (bias_mean is None) or (abs(float(bias_mean)) <= float(STRAIGHT_STEER_MAX_FOR_OFFSET) * 0.35)
+            bias_ok = (bias_mean is None) or (abs(float(bias_mean)) <= float(STRAIGHT_STEER_MAX_FOR_OFFSET) * 0.50)
 
             if straight_offset_ok and bias_ok:
                 w_off = min(float(w), 0.10)
@@ -2946,23 +3397,7 @@ class TorqueEstimator:
                 liveTorqueParameters.liveValid = True
 
                 # 최종 학습 업데이트 동결 조건
-                # quality freeze 중이라도 10~35kph의 약한 limited 샘플은 완전 동결하지 않고
-                # 아래 upd blend에서 0.15~0.25 계열로 아주 낮게 반영한다.
-                try:
-                    v_kph_update = float(v) * 3.6
-                except Exception:
-                    v_kph_update = 0.0
-                limited_soft_update_now = bool(
-                    LIMITED_SOFT_UPDATE_ENABLED and
-                    bool(qual_freeze_now) and
-                    (not bool(freeze_update)) and
-                    (not bool(rate_transient_now)) and
-                    (not bool(rate_strong_now)) and
-                    (not bool(steer_pressed_now)) and
-                    (float(LIMITED_SOFT_UPDATE_MIN_KPH) <= v_kph_update <= float(LIMITED_SOFT_UPDATE_MAX_KPH)) and
-                    (bool(clip_now) or bool(rate_now))
-                )
-                freeze_update_total = bool(freeze_update) or bool(rate_transient_now) or (bool(qual_freeze_now) and (not limited_soft_update_now))
+                freeze_update_total = bool(freeze_update) or bool(qual_freeze_now) or bool(rate_transient_now)
 
                 # -----------------------------
                 # Straight offset(latAO) update debug (candidate / gating / block reasons)
@@ -2970,7 +3405,7 @@ class TorqueEstimator:
                 #  - offset_gate_pass: candidate + cooldown + no clip/rate + not freeze_update_total
                 # -----------------------------
                 try:
-                    offset_candidate = bool((not DISABLE_LATACCEL_OFFSET_LEARNING) and straight_offset_ok and bias_ok and np.isfinite(latOffset_s))
+                    offset_candidate = bool(straight_offset_ok and bias_ok and np.isfinite(latOffset_s))
                 except Exception:
                     offset_candidate = False
                 try:
@@ -3042,22 +3477,6 @@ class TorqueEstimator:
                     if bool(clip_now):
                         try:
                             upd.pop('frictionCoefficient', None)
-                        except Exception:
-                            pass
-
-                    # quality freeze를 soft limited update로 통과한 경우에는 필터 입력 자체를 낮은 비중으로 축소한다.
-                    if bool(locals().get('limited_soft_update_now', False)):
-                        try:
-                            cur_latF = float(_sanitize_num(self.filtered_params['latAccelFactor'].x, self.offline_latAccelFactor))
-                            cur_fric = float(_sanitize_num(self.filtered_params['frictionCoefficient'].x, self.offline_friction))
-                            wF = float(np.clip(float(LIMITED_SOFT_UPDATE_BLEND_LAT), 0.0, 0.25))
-                            wR = float(np.clip(float(LIMITED_SOFT_UPDATE_BLEND_FRICTION), 0.0, 0.25))
-
-                            # limited 구간에서는 latAF를 더 낮추는 방향(더 공격적)으로 급히 끌고 가지 않는다.
-                            latF_tgt = float(max(float(latF_use), float(cur_latF))) if (bool(clip_now) or bool(rate_now)) else float(latF_use)
-                            upd['latAccelFactor'] = float(cur_latF + wF * (latF_tgt - cur_latF))
-                            if 'frictionCoefficient' in upd:
-                                upd['frictionCoefficient'] = float(cur_fric + wR * (float(fric_use) - cur_fric))
                         except Exception:
                             pass
 
@@ -3169,7 +3588,7 @@ class TorqueEstimator:
                         np.isfinite(latOffset_s) and
                         (self._straight_win_ok >= int(min_ok_win)) and
                         (self._straight_win_ok_ratio >= STRAIGHT_OK_MIN_RATIO) and
-                        (abs(float(latOffset_s)) <= float(STRAIGHT_OFFSET_MAX_ABS_MED))
+                        (abs(float(latOffset_s)) <= 0.15)
                 )
 
                 if (not freeze_update) and straight_offset_ok and self._offset_update_allowed():
@@ -3264,234 +3683,54 @@ def main(sm=None, pm=None):
     def _reload_user_torque_params(estimator_ref=None, force_log: bool = False):
         global LIVE_TORQUE_TUNING_ENABLED, LAT_ACCEL_FACTOR_ANCHOR, FRICTION_ANCHOR
         nonlocal _last_is_live, _last_lat_raw, _last_fric_raw
-        changed = False
-
-        # IsLiveTorque (bool)
-        # Params.get_bool()은 Param이 없을 때 False를 반환할 수 있으므로,
-        # 키가 실제로 존재할 때만 override한다. 없으면 코드 기본값(True)을 유지한다.
-        try:
-            raw_live = params.get('IsLiveTorque')
-            if raw_live is not None:
-                is_live = bool(params.get_bool('IsLiveTorque'))
-                if _last_is_live is None or is_live != _last_is_live:
-                    LIVE_TORQUE_TUNING_ENABLED = bool(is_live)
-                    _last_is_live = bool(is_live)
-                    changed = True
-        except Exception:
-            pass
-
-        # Runtime anchor Params are dangerous in this fork: stale values such as
-        # TorqueMaxLatAccel=30 / TorqueFriction=120 turn into 3.0 / 0.120 and can
-        # re-poison the learner after VERSION reset.  Therefore FORCE_TARGET_TUNING
-        # locks the source anchors unless LTP_ALLOW_RUNTIME_ANCHORS=1 is explicitly set.
-        runtime_anchor_locked = bool(FORCE_TARGET_TUNING) and not bool(LTP_ALLOW_RUNTIME_ANCHORS)
-        if runtime_anchor_locked:
-            try:
-                raw_lat = _read_raw_param_key_file("TorqueMaxLatAccel")
-                raw_fric = _read_raw_param_key_file("TorqueFriction")
-                if raw_lat is not None or raw_fric is not None:
-                    _delete_param_key_file("TorqueMaxLatAccel")
-                    _delete_param_key_file("TorqueFriction")
-                    try:
-                        cloudlog.warning(
-                            "LiveTorque: ignored/deleted runtime anchors TorqueMaxLatAccel=%s TorqueFriction=%s; source anchors locked %.3f/%.3f"
-                            % ((raw_lat or b"").decode("utf-8", "ignore").strip(),
-                               (raw_fric or b"").decode("utf-8", "ignore").strip(),
-                               SOURCE_LAT_ACCEL_FACTOR_ANCHOR, SOURCE_FRICTION_ANCHOR)
-                        )
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-            if (abs(float(LAT_ACCEL_FACTOR_ANCHOR) - float(SOURCE_LAT_ACCEL_FACTOR_ANCHOR)) > 1e-6 or
-                    abs(float(FRICTION_ANCHOR) - float(SOURCE_FRICTION_ANCHOR)) > 1e-6):
-                changed = True
-            LAT_ACCEL_FACTOR_ANCHOR = float(SOURCE_LAT_ACCEL_FACTOR_ANCHOR)
-            FRICTION_ANCHOR = float(SOURCE_FRICTION_ANCHOR)
-            _last_lat_raw = None
-            _last_fric_raw = None
-        else:
-            # TorqueMaxLatAccel (x0.1) - opt-in only
-            try:
-                v = params.get("TorqueMaxLatAccel", encoding="utf8")
-                if v is not None:
-                    v = str(v).strip()
-                if v:
-                    if _last_lat_raw is None or v != _last_lat_raw:
-                        torque_lat_accel_factor = float(Decimal(v) * Decimal('0.1'))  # LAT_ACCEL_FACTOR
-                        if np.isfinite(torque_lat_accel_factor) and 0.5 < torque_lat_accel_factor < 5.0:
-                            LAT_ACCEL_FACTOR_ANCHOR = float(torque_lat_accel_factor)
-                            _last_lat_raw = v
-                            changed = True
-            except (InvalidOperation, Exception):
-                pass
-
-            # TorqueFriction (x0.001) - opt-in only
-            try:
-                v = params.get("TorqueFriction", encoding="utf8")
-                if v is not None:
-                    v = str(v).strip()
-                if v:
-                    if _last_fric_raw is None or v != _last_fric_raw:
-                        torque_friction = float(Decimal(v) * Decimal('0.001'))  # FRICTION
-                        if np.isfinite(torque_friction) and 0.01 < torque_friction < 1.0:
-                            FRICTION_ANCHOR = float(torque_friction)
-                            _last_fric_raw = v
-                            changed = True
-            except (InvalidOperation, Exception):
-                pass
-
-        # Keep estimator's offline anchors and sanity bounds in sync (used for warm-start and fallbacks)
+        LIVE_TORQUE_TUNING_ENABLED = False
+        LAT_ACCEL_FACTOR_ANCHOR = 2.05
+        FRICTION_ANCHOR = 0.230
+        _last_is_live = False
+        _last_lat_raw = None
+        _last_fric_raw = None
         try:
             if estimator_ref is not None:
                 estimator_ref.offline_latAccelFactor = float(LAT_ACCEL_FACTOR_ANCHOR)
                 estimator_ref.offline_friction = float(FRICTION_ANCHOR)
-                estimator_ref.base_params['latAccelFactor'] = float(LAT_ACCEL_FACTOR_ANCHOR)
-                estimator_ref.base_params['frictionCoefficient'] = float(FRICTION_ANCHOR)
-                estimator_ref.min_lataccel_factor = max((1.0 - FACTOR_SANITY) * float(LAT_ACCEL_FACTOR_ANCHOR), float(LAT_ACCEL_FACTOR_ABS_MIN))
-                estimator_ref.max_lataccel_factor = min((1.0 + FACTOR_SANITY) * float(LAT_ACCEL_FACTOR_ANCHOR), float(LAT_ACCEL_FACTOR_ABS_MAX))
-                estimator_ref.min_friction = max((1.0 - FRICTION_SANITY) * float(FRICTION_ANCHOR), float(FRICTION_ABS_MIN))
-                estimator_ref.max_friction = min((1.0 + FRICTION_SANITY) * float(FRICTION_ANCHOR), float(FRICTION_ABS_MAX))
         except Exception:
             pass
-
-        if changed or force_log:
+        if force_log:
             try:
-                cloudlog.info(
-                    "LiveTorque: runtime params applied IsLiveTorque=%s LAT_ACCEL_FACTOR_ANCHOR=%.5f FRICTION_ANCHOR=%.5f"
-                    % (LIVE_TORQUE_TUNING_ENABLED, LAT_ACCEL_FACTOR_ANCHOR, FRICTION_ANCHOR)
-                )
+                cloudlog.info("LiveTorque: fixed safe profile IsLiveTorque=False LAT_ACCEL_FACTOR_ANCHOR=2.05000 FRICTION_ANCHOR=0.23000")
             except Exception:
                 pass
 
-    def _delete_path_silent(path):
-        try:
-            if path and os.path.exists(path):
-                os.remove(path)
-                try:
-                    cloudlog.warning("LiveTorque: deleted %s" % str(path))
-                except Exception:
-                    pass
-        except Exception as e:
-            try:
-                cloudlog.warning("LiveTorque: delete failed %s: %s" % (str(path), str(e)))
-            except Exception:
-                pass
-
-    def _delete_param_key_file(key: str):
-        """
-        openpilot 0.8.14 Params may not expose remove().  Deleting the backing
-        file is the safest cross-version way to clear a Param without raising
-        UnknownKeyName for custom keys.
-        """
-        try:
-            key_s = str(key)
-        except Exception:
-            return
-        for base in ("/data/params/d", "/data/params"):
-            _delete_path_silent(os.path.join(base, key_s))
-
-    def _read_raw_param_key_file(key: str):
-        try:
-            key_s = str(key)
-        except Exception:
-            return None
-        for base in ("/data/params/d", "/data/params"):
-            try:
-                pth = os.path.join(base, key_s)
-                if os.path.exists(pth):
-                    with open(pth, "rb") as f:
-                        return f.read()
-            except Exception:
-                pass
-        return None
-
-    def _read_text_file(path: str):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read().strip()
-        except Exception:
-            return ""
-
-    def _write_text_file_atomic(path: str, value: str):
-        try:
-            d = os.path.dirname(path)
-            os.makedirs(d, exist_ok=True)
-            with tempfile.NamedTemporaryFile("w", delete=False, dir=d, prefix="ltp_ver_", suffix=".tmp", encoding="utf-8") as tf:
-                tf.write(str(value))
-                tf.flush()
-                os.fsync(tf.fileno())
-                tmp = tf.name
-            os.replace(tmp, path)
-        except Exception as e:
-            try:
-                cloudlog.warning("LiveTorque: version file write failed: %s" % str(e))
-            except Exception:
-                pass
-
-    def _clear_ltp_persistent_state(reason: str, clear_runtime_anchor_params: bool = False):
-        """Clear every persistent source that can override source anchors on startup."""
-        try:
-            cloudlog.warning("LiveTorque: clearing persistent state (%s)" % str(reason))
-        except Exception:
-            pass
-
-        # Warm-state files
-        for pth in (LTP_STATE_PATH, LTP_STATE_PATH_PKL):
-            _delete_path_silent(pth)
-
-        # Params cache files.  Do NOT call params.remove(); it is not available
-        # on common.params_pyx.Params in this fork.
-        for key in ("LiveTorqueCarParams", "LiveTorqueParameters"):
-            _delete_param_key_file(key)
-
-        # Runtime user anchors that previously produced 3.0 / 0.12
-        # from TorqueMaxLatAccel=30 / TorqueFriction=120.
-        if clear_runtime_anchor_params:
-            for key in LTP_RUNTIME_ANCHOR_PARAM_KEYS:
-                _delete_param_key_file(key)
-
-        # Also clear the legacy version Param file if it exists; the source of
-        # truth is now LTP_VERSION_FILE_PATH because the Param key may not be
-        # registered in this 0.8.14 params schema.
-        _delete_param_key_file(LTP_VERSION_PARAM_KEY)
-
-    startup_version_reset = False
-
-    # VERSION이 바뀌면 source anchor 기준으로 완전 초기화한다.
-    # Params에 등록되지 않은 custom key는 UnknownKeyName을 낼 수 있으므로,
-    # VERSION 추적은 파일(/data/openpilot/ltp_logs/ltp_version.txt)로 한다.
-    try:
-        saved_version = _read_text_file(LTP_VERSION_FILE_PATH)
-        if saved_version != str(VERSION):
-            startup_version_reset = True
-            _clear_ltp_persistent_state(
-                "VERSION changed %s -> %s" % (saved_version or "none", VERSION),
-                clear_runtime_anchor_params=bool(LTP_CLEAR_RUNTIME_ANCHOR_PARAMS_ON_VERSION_CHANGE),
-            )
-            _write_text_file_atomic(LTP_VERSION_FILE_PATH, str(VERSION))
-    except Exception:
-        pass
-
-    # Initial load (once at startup). VERSION reset 이후에 읽어야 예전 Runtime Param이 anchor를 덮지 않는다.
-    _reload_user_torque_params(estimator_ref=None, force_log=True)
+    # Initial load (once at startup)    _reload_user_torque_params(estimator_ref=None, force_log=True)
 
     try:
         do_reset = (os.environ.get("LTP_RESET", "0") == "1")
-        # LiveTorqueReset is not a registered Param in this fork, so do not
-        # call params.get/put for it.  Support a raw file only if the user
-        # manually created /data/params/d/LiveTorqueReset.
-        v = _read_raw_param_key_file("LiveTorqueReset")
+        v = params.get("LiveTorqueReset")
         if v is not None and v.strip() in [b"1", b"true", b"True", b"YES", b"yes"]:
             do_reset = True
         if do_reset:
-            _clear_ltp_persistent_state(
-                "manual reset",
-                clear_runtime_anchor_params=bool(LTP_CLEAR_RUNTIME_ANCHOR_PARAMS_ON_VERSION_CHANGE),
-            )
-            _delete_param_key_file("LiveTorqueReset")
-            _write_text_file_atomic(LTP_VERSION_FILE_PATH, str(VERSION))
+            cloudlog.warning("LiveTorque: reset requested - clearing cached params")
+
+            # ✅ warm-state 파일 삭제(restore 스킵 목적)
+            try:
+                for pth in (LTP_STATE_PATH, LTP_STATE_PATH_PKL):
+                    if os.path.exists(pth):
+                        os.remove(pth)
+            except Exception:
+                pass
+
+            try:
+                params.remove("LiveTorqueCarParams")
+            except Exception:
+                pass
+            try:
+                params.remove("LiveTorqueParameters")
+            except Exception:
+                pass
+            try:
+                params.put("LiveTorqueReset", b"0")
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -3500,26 +3739,6 @@ def main(sm=None, pm=None):
     # Sync offline anchors to the latest runtime Params values
     try:
         _reload_user_torque_params(estimator_ref=estimator, force_log=True)
-    except Exception:
-        pass
-
-    # VERSION/manual reset 직후에는 filtered 값/버킷/decay도 source anchor로 강제 초기화한다.
-    try:
-        if startup_version_reset:
-            estimator.reset()
-            estimator._straight_bias = deque()
-            estimator._pending_straight_restore = None
-            estimator._straight_win_ok = 0
-            estimator._straight_win_total = 0
-            estimator._straight_win_ok_ratio = 0.0
-            estimator.filtered_params['latAccelFactor'].x = float(estimator.offline_latAccelFactor)
-            estimator.filtered_params['latAccelOffset'].x = 0.0
-            estimator.filtered_params['frictionCoefficient'].x = float(estimator.offline_friction)
-            estimator.decay = float(MIN_FILTER_DECAY)
-            cloudlog.warning(
-                "LiveTorque: VERSION reset applied filtered anchors latAF=%.5f friction=%.5f"
-                % (float(estimator.offline_latAccelFactor), float(estimator.offline_friction))
-            )
     except Exception:
         pass
 
@@ -3547,24 +3766,13 @@ def main(sm=None, pm=None):
                 prev = log.Event.from_bytes(prev_bytes).liveTorqueParameters
                 cur = msg.liveTorqueParameters
 
-                # VERSION이 다른 이전 캐시와 EMA merge하면 새 anchor 초기화가 다시 오염된다.
-                # 같은 VERSION일 때만 EMA merge를 허용한다.
-                if int(getattr(prev, 'version', -1)) == int(getattr(cur, 'version', VERSION)):
-                    cur.latAccelFactorFiltered = merge_with_cache(prev.latAccelFactorFiltered, cur.latAccelFactorFiltered,
-                                                                  EMA_ALPHA)
-                    cur.latAccelOffsetFiltered = merge_with_cache(prev.latAccelOffsetFiltered, cur.latAccelOffsetFiltered,
-                                                                  EMA_ALPHA)
-                    cur.frictionCoefficientFiltered = merge_with_cache(prev.frictionCoefficientFiltered,
-                                                                       cur.frictionCoefficientFiltered, EMA_ALPHA)
-                    cur.decay = max(prev.decay, cur.decay)
-                else:
-                    try:
-                        cloudlog.warning(
-                            "LiveTorque: skip EMA cache merge due to VERSION mismatch prev=%s cur=%s"
-                            % (getattr(prev, 'version', None), getattr(cur, 'version', None))
-                        )
-                    except Exception:
-                        pass
+                cur.latAccelFactorFiltered = merge_with_cache(prev.latAccelFactorFiltered, cur.latAccelFactorFiltered,
+                                                              EMA_ALPHA)
+                cur.latAccelOffsetFiltered = merge_with_cache(prev.latAccelOffsetFiltered, cur.latAccelOffsetFiltered,
+                                                              EMA_ALPHA)
+                cur.frictionCoefficientFiltered = merge_with_cache(prev.frictionCoefficientFiltered,
+                                                                   cur.frictionCoefficientFiltered, EMA_ALPHA)
+                cur.decay = max(prev.decay, cur.decay)
             params.put("LiveTorqueParameters", msg.to_bytes())
         except Exception:
             cloudlog.exception("EMA cache merge failed; saving current snapshot")
@@ -3614,21 +3822,21 @@ def main(sm=None, pm=None):
         if (now_wall - last_reset_check_wall) >= 0.5:
             last_reset_check_wall = now_wall
             try:
-                # LiveTorqueReset is not a registered Param key here; avoid
-                # UnknownKeyName by checking the raw backing file only.
-                v = _read_raw_param_key_file("LiveTorqueReset")
+                v = params.get("LiveTorqueReset")
                 if v is not None and v.strip() in [b"1", b"true", b"True", b"YES", b"yes"]:
                     cloudlog.warning("LiveTorque: runtime reset requested")
                     try:
-                        _clear_ltp_persistent_state(
-                            "runtime reset",
-                            clear_runtime_anchor_params=bool(LTP_CLEAR_RUNTIME_ANCHOR_PARAMS_ON_VERSION_CHANGE),
-                        )
+                        for pth in (LTP_STATE_PATH, LTP_STATE_PATH_PKL):
+                            if os.path.exists(pth):
+                                os.remove(pth)
                     except Exception:
                         pass
-                    _write_text_file_atomic(LTP_VERSION_FILE_PATH, str(VERSION))
                     try:
-                        _reload_user_torque_params(estimator_ref=estimator, force_log=True)
+                        params.remove("LiveTorqueCarParams")
+                    except Exception:
+                        pass
+                    try:
+                        params.remove("LiveTorqueParameters")
                     except Exception:
                         pass
                     try:
@@ -3648,7 +3856,10 @@ def main(sm=None, pm=None):
                         estimator.decay = float(MIN_FILTER_DECAY)
                     except Exception:
                         pass
-                    _delete_param_key_file("LiveTorqueReset")
+                    try:
+                        params.put("LiveTorqueReset", b"0")
+                    except Exception:
+                        pass
             except Exception:
                 pass
         for which in sm.updated.keys():
