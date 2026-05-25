@@ -391,7 +391,7 @@ RATE_LIM_STEADY_FRICTION_BLEND_W = 0.15  # 준정상 rate-limit 구간에서 fri
 # Applied profile: Equinox 2020 Diesel
 # - CarControllerParams matched: STEER_MAX=300, STEER_DELTA_UP=10, STEER_DELTA_DOWN=17, MIN_STEER_SPEED=10km/h
 # - Corner learning starts at 10km/h; straight/offset learning remains >=20km/h
-VERSION = 32  # 10~20kph clip relief + stricter latAO candidate + 80kph+ guard retune
+VERSION = 33  # reset unsafe low-latAF warm state; restrict assist to low-speed only
 
 
 def slope2rot(slope):

@@ -79,15 +79,15 @@ HS_LIMIT_ALPHA_SHRINK = 0.75
 # High-speed straight-road weave guard. Only tiny near-center curvature requests
 # are attenuated; real curve requests remain on the normal path.
 HS_CENTER_DAMPING_BP = [60.0, 80.0, 100.0, 130.0]
-HS_CENTER_DAMPING_CURV_V = [0.00034, 0.00030, 0.00026, 0.00022]
-HS_CENTER_DAMPING_RATE_V = [0.0022, 0.0018, 0.0013, 0.0009]
-HS_CENTER_DAMPING_GAIN_V = [0.30, 0.24, 0.18, 0.14]
+HS_CENTER_DAMPING_CURV_V = [0.00018, 0.00016, 0.00014, 0.00012]
+HS_CENTER_DAMPING_RATE_V = [0.0014, 0.0011, 0.00085, 0.00065]
+HS_CENTER_DAMPING_GAIN_V = [0.90, 0.87, 0.84, 0.80]
 HS_CENTER_HOLD_MIN_KPH = 55.0
 HS_CENTER_HOLD_PREDICT_S = 0.55
 HS_CENTER_HOLD_ENTER_V = [0.00024, 0.00022, 0.00019, 0.00016]
 HS_CENTER_HOLD_EXIT_V = [0.00046, 0.00040, 0.00034, 0.00028]
 HS_CENTER_HOLD_RATE_EXIT_V = [0.0028, 0.0022, 0.0016, 0.0011]
-HS_CENTER_HOLD_FRAMES = 30
+HS_CENTER_HOLD_FRAMES = 0
 
 # Low-speed adaptive slew guard.
 # It does not reduce steady-state steering authority. It only slows a sudden
@@ -379,9 +379,7 @@ class LatControlTorque(LatControl):
 
             if enter_center_hold or keep_center_hold:
                 self._hs_center_hold_frames = int(HS_CENTER_HOLD_FRAMES)
-                self._hs_center_hold_active = True
-                curv_in = 0.0
-                rate_in = 0.0
+                self._hs_center_hold_active = False
             else:
                 self._hs_center_hold_frames = 0
                 self._hs_center_hold_active = False
@@ -397,7 +395,7 @@ class LatControlTorque(LatControl):
         if (abs(prev) >= HS_SIGN_FLIP_MIN_CURV and
                 abs(curv_in) >= HS_SIGN_FLIP_MIN_CURV and
                 (prev * curv_in) < 0.0):
-            curv_in = math.copysign(min(abs(curv_in), abs(prev) * HS_SIGN_FLIP_KEEP_RATIO), prev)
+            curv_in = 0.0
             rate_in = 0.0
 
         delta_max = float(interp(v_kph, HS_CURV_DELTA_MAX_BP, HS_CURV_DELTA_MAX_V))
