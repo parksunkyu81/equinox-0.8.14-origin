@@ -85,6 +85,18 @@ STABLE_TORQUE_LIMITED_SHRINK = 0.85
 # 실제 torque 계산에만 임시 effective latAccelFactor/friction을 적용한다.
 DYN_TORQUE_PROFILE_ENABLED = False
 
+# Bounded effective assist when the large dynamic profile is disabled.
+# torqued may learn lower values for low/mid speed tracking, but this controller
+# keeps 70+ kph at or above 2.00 to avoid highway hunting.
+LOW_MID_TORQUE_ASSIST_ENABLED = True
+LOW_MID_ASSIST_GATE_BP = [0.0, 15.0, 20.0, 35.0, 55.0, 60.0, 70.0]
+LOW_MID_ASSIST_GATE_V  = [0.0, 0.0, 0.35, 0.70, 0.70, 0.35, 0.0]
+LOW_MID_LAT_FACTOR_FLOOR_BP = [0.0, 55.0, 60.0, 65.0, 70.0, 130.0]
+LOW_MID_LAT_FACTOR_FLOOR_V  = [1.86, 1.86, 1.90, 1.96, 2.00, 2.00]
+LOW_MID_LAT_FACTOR_DROP_MAX = 0.040
+LOW_MID_FRICTION_ADD_MAX = 0.004
+LOW_MID_FRICTION_MAX = 0.245
+
 # 로그 기반 목표값: 저속은 강하게, 고속은 안정적으로.
 DYN_LAT_FACTOR_BP = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
 # v4 10~45kph 통합 개선:
@@ -317,6 +329,106 @@ class LatControlTorque(LatControl):
             pass
         return float(fallback)
 
+    def _get_bounded_low_mid_torque_params(self, base_params, v_ego, desired_curvature,
+                                           desired_lateral_accel, steer_limited=False,
+                                           steering_pressed=False, last_actuators=None,
+                                           rate_limited_strong=False, rate_limit_err=0.0):
+        base_params = dict(base_params)
+        base_lat = self._safe_float(base_params.get('latAccelFactor', 2.05), 2.05)
+        base_fric = self._safe_float(base_params.get('friction', 0.230), 0.230)
+        base_off = self._safe_float(base_params.get('latAccelOffset', 0.0), 0.0)
+        total_pts = base_params.get('totalBucketPoints', 0)
+
+        try:
+            v_kph = float(v_ego) * 3.6
+        except Exception:
+            v_kph = 0.0
+
+        speed_floor = float(clip(
+            interp(v_kph, LOW_MID_LAT_FACTOR_FLOOR_BP, LOW_MID_LAT_FACTOR_FLOOR_V),
+            1.86, 2.00
+        ))
+        base_lat_bounded = float(max(base_lat, speed_floor))
+
+        self._dyn_last_target_delta_up = 10.0
+        self._dyn_last_target_delta_down = 17.0
+        self._dyn_last_rate_limited_strong = False
+
+        if (not LOW_MID_TORQUE_ASSIST_ENABLED) or bool(steering_pressed) or v_kph >= 70.0:
+            eff_lat = base_lat_bounded
+            eff_fric = float(clip(base_fric, DYN_FRICTION_MIN, DYN_FRICTION_MAX))
+            active = abs(eff_lat - base_lat) > 1e-6
+            self._dyn_last_blend = 0.0
+            self._dyn_last_corner_strength = 0.0
+            self._dyn_last_low_speed_gate = 0.0
+            self._dyn_last_mid_speed_gate = 0.0
+            self._dyn_last_high_speed_gate = 1.0 if v_kph >= 70.0 else 0.0
+            self._dyn_last_effective_params = {
+                'latAccelFactor': eff_lat,
+                'friction': eff_fric,
+                'latAccelOffset': base_off,
+                'totalBucketPoints': total_pts,
+            }
+            self._dyn_effective_active = bool(active)
+            self.live_torque_params = dict(self._dyn_last_effective_params if active else base_params)
+            return self.live_torque_params
+
+        desired_curv_abs = abs(self._safe_float(desired_curvature, 0.0))
+        desired_lat_abs = abs(self._safe_float(desired_lateral_accel, 0.0))
+
+        try:
+            steer_abs = abs(float(getattr(last_actuators, 'steer', 0.0))) if last_actuators is not None else 0.0
+            if not math.isfinite(steer_abs):
+                steer_abs = 0.0
+        except Exception:
+            steer_abs = 0.0
+
+        curv_w = float(interp(desired_curv_abs, DYN_CURV_STRENGTH_BP, [0.0, 1.0]))
+        latacc_w = float(interp(desired_lat_abs, DYN_LATACC_STRENGTH_BP, [0.0, 1.0]))
+        steer_w = float(interp(steer_abs, DYN_STEER_STRENGTH_BP, [0.0, 1.0]))
+        corner_strength = float(clip(max(curv_w, latacc_w, steer_w), 0.0, 1.0))
+        gate = float(clip(interp(v_kph, LOW_MID_ASSIST_GATE_BP, LOW_MID_ASSIST_GATE_V), 0.0, 1.0))
+
+        turning_hint = bool(
+            (desired_curv_abs >= 0.00020) or
+            (desired_lat_abs >= 0.035) or
+            (steer_abs >= 0.015)
+        )
+        if turning_hint and (20.0 <= v_kph <= 55.0):
+            corner_strength = max(corner_strength, 0.45)
+
+        assist = float(clip(gate * corner_strength, 0.0, 1.0))
+        rate_err = abs(self._safe_float(rate_limit_err, 0.0))
+        strong_rate_limited = bool(rate_limited_strong) or (rate_err >= float(DYN_RATE_LIMITED_STRONG_OUTPUT_GAP))
+        if bool(strong_rate_limited):
+            assist *= 0.60
+        elif bool(steer_limited):
+            assist *= 0.55
+
+        eff_lat = float(max(base_lat_bounded - float(LOW_MID_LAT_FACTOR_DROP_MAX) * assist, speed_floor))
+        eff_lat = float(clip(eff_lat, 1.86, DYN_LAT_FACTOR_MAX))
+        eff_fric = float(clip(
+            base_fric + float(LOW_MID_FRICTION_ADD_MAX) * assist,
+            DYN_FRICTION_MIN,
+            LOW_MID_FRICTION_MAX
+        ))
+
+        self._dyn_last_corner_strength = corner_strength
+        self._dyn_last_low_speed_gate = gate
+        self._dyn_last_mid_speed_gate = 0.0
+        self._dyn_last_high_speed_gate = 0.0
+        self._dyn_last_rate_limited_strong = bool(strong_rate_limited)
+        self._dyn_last_blend = float(assist)
+        self._dyn_last_effective_params = {
+            'latAccelFactor': eff_lat,
+            'friction': eff_fric,
+            'latAccelOffset': base_off,
+            'totalBucketPoints': total_pts,
+        }
+        self._dyn_effective_active = bool(assist > 1e-4 or abs(eff_lat - base_lat) > 1e-6)
+        self.live_torque_params = dict(self._dyn_last_effective_params if self._dyn_effective_active else base_params)
+        return self.live_torque_params
+
     def _get_dynamic_torque_params(self, v_ego, desired_curvature, desired_lateral_accel,
                                    actual_lateral_accel, steer_limited=False, steering_pressed=False,
                                    last_actuators=None, rate_limited_strong=False, rate_limit_err=0.0,
@@ -331,10 +443,12 @@ class LatControlTorque(LatControl):
         base_params = dict(getattr(self, '_dyn_base_live_torque_params', self.live_torque_params))
 
         if not DYN_TORQUE_PROFILE_ENABLED:
-            self._dyn_effective_active = False
-            self._dyn_last_blend = 0.0
-            self.live_torque_params = dict(base_params)
-            return self.live_torque_params
+            return self._get_bounded_low_mid_torque_params(
+                base_params, v_ego, desired_curvature, desired_lateral_accel,
+                steer_limited=steer_limited, steering_pressed=steering_pressed,
+                last_actuators=last_actuators, rate_limited_strong=rate_limited_strong,
+                rate_limit_err=rate_limit_err
+            )
 
         base_lat = self._safe_float(base_params.get('latAccelFactor', 1.88), 1.88)
         base_fric = self._safe_float(base_params.get('friction', 0.255), 0.255)
