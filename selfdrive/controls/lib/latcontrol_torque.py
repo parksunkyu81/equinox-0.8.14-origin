@@ -656,6 +656,7 @@ class LatControlTorque(LatControl):
             self._dyn_effective_active = False
             self._dyn_last_blend = 0.0
             if hasattr(self, '_dyn_base_live_torque_params'):
+                self._dyn_last_effective_params = dict(self._dyn_base_live_torque_params)
                 self.live_torque_params = dict(self._dyn_base_live_torque_params)
         else:
             if self.use_steering_angle:
@@ -782,6 +783,11 @@ class LatControlTorque(LatControl):
 
             angle_steers_des = math.degrees(
                 VM.get_steer_from_curvature(-desired_curvature, CS.vEgo, params.roll)) + params.angleOffsetDeg
+
+        dyn_debug = self.get_dynamic_debug_torque_params()
+        pid_log.latAccelFactor = float(dyn_debug.get('latAccelFactor', 0.0) or 0.0)
+        pid_log.latAccelOffset = float(dyn_debug.get('latAccelOffset', 0.0) or 0.0)
+        pid_log.friction = float(dyn_debug.get('friction', 0.0) or 0.0)
 
         # TODO left is positive in this convention
         return -output_torque, angle_steers_des, pid_log
