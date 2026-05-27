@@ -92,14 +92,9 @@ ENABLE_BURST_TRACE = True
 BURST_PRE_S = 2.0
 BURST_POST_S = 2.5
 BURST_COOLDOWN_S = 4.0
-BURST_RING_MAX = 500
+BURST_RING_MAX = 900
 BURST_MAX_EVENTS_PER_FILE = 24
-BURST_SAMPLE_LIMIT = 1000
-BURST_SAMPLE_INTERVAL_S = 0.10  # 10Hz burst samples; liveLocationKalman is 20Hz
-LTP_LOG_INTERVAL_S = 0.50       # 2Hz file logging; liveTorqueParameters publish stays unchanged
-LTP_LOG_RETENTION_DAYS = 2      # keep today + yesterday by filename date
-LTP_LOG_CLEANUP_INTERVAL_S = 6 * 60 * 60
-LTP_LOG_CLEANUP_MAX_DELETE = 250
+BURST_SAMPLE_LIMIT = 2400
 
 # -----------------------------
 # 이쿼녹스 토크 디폴트값 (요청값)
@@ -214,7 +209,6 @@ LTP_STATE_VERSION = 2
 LTP_STATE_SAVE_INTERVAL_S = 20.0  # faster warm-state persistence
 LTP_STATE_PATH = os.path.join(LTP_LOG_DIR, "ltp_state.json")
 LTP_STATE_PATH_PKL = os.path.join(LTP_LOG_DIR, "ltp_state.pkl")
-LTP_VERSION_PATH = os.path.join(LTP_LOG_DIR, "ltp_version.txt")
 
 # Warm restore compatibility
 LTP_WARM_COMPAT_MAX_VERSION_GAP = 0  # strict reset: VERSION mismatch must not restore old live-torque state
@@ -844,12 +838,6 @@ class TorqueEstimator:
         self._lc_eps_evt = False
         self._lc_eps_damp = False
         self._lc_eps_damp_until = 0.0
-        self._lc_torque_active = False
-        self._lc_latAF_eff = None
-        self._lc_latAO_eff = None
-        self._lc_fric_eff = None
-        self._lc_torque_output = None
-        self._lc_torque_saturated = False
         self.last_is_frozen = False
         self.stop_freeze_until = 0.0
 
@@ -905,15 +893,12 @@ class TorqueEstimator:
         self._log_dir = LTP_LOG_DIR
         self._log_date = None
         self._log_path = None
-        self._last_ltp_log_write_t = -1e9
-        self._last_ltp_cleanup_t = -1e9
 
         # snapshot + burst/event trace state
         self._burst_dir = LTP_BURST_LOG_DIR
         self._burst_ring = deque(maxlen=BURST_RING_MAX)
         self._burst_active = None
         self._burst_seq = 0
-        self._burst_last_sample_t = -1e9
         self._burst_prev_flags = {}
         self._burst_prev_ext_cnt = 0
         self._burst_last_start_t = -1e9
@@ -1544,14 +1529,6 @@ class TorqueEstimator:
                 os.fsync(tf2.fileno())
                 tmp2 = tf2.name
             os.replace(tmp2, LTP_STATE_PATH_PKL)
-
-            with tempfile.NamedTemporaryFile("w", delete=False, dir=d, prefix="ltp_version_", suffix=".tmp",
-                                             encoding="utf-8") as vf:
-                vf.write(str(int(self.version)))
-                vf.flush()
-                os.fsync(vf.fileno())
-                tmp_ver = vf.name
-            os.replace(tmp_ver, LTP_VERSION_PATH)
 
             try:
                 self._last_state_save_pts = int(
@@ -2257,10 +2234,9 @@ class TorqueEstimator:
                 self.raw_points['lkas_enable'].append(False)
 
         elif which == "controlsState":
-            # Read latcontrol-decided effective torque params from ControlsState.lateralControlState.torqueState.
+            # Read latcontrol-decided epsEvt/epsDamp from ControlsState.lateralTorqueState (capnp fields @14/@15)
             try:
-                lcs = getattr(msg, "lateralControlState", None)
-                lts = None if lcs is None else getattr(lcs, "torqueState", None)
+                lts = getattr(msg, "lateralTorqueState", None)
                 if lts is None:
                     return
                 # dt from logMonoTime spacing
@@ -2272,18 +2248,6 @@ class TorqueEstimator:
 
                 self._lc_eps_evt = bool(getattr(lts, "epsEvt", False))
                 self._lc_eps_damp = bool(getattr(lts, "epsDamp", False))
-                self._lc_torque_active = bool(getattr(lts, "active", False))
-                self._lc_torque_saturated = bool(getattr(lts, "saturated", False))
-
-                lat_eff = getattr(lts, "latAccelFactor", None)
-                lat_off_eff = getattr(lts, "latAccelOffset", None)
-                fric_eff = getattr(lts, "friction", None)
-                torque_out = getattr(lts, "output", None)
-
-                self._lc_latAF_eff = float(lat_eff) if _finite(lat_eff) else None
-                self._lc_latAO_eff = float(lat_off_eff) if _finite(lat_off_eff) else None
-                self._lc_fric_eff = float(fric_eff) if _finite(fric_eff) else None
-                self._lc_torque_output = float(torque_out) if _finite(torque_out) else None
             except Exception:
                 return
 
@@ -2502,12 +2466,9 @@ class TorqueEstimator:
                             self._last_straight_sampled_t = float(t)
 
                 try:
-                    t_burst = float(t)
-                    if (t_burst - float(getattr(self, "_burst_last_sample_t", -1e9) or -1e9)) >= float(BURST_SAMPLE_INTERVAL_S):
-                        self._burst_last_sample_t = t_burst
-                        burst_sample = self._make_burst_sample(t_burst, lateral_acc=float(lateral_acc), straight_ok=bool(straight_ok))
-                        self._append_burst_sample(burst_sample)
-                        self._detect_burst_triggers(t_burst, burst_sample)
+                    burst_sample = self._make_burst_sample(float(t), lateral_acc=float(lateral_acc), straight_ok=bool(straight_ok))
+                    self._append_burst_sample(burst_sample)
+                    self._detect_burst_triggers(float(t), burst_sample)
                     self._flush_active_burst(reason="auto", t_now=float(t), force=False)
                 except Exception:
                     pass
@@ -2614,12 +2575,6 @@ class TorqueEstimator:
                 (float(sample_delta_err) >= float(QUALITY_CLIP_MIN_DELTA_ERR))
             )
         )
-        sample_latAF_f = float(_sanitize_num(self.filtered_params['latAccelFactor'].x, self.offline_latAccelFactor))
-        sample_latAO_f = float(_sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0))
-        sample_fric_f = float(_sanitize_num(self.filtered_params['frictionCoefficient'].x, self.offline_friction))
-        sample_latAF_eff = getattr(self, "_lc_latAF_eff", None)
-        sample_latAO_eff = getattr(self, "_lc_latAO_eff", None)
-        sample_fric_eff = getattr(self, "_lc_fric_eff", None)
 
         sample = {
             "mono_t": round(float(mono_t), 4),
@@ -2659,31 +2614,14 @@ class TorqueEstimator:
             "eps_damp_proxy": bool(eps_damp_proxy),
             "lc_eps_evt": bool(getattr(self, "_lc_eps_evt", False)),
             "lc_eps_damp": bool(getattr(self, "_lc_eps_damp", False)),
-            "lc_torque_active": bool(getattr(self, "_lc_torque_active", False)),
-            "lc_torque_saturated": bool(getattr(self, "_lc_torque_saturated", False)),
-            "lc_torque_output": (
-                None if not _finite(getattr(self, "_lc_torque_output", None))
-                else round(float(getattr(self, "_lc_torque_output", 0.0)), 6)
-            ),
             "driver_torque": round(float(getattr(self, "_last_driver_torque", 0.0) or 0.0), 6),
             "eps_torque": round(float(getattr(self, "_last_eps_torque", 0.0) or 0.0), 6),
             "allowed_torque": round(float(getattr(self, "_last_allowed_torque", 0.0) or 0.0), 6),
             "steer_out_can": round(float(getattr(self, "_last_steer_out_can", 0.0) or 0.0), 6),
             "steer_max": round(float(getattr(self, "_last_steer_max", 0.0) or 0.0), 6),
-            "latAF_f": round(sample_latAF_f, 6),
-            "latAF_eff": (None if not _finite(sample_latAF_eff) else round(float(sample_latAF_eff), 6)),
-            "latAF_eff_delta": (
-                None if not _finite(sample_latAF_eff)
-                else round(float(sample_latAF_eff) - sample_latAF_f, 6)
-            ),
-            "latAO_f": round(sample_latAO_f, 6),
-            "latAO_eff": (None if not _finite(sample_latAO_eff) else round(float(sample_latAO_eff), 6)),
-            "fric_f": round(sample_fric_f, 6),
-            "fric_eff": (None if not _finite(sample_fric_eff) else round(float(sample_fric_eff), 6)),
-            "fric_eff_delta": (
-                None if not _finite(sample_fric_eff)
-                else round(float(sample_fric_eff) - sample_fric_f, 6)
-            ),
+            "latAF_f": round(float(_sanitize_num(self.filtered_params['latAccelFactor'].x, self.offline_latAccelFactor)), 6),
+            "latAO_f": round(float(_sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0)), 6),
+            "fric_f": round(float(_sanitize_num(self.filtered_params['frictionCoefficient'].x, self.offline_friction)), 6),
             "latAO_evt": getattr(self, "_latAO_evt", None),
             "latAO_blk": getattr(self, "_latAO_blk", None),
             "straight_sampled": bool(getattr(self, "last_straight_sampled", False)),
@@ -2896,76 +2834,6 @@ class TorqueEstimator:
         self._burst_active = None
         return path
 
-    @staticmethod
-    def _ltp_log_date_from_name(name):
-        if not (name.startswith("ltp_log_") and name.endswith(".log")):
-            return None
-        try:
-            return datetime.strptime(name[len("ltp_log_"):-len(".log")], "%Y_%m_%d").date()
-        except Exception:
-            return None
-
-    @staticmethod
-    def _ltp_burst_date_from_name(name):
-        prefix = "ltp_burst_"
-        if not (name.startswith(prefix) and name.endswith(".jsonl")):
-            return None
-        date_part = name[len(prefix):len(prefix) + 8]
-        if len(date_part) != 8 or not date_part.isdigit():
-            return None
-        try:
-            return datetime.strptime(date_part, "%Y%m%d").date()
-        except Exception:
-            return None
-
-    def _cleanup_ltp_log_files(self, force=False):
-        try:
-            now_wall = time.monotonic()
-            if (not force) and (
-                    now_wall - float(getattr(self, "_last_ltp_cleanup_t", -1e9) or -1e9)
-            ) < float(LTP_LOG_CLEANUP_INTERVAL_S):
-                return 0
-            self._last_ltp_cleanup_t = float(now_wall)
-
-            keep_days = max(1, int(LTP_LOG_RETENTION_DAYS))
-            cutoff_date = datetime.now(KST).date() - timedelta(days=keep_days - 1)
-            max_delete = max(1, int(LTP_LOG_CLEANUP_MAX_DELETE))
-            deleted = 0
-
-            targets = (
-                (self._log_dir, self._ltp_log_date_from_name),
-                (self._burst_dir, self._ltp_burst_date_from_name),
-            )
-            for dir_path, date_fn in targets:
-                if deleted >= max_delete:
-                    break
-                try:
-                    with os.scandir(dir_path) as entries:
-                        for ent in entries:
-                            if deleted >= max_delete:
-                                break
-                            try:
-                                if not ent.is_file():
-                                    continue
-                                file_date = date_fn(ent.name)
-                                if file_date is None or file_date >= cutoff_date:
-                                    continue
-                                os.remove(ent.path)
-                                deleted += 1
-                            except Exception:
-                                continue
-                except FileNotFoundError:
-                    continue
-                except Exception:
-                    continue
-
-            if deleted > 0:
-                cloudlog.info(f"live torque: cleaned {deleted} old ltp log files older than {cutoff_date}")
-            return deleted
-        except Exception:
-            cloudlog.exception("live torque: failed ltp log cleanup")
-            return 0
-
     def _estimate_dynamic_display_params(self, base_lat: float, base_fric: float):
         """Return latcontrol_torque dynamic-effective estimate for ltp_log only.
 
@@ -3058,11 +2926,6 @@ class TorqueEstimator:
 
     def _log_to_file(self, msg):
         try:
-            now_wall = time.monotonic()
-            if (now_wall - float(getattr(self, "_last_ltp_log_write_t", -1e9) or -1e9)) < float(LTP_LOG_INTERVAL_S):
-                return
-            self._last_ltp_log_write_t = float(now_wall)
-
             os.makedirs(self._log_dir, exist_ok=True)
             now = datetime.now(KST)
             date_str = now.strftime("%Y_%m_%d")
@@ -3108,12 +2971,6 @@ class TorqueEstimator:
                 dyn_latAF, dyn_fric, dyn_blend, dyn_corner_strength, dyn_low_gate, dyn_mid_gate, dyn_high_gate = (
                     float(ltp.latAccelFactorFiltered), float(ltp.frictionCoefficientFiltered), 0.0, 0.0, 0.0, 0.0, 0.0
                 )
-            latAF_f = float(ltp.latAccelFactorFiltered)
-            latAO_f = float(ltp.latAccelOffsetFiltered)
-            fric_f = float(ltp.frictionCoefficientFiltered)
-            latAF_eff = getattr(self, "_lc_latAF_eff", None)
-            latAO_eff = getattr(self, "_lc_latAO_eff", None)
-            fric_eff = getattr(self, "_lc_fric_eff", None)
 
             rec = {
                 "ts": now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -3125,12 +2982,6 @@ class TorqueEstimator:
                 "lc_dt": (None if getattr(self, "_lc_dt", None) is None else round(float(getattr(self, "_lc_dt", 0.0) or 0.0), 4)),
                 "lc_eps_evt": bool(getattr(self, "_lc_eps_evt", False)),
                 "lc_eps_damp": bool(getattr(self, "_lc_eps_damp", False)),
-                "lc_torque_active": bool(getattr(self, "_lc_torque_active", False)),
-                "lc_torque_saturated": bool(getattr(self, "_lc_torque_saturated", False)),
-                "lc_torque_output": (
-                    None if not _finite(getattr(self, "_lc_torque_output", None))
-                    else round(float(getattr(self, "_lc_torque_output", 0.0)), 5)
-                ),
                 "liveValid": bool(ltp.liveValid),
                 "v_kph": v_kph,
                 "yaw_rate": yaw,
@@ -3190,12 +3041,7 @@ class TorqueEstimator:
                 "qual_steer_pressed_ratio": (None if not hasattr(self, "_qual_steer_pressed_ratio") else round(
                     float(getattr(self, "_qual_steer_pressed_ratio", 0.0) or 0.0), 4)),
                 "latAF_raw": round(float(ltp.latAccelFactorRaw), 5),
-                "latAF_f": round(latAF_f, 5),
-                "latAF_eff": (None if not _finite(latAF_eff) else round(float(latAF_eff), 5)),
-                "latAF_eff_delta": (
-                    None if not _finite(latAF_eff)
-                    else round(float(latAF_eff) - latAF_f, 5)
-                ),
+                "latAF_f": round(float(ltp.latAccelFactorFiltered), 5),
                 "latAF_assist_active": bool(getattr(self, "_latAF_assist_active", False)),
                 "latAF_assist_base": round(float(getattr(self, "_latAF_assist_base", 0.0) or 0.0), 5),
                 "latAF_assist_scale": round(float(getattr(self, "_latAF_assist_scale", 1.0) or 1.0), 4),
@@ -3204,15 +3050,9 @@ class TorqueEstimator:
                 "latAF_assist_big_corner": bool(getattr(self, "_latAF_assist_big_corner", False)),
                 "latAF_assist_wide_corner": bool(getattr(self, "_latAF_assist_wide_corner", False)),
                 "latAO_raw": round(float(ltp.latAccelOffsetRaw), 5),
-                "latAO_f": round(latAO_f, 5),
-                "latAO_eff": (None if not _finite(latAO_eff) else round(float(latAO_eff), 5)),
+                "latAO_f": round(float(ltp.latAccelOffsetFiltered), 5),
                 "fric_raw": round(float(ltp.frictionCoefficientRaw), 5),
-                "fric_f": round(fric_f, 5),
-                "fric_eff": (None if not _finite(fric_eff) else round(float(fric_eff), 5)),
-                "fric_eff_delta": (
-                    None if not _finite(fric_eff)
-                    else round(float(fric_eff) - fric_f, 5)
-                ),
+                "fric_f": round(float(ltp.frictionCoefficientFiltered), 5),
                 "dyn_latAF_eff_est": round(float(dyn_latAF), 5),
                 "dyn_fric_eff_est": round(float(dyn_fric), 5),
                 "dyn_blend_est": round(float(dyn_blend), 4),
@@ -3967,10 +3807,6 @@ def main(sm=None, pm=None):
 
     CP = car.CarParams.from_bytes(params.get("CarParams", block=True))
     estimator = TorqueEstimator(CP)
-    try:
-        estimator._cleanup_ltp_log_files(force=True)
-    except Exception:
-        pass
     # Sync offline anchors to the latest runtime Params values
     try:
         _reload_user_torque_params(estimator_ref=estimator, force_log=True)
@@ -4053,11 +3889,6 @@ def main(sm=None, pm=None):
                 _reload_user_torque_params(estimator_ref=estimator, force_log=False)
             except Exception:
                 pass
-
-        try:
-            estimator._cleanup_ltp_log_files(force=False)
-        except Exception:
-            pass
 
         if (now_wall - last_reset_check_wall) >= 0.5:
             last_reset_check_wall = now_wall
