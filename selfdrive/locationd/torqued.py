@@ -80,6 +80,7 @@ from common.numpy_fast import interp, clip
 # -----------------------------
 LTP_LOG_DIR = "/data/openpilot/ltp_logs"
 KST = timezone(timedelta(hours=9))
+LTP_FILE_LOGGING_ENABLED = False
 
 # EPS proxy thresholds used by ltp_log snapshot/burst diagnostics
 LTP_EPS_ERR_NEAR_MAX = LTP_EPS_SAT_RATIO
@@ -88,7 +89,7 @@ LTP_EPS_CLIP_DEMAND = 0.70
 
 # Burst / event trace (snapshot log is kept; burst logs are only emitted around key events)
 LTP_BURST_LOG_DIR = os.path.join(LTP_LOG_DIR, "bursts")
-ENABLE_BURST_TRACE = True
+ENABLE_BURST_TRACE = False
 BURST_PRE_S = 2.0
 BURST_POST_S = 2.5
 BURST_COOLDOWN_S = 4.0
@@ -2925,6 +2926,8 @@ class TorqueEstimator:
         return eff_lat, eff_fric, blend, corner_strength, low_gate, mid_gate, high_gate
 
     def _log_to_file(self, msg):
+        if not LTP_FILE_LOGGING_ENABLED:
+            return
         try:
             os.makedirs(self._log_dir, exist_ok=True)
             now = datetime.now(KST)
