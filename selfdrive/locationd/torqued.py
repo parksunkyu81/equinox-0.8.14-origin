@@ -129,7 +129,7 @@ FORCE_TARGET_TUNING = True  # latAccelFactor/friction anchors are enforced
 
 # ✅ FORCE 밴드: 비대칭(하향 넓게, 상향 보수적으로)
 TARGET_FACTOR_BAND_UP = 0.035
-TARGET_FACTOR_BAND_DOWN = 0.095
+TARGET_FACTOR_BAND_DOWN = 0.025
 
 TARGET_FRICTION_BAND = 0.065
 
@@ -150,7 +150,7 @@ FORCE_FACTOR_BAND_DOWN_MAX = 0.04  # disabled by FORCE_BAND_RELAX_ENABLED = Fals
 FORCE_FRICTION_BAND_MAX = 0.35  # ±35%
 
 # 절대 안전 클램프(혹시 모를 발산/오입력 방지)
-LAT_ACCEL_FACTOR_ABS_MIN = 1.86
+LAT_ACCEL_FACTOR_ABS_MIN = 2.00
 LAT_ACCEL_FACTOR_ABS_MAX = 2.12
 FRICTION_ABS_MIN = 0.220
 FRICTION_ABS_MAX = 0.245
@@ -452,7 +452,7 @@ QUALITY_STEER_PRESSED_LOW_SPEED_KPH = 30.0
 QUALITY_STEER_PRESSED_EXTEND_GUARD_KPH = 30.0
 QUALITY_FREEZE_HOLD_S = 0.65
 
-VERSION = 36  # allow bounded latAccelFactor learning; latcontrol enforces high-speed floor
+VERSION = 35  # bounded live torque tuning; clear fixed-profile and unsafe warm states
 
 
 def slope2rot(slope):
