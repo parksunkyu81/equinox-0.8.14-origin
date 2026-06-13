@@ -88,7 +88,8 @@ class LongControl:
                                                        v_target, v_target_future, CS.brakePressed,
                                                        CS.cruiseState.standstill)
 
-    if self.long_control_state == LongCtrlState.off or CS.gasPressed or CS.brakePressed:
+    gas_override = bool(CS.gasPressed) and not bool(self.CP.enableGasInterceptor)
+    if self.long_control_state == LongCtrlState.off or gas_override or CS.brakePressed:
       self.reset(CS.vEgo)
       output_accel = 0.
 

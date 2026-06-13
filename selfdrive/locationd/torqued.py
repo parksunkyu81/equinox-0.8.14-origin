@@ -156,7 +156,7 @@ LAT_ACCEL_FACTOR_ABS_MAX = 2.12
 FRICTION_ABS_MIN = 0.220
 FRICTION_ABS_MAX = 0.245
 # ✅ 직선 쏠림 보완: offset 학습 허용(단, 직선 샘플이 실제로 들어온 프레임에서만 업데이트 게이트)
-DISABLE_LATACCEL_OFFSET_LEARNING = True
+DISABLE_LATACCEL_OFFSET_LEARNING = False
 
 # Published latAccelFactor assist.
 # Lower latAccelFactor commands more steering torque. Keep the learner stable, but
@@ -182,9 +182,9 @@ LIMITED_CORNER_WEIGHT = 0.30
 #  - aggressive:  빠르게 따라가되 step/clamp로 안전 확보
 LTP_OFFSET_PRESET = os.environ.get("LTP_OFFSET_PRESET", "balanced").lower().strip()
 _LTP_OFFSET_PRESETS = {
-    "conservative": {"min_ok_abs": 45, "min_ok_frac": 0.70, "min_ratio": 0.90, "step_max": 0.002, "cooldown_s": 8.0},
-    "balanced": {"min_ok_abs": 35, "min_ok_frac": 0.65, "min_ratio": 0.85, "step_max": 0.003, "cooldown_s": 5.0},
-    "aggressive": {"min_ok_abs": 30, "min_ok_frac": 0.60, "min_ratio": 0.80, "step_max": 0.005, "cooldown_s": 3.0},
+    "conservative": {"min_ok_abs": 12, "min_ok_frac": 0.70, "min_ratio": 0.90, "step_max": 0.0015, "cooldown_s": 8.0},
+    "balanced": {"min_ok_abs": 8, "min_ok_frac": 0.65, "min_ratio": 0.85, "step_max": 0.0025, "cooldown_s": 5.0},
+    "aggressive": {"min_ok_abs": 6, "min_ok_frac": 0.60, "min_ratio": 0.80, "step_max": 0.0035, "cooldown_s": 3.0},
 }
 _LTP_OFFSET_CFG = _LTP_OFFSET_PRESETS.get(LTP_OFFSET_PRESET, _LTP_OFFSET_PRESETS["balanced"])
 
@@ -193,6 +193,8 @@ STRAIGHT_OK_MIN_FRAC = float(_LTP_OFFSET_CFG["min_ok_frac"])
 STRAIGHT_OK_MIN_RATIO = float(_LTP_OFFSET_CFG["min_ratio"])
 OFFSET_UPDATE_MAX_STEP = float(_LTP_OFFSET_CFG["step_max"])
 OFFSET_UPDATE_MIN_INTERVAL_S = float(_LTP_OFFSET_CFG["cooldown_s"])
+OFFSET_UPDATE_TARGET_ABS_MAX = 0.14
+STRAIGHT_BIAS_OK_MULT = 1.00
 
 # 직선 오프셋(윈도우) 아웃라이어 제거(MAD 기반)
 STRAIGHT_MAD_K = 3.5
@@ -3366,7 +3368,7 @@ class TorqueEstimator:
                     np.isfinite(latOffset_s) and
                     (self._straight_win_ok >= int(min_ok_win)) and
                     (self._straight_win_ok_ratio >= STRAIGHT_OK_MIN_RATIO) and
-                    (abs(float(latOffset_s)) <= 0.15)
+                    (abs(float(latOffset_s)) <= float(OFFSET_UPDATE_TARGET_ABS_MAX))
             )
 
             latFactor_blend = latFactor_c
@@ -3379,7 +3381,8 @@ class TorqueEstimator:
             steer_ok = [s[1] for s in win if isinstance(s, (list, tuple)) and len(s) >= 6 and bool(s[5]) and (
                         s[1] is not None) and np.isfinite(s[1])]
             bias_mean = _mean_safe(steer_ok)
-            bias_ok = (bias_mean is None) or (abs(float(bias_mean)) <= float(STRAIGHT_STEER_MAX_FOR_OFFSET) * 0.50)
+            bias_ok = (bias_mean is None) or (
+                    abs(float(bias_mean)) <= float(STRAIGHT_STEER_MAX_FOR_OFFSET) * float(STRAIGHT_BIAS_OK_MULT))
 
             if straight_offset_ok and bias_ok:
                 w_off = min(float(w), 0.10)
@@ -3591,7 +3594,7 @@ class TorqueEstimator:
                         np.isfinite(latOffset_s) and
                         (self._straight_win_ok >= int(min_ok_win)) and
                         (self._straight_win_ok_ratio >= STRAIGHT_OK_MIN_RATIO) and
-                        (abs(float(latOffset_s)) <= 0.15)
+                        (abs(float(latOffset_s)) <= float(OFFSET_UPDATE_TARGET_ABS_MAX))
                 )
 
                 if (not freeze_update) and straight_offset_ok and self._offset_update_allowed():

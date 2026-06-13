@@ -91,7 +91,8 @@ class CarInterfaceBase(ABC):
       )
     else:
       friction = 0.0
-    return (lateral_accel_value / torque_params['latAccelFactor']) + friction
+    lat_accel_offset = torque_params.get('latAccelOffset', 0.0) if friction_compensation else 0.0
+    return ((lateral_accel_value - lat_accel_offset) / torque_params['latAccelFactor']) + friction
 
   def torque_from_lateral_accel(self):
     return self.torque_from_lateral_accel_linear
