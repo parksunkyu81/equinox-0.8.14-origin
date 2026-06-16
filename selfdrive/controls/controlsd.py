@@ -47,6 +47,9 @@ STOP_ACCEL_BOOST_HOLD_MAX_VEGO = 1.0
 STOP_ACCEL_BOOST_START_MIN_DREL = 5.0
 STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VLEAD = 0.30
 STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VREL = 0.15
+STOP_ACCEL_BOOST_RELEASE_MIN_DREL = 2.5
+STOP_ACCEL_BOOST_RELEASE_MIN_VLEAD = 0.15
+STOP_ACCEL_BOOST_RELEASE_MIN_VREL = 0.05
 FCW_MIN_CLOSING_SPEED = 0.8
 FCW_URGENT_TTC = 1.6
 FCW_CRITICAL_TTC = 1.0
@@ -316,12 +319,22 @@ class Controls:
     def stop_accel_boost_lead_safe_to_start(self, lead):
         return lead is not None and lead.status and lead.dRel >= STOP_ACCEL_BOOST_START_MIN_DREL
 
+    def stop_accel_boost_lead_starting(self, lead):
+        if lead is None or not lead.status or lead.dRel < STOP_ACCEL_BOOST_RELEASE_MIN_DREL:
+            return False
+
+        return lead.vRel > STOP_ACCEL_BOOST_RELEASE_MIN_VREL or \
+               (lead.vLead > STOP_ACCEL_BOOST_RELEASE_MIN_VLEAD and lead.vRel > -STOP_ACCEL_BOOST_RELEASE_MIN_VREL)
+
     def stop_accel_boost_hold_stationary_lead(self, CS):
         if not self.stop_accel_boost or not CS.adaptiveCruise or CS.vEgo > STOP_ACCEL_BOOST_HOLD_MAX_VEGO:
             return False
 
         lead = self.get_lead(self.sm)
         if lead is None or lead.dRel <= 0.0:
+            return False
+
+        if self.stop_accel_boost_lead_starting(lead):
             return False
 
         return not (self.stop_accel_boost_lead_moving(lead) and
