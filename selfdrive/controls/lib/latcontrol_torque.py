@@ -155,6 +155,20 @@ DYN_LAT_FACTOR_MAX = 2.12
 DYN_FRICTION_MIN = 0.220
 DYN_FRICTION_MAX = 0.235
 
+# Directional torque balance.
+# latAccelOffset remains the straight-line bias correction. These small,
+# bounded per-direction assists compensate left/right corner response
+# differences without moving the straight offset.
+DIRECTIONAL_TORQUE_COMP_ENABLED = True
+DIRECTIONAL_TORQUE_MIN_SPEED = 5.0
+DIRECTIONAL_TORQUE_MIN_LAT_ACCEL = 0.12
+DIRECTIONAL_TORQUE_ERROR_DEADBAND = 0.035
+DIRECTIONAL_TORQUE_ERROR_FULL = 0.28
+DIRECTIONAL_TORQUE_STEP = 0.00045
+DIRECTIONAL_TORQUE_ASSIST_MIN = 0.94
+DIRECTIONAL_TORQUE_ASSIST_MAX = 1.08
+DIRECTIONAL_TORQUE_FRICTION_GAIN = 0.55
+
 
 class LatControlTorque(LatControl):
     def __init__(self, CP, CI):
@@ -194,6 +208,9 @@ class LatControlTorque(LatControl):
         self._dyn_last_rate_limited_strong = False
         self._dyn_last_target_delta_up = 10.0
         self._dyn_last_target_delta_down = 14.0
+        self._dir_torque_assist_left = 1.0
+        self._dir_torque_assist_right = 1.0
+        self._dir_torque_last_side = 0
 
     def update_live_torque_params(self, latAccelFactor, latAccelOffset, friction, totalBucketPoints=0):
         base_params = {
@@ -212,6 +229,56 @@ class LatControlTorque(LatControl):
             self.live_torque_params = dict(getattr(self, '_dyn_last_effective_params', base_params))
         else:
             self.live_torque_params = dict(base_params)
+
+    def _get_directional_torque_params(self, torque_params, v_ego, desired_lateral_accel,
+                                       actual_lateral_accel, steering_pressed=False,
+                                       steer_limited=False):
+        if not DIRECTIONAL_TORQUE_COMP_ENABLED:
+            return torque_params
+
+        desired_lat = self._safe_float(desired_lateral_accel, 0.0)
+        actual_lat = self._safe_float(actual_lateral_accel, 0.0)
+        if abs(desired_lat) < DIRECTIONAL_TORQUE_MIN_LAT_ACCEL:
+            self._dir_torque_last_side = 0
+            return torque_params
+
+        side = 1 if desired_lat > 0.0 else -1
+        self._dir_torque_last_side = side
+
+        assist_attr = '_dir_torque_assist_left' if side > 0 else '_dir_torque_assist_right'
+        assist = self._safe_float(getattr(self, assist_attr, 1.0), 1.0)
+
+        can_learn = (
+            self._safe_float(v_ego, 0.0) >= DIRECTIONAL_TORQUE_MIN_SPEED and
+            not bool(steering_pressed) and
+            not bool(steer_limited)
+        )
+        if can_learn:
+            signed_error = (desired_lat - actual_lat) * float(side)
+            error_mag = abs(signed_error)
+            if error_mag > DIRECTIONAL_TORQUE_ERROR_DEADBAND:
+                learn_w = float(clip(
+                    (error_mag - DIRECTIONAL_TORQUE_ERROR_DEADBAND) /
+                    max(DIRECTIONAL_TORQUE_ERROR_FULL - DIRECTIONAL_TORQUE_ERROR_DEADBAND, 1e-3),
+                    0.0, 1.0
+                ))
+                if signed_error > 0.0:
+                    assist += DIRECTIONAL_TORQUE_STEP * learn_w
+                else:
+                    assist -= DIRECTIONAL_TORQUE_STEP * learn_w
+                assist = float(clip(assist, DIRECTIONAL_TORQUE_ASSIST_MIN, DIRECTIONAL_TORQUE_ASSIST_MAX))
+                setattr(self, assist_attr, assist)
+
+        if abs(assist - 1.0) < 1e-5:
+            return torque_params
+
+        out = dict(torque_params)
+        base_lat = self._safe_float(out.get('latAccelFactor', 1.0), 1.0)
+        base_fric = self._safe_float(out.get('friction', 0.0), 0.0)
+        if base_lat > 1e-3:
+            out['latAccelFactor'] = base_lat / assist
+        out['friction'] = max(0.0, base_fric * (1.0 + ((assist - 1.0) * DIRECTIONAL_TORQUE_FRICTION_GAIN)))
+        return out
 
     def _guard_high_speed_curvature(self, v_ego, desired_curvature, desired_curvature_rate):
         v_kph = float(v_ego) * 3.6
@@ -487,6 +554,9 @@ class LatControlTorque(LatControl):
             'latAccelOffset': float(eff.get('latAccelOffset', base.get('latAccelOffset', 0.0)) or 0.0),
             'baseLatAccelFactor': float(base.get('latAccelFactor', 0.0) or 0.0),
             'baseFriction': float(base.get('friction', 0.0) or 0.0),
+            'dirAssistLeft': float(getattr(self, '_dir_torque_assist_left', 1.0) or 1.0),
+            'dirAssistRight': float(getattr(self, '_dir_torque_assist_right', 1.0) or 1.0),
+            'dirAssistSide': int(getattr(self, '_dir_torque_last_side', 0) or 0),
             'targetDeltaUp': float(getattr(self, '_dyn_last_target_delta_up', 0.0) or 0.0),
             'targetDeltaDown': float(getattr(self, '_dyn_last_target_delta_down', 0.0) or 0.0),
             'rateLimitedStrong': bool(getattr(self, '_dyn_last_rate_limited_strong', False)),
@@ -584,6 +654,10 @@ class LatControlTorque(LatControl):
                 rate_limited_strong=getattr(self, '_dyn_prev_rate_limited_strong', False),
                 rate_limit_err=getattr(self, '_dyn_prev_rate_limit_err', 0.0),
                 driver_steering_torque=getattr(CS, 'steeringTorque', 0.0)
+            )
+            effective_torque_params = self._get_directional_torque_params(
+                effective_torque_params, CS.vEgo, desired_lateral_accel, actual_lateral_accel,
+                steering_pressed=CS.steeringPressed, steer_limited=steer_limited
             )
 
             pid_log.error = self.torque_from_lateral_accel(lateral_accel_value=error,
