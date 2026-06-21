@@ -47,11 +47,12 @@ STOP_ACCEL_BOOST_HOLD_MAX_VEGO = 1.0
 STOP_ACCEL_BOOST_START_MIN_DREL = 5.0
 STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VLEAD = 0.30
 STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VREL = 0.15
-STOP_ACCEL_BOOST_RELEASE_MIN_DREL = 2.0
-STOP_ACCEL_BOOST_RELEASE_MIN_VLEAD = 0.05
-STOP_ACCEL_BOOST_RELEASE_MIN_VREL = 0.01
-STOP_ACCEL_BOOST_RELEASE_MIN_DREL_DELTA = 0.01
+STOP_ACCEL_BOOST_RELEASE_MIN_DREL = 0.1
+STOP_ACCEL_BOOST_RELEASE_MIN_VLEAD = 0.01
+STOP_ACCEL_BOOST_RELEASE_MIN_VREL = 0.0
+STOP_ACCEL_BOOST_RELEASE_MIN_DREL_DELTA = 0.005
 STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL = -0.20
+STOP_ACCEL_BOOST_RELEASE_HOLD_FRAMES = int(0.5 / DT_CTRL)
 FCW_MIN_CLOSING_SPEED = 0.8
 FCW_URGENT_TTC = 1.6
 FCW_CRITICAL_TTC = 1.0
@@ -218,6 +219,7 @@ class Controls:
         self.slowing_down = False
         self.slowing_down_alert = False
         self.slowing_down_sound_alert = False
+        self._stop_accel_boost_release_frames = 0
         self.active_cam = False
         self.over_speed_limit = False
 
@@ -306,6 +308,7 @@ class Controls:
         self.slowing_down = False
         self.slowing_down_alert = False
         self.slowing_down_sound_alert = False
+        self._stop_accel_boost_release_frames = 0
 
     def get_lead(self, sm):
         radar = sm['radarState']
@@ -345,13 +348,21 @@ class Controls:
         lead = self.get_lead(self.sm)
         if lead is None or lead.dRel <= 0.0:
             self._stop_accel_boost_prev_drel = None
+            self._stop_accel_boost_release_frames = 0
             return False
 
         lead_starting = self.stop_accel_boost_lead_starting(lead)
         self._stop_accel_boost_prev_drel = float(lead.dRel)
 
         if lead_starting:
+            self._stop_accel_boost_release_frames = STOP_ACCEL_BOOST_RELEASE_HOLD_FRAMES
             return False
+
+        if self._stop_accel_boost_release_frames > 0 and lead.vRel > STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL:
+            self._stop_accel_boost_release_frames -= 1
+            return False
+
+        self._stop_accel_boost_release_frames = 0
 
         return not (self.stop_accel_boost_lead_moving(lead) and
                     self.stop_accel_boost_lead_safe_to_start(lead))
