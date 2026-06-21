@@ -118,7 +118,7 @@ DYN_LOG_MID_GATE_BP   = [35.0, 40.0, 45.0, 55.0, 60.0, 70.0]
 DYN_LOG_MID_GATE_V    = [0.25, 0.45, 0.55, 0.55, 0.30, 0.0]
 DYN_LOG_HIGH_GATE_BP  = [45.0, 60.0, 80.0, 110.0, 130.0]
 DYN_LOG_HIGH_GATE_V   = [0.0, 0.20, 0.75, 1.00, 1.00]
-DYN_LOG_LAT_FACTOR_MIN = 2.00
+DYN_LOG_LAT_FACTOR_MIN = 1.95
 DYN_LOG_LAT_FACTOR_MAX = 2.12
 DYN_LOG_FRICTION_MIN = 0.220
 DYN_LOG_FRICTION_MAX = 0.235
@@ -151,12 +151,12 @@ FORCE_FACTOR_BAND_DOWN_MAX = 0.04  # disabled by FORCE_BAND_RELAX_ENABLED = Fals
 FORCE_FRICTION_BAND_MAX = 0.35  # ±35%
 
 # 절대 안전 클램프(혹시 모를 발산/오입력 방지)
-LAT_ACCEL_FACTOR_ABS_MIN = 2.00
+LAT_ACCEL_FACTOR_ABS_MIN = 1.95
 LAT_ACCEL_FACTOR_ABS_MAX = 2.12
 FRICTION_ABS_MIN = 0.220
 FRICTION_ABS_MAX = 0.245
 # ✅ 직선 쏠림 보완: offset 학습 허용(단, 직선 샘플이 실제로 들어온 프레임에서만 업데이트 게이트)
-DISABLE_LATACCEL_OFFSET_LEARNING = False
+DISABLE_LATACCEL_OFFSET_LEARNING = True
 
 # Published latAccelFactor assist.
 # Lower latAccelFactor commands more steering torque. Keep the learner stable, but
@@ -973,14 +973,14 @@ class TorqueEstimator:
                             if FORCE_TARGET_TUNING:
                                 initial_params = {
                                     'latAccelFactor': self.offline_latAccelFactor,
-                                    'latAccelOffset': merge_with_cache(0.0, cache_ltp.latAccelOffsetFiltered),
+                                    'latAccelOffset': 0.0,
                                     'frictionCoefficient': self.offline_friction
                                 }
                             else:
                                 initial_params = {
                                     'latAccelFactor': merge_with_cache(self.offline_latAccelFactor,
                                                                        cache_ltp.latAccelFactorFiltered),
-                                    'latAccelOffset': merge_with_cache(0.0, cache_ltp.latAccelOffsetFiltered),
+                                    'latAccelOffset': 0.0,
                                     'frictionCoefficient': merge_with_cache(self.offline_friction,
                                                                             cache_ltp.frictionCoefficientFiltered)
                                 }
@@ -1785,7 +1785,7 @@ class TorqueEstimator:
 
     def _coerce_params(self, latFactor, latOffset, friction):
         curF = _sanitize_num(self.filtered_params['latAccelFactor'].x, self.offline_latAccelFactor)
-        curO = _sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0)
+        curO = 0.0 if DISABLE_LATACCEL_OFFSET_LEARNING else _sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0)
         curR = _sanitize_num(self.filtered_params['frictionCoefficient'].x, self.offline_friction)
 
         min_factor, max_factor, min_fric, max_fric = self._dynamic_bands()
@@ -3119,7 +3119,7 @@ class TorqueEstimator:
             return msg
 
         curF = _sanitize_num(self.filtered_params['latAccelFactor'].x, self.offline_latAccelFactor)
-        curO = _sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0)
+        curO = 0.0 if DISABLE_LATACCEL_OFFSET_LEARNING else _sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0)
         curR = _sanitize_num(self.filtered_params['frictionCoefficient'].x, self.offline_friction)
 
         liveTorqueParameters.latAccelFactorRaw = float(curF)
@@ -3374,7 +3374,8 @@ class TorqueEstimator:
             latFactor_blend = latFactor_c
             friction_use = friction_c
 
-            latOffset_base = _sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0)
+            latOffset_base = 0.0 if DISABLE_LATACCEL_OFFSET_LEARNING else _sanitize_num(
+                self.filtered_params['latAccelOffset'].x, 0.0)
             latOffset_blend = float(latOffset_base)
 
             win = list(self._straight_bias) if hasattr(self, "_straight_bias") else []
@@ -3389,7 +3390,8 @@ class TorqueEstimator:
                 latOffset_blend = (1.0 - w_off) * float(latOffset_base) + w_off * float(latOffset_s)
 
             if _finite(latFactor_blend): liveTorqueParameters.latAccelFactorRaw = float(latFactor_blend)
-            if _finite(latOffset_blend): liveTorqueParameters.latAccelOffsetRaw = float(latOffset_blend)
+            if _finite(latOffset_blend) and not DISABLE_LATACCEL_OFFSET_LEARNING:
+                liveTorqueParameters.latAccelOffsetRaw = float(latOffset_blend)
             if _finite(friction_use):    liveTorqueParameters.frictionCoefficientRaw = float(friction_use)
 
             sane = self.is_sane(latFactor_blend, latOffset_blend, friction_use)
@@ -3633,8 +3635,9 @@ class TorqueEstimator:
         minF, maxF, minR, maxR = self._dynamic_bands()
         fF = float(
             np.clip(_sanitize_num(self.filtered_params['latAccelFactor'].x, self.offline_latAccelFactor), minF, maxF))
-        fO = float(np.clip(_sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0), -self.max_offset_abs,
-                           self.max_offset_abs))
+        fO = 0.0 if DISABLE_LATACCEL_OFFSET_LEARNING else float(
+            np.clip(_sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0), -self.max_offset_abs,
+                    self.max_offset_abs))
         fR = float(
             np.clip(_sanitize_num(self.filtered_params['frictionCoefficient'].x, self.offline_friction), minR, maxR))
 
@@ -3753,7 +3756,7 @@ def main(sm=None, pm=None):
                 estimator_ref.filtered_params['frictionCoefficient'].x = float(
                     np.clip(_sanitize_num(estimator_ref.filtered_params['frictionCoefficient'].x, FRICTION_ANCHOR),
                             minR, maxR))
-                estimator_ref.filtered_params['latAccelOffset'].x = float(
+                estimator_ref.filtered_params['latAccelOffset'].x = 0.0 if DISABLE_LATACCEL_OFFSET_LEARNING else float(
                     np.clip(_sanitize_num(estimator_ref.filtered_params['latAccelOffset'].x, 0.0),
                             -estimator_ref.max_offset_abs, estimator_ref.max_offset_abs))
         except Exception:
@@ -3845,8 +3848,8 @@ def main(sm=None, pm=None):
 
                 cur.latAccelFactorFiltered = merge_with_cache(prev.latAccelFactorFiltered, cur.latAccelFactorFiltered,
                                                               EMA_ALPHA)
-                cur.latAccelOffsetFiltered = merge_with_cache(prev.latAccelOffsetFiltered, cur.latAccelOffsetFiltered,
-                                                              EMA_ALPHA)
+                cur.latAccelOffsetFiltered = 0.0 if DISABLE_LATACCEL_OFFSET_LEARNING else merge_with_cache(
+                    prev.latAccelOffsetFiltered, cur.latAccelOffsetFiltered, EMA_ALPHA)
                 cur.frictionCoefficientFiltered = merge_with_cache(prev.frictionCoefficientFiltered,
                                                                    cur.frictionCoefficientFiltered, EMA_ALPHA)
                 cur.decay = max(prev.decay, cur.decay)

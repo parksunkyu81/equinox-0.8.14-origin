@@ -150,7 +150,7 @@ DYN_RATE_LIMITED_STRONG_TRACKING_GAP = 0.45
 DYN_RATE_LIMITED_STRONG_OUTPUT_GAP = 0.18
 
 # 최종 안전 클램프
-DYN_LAT_FACTOR_MIN = 2.00
+DYN_LAT_FACTOR_MIN = 1.95
 DYN_LAT_FACTOR_MAX = 2.12
 DYN_FRICTION_MIN = 0.220
 DYN_FRICTION_MAX = 0.235
@@ -159,7 +159,7 @@ DYN_FRICTION_MAX = 0.235
 # latAccelOffset remains the straight-line bias correction. These small,
 # bounded per-direction assists compensate left/right corner response
 # differences without moving the straight offset.
-DIRECTIONAL_TORQUE_COMP_ENABLED = True
+DIRECTIONAL_TORQUE_COMP_ENABLED = False
 DIRECTIONAL_TORQUE_MIN_SPEED = 5.0
 DIRECTIONAL_TORQUE_MIN_LAT_ACCEL = 0.12
 DIRECTIONAL_TORQUE_ERROR_DEADBAND = 0.035
