@@ -16,6 +16,8 @@ ButtonType = car.CarState.ButtonEvent.Type
 EventName = car.CarEvent.EventName
 GearShifter = car.CarState.GearShifter
 
+PEDAL_MAIN_ON_DEBOUNCE_FRAMES = 10
+
 
 def get_steer_feedforward_sigmoid(desired_angle, v_ego, ANGLE, ANGLE_OFFSET, SIGMOID_SPEED, SIGMOID, SPEED):
     x = ANGLE * (desired_angle + ANGLE_OFFSET)
@@ -256,13 +258,35 @@ class CarInterface(CarInterfaceBase):
                     # adaptive_Cruise 상태는 main_on 상태에 맞춰 아래에서 반영
                     break
 
+            raw_main_on = bool(self.CS.main_on)
+            if not hasattr(self, "_pedal_main_on_filtered"):
+                self._pedal_main_on_filtered = raw_main_on
+                self._pedal_main_on_frames = PEDAL_MAIN_ON_DEBOUNCE_FRAMES
+                self._pedal_main_off_frames = PEDAL_MAIN_ON_DEBOUNCE_FRAMES
+
+            if raw_main_on:
+                self._pedal_main_on_frames = min(self._pedal_main_on_frames + 1, PEDAL_MAIN_ON_DEBOUNCE_FRAMES)
+                self._pedal_main_off_frames = 0
+                if self._pedal_main_on_frames >= PEDAL_MAIN_ON_DEBOUNCE_FRAMES:
+                    self._pedal_main_on_filtered = True
+            else:
+                self._pedal_main_off_frames = min(self._pedal_main_off_frames + 1, PEDAL_MAIN_ON_DEBOUNCE_FRAMES)
+                self._pedal_main_on_frames = 0
+                if self._pedal_main_off_frames >= PEDAL_MAIN_ON_DEBOUNCE_FRAMES:
+                    self._pedal_main_on_filtered = False
+
             # MAIN 상태에 따라 adaptiveCruise 반영
-            if self.CS.main_on:
+            if self._pedal_main_on_filtered:
                 self.CS.adaptive_Cruise = False
                 self.CS.enable_lkas = True
             else:
                 self.CS.adaptive_Cruise = True
                 self.CS.enable_lkas = True
+
+            ret.adaptiveCruise = self.CS.adaptive_Cruise
+            ret.lkasEnable = self.CS.enable_lkas
+            ret.cruiseState.available = ret.adaptiveCruise
+            ret.cruiseState.enabled = ret.adaptiveCruise
 
         else:
             # 페달 없는 차량
