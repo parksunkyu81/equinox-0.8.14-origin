@@ -216,7 +216,7 @@ class LatControlTorque(LatControl):
         base_params = {
             'latAccelFactor': latAccelFactor,
             'friction': friction,
-            'latAccelOffset': latAccelOffset,
+            'latAccelOffset': 0.0,
             'totalBucketPoints': totalBucketPoints,
         }
         # BUGFIX:
