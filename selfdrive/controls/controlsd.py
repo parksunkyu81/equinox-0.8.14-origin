@@ -52,7 +52,8 @@ STOP_ACCEL_BOOST_RELEASE_MIN_VLEAD = 0.01
 STOP_ACCEL_BOOST_RELEASE_MIN_VREL = 0.0
 STOP_ACCEL_BOOST_RELEASE_MIN_DREL_DELTA = 0.005
 STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL = -0.20
-STOP_ACCEL_BOOST_RELEASE_HOLD_FRAMES = int(0.5 / DT_CTRL)
+STOP_ACCEL_BOOST_RELEASE_HOLD_FRAMES = int(1.2 / DT_CTRL)
+STOP_ACCEL_BOOST_RESTART_MIN_ACCEL = 0.22
 FCW_MIN_CLOSING_SPEED = 0.8
 FCW_URGENT_TTC = 1.6
 FCW_CRITICAL_TTC = 1.0
@@ -220,6 +221,7 @@ class Controls:
         self.slowing_down_alert = False
         self.slowing_down_sound_alert = False
         self._stop_accel_boost_release_frames = 0
+        self._stop_accel_boost_release_active = False
         self.active_cam = False
         self.over_speed_limit = False
 
@@ -309,6 +311,13 @@ class Controls:
         self.slowing_down_alert = False
         self.slowing_down_sound_alert = False
         self._stop_accel_boost_release_frames = 0
+        self._stop_accel_boost_release_active = False
+
+    def set_stop_accel_boost_hold_result(self, hold, release_active=False):
+        self._stop_accel_boost_release_active = release_active
+        self._stop_accel_boost_hold_frame = self.sm.frame
+        self._stop_accel_boost_hold_result = hold
+        return hold
 
     def get_lead(self, sm):
         radar = sm['radarState']
@@ -342,30 +351,34 @@ class Controls:
                 lead.vRel > STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL)
 
     def stop_accel_boost_hold_stationary_lead(self, CS):
+        if getattr(self, "_stop_accel_boost_hold_frame", -1) == self.sm.frame:
+            return self._stop_accel_boost_hold_result
+
         if not self.stop_accel_boost or not CS.adaptiveCruise or CS.vEgo > STOP_ACCEL_BOOST_HOLD_MAX_VEGO:
-            return False
+            return self.set_stop_accel_boost_hold_result(False)
 
         lead = self.get_lead(self.sm)
         if lead is None or lead.dRel <= 0.0:
             self._stop_accel_boost_prev_drel = None
             self._stop_accel_boost_release_frames = 0
-            return False
+            return self.set_stop_accel_boost_hold_result(False)
 
         lead_starting = self.stop_accel_boost_lead_starting(lead)
         self._stop_accel_boost_prev_drel = float(lead.dRel)
 
         if lead_starting:
             self._stop_accel_boost_release_frames = STOP_ACCEL_BOOST_RELEASE_HOLD_FRAMES
-            return False
+            return self.set_stop_accel_boost_hold_result(False, True)
 
         if self._stop_accel_boost_release_frames > 0 and lead.vRel > STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL:
             self._stop_accel_boost_release_frames -= 1
-            return False
+            return self.set_stop_accel_boost_hold_result(False, True)
 
         self._stop_accel_boost_release_frames = 0
 
-        return not (self.stop_accel_boost_lead_moving(lead) and
-                    self.stop_accel_boost_lead_safe_to_start(lead))
+        return self.set_stop_accel_boost_hold_result(
+            not (self.stop_accel_boost_lead_moving(lead) and
+                 self.stop_accel_boost_lead_safe_to_start(lead)))
 
     def op_fcw_dangerous_lead(self, CS):
         lead = self.get_lead(self.sm)
@@ -1144,6 +1157,13 @@ class Controls:
             if self.active and self.stop_accel_boost_hold_stationary_lead(CS):
                 actuators.accel = min(actuators.accel, 0.0)
                 self.LoC.reset(v_pid=CS.vEgo)
+            elif self.active and self._stop_accel_boost_release_active:
+                lead = self.get_lead(self.sm)
+                if self.stop_accel_boost_lead_safe_to_start(lead) and lead.vRel > STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL:
+                    if self.LoC.long_control_state == car.CarControl.Actuators.LongControlState.stopping:
+                        self.LoC.long_control_state = car.CarControl.Actuators.LongControlState.pid
+                        self.LoC.reset(v_pid=CS.vEgo)
+                    actuators.accel = max(actuators.accel, STOP_ACCEL_BOOST_RESTART_MIN_ACCEL)
 
             # Steering PID loop and lateral MPC
             # lat_active = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
