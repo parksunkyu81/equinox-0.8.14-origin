@@ -86,12 +86,6 @@ def manager_init() -> None:
     ("DynamicTRSet", "1.2,1.3,1.4,1.5,1.6"),  # ("DynamicTRSet", "1.3,1.4,1.5,1.6,1.7"),
     ("cruiseGap", "4"),
 
-
-    # Driving Close to RoadEdge
-    ("CloseToRoadEdge", "1"),
-    ("LeftEdgeOffset", "15"),
-    ("RightEdgeOffset", "-15"),
-
   ]
   if not PC:
     default_params.append(("LastUpdateTime", datetime.datetime.utcnow().isoformat().encode('utf8')))

@@ -776,12 +776,6 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                           "../assets/offroad/icon_shell.png",
                                           this));*/
 
-  toggles.append(new ParamControl("CloseToRoadEdge",
-                                          "Driving Close to RoadEdge",
-                                          "This will adjust the camera offset to get close to road edge if the car is on the first or last lane.",
-                                          "../assets/offroad/icon_shell.png",
-                                          this));
-
   for(ParamControl *toggle : toggles) {
     if(main_layout->count() != 0) {
       toggleLayout->addWidget(horizontal_line());

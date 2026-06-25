@@ -230,10 +230,6 @@ std::unordered_map<std::string, uint32_t> keys = {
     {"DynamicTRSet", PERSISTENT},
     {"cruiseGap", PERSISTENT},
 
-    {"CloseToRoadEdge", PERSISTENT},
-    {"LeftEdgeOffset", PERSISTENT},
-    {"RightEdgeOffset", PERSISTENT},
-
 };
 
 } // namespace
