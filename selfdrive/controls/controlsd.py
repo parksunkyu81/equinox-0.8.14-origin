@@ -53,7 +53,8 @@ STOP_ACCEL_BOOST_RELEASE_MIN_VREL = 0.0
 STOP_ACCEL_BOOST_RELEASE_MIN_DREL_DELTA = 0.005
 STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL = -0.20
 STOP_ACCEL_BOOST_RELEASE_HOLD_FRAMES = int(1.2 / DT_CTRL)
-STOP_ACCEL_BOOST_RESTART_MIN_ACCEL = 0.22
+STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH = 1.0
+STOP_ACCEL_BOOST_RESTART_MIN_ACCEL = 1.50
 FCW_MIN_CLOSING_SPEED = 0.8
 FCW_URGENT_TTC = 1.6
 FCW_CRITICAL_TTC = 1.0
@@ -1159,7 +1160,9 @@ class Controls:
                 self.LoC.reset(v_pid=CS.vEgo)
             elif self.active and self._stop_accel_boost_release_active:
                 lead = self.get_lead(self.sm)
-                if self.stop_accel_boost_lead_safe_to_start(lead) and lead.vRel > STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL:
+                if self.stop_accel_boost_lead_safe_to_start(lead) and \
+                   lead.vRel > STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL and \
+                   CS.vEgo * CV.MS_TO_KPH >= STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH:
                     if self.LoC.long_control_state == car.CarControl.Actuators.LongControlState.stopping:
                         self.LoC.long_control_state = car.CarControl.Actuators.LongControlState.pid
                         self.LoC.reset(v_pid=CS.vEgo)
