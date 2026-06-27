@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from cereal import car
 from common.numpy_fast import interp
+from common.realtime import DT_CTRL
 from math import fabs
 from common.conversions import Conversions as CV
 from selfdrive.ntune import ntune_scc_get
@@ -16,7 +17,7 @@ ButtonType = car.CarState.ButtonEvent.Type
 EventName = car.CarEvent.EventName
 GearShifter = car.CarState.GearShifter
 
-PEDAL_MAIN_ON_DEBOUNCE_FRAMES = 10
+PEDAL_MAIN_ON_SIGNAL_SYNC_FRAMES = int(1.0 / DT_CTRL)
 
 
 def get_steer_feedforward_sigmoid(desired_angle, v_ego, ANGLE, ANGLE_OFFSET, SIGMOID_SPEED, SIGMOID, SPEED):
@@ -242,6 +243,7 @@ class CarInterface(CarInterfaceBase):
 
         if self.CP.enableGasInterceptor:
             # 가속 페달 장착 차량
+            main_button_pressed = False
             for b in ret.buttonEvents:
                 if (b.type in [ButtonType.decelCruise, ButtonType.accelCruise]) and not b.pressed:
                     self.CS.adaptive_Cruise = True
@@ -256,24 +258,35 @@ class CarInterface(CarInterfaceBase):
                 if (b.type == ButtonType.altButton3 and b.pressed):
                     # MAIN 버튼은 단순히 main_on 플래그를 토글하는 역할로만 두고
                     # adaptive_Cruise 상태는 main_on 상태에 맞춰 아래에서 반영
+                    main_button_pressed = True
                     break
 
             raw_main_on = bool(self.CS.main_on)
-            if not hasattr(self, "_pedal_main_on_filtered"):
+            main_filter_initialized = hasattr(self, "_pedal_main_on_filtered")
+            if not main_filter_initialized:
                 self._pedal_main_on_filtered = raw_main_on
-                self._pedal_main_on_frames = PEDAL_MAIN_ON_DEBOUNCE_FRAMES
-                self._pedal_main_off_frames = PEDAL_MAIN_ON_DEBOUNCE_FRAMES
+                self._pedal_main_on_sync_frames = 0
 
-            if raw_main_on:
-                self._pedal_main_on_frames = min(self._pedal_main_on_frames + 1, PEDAL_MAIN_ON_DEBOUNCE_FRAMES)
-                self._pedal_main_off_frames = 0
-                if self._pedal_main_on_frames >= PEDAL_MAIN_ON_DEBOUNCE_FRAMES:
-                    self._pedal_main_on_filtered = True
+            # An explicit MAIN button event is authoritative and remains an
+            # immediate pedal kill switch. Without that event, require a
+            # sustained raw-signal mismatch before changing pedal state.
+            if main_button_pressed:
+                if main_filter_initialized:
+                    if raw_main_on != self._pedal_main_on_filtered:
+                        self._pedal_main_on_filtered = raw_main_on
+                    else:
+                        self._pedal_main_on_filtered = not self._pedal_main_on_filtered
+                self._pedal_main_on_sync_frames = 0
+            elif raw_main_on == self._pedal_main_on_filtered:
+                self._pedal_main_on_sync_frames = 0
             else:
-                self._pedal_main_off_frames = min(self._pedal_main_off_frames + 1, PEDAL_MAIN_ON_DEBOUNCE_FRAMES)
-                self._pedal_main_on_frames = 0
-                if self._pedal_main_off_frames >= PEDAL_MAIN_ON_DEBOUNCE_FRAMES:
-                    self._pedal_main_on_filtered = False
+                self._pedal_main_on_sync_frames = min(
+                    self._pedal_main_on_sync_frames + 1,
+                    PEDAL_MAIN_ON_SIGNAL_SYNC_FRAMES,
+                )
+                if self._pedal_main_on_sync_frames >= PEDAL_MAIN_ON_SIGNAL_SYNC_FRAMES:
+                    self._pedal_main_on_filtered = raw_main_on
+                    self._pedal_main_on_sync_frames = 0
 
             # MAIN 상태에 따라 adaptiveCruise 반영
             if self._pedal_main_on_filtered:

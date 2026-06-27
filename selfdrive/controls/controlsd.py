@@ -223,6 +223,7 @@ class Controls:
         self.slowing_down_sound_alert = False
         self._stop_accel_boost_release_frames = 0
         self._stop_accel_boost_release_active = False
+        self._stop_accel_boost_lead_departed = False
         self.active_cam = False
         self.over_speed_limit = False
 
@@ -313,6 +314,7 @@ class Controls:
         self.slowing_down_sound_alert = False
         self._stop_accel_boost_release_frames = 0
         self._stop_accel_boost_release_active = False
+        self._stop_accel_boost_lead_departed = False
 
     def set_stop_accel_boost_hold_result(self, hold, release_active=False):
         self._stop_accel_boost_release_active = release_active
@@ -356,16 +358,33 @@ class Controls:
             return self._stop_accel_boost_hold_result
 
         if not self.stop_accel_boost or not CS.adaptiveCruise or CS.vEgo > STOP_ACCEL_BOOST_HOLD_MAX_VEGO:
+            self._stop_accel_boost_lead_departed = False
             return self.set_stop_accel_boost_hold_result(False)
 
         lead = self.get_lead(self.sm)
         if lead is None or lead.dRel <= 0.0:
             self._stop_accel_boost_prev_drel = None
             self._stop_accel_boost_release_frames = 0
+            self._stop_accel_boost_lead_departed = False
             return self.set_stop_accel_boost_hold_result(False)
 
         lead_starting = self.stop_accel_boost_lead_starting(lead)
         self._stop_accel_boost_prev_drel = float(lead.dRel)
+
+        # Keep a confirmed lead departure across the short release-frame window.
+        # Clear it immediately when the ego is closing at an unsafe rate.
+        if lead_starting:
+            self._stop_accel_boost_lead_departed = True
+        elif lead.vRel <= STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL:
+            self._stop_accel_boost_lead_departed = False
+            self._stop_accel_boost_release_frames = 0
+
+        post_roll_restart = self._stop_accel_boost_lead_departed and \
+                            self.stop_accel_boost_lead_safe_to_start(lead) and \
+                            lead.vRel > STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL and \
+                            CS.vEgo * CV.MS_TO_KPH >= STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH
+        if post_roll_restart:
+            return self.set_stop_accel_boost_hold_result(False, True)
 
         if lead_starting:
             self._stop_accel_boost_release_frames = STOP_ACCEL_BOOST_RELEASE_HOLD_FRAMES

@@ -18,6 +18,8 @@ TRAJECTORY_SIZE = 33
 
 PATH_OFFSET = 0.00
 CAMERA_OFFSET = -0.06
+CENTER_LANE_CONF_BP = [0.35, 0.60]
+CENTER_LANE_CONF_V = [0.0, 1.0]
 
 class LanePlanner:
   def __init__(self, wide_camera=False):
@@ -102,9 +104,21 @@ class LanePlanner:
     path_from_left_lane = self.lll_y + clipped_lane_width / 2.0
     path_from_right_lane = self.rll_y - clipped_lane_width / 2.0
 
-    self.d_prob = l_prob + r_prob - l_prob * r_prob
+    raw_d_prob = l_prob + r_prob - l_prob * r_prob
+    both_lane_conf = interp(min(l_prob, r_prob), CENTER_LANE_CONF_BP, CENTER_LANE_CONF_V)
 
-    lane_path_y = (l_prob * path_from_left_lane + r_prob * path_from_right_lane) / (l_prob + r_prob + 0.0001)
+    # When both lane lines are reliable, prefer their geometric midpoint.
+    # This prevents model-path bias, lane-width error, or unequal line
+    # probabilities from pulling the target away from the lane center.
+    direct_lane_center_y = (self.lll_y + self.rll_y) / 2.0
+    inferred_lane_center_y = \
+      (l_prob * path_from_left_lane + r_prob * path_from_right_lane) / (l_prob + r_prob + 0.0001)
+    lane_path_y = both_lane_conf * direct_lane_center_y + \
+                  (1.0 - both_lane_conf) * inferred_lane_center_y
+
+    # Smoothly remove the model path only when both lane lines agree.
+    # Keep the original model fallback for weak or single-line detection.
+    self.d_prob = raw_d_prob + (1.0 - raw_d_prob) * both_lane_conf
     safe_idxs = np.isfinite(self.ll_t)
     if safe_idxs[0]:
       lane_path_y_interp = np.interp(path_t, self.ll_t[safe_idxs], lane_path_y[safe_idxs])
