@@ -84,11 +84,11 @@ _A_CRUISE_MAX_V = [
 # 앞차 따라붙을 때는 일반 cruise보다 조금 더 허용하지만,
 # 40km/h 이후부터는 과한 재가속을 억제
 _A_CRUISE_MAX_V_FOLLOWING = [
-  1.56,  # 0 km/h  : 1.3x low-speed boost
-  1.70885,  # 1 km/h  : 1.3x low-speed boost
-  1.6445,  # 10 km/h : 1.3x low-speed boost
-  1.573,  # 15 km/h : 1.3x low-speed boost
-  1.365,  # 20 km/h : 1.3x low-speed boost
+  1.68,  # 0 km/h  : 1.4x low-speed boost
+  1.8403,  # 1 km/h  : 1.4x low-speed boost
+  1.771,  # 10 km/h : 1.4x low-speed boost
+  1.694,  # 15 km/h : 1.4x low-speed boost
+  1.47,  # 20 km/h : 1.4x low-speed boost
   0.93,  # 30 km/h
   0.89,  # 40 km/h
   0.86,  # 55 km/h
