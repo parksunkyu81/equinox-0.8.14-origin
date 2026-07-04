@@ -43,8 +43,11 @@ MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
 
 SOFT_DISABLE_TIME = 3  # seconds
-STOP_ACCEL_BOOST_HOLD_MAX_VEGO = 1.0
-STOP_ACCEL_BOOST_START_MIN_DREL = 5.0
+STOP_ACCEL_BOOST_HOLD_MAX_VEGO = 20.0 * CV.KPH_TO_MS
+STOP_ACCEL_BOOST_PID_RESET_MAX_VEGO = 1.0
+STOP_ACCEL_BOOST_START_MIN_DREL = 3.0
+STOP_ACCEL_BOOST_STATIONARY_LEAD_MIN_HOLD_DREL = 12.0
+STOP_ACCEL_BOOST_STATIONARY_LEAD_HOLD_HEADWAY = 1.0
 STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VLEAD = 0.30
 STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VREL = 0.15
 STOP_ACCEL_BOOST_RELEASE_MIN_DREL = 0.1
@@ -54,6 +57,10 @@ STOP_ACCEL_BOOST_RELEASE_MIN_DREL_DELTA = 0.005
 STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL = -0.20
 STOP_ACCEL_BOOST_RELEASE_HOLD_FRAMES = int(1.2 / DT_CTRL)
 STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH = 1.0
+STOP_ACCEL_BOOST_RESTART_MAX_VEGO_KPH = 20.0
+STOP_ACCEL_BOOST_RESTART_REDUCED_MAX_VEGO_KPH = 10.0
+STOP_ACCEL_BOOST_RESTART_FULL_ACCEL_VEGO_KPH = 15.0
+STOP_ACCEL_BOOST_RESTART_REDUCED_MIN_ACCEL = 1.232
 STOP_ACCEL_BOOST_RESTART_MIN_ACCEL = 1.40
 FCW_MIN_CLOSING_SPEED = 0.8
 FCW_URGENT_TTC = 1.6
@@ -336,6 +343,35 @@ class Controls:
     def stop_accel_boost_lead_safe_to_start(self, lead):
         return lead is not None and lead.status and lead.dRel >= STOP_ACCEL_BOOST_START_MIN_DREL
 
+    def stop_accel_boost_restart_min_accel(self, v_ego_kph):
+        return interp(v_ego_kph,
+                      [STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH,
+                       STOP_ACCEL_BOOST_RESTART_REDUCED_MAX_VEGO_KPH,
+                       STOP_ACCEL_BOOST_RESTART_FULL_ACCEL_VEGO_KPH],
+                      [STOP_ACCEL_BOOST_RESTART_REDUCED_MIN_ACCEL,
+                       STOP_ACCEL_BOOST_RESTART_REDUCED_MIN_ACCEL,
+                       STOP_ACCEL_BOOST_RESTART_MIN_ACCEL])
+
+    def stop_accel_boost_stationary_lead_hold_distance(self, CS):
+        return STOP_ACCEL_BOOST_STATIONARY_LEAD_MIN_HOLD_DREL + \
+               STOP_ACCEL_BOOST_STATIONARY_LEAD_HOLD_HEADWAY * max(CS.vEgo, 0.0)
+
+    def stop_accel_boost_near_stationary_lead(self, CS, lead):
+        return lead is not None and lead.status and lead.dRel > 0.0 and \
+               lead.dRel <= self.stop_accel_boost_stationary_lead_hold_distance(CS) and \
+               lead.vLead <= STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VLEAD
+
+    def stop_accel_boost_lead_clear_for_boost(self, CS, lead):
+        if lead is None or not lead.status or lead.dRel <= 0.0:
+            return False
+
+        if lead.dRel > self.stop_accel_boost_stationary_lead_hold_distance(CS):
+            return True
+
+        return self.stop_accel_boost_lead_safe_to_start(lead) and \
+               lead.vLead > STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VLEAD and \
+               lead.vRel > STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL
+
     def stop_accel_boost_lead_starting(self, lead):
         if lead is None or not lead.status or lead.dRel < STOP_ACCEL_BOOST_RELEASE_MIN_DREL:
             return False
@@ -368,7 +404,20 @@ class Controls:
             self._stop_accel_boost_lead_departed = False
             return self.set_stop_accel_boost_hold_result(False)
 
-        lead_starting = self.stop_accel_boost_lead_starting(lead)
+        if self.stop_accel_boost_near_stationary_lead(CS, lead):
+            self._stop_accel_boost_prev_drel = float(lead.dRel)
+            self._stop_accel_boost_release_frames = 0
+            self._stop_accel_boost_lead_departed = False
+            return self.set_stop_accel_boost_hold_result(True)
+
+        if lead.dRel > self.stop_accel_boost_stationary_lead_hold_distance(CS):
+            self._stop_accel_boost_prev_drel = float(lead.dRel)
+            self._stop_accel_boost_release_frames = 0
+            self._stop_accel_boost_lead_departed = False
+            return self.set_stop_accel_boost_hold_result(False, True)
+
+        lead_starting = self.stop_accel_boost_lead_starting(lead) and \
+                        self.stop_accel_boost_lead_safe_to_start(lead)
         self._stop_accel_boost_prev_drel = float(lead.dRel)
 
         # Keep a confirmed lead departure across the short release-frame window.
@@ -924,8 +973,8 @@ class Controls:
         stock_long_is_braking = self.enabled and not self.CP.openpilotLongitudinalControl and CS.aEgo < -1.25
         model_fcw = self.sm['modelV2'].meta.hardBrakePredicted and not CS.brakePressed and not stock_long_is_braking
         planner_fcw = self.sm['longitudinalPlan'].fcw and self.enabled
-        stationary_lead_hold = self.stop_accel_boost_hold_stationary_lead(CS)
-        if not self.disable_op_fcw and not stationary_lead_hold and self.op_fcw_dangerous_lead(CS) and (planner_fcw or model_fcw):
+        self.stop_accel_boost_hold_stationary_lead(CS)
+        if not self.disable_op_fcw and self.op_fcw_dangerous_lead(CS) and (planner_fcw or model_fcw):
             self.events.add(EventName.fcw)
 
         if TICI:
@@ -1174,18 +1223,24 @@ class Controls:
             t_since_plan = (self.sm.frame - self.sm.rcv_frame['longitudinalPlan']) * DT_CTRL
 
             actuators.accel = self.LoC.update(self.active, CS, long_plan, pid_accel_limits, t_since_plan)
-            if self.active and self.stop_accel_boost_hold_stationary_lead(CS):
+            stationary_lead_hold = self.stop_accel_boost_hold_stationary_lead(CS)
+            if CS.brakePressed:
+                self._stop_accel_boost_release_frames = 0
+                self._stop_accel_boost_release_active = False
+                self._stop_accel_boost_lead_departed = False
                 actuators.accel = min(actuators.accel, 0.0)
                 self.LoC.reset(v_pid=CS.vEgo)
+            elif self.active and stationary_lead_hold:
+                actuators.accel = min(actuators.accel, 0.0)
+                if CS.vEgo <= STOP_ACCEL_BOOST_PID_RESET_MAX_VEGO:
+                    self.LoC.reset(v_pid=CS.vEgo)
             elif self.active and self._stop_accel_boost_release_active:
                 lead = self.get_lead(self.sm)
-                if self.stop_accel_boost_lead_safe_to_start(lead) and \
-                   lead.vRel > STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL and \
-                   CS.vEgo * CV.MS_TO_KPH >= STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH:
-                    if self.LoC.long_control_state == car.CarControl.Actuators.LongControlState.stopping:
-                        self.LoC.long_control_state = car.CarControl.Actuators.LongControlState.pid
-                        self.LoC.reset(v_pid=CS.vEgo)
-                    actuators.accel = max(actuators.accel, STOP_ACCEL_BOOST_RESTART_MIN_ACCEL)
+                v_ego_kph = CS.vEgo * CV.MS_TO_KPH
+                if self.stop_accel_boost_lead_clear_for_boost(CS, lead) and \
+                   STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH <= v_ego_kph <= STOP_ACCEL_BOOST_RESTART_MAX_VEGO_KPH and \
+                   actuators.accel > 0.0:
+                    actuators.accel = max(actuators.accel, self.stop_accel_boost_restart_min_accel(v_ego_kph))
 
             # Steering PID loop and lateral MPC
             # lat_active = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
@@ -1217,6 +1272,11 @@ class Controls:
                 lac_log.saturated = abs(steer) >= 0.9
 
         # Send a "steering required alert" if saturation count has reached the limit (조향 제어 초과)
+        # Driver brake is the final authority over every longitudinal path,
+        # including restart boost and joystick/debug acceleration.
+        if CS.brakePressed:
+            actuators.accel = min(actuators.accel, 0.0)
+
         if lac_log.active and lac_log.saturated and not CS.steeringPressed:
             dpath_points = lat_plan.dPathPoints
             if len(dpath_points):

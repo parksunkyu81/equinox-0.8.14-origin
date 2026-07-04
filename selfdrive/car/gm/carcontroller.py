@@ -109,11 +109,14 @@ class CarController():
     #
     # 따라서 종방향 계산은 매 프레임 먼저 갱신하고, CAN 전송 주기만 별도로 유지한다.
     # ---------------------------------------------------------------
-    self.accel = float(clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+    brake_pressed = bool(CS.out.brakePressed)
+    requested_accel = float(clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+    self.accel = min(requested_accel, 0.0) if brake_pressed else requested_accel
 
     if CS.CP.enableGasInterceptor:
       # 이것이 없으면 저속에서 너무 공격적입니다.
-      if c.active and CS.adaptive_Cruise and CS.out.vEgo > V_CRUISE_ENABLE_MIN / CV.MS_TO_KPH:
+      if c.active and CS.adaptive_Cruise and not brake_pressed and \
+         CS.out.vEgo > V_CRUISE_ENABLE_MIN / CV.MS_TO_KPH:
 
         # 가속 멀티플라이어 설정
         # 속도별 가속 배율 - 전체적으로 절반으로 줄임
