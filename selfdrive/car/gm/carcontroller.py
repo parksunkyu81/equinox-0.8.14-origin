@@ -15,6 +15,9 @@ VisualAlert = car.CarControl.HUDControl.VisualAlert
 GearShifter = car.CarState.GearShifter
 
 CREEP_SPEED = 2.5   # 4km
+LEAD_CLOSING_GAS_CUT_VREL = -0.20
+LEAD_CATCHUP_PEDAL_BOOST_BP = [20.0, 30.0, 40.0, 60.0, 70.0]
+LEAD_CATCHUP_PEDAL_BOOST_V = [1.00, 1.08, 1.09, 1.10, 1.00]
 
 
 # =====================================================================
@@ -85,6 +88,7 @@ class CarController():
     self.accel_start_time = None
 
     self.params = CarControllerParams(CP)
+    self.lead_catchup_enabled = Params().get_bool('StopAccelBoost')
 
     self.packer_pt = CANPacker(DBC[CP.carFingerprint]['pt'])
     #self.packer_obj = CANPacker(DBC[CP.carFingerprint]['radar'])
@@ -110,8 +114,13 @@ class CarController():
     # 따라서 종방향 계산은 매 프레임 먼저 갱신하고, CAN 전송 주기만 별도로 유지한다.
     # ---------------------------------------------------------------
     brake_pressed = bool(CS.out.brakePressed)
+    lead = self.get_lead(controls.sm)
+    # This car cannot command the brakes. A clearly closing lead therefore
+    # gets an immediate gas cut in the final GM output layer as well.
+    lead_closing = self.lead_catchup_enabled and lead is not None and \
+                   lead.vRel <= LEAD_CLOSING_GAS_CUT_VREL
     requested_accel = float(clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-    self.accel = min(requested_accel, 0.0) if brake_pressed else requested_accel
+    self.accel = min(requested_accel, 0.0) if brake_pressed or lead_closing else requested_accel
 
     if CS.CP.enableGasInterceptor:
       # 이것이 없으면 저속에서 너무 공격적입니다.
@@ -133,6 +142,17 @@ class CarController():
                           [0.132, 0.145, 0.158, 0.185,
                            0.182, 0.168, 0.178, 0.188]
                           )
+
+        catchup_active = self.lead_catchup_enabled and \
+                         bool(controls.sm['dynamicFollowData'].leadCatchupActive) and \
+                         lead is not None and lead.vRel > 0.0 and lead.aLeadK > -0.30
+        if catchup_active:
+          # Diesel response shaping is temporary and speed-bounded: +8/9/10%
+          # at 30/40/60 km/h, returning to the base map outside the band.
+          pedal_boost = interp(CS.out.vEgo * CV.MS_TO_KPH,
+                               LEAD_CATCHUP_PEDAL_BOOST_BP,
+                               LEAD_CATCHUP_PEDAL_BOOST_V)
+          acc_mult *= pedal_boost
 
         pedal_command = acc_mult * self.accel
         self.comma_pedal = float(clip(pedal_command, 0., 0.75))

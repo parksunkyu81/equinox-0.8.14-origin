@@ -66,6 +66,12 @@ FCW_MIN_CLOSING_SPEED = 0.8
 FCW_URGENT_TTC = 1.6
 FCW_CRITICAL_TTC = 1.0
 FCW_DECEL_SUPPRESS = -0.8
+PEDAL_ONLY_LEAD_CLOSING_VREL = -0.20
+MANUAL_BRAKE_FCW_MIN_CLOSING_SPEED = 0.8
+MANUAL_BRAKE_FCW_TTC = 3.0
+MANUAL_BRAKE_FCW_MIN_DISTANCE = 8.0
+MANUAL_BRAKE_FCW_STOP_DISTANCE = 5.5
+MANUAL_BRAKE_FCW_HEADWAY = 1.2
 LOW_SPEED_CURVE_SLOWDOWN_MIN_KPH = 10.0
 LOW_SPEED_CURVE_SLOWDOWN_MAX_KPH = 35.0
 LOW_SPEED_CURVE_SLOWDOWN_FLOOR_KPH = 8.0
@@ -469,6 +475,31 @@ class Controls:
 
         already_decelerating = CS.aEgo <= FCW_DECEL_SUPPRESS
         return not already_decelerating or critical_now
+
+    def pedal_only_lead_closing(self, CS):
+        if not self.CP.enableGasInterceptor or not CS.adaptiveCruise:
+            return False
+        lead = self.get_lead(self.sm)
+        return lead is not None and lead.dRel > 0.0 and lead.vRel <= PEDAL_ONLY_LEAD_CLOSING_VREL
+
+    def manual_brake_early_warning(self, CS):
+        # Pedal-only longitudinal control needs more driver reaction time than
+        # the normal last-moment FCW path because it cannot apply the brakes.
+        if not self.CP.enableGasInterceptor or not CS.adaptiveCruise or CS.brakePressed:
+            return False
+
+        lead = self.get_lead(self.sm)
+        if lead is None or lead.dRel <= 0.0:
+            return False
+
+        closing_speed = -lead.vRel
+        if closing_speed < MANUAL_BRAKE_FCW_MIN_CLOSING_SPEED:
+            return False
+
+        ttc = lead.dRel / max(closing_speed, 0.1)
+        warning_distance = max(MANUAL_BRAKE_FCW_MIN_DISTANCE,
+                               MANUAL_BRAKE_FCW_STOP_DISTANCE + MANUAL_BRAKE_FCW_HEADWAY * max(CS.vEgo, 0.0))
+        return lead.dRel <= warning_distance and ttc <= MANUAL_BRAKE_FCW_TTC
 
     def get_long_lead_safe_speed(self, sm, CS, vEgo):
         if CS.adaptiveCruise:
@@ -974,7 +1005,9 @@ class Controls:
         model_fcw = self.sm['modelV2'].meta.hardBrakePredicted and not CS.brakePressed and not stock_long_is_braking
         planner_fcw = self.sm['longitudinalPlan'].fcw and self.enabled
         self.stop_accel_boost_hold_stationary_lead(CS)
-        if not self.disable_op_fcw and self.op_fcw_dangerous_lead(CS) and (planner_fcw or model_fcw):
+        manual_brake_fcw = self.enabled and self.manual_brake_early_warning(CS)
+        if not self.disable_op_fcw and (manual_brake_fcw or
+                                        (self.op_fcw_dangerous_lead(CS) and (planner_fcw or model_fcw))):
             self.events.add(EventName.fcw)
 
         if TICI:
@@ -1224,12 +1257,15 @@ class Controls:
 
             actuators.accel = self.LoC.update(self.active, CS, long_plan, pid_accel_limits, t_since_plan)
             stationary_lead_hold = self.stop_accel_boost_hold_stationary_lead(CS)
+            lead_closing = self.pedal_only_lead_closing(CS)
             if CS.brakePressed:
                 self._stop_accel_boost_release_frames = 0
                 self._stop_accel_boost_release_active = False
                 self._stop_accel_boost_lead_departed = False
                 actuators.accel = min(actuators.accel, 0.0)
                 self.LoC.reset(v_pid=CS.vEgo)
+            elif lead_closing:
+                actuators.accel = min(actuators.accel, 0.0)
             elif self.active and stationary_lead_hold:
                 actuators.accel = min(actuators.accel, 0.0)
                 if CS.vEgo <= STOP_ACCEL_BOOST_PID_RESET_MAX_VEGO:
@@ -1274,7 +1310,7 @@ class Controls:
         # Send a "steering required alert" if saturation count has reached the limit (조향 제어 초과)
         # Driver brake is the final authority over every longitudinal path,
         # including restart boost and joystick/debug acceleration.
-        if CS.brakePressed:
+        if CS.brakePressed or self.pedal_only_lead_closing(CS):
             actuators.accel = min(actuators.accel, 0.0)
 
         if lac_log.active and lac_log.saturated and not CS.steeringPressed:
