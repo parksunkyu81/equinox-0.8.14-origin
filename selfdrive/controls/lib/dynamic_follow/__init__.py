@@ -27,6 +27,7 @@ LEAD_CATCHUP_ABORT_LEAD_DECEL = -0.30
 LEAD_CATCHUP_MIN_DISTANCE = 5.5
 LEAD_CATCHUP_MIN_HEADWAY = 1.0
 LEAD_CATCHUP_CONFIRM_FRAMES = max(1, int(0.30 / DT_MDL))
+LEAD_CATCHUP_AUTO_CONFIRM_FRAMES = max(1, int(0.15 / DT_MDL))
 LEAD_CATCHUP_TR_REDUCTION = 0.12
 
 
@@ -313,7 +314,8 @@ class DynamicFollow:
 
     can_enter = speed_ok and distance_ok and lead_not_braking and v_rel >= LEAD_CATCHUP_ENTER_VREL
     self._lead_catchup_confirm_frames = self._lead_catchup_confirm_frames + 1 if can_enter else 0
-    if self._lead_catchup_confirm_frames >= LEAD_CATCHUP_CONFIRM_FRAMES:
+    confirm_frames = LEAD_CATCHUP_AUTO_CONFIRM_FRAMES if self.df_manager.is_auto else LEAD_CATCHUP_CONFIRM_FRAMES
+    if self._lead_catchup_confirm_frames >= confirm_frames:
       self.lead_catchup_active = True
       self._lead_catchup_confirm_frames = 0
 

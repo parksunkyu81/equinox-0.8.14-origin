@@ -38,6 +38,7 @@ from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, CON
 from selfdrive.car.gm.values import SLOW_ON_CURVES, MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
+from selfdrive.controls.lib.pedal_follow import PedalFollowSmoother
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
@@ -237,6 +238,7 @@ class Controls:
         self._stop_accel_boost_release_frames = 0
         self._stop_accel_boost_release_active = False
         self._stop_accel_boost_lead_departed = False
+        self.pedal_follow_smoother = PedalFollowSmoother()
         self.active_cam = False
         self.over_speed_limit = False
 
@@ -476,11 +478,15 @@ class Controls:
         already_decelerating = CS.aEgo <= FCW_DECEL_SUPPRESS
         return not already_decelerating or critical_now
 
-    def pedal_only_lead_closing(self, CS):
-        if not self.CP.enableGasInterceptor or not CS.adaptiveCruise:
-            return False
+    def smooth_pedal_follow_accel(self, CS, requested_accel):
+        enabled = self.CP.enableGasInterceptor and CS.adaptiveCruise and self.active
         lead = self.get_lead(self.sm)
-        return lead is not None and lead.dRel > 0.0 and lead.vRel <= PEDAL_ONLY_LEAD_CLOSING_VREL
+        if enabled and not self.df_manager.is_auto:
+            self.pedal_follow_smoother.reset()
+            lead_closing = lead is not None and lead.dRel > 0.0 and \
+                           lead.vRel <= PEDAL_ONLY_LEAD_CLOSING_VREL
+            return min(requested_accel, 0.0) if lead_closing else requested_accel
+        return self.pedal_follow_smoother.update(enabled, requested_accel, lead, CS.vEgo)
 
     def manual_brake_early_warning(self, CS):
         # Pedal-only longitudinal control needs more driver reaction time than
@@ -1257,15 +1263,12 @@ class Controls:
 
             actuators.accel = self.LoC.update(self.active, CS, long_plan, pid_accel_limits, t_since_plan)
             stationary_lead_hold = self.stop_accel_boost_hold_stationary_lead(CS)
-            lead_closing = self.pedal_only_lead_closing(CS)
             if CS.brakePressed:
                 self._stop_accel_boost_release_frames = 0
                 self._stop_accel_boost_release_active = False
                 self._stop_accel_boost_lead_departed = False
                 actuators.accel = min(actuators.accel, 0.0)
                 self.LoC.reset(v_pid=CS.vEgo)
-            elif lead_closing:
-                actuators.accel = min(actuators.accel, 0.0)
             elif self.active and stationary_lead_hold:
                 actuators.accel = min(actuators.accel, 0.0)
                 if CS.vEgo <= STOP_ACCEL_BOOST_PID_RESET_MAX_VEGO:
@@ -1310,8 +1313,10 @@ class Controls:
         # Send a "steering required alert" if saturation count has reached the limit (조향 제어 초과)
         # Driver brake is the final authority over every longitudinal path,
         # including restart boost and joystick/debug acceleration.
-        if CS.brakePressed or self.pedal_only_lead_closing(CS):
+        if CS.brakePressed:
             actuators.accel = min(actuators.accel, 0.0)
+        else:
+            actuators.accel = self.smooth_pedal_follow_accel(CS, actuators.accel)
 
         if lac_log.active and lac_log.saturated and not CS.steeringPressed:
             dpath_points = lat_plan.dPathPoints
