@@ -20,6 +20,10 @@ PATH_OFFSET = 0.00
 CAMERA_OFFSET = -0.06
 CENTER_LANE_CONF_BP = [0.35, 0.60]
 CENTER_LANE_CONF_V = [0.0, 1.0]
+LANE_WIDTH_MIN_BP = [2.5, 2.8]
+LANE_WIDTH_MAX_BP = [4.0, 5.0]
+LANE_PATH_AGREEMENT_BP = [0.08, 0.20]
+LANE_CENTER_CONTINUITY_BP = [0.10, 0.30]
 
 class LanePlanner:
   def __init__(self, wide_camera=False):
@@ -47,6 +51,7 @@ class LanePlanner:
     self.wide_camera = wide_camera
 
     self.total_camera_offset = self.camera_offset
+    self.last_reliable_lane_center_y = None
 
   def parse_model(self, md):
 
@@ -80,9 +85,11 @@ class LanePlanner:
     l_prob, r_prob = self.lll_prob, self.rll_prob
     width_pts = self.rll_y - self.lll_y
     prob_mods = []
-    for t_check in (0.0, 1.5, 3.0):
+    for t_check in (0.0, 1.5, 2.0):
       width_at_t = interp(t_check * (v_ego + 7), self.ll_x, width_pts)
-      prob_mods.append(interp(width_at_t, [4.0, 5.0], [1.0, 0.0]))
+      min_width_mod = interp(width_at_t, LANE_WIDTH_MIN_BP, [0.0, 1.0])
+      max_width_mod = interp(width_at_t, LANE_WIDTH_MAX_BP, [1.0, 0.0])
+      prob_mods.append(min_width_mod * max_width_mod)
     mod = min(prob_mods)
     l_prob *= mod
     r_prob *= mod
@@ -93,10 +100,44 @@ class LanePlanner:
     l_prob *= l_std_mod
     r_prob *= r_std_mod
 
-    self.lane_width_certainty.update(l_prob * r_prob)
     current_lane_width = abs(self.rll_y[0] - self.lll_y[0])
-    self.lane_width_estimate.update(current_lane_width)
     speed_lane_width = interp(v_ego, [0., 31.], [2.8, 3.5])
+
+    # Use the last trusted width to evaluate the current lines. Updating the
+    # width estimate before the safety checks would let a persistent misread
+    # gradually teach the planner the wrong lane width.
+    clipped_lane_width = min(4.0, self.lane_width)
+    path_from_left_lane = self.lll_y + clipped_lane_width / 2.0
+    path_from_right_lane = self.rll_y - clipped_lane_width / 2.0
+
+    safe_idxs = np.isfinite(self.ll_t) & np.isfinite(self.lll_y) & np.isfinite(self.rll_y)
+    lane_lines_valid = np.count_nonzero(safe_idxs) >= 2
+    if lane_lines_valid:
+      # A high lane-line probability is not sufficient: a confidently
+      # misdetected line can still point well away from the model path. Check
+      # each line-derived center independently so the reliable side can remain
+      # useful while the inconsistent side is rejected.
+      left_path_interp = np.interp(path_t, self.ll_t[safe_idxs], path_from_left_lane[safe_idxs])
+      right_path_interp = np.interp(path_t, self.ll_t[safe_idxs], path_from_right_lane[safe_idxs])
+      near_path_idxs = np.isfinite(path_t) & np.isfinite(path_xyz[:, 1]) & (path_t <= 1.5)
+      if not np.any(near_path_idxs):
+        near_path_idxs = np.isfinite(path_t) & np.isfinite(path_xyz[:, 1])
+
+      if np.any(near_path_idxs):
+        left_path_error = np.median(np.abs(left_path_interp[near_path_idxs] - path_xyz[near_path_idxs, 1]))
+        right_path_error = np.median(np.abs(right_path_interp[near_path_idxs] - path_xyz[near_path_idxs, 1]))
+        l_prob *= interp(left_path_error, LANE_PATH_AGREEMENT_BP, [1.0, 0.0])
+        r_prob *= interp(right_path_error, LANE_PATH_AGREEMENT_BP, [1.0, 0.0])
+      else:
+        l_prob = 0.0
+        r_prob = 0.0
+    else:
+      l_prob = 0.0
+      r_prob = 0.0
+
+    self.lane_width_certainty.update(l_prob * r_prob)
+    if min(l_prob, r_prob) >= 0.5 and np.isfinite(current_lane_width):
+      self.lane_width_estimate.update(current_lane_width)
     self.lane_width = self.lane_width_certainty.x * self.lane_width_estimate.x + \
                       (1 - self.lane_width_certainty.x) * speed_lane_width
 
@@ -111,16 +152,36 @@ class LanePlanner:
     # This prevents model-path bias, lane-width error, or unequal line
     # probabilities from pulling the target away from the lane center.
     direct_lane_center_y = (self.lll_y + self.rll_y) / 2.0
+    current_lane_center_y = direct_lane_center_y[0]
+    if self.last_reliable_lane_center_y is None:
+      center_continuity_mod = 1.0
+    else:
+      center_jump = abs(current_lane_center_y - self.last_reliable_lane_center_y)
+      center_continuity_mod = interp(center_jump, LANE_CENTER_CONTINUITY_BP, [1.0, 0.0])
+    both_lane_conf *= center_continuity_mod
+
+    # Only a center supported by two independently consistent lines may update
+    # the continuity reference. A rejected misread must not become the new
+    # baseline merely because it persists for several frames.
+    if both_lane_conf >= 0.5:
+      if self.last_reliable_lane_center_y is None:
+        self.last_reliable_lane_center_y = current_lane_center_y
+      else:
+        self.last_reliable_lane_center_y = 0.9 * self.last_reliable_lane_center_y + 0.1 * current_lane_center_y
+
+    # Squared weights prevent a weak or uncertain line from pulling strongly
+    # against the line that agrees with the model path.
+    l_weight = l_prob * l_prob
+    r_weight = r_prob * r_prob
     inferred_lane_center_y = \
-      (l_prob * path_from_left_lane + r_prob * path_from_right_lane) / (l_prob + r_prob + 0.0001)
+      (l_weight * path_from_left_lane + r_weight * path_from_right_lane) / (l_weight + r_weight + 0.0001)
     lane_path_y = both_lane_conf * direct_lane_center_y + \
                   (1.0 - both_lane_conf) * inferred_lane_center_y
 
     # Smoothly remove the model path only when both lane lines agree.
     # Keep the original model fallback for weak or single-line detection.
     self.d_prob = raw_d_prob + (1.0 - raw_d_prob) * both_lane_conf
-    safe_idxs = np.isfinite(self.ll_t)
-    if safe_idxs[0]:
+    if lane_lines_valid:
       lane_path_y_interp = np.interp(path_t, self.ll_t[safe_idxs], lane_path_y[safe_idxs])
       path_xyz[:,1] = self.d_prob * lane_path_y_interp + (1.0 - self.d_prob) * path_xyz[:,1]
     else:
