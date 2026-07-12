@@ -14,7 +14,6 @@ PEDAL_FOLLOW_COAST_HEADWAY = 0.90
 PEDAL_FOLLOW_COAST_CLOSING_TIME = 2.0
 PEDAL_FOLLOW_COAST_ENTER_VREL = -0.15
 PEDAL_FOLLOW_COAST_EXIT_VREL = 0.30
-PEDAL_FOLLOW_COAST_EXIT_MARGIN = 4.0
 PEDAL_FOLLOW_COAST_ENTER_FRAMES = max(1, round(0.25 / DT_CTRL))
 PEDAL_FOLLOW_COAST_EXIT_FRAMES = max(1, round(0.80 / DT_CTRL))
 PEDAL_FOLLOW_LEAD_DROPOUT_HOLD_FRAMES = max(1, round(0.50 / DT_CTRL))
@@ -89,8 +88,10 @@ class PedalFollowSmoother:
     coast_distance = self.coast_distance(v_ego, raw_v_rel)
 
     if self.coast_active:
+      safe_follow_distance = PEDAL_FOLLOW_COAST_MIN_DISTANCE + \
+                             PEDAL_FOLLOW_COAST_HEADWAY * max(float(v_ego), 0.0)
       can_exit = raw_v_rel >= PEDAL_FOLLOW_COAST_EXIT_VREL and \
-                 float(lead.dRel) >= coast_distance + PEDAL_FOLLOW_COAST_EXIT_MARGIN
+                 float(lead.dRel) >= safe_follow_distance
       self.coast_exit_frames = self.coast_exit_frames + 1 if can_exit else 0
       if self.coast_exit_frames >= PEDAL_FOLLOW_COAST_EXIT_FRAMES:
         self.coast_active = False
