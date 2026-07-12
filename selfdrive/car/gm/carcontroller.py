@@ -16,9 +16,10 @@ VisualAlert = car.CarControl.HUDControl.VisualAlert
 GearShifter = car.CarState.GearShifter
 
 CREEP_SPEED = 2.5   # 4km
-LEAD_CLOSING_GAS_CUT_VREL = -0.20
 LEAD_CATCHUP_PEDAL_BOOST_BP = [20.0, 30.0, 40.0, 60.0, 70.0]
 LEAD_CATCHUP_PEDAL_BOOST_V = [1.00, 1.08, 1.09, 1.10, 1.00]
+LEAD_CATCHUP_PEDAL_BOOST_RISE_RATE = 0.15  # multiplier / second
+LEAD_CATCHUP_PEDAL_BOOST_FALL_RATE = 0.20  # multiplier / second
 
 
 # =====================================================================
@@ -78,6 +79,7 @@ class CarController():
     self._dyn_delta_down_last = 0
 
     self.accel = 0.0
+    self.lead_catchup_pedal_boost = 1.0
 
     self.lka_steering_cmd_counter_last = -1
     self.lka_icon_status_last = (False, False)
@@ -119,9 +121,8 @@ class CarController():
     # This car cannot command the brakes. A clearly closing lead therefore
     # gets an immediate gas cut in the final GM output layer as well.
     auto_follow = controls.df_manager.is_auto
-    lead_closing = lead is not None and lead.vRel <= LEAD_CLOSING_GAS_CUT_VREL
     urgent_lead_closing = self.lead_catchup_enabled and \
-                          (pedal_follow_urgent(lead, CS.out.vEgo) if auto_follow else lead_closing)
+                          pedal_follow_urgent(lead, CS.out.vEgo)
     requested_accel = float(clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
     self.accel = min(requested_accel, 0.0) if brake_pressed or urgent_lead_closing else requested_accel
 
@@ -150,16 +151,29 @@ class CarController():
                          bool(controls.sm['dynamicFollowData'].leadCatchupActive) and \
                          lead is not None and lead.vRel > 0.0 and lead.aLeadK > -0.30
         if catchup_active:
-          pedal_boost = interp(CS.out.vEgo * CV.MS_TO_KPH,
-                               LEAD_CATCHUP_PEDAL_BOOST_BP,
-                               LEAD_CATCHUP_PEDAL_BOOST_V)
-          acc_mult *= pedal_boost
+          pedal_boost_target = interp(CS.out.vEgo * CV.MS_TO_KPH,
+                                      LEAD_CATCHUP_PEDAL_BOOST_BP,
+                                      LEAD_CATCHUP_PEDAL_BOOST_V)
+        else:
+          pedal_boost_target = 1.0
+
+        if pedal_boost_target > self.lead_catchup_pedal_boost:
+          self.lead_catchup_pedal_boost = min(pedal_boost_target,
+                                              self.lead_catchup_pedal_boost +
+                                              LEAD_CATCHUP_PEDAL_BOOST_RISE_RATE * DT_CTRL)
+        else:
+          self.lead_catchup_pedal_boost = max(pedal_boost_target,
+                                              self.lead_catchup_pedal_boost -
+                                              LEAD_CATCHUP_PEDAL_BOOST_FALL_RATE * DT_CTRL)
+        acc_mult *= self.lead_catchup_pedal_boost
 
         pedal_command = acc_mult * self.accel
         self.comma_pedal = float(clip(pedal_command, 0., 0.75))
       else:
+        self.lead_catchup_pedal_boost = 1.0
         self.comma_pedal = 0.0
     else:
+      self.lead_catchup_pedal_boost = 1.0
       self.comma_pedal = 0.0
 
     # Steering (50Hz)

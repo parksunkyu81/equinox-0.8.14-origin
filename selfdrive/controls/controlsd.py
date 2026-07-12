@@ -67,7 +67,6 @@ FCW_MIN_CLOSING_SPEED = 0.8
 FCW_URGENT_TTC = 1.6
 FCW_CRITICAL_TTC = 1.0
 FCW_DECEL_SUPPRESS = -0.8
-PEDAL_ONLY_LEAD_CLOSING_VREL = -0.20
 MANUAL_BRAKE_FCW_MIN_CLOSING_SPEED = 0.8
 MANUAL_BRAKE_FCW_TTC = 3.0
 MANUAL_BRAKE_FCW_MIN_DISTANCE = 8.0
@@ -481,11 +480,6 @@ class Controls:
     def smooth_pedal_follow_accel(self, CS, requested_accel):
         enabled = self.CP.enableGasInterceptor and CS.adaptiveCruise and self.active
         lead = self.get_lead(self.sm)
-        if enabled and not self.df_manager.is_auto:
-            self.pedal_follow_smoother.reset()
-            lead_closing = lead is not None and lead.dRel > 0.0 and \
-                           lead.vRel <= PEDAL_ONLY_LEAD_CLOSING_VREL
-            return min(requested_accel, 0.0) if lead_closing else requested_accel
         return self.pedal_follow_smoother.update(enabled, requested_accel, lead, CS.vEgo)
 
     def manual_brake_early_warning(self, CS):
@@ -1314,6 +1308,7 @@ class Controls:
         # Driver brake is the final authority over every longitudinal path,
         # including restart boost and joystick/debug acceleration.
         if CS.brakePressed:
+            self.pedal_follow_smoother.reset()
             actuators.accel = min(actuators.accel, 0.0)
         else:
             actuators.accel = self.smooth_pedal_follow_accel(CS, actuators.accel)

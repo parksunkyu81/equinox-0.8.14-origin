@@ -1,15 +1,23 @@
-from common.numpy_fast import clip, interp
+from common.numpy_fast import clip
 from common.realtime import DT_CTRL
 
 
-# Pedal-only GM longitudinal control cannot command the brakes. Mild closing
-# should therefore taper positive acceleration, while an urgent approach or a
-# driver brake must still cut gas immediately.
+# Pedal-only GM longitudinal control cannot command the brakes. A far-away
+# slower lead must not cause repeated pedal release/reapply cycles. Enter one
+# latched coast phase only inside the brake-free coast window, then continuously
+# release gas until the lead has clearly opened the gap again.
 PEDAL_FOLLOW_MAX_ACCEL = 1.0
-PEDAL_FOLLOW_VREL_BP = [-0.80, -0.45, -0.20, 0.05]
-PEDAL_FOLLOW_ACCEL_CAP_V = [0.0, 0.18, 0.45, PEDAL_FOLLOW_MAX_ACCEL]
-PEDAL_FOLLOW_CAP_FALL_RATE = 1.20  # m/s^3
-PEDAL_FOLLOW_CAP_RISE_RATE = 0.55  # m/s^3
+PEDAL_FOLLOW_OUTPUT_FALL_RATE = 0.65  # m/s^3
+PEDAL_FOLLOW_OUTPUT_RISE_RATE = 0.35  # m/s^3
+PEDAL_FOLLOW_COAST_MIN_DISTANCE = 5.5
+PEDAL_FOLLOW_COAST_HEADWAY = 0.90
+PEDAL_FOLLOW_COAST_CLOSING_TIME = 2.0
+PEDAL_FOLLOW_COAST_ENTER_VREL = -0.15
+PEDAL_FOLLOW_COAST_EXIT_VREL = 0.30
+PEDAL_FOLLOW_COAST_EXIT_MARGIN = 4.0
+PEDAL_FOLLOW_COAST_ENTER_FRAMES = max(1, round(0.25 / DT_CTRL))
+PEDAL_FOLLOW_COAST_EXIT_FRAMES = max(1, round(0.80 / DT_CTRL))
+PEDAL_FOLLOW_LEAD_DROPOUT_HOLD_FRAMES = max(1, round(0.50 / DT_CTRL))
 PEDAL_FOLLOW_URGENT_VREL = -0.80
 PEDAL_FOLLOW_URGENT_TTC = 3.0
 PEDAL_FOLLOW_URGENT_MIN_DISTANCE = 5.5
@@ -24,40 +32,97 @@ def pedal_follow_urgent(lead, v_ego):
   ttc = float(lead.dRel) / max(closing_speed, 0.1)
   urgent_distance = PEDAL_FOLLOW_URGENT_MIN_DISTANCE + \
                     PEDAL_FOLLOW_URGENT_HEADWAY * max(float(v_ego), 0.0)
-  return lead.vRel <= PEDAL_FOLLOW_URGENT_VREL or \
-         (lead.dRel <= urgent_distance and ttc <= PEDAL_FOLLOW_URGENT_TTC)
+  return lead.dRel <= urgent_distance and \
+         (lead.vRel <= PEDAL_FOLLOW_URGENT_VREL or ttc <= PEDAL_FOLLOW_URGENT_TTC)
 
 
 class PedalFollowSmoother:
   def __init__(self):
-    self.accel_cap = PEDAL_FOLLOW_MAX_ACCEL
+    self.coast_active = False
+    self.recovering = False
+    self.coast_enter_frames = 0
+    self.coast_exit_frames = 0
+    self.lead_missing_frames = 0
+    self.output_accel = None
 
   def reset(self):
-    self.accel_cap = PEDAL_FOLLOW_MAX_ACCEL
+    self.coast_active = False
+    self.recovering = False
+    self.coast_enter_frames = 0
+    self.coast_exit_frames = 0
+    self.lead_missing_frames = 0
+    self.output_accel = None
+
+  @staticmethod
+  def coast_distance(v_ego, v_rel):
+    closing_speed = max(-float(v_rel), 0.0)
+    return PEDAL_FOLLOW_COAST_MIN_DISTANCE + \
+           PEDAL_FOLLOW_COAST_HEADWAY * max(float(v_ego), 0.0) + \
+           PEDAL_FOLLOW_COAST_CLOSING_TIME * closing_speed
 
   def update(self, enabled, requested_accel, lead, v_ego):
     requested_accel = float(requested_accel)
-    if not enabled or lead is None or not lead.status or lead.dRel <= 0.0:
+    lead_valid = lead is not None and lead.status and lead.dRel > 0.0
+    if enabled and self.coast_active and not lead_valid and \
+       self.lead_missing_frames < PEDAL_FOLLOW_LEAD_DROPOUT_HOLD_FRAMES:
+      self.lead_missing_frames += 1
+      if self.output_accel is None:
+        self.output_accel = float(clip(requested_accel, 0.0, PEDAL_FOLLOW_MAX_ACCEL))
+      self.output_accel = max(0.0, self.output_accel - PEDAL_FOLLOW_OUTPUT_FALL_RATE * DT_CTRL)
+      return min(requested_accel, self.output_accel)
+
+    if not enabled or not lead_valid:
       self.reset()
       return requested_accel
 
+    self.lead_missing_frames = 0
+
     if pedal_follow_urgent(lead, v_ego):
-      self.accel_cap = 0.0
+      self.coast_active = True
+      self.recovering = False
+      self.coast_enter_frames = 0
+      self.coast_exit_frames = 0
+      self.output_accel = 0.0
       return min(requested_accel, 0.0)
 
-    target_cap = interp(float(lead.vRel), PEDAL_FOLLOW_VREL_BP, PEDAL_FOLLOW_ACCEL_CAP_V)
+    raw_v_rel = float(lead.vRel)
+    coast_distance = self.coast_distance(v_ego, raw_v_rel)
 
-    # When the gap is already short, react to a slower lead a little earlier
-    # without requesting braking or stronger acceleration.
-    if lead.vRel < 0.05:
-      headway = float(lead.dRel) / max(float(v_ego), 1.0)
-      headway_mod = interp(headway, [0.6, 1.2], [0.55, 1.0])
-      target_cap *= headway_mod
-
-    if target_cap < self.accel_cap:
-      self.accel_cap = max(target_cap, self.accel_cap - PEDAL_FOLLOW_CAP_FALL_RATE * DT_CTRL)
+    if self.coast_active:
+      can_exit = raw_v_rel >= PEDAL_FOLLOW_COAST_EXIT_VREL and \
+                 float(lead.dRel) >= coast_distance + PEDAL_FOLLOW_COAST_EXIT_MARGIN
+      self.coast_exit_frames = self.coast_exit_frames + 1 if can_exit else 0
+      if self.coast_exit_frames >= PEDAL_FOLLOW_COAST_EXIT_FRAMES:
+        self.coast_active = False
+        self.recovering = True
+        self.coast_exit_frames = 0
     else:
-      self.accel_cap = min(target_cap, self.accel_cap + PEDAL_FOLLOW_CAP_RISE_RATE * DT_CTRL)
+      can_enter = raw_v_rel <= PEDAL_FOLLOW_COAST_ENTER_VREL and \
+                  float(lead.dRel) <= coast_distance
+      self.coast_enter_frames = self.coast_enter_frames + 1 if can_enter else 0
+      if self.coast_enter_frames >= PEDAL_FOLLOW_COAST_ENTER_FRAMES:
+        self.coast_active = True
+        self.recovering = False
+        self.coast_enter_frames = 0
+        self.output_accel = float(clip(requested_accel, 0.0, PEDAL_FOLLOW_MAX_ACCEL))
 
-    self.accel_cap = float(clip(self.accel_cap, 0.0, PEDAL_FOLLOW_MAX_ACCEL))
-    return min(requested_accel, self.accel_cap)
+    if self.coast_active:
+      if self.output_accel is None:
+        self.output_accel = float(clip(requested_accel, 0.0, PEDAL_FOLLOW_MAX_ACCEL))
+      self.output_accel = max(0.0, self.output_accel - PEDAL_FOLLOW_OUTPUT_FALL_RATE * DT_CTRL)
+      # Never exceed a lower request from the main longitudinal planner.
+      return min(requested_accel, self.output_accel)
+
+    if not self.recovering:
+      self.output_accel = float(clip(requested_accel, 0.0, PEDAL_FOLLOW_MAX_ACCEL))
+      return requested_accel
+
+    target_accel = float(clip(requested_accel, 0.0, PEDAL_FOLLOW_MAX_ACCEL))
+    if self.output_accel is None:
+      self.output_accel = 0.0
+    self.output_accel = min(target_accel,
+                            self.output_accel + PEDAL_FOLLOW_OUTPUT_RISE_RATE * DT_CTRL)
+    if self.output_accel >= target_accel:
+      self.recovering = False
+
+    return min(requested_accel, self.output_accel)

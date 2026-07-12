@@ -21,13 +21,17 @@ STOP_ACCEL_BOOST_TR_HIGH = 1.05
 LEAD_CATCHUP_MIN_SPEED = 20.0 * CV.KPH_TO_MS
 LEAD_CATCHUP_MAX_SPEED = 70.0 * CV.KPH_TO_MS
 LEAD_CATCHUP_ENTER_VREL = 0.50
-LEAD_CATCHUP_EXIT_VREL = 0.10
 LEAD_CATCHUP_MAX_LEAD_DECEL = -0.15
 LEAD_CATCHUP_ABORT_LEAD_DECEL = -0.30
 LEAD_CATCHUP_MIN_DISTANCE = 5.5
 LEAD_CATCHUP_MIN_HEADWAY = 1.0
-LEAD_CATCHUP_CONFIRM_FRAMES = max(1, int(0.30 / DT_MDL))
+LEAD_CATCHUP_COAST_HEADWAY = 0.90
+LEAD_CATCHUP_COAST_CLOSING_TIME = 2.0
+LEAD_CATCHUP_COAST_ABORT_MARGIN = 4.0
+LEAD_CATCHUP_ENTER_DISTANCE_MARGIN = 3.0
+LEAD_CATCHUP_CONFIRM_FRAMES = max(1, int(0.80 / DT_MDL))
 LEAD_CATCHUP_AUTO_CONFIRM_FRAMES = max(1, int(0.15 / DT_MDL))
+LEAD_CATCHUP_EXIT_CONFIRM_FRAMES = max(1, round(0.60 / DT_MDL))
 LEAD_CATCHUP_TR_REDUCTION = 0.12
 
 
@@ -95,6 +99,7 @@ class DynamicFollow:
     self.sng_speed = 20 / CV.MS_TO_KPH   # 28.8 kph  (DEF:18.0)
     self.lead_catchup_active = False
     self._lead_catchup_confirm_frames = 0
+    self._lead_catchup_exit_frames = 0
 
     self._setup_collector()
     self._setup_changing_variables()
@@ -287,13 +292,15 @@ class DynamicFollow:
   def _reset_lead_catchup(self):
     self.lead_catchup_active = False
     self._lead_catchup_confirm_frames = 0
+    self._lead_catchup_exit_frames = 0
 
   def _lead_catchup_safe_distance(self):
     return LEAD_CATCHUP_MIN_DISTANCE + LEAD_CATCHUP_MIN_HEADWAY * max(self.car_data.v_ego, 0.0)
 
   def _update_lead_catchup(self):
-    # Temporarily close only an opening gap. Confirmation prevents radar noise
-    # from shortening TR, while the exit path restores normal TR immediately.
+    # Temporarily close only a clearly opening gap. The separate enter/exit
+    # distances and confirmation times prevent radar noise around one exact
+    # distance from repeatedly engaging and releasing pedal torque.
     if not self.stop_accel_boost or not self.car_data.cruise_enabled or not self.lead_data.status:
       self._reset_lead_catchup()
       return
@@ -303,16 +310,31 @@ class DynamicFollow:
     a_lead = self.lead_data.a_lead
     d_rel = self.lead_data.x_lead
     speed_ok = LEAD_CATCHUP_MIN_SPEED <= v_ego <= LEAD_CATCHUP_MAX_SPEED
-    distance_ok = d_rel is not None and d_rel >= self._lead_catchup_safe_distance()
+    safe_distance = self._lead_catchup_safe_distance()
+    enter_distance_ok = d_rel is not None and \
+                        d_rel >= safe_distance + LEAD_CATCHUP_ENTER_DISTANCE_MARGIN
     lead_not_braking = a_lead is not None and a_lead >= LEAD_CATCHUP_MAX_LEAD_DECEL
 
     if self.lead_catchup_active:
-      if not speed_ok or not distance_ok or v_rel <= LEAD_CATCHUP_EXIT_VREL or \
-         a_lead is None or a_lead <= LEAD_CATCHUP_ABORT_LEAD_DECEL:
+      hard_abort = not speed_ok or d_rel is None or a_lead is None
+      if hard_abort:
+        self._reset_lead_catchup()
+        return
+
+      closing_speed = max(-v_rel, 0.0)
+      coast_distance = LEAD_CATCHUP_MIN_DISTANCE + \
+                       LEAD_CATCHUP_COAST_HEADWAY * max(v_ego, 0.0) + \
+                       LEAD_CATCHUP_COAST_CLOSING_TIME * closing_speed
+      lead_braking_near = a_lead <= LEAD_CATCHUP_ABORT_LEAD_DECEL and \
+                          d_rel <= coast_distance + LEAD_CATCHUP_COAST_ABORT_MARGIN
+      soft_exit = d_rel <= coast_distance or lead_braking_near
+      self._lead_catchup_exit_frames = self._lead_catchup_exit_frames + 1 if soft_exit else 0
+      if self._lead_catchup_exit_frames >= LEAD_CATCHUP_EXIT_CONFIRM_FRAMES:
         self._reset_lead_catchup()
       return
 
-    can_enter = speed_ok and distance_ok and lead_not_braking and v_rel >= LEAD_CATCHUP_ENTER_VREL
+    can_enter = speed_ok and enter_distance_ok and lead_not_braking and \
+                v_rel >= LEAD_CATCHUP_ENTER_VREL
     self._lead_catchup_confirm_frames = self._lead_catchup_confirm_frames + 1 if can_enter else 0
     confirm_frames = LEAD_CATCHUP_AUTO_CONFIRM_FRAMES if self.df_manager.is_auto else LEAD_CATCHUP_CONFIRM_FRAMES
     if self._lead_catchup_confirm_frames >= confirm_frames:
