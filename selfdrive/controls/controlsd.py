@@ -814,14 +814,20 @@ class Controls:
             self.slowing_down = False
 
         lead_speed = self.get_long_lead_safe_speed(sm, CS, vEgo)
-        if self.stop_accel_boost and lead_speed >= self.min_set_speed_clu:
-            if lead_speed < max_speed_clu:
-                max_speed_clu = min(max_speed_clu, lead_speed)
-                if not self.limited_lead:
-                    self.max_speed_clu = vEgo + 3.
-                    self.limited_lead = True
-        else:
-          self.limited_lead = False
+        lead_limited = self.stop_accel_boost and \
+                       lead_speed >= self.min_set_speed_clu and \
+                       lead_speed < max_speed_clu
+        if lead_limited:
+            max_speed_clu = lead_speed
+            if not self.limited_lead:
+                self.max_speed_clu = vEgo + 3.
+        elif self.limited_lead:
+            # The longitudinal planner already rate-limits acceleration. Do not
+            # keep a stale lead-imposed cruise target for another 2-3 seconds
+            # after the lead is no longer limiting us.
+            self.max_speed_clu = max_speed_clu
+
+        self.limited_lead = lead_limited
 
 
         self.update_max_speed(int(max_speed_clu + 0.5), CS,
