@@ -423,13 +423,23 @@ class Controls:
         if getattr(self, "_stop_accel_boost_hold_frame", -1) == self.sm.frame:
             return self._stop_accel_boost_hold_result
 
-        launch_enabled = self.stop_accel_boost and CS.adaptiveCruise and \
+        # Confirmed standstill launch is a core pedal-longitudinal safety path;
+        # it must not disappear when the optional StopAccelBoost tuning is off.
+        launch_enabled = self.active and self.CP.enableGasInterceptor and CS.adaptiveCruise and \
                          CS.vEgo <= STOP_ACCEL_BOOST_HOLD_MAX_VEGO
         lead = self.get_lead(self.sm)
         self.pedal_launch_active = self.pedal_launch_controller.update(
             launch_enabled, CS.brakePressed, lead, CS.vEgo)
 
-        if not launch_enabled:
+        if self.pedal_launch_active:
+            self._stop_accel_boost_prev_drel = float(lead.dRel)
+            self._stop_accel_boost_lead_departed = True
+            self._stop_accel_boost_release_frames = STOP_ACCEL_BOOST_RELEASE_HOLD_FRAMES
+            return self.set_stop_accel_boost_hold_result(False, True)
+
+        hold_enabled = self.stop_accel_boost and CS.adaptiveCruise and \
+                       CS.vEgo <= STOP_ACCEL_BOOST_HOLD_MAX_VEGO
+        if not hold_enabled:
             self._stop_accel_boost_lead_departed = False
             return self.set_stop_accel_boost_hold_result(False)
 
@@ -438,12 +448,6 @@ class Controls:
             self._stop_accel_boost_release_frames = 0
             self._stop_accel_boost_lead_departed = False
             return self.set_stop_accel_boost_hold_result(False)
-
-        if self.pedal_launch_active:
-            self._stop_accel_boost_prev_drel = float(lead.dRel)
-            self._stop_accel_boost_lead_departed = True
-            self._stop_accel_boost_release_frames = STOP_ACCEL_BOOST_RELEASE_HOLD_FRAMES
-            return self.set_stop_accel_boost_hold_result(False, True)
 
         if self.stop_accel_boost_near_stationary_lead(CS, lead):
             self._stop_accel_boost_prev_drel = float(lead.dRel)
@@ -1582,6 +1586,10 @@ class Controls:
         controlsState.gmLkasStatus = int(self.gm_lkas_status)
         controlsState.gmSteerCommandActive = bool(self.gm_steer_command_active)
         controlsState.gmSteerCommandTorque = int(self.gm_steer_command_torque)
+        controlsState.pedalLaunchState = int(self.pedal_launch_controller.state)
+        controlsState.pedalLaunchSafeDistance = float(self.pedal_launch_controller.safe_distance)
+        controlsState.pedalLaunchDistanceDelta = float(self.pedal_launch_controller.distance_delta)
+        controlsState.pedalLaunchConfirmTime = float(self.pedal_launch_controller.confirm_frames * DT_CTRL)
 
         controlsState.totalCameraOffset = totalCameraOffset
 

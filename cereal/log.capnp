@@ -655,6 +655,10 @@ struct ControlsState @0x97ff69c53601abf1 {
   gmSteerCommandDeadlineLagMs @112 :Float32;
   gmSteerCommandGapFault @113 :Bool;
   gmSteerLoopbackAcked @114 :Bool;
+  pedalLaunchState @115 :UInt8;
+  pedalLaunchSafeDistance @116 :Float32;
+  pedalLaunchDistanceDelta @117 :Float32;
+  pedalLaunchConfirmTime @118 :Float32;
 
 
 

@@ -38,15 +38,29 @@ PEDAL_FOLLOW_URGENT_MIN_DISTANCE = 5.5
 PEDAL_FOLLOW_URGENT_HEADWAY = 0.8
 PEDAL_LAUNCH_ENTER_MAX_VEGO = 2.0 * CV.KPH_TO_MS
 PEDAL_LAUNCH_EXIT_VEGO = 3.0 * CV.KPH_TO_MS
-PEDAL_LAUNCH_MIN_DISTANCE = 3.0
-PEDAL_LAUNCH_MIN_VLEAD = 0.15
+PEDAL_LAUNCH_PREFERRED_MIN_DISTANCE = 3.0
+PEDAL_LAUNCH_HARD_MIN_DISTANCE = 1.5
+PEDAL_LAUNCH_STOPPED_DISTANCE_TOLERANCE = 0.10
+PEDAL_LAUNCH_MIN_VLEAD = 0.12
 PEDAL_LAUNCH_MIN_DISTANCE_DELTA = 0.10
 PEDAL_LAUNCH_MAX_CLOSING_VREL = -0.20
-PEDAL_LAUNCH_MAX_LEAD_DECEL = -0.30
+PEDAL_LAUNCH_MAX_LEAD_DECEL = -0.80
 PEDAL_LAUNCH_STATIONARY_VLEAD = 0.05
 PEDAL_LAUNCH_STATIONARY_VREL = 0.05
-PEDAL_LAUNCH_CONFIRM_FRAMES = max(1, round(0.15 / DT_CTRL))
+PEDAL_LAUNCH_REFERENCE_DRIFT = 0.04
+PEDAL_LAUNCH_CONFIRM_FRAMES = max(1, round(0.10 / DT_CTRL))
 PEDAL_LAUNCH_TIMEOUT_FRAMES = max(1, round(2.0 / DT_CTRL))
+PEDAL_LAUNCH_LEAD_DROPOUT_FRAMES = max(1, round(0.25 / DT_CTRL))
+PEDAL_LAUNCH_STATE_DISABLED = 0
+PEDAL_LAUNCH_STATE_WAITING = 1
+PEDAL_LAUNCH_STATE_CONFIRMING = 2
+PEDAL_LAUNCH_STATE_ACTIVE = 3
+PEDAL_LAUNCH_STATE_BLOCKED_GAP = 4
+PEDAL_LAUNCH_STATE_BLOCKED_CLOSING = 5
+PEDAL_LAUNCH_STATE_BLOCKED_BRAKING = 6
+PEDAL_LAUNCH_STATE_NO_LEAD = 7
+PEDAL_LAUNCH_STATE_SPEED = 8
+PEDAL_LAUNCH_STATE_TIMEOUT = 9
 
 
 def smoothstep(edge0, edge1, value):
@@ -111,18 +125,41 @@ class PedalLaunchController:
     self.confirm_frames = 0
     self.timeout_frames = 0
     self.stopped_d_rel = None
+    self.lead_missing_frames = 0
+    self.state = PEDAL_LAUNCH_STATE_DISABLED
+    self.safe_distance = PEDAL_LAUNCH_PREFERRED_MIN_DISTANCE
+    self.distance_delta = 0.0
 
   def reset(self):
     self.active = False
     self.confirm_frames = 0
     self.timeout_frames = 0
     self.stopped_d_rel = None
+    self.lead_missing_frames = 0
+    self.state = PEDAL_LAUNCH_STATE_DISABLED
+    self.safe_distance = PEDAL_LAUNCH_PREFERRED_MIN_DISTANCE
+    self.distance_delta = 0.0
 
   def update(self, enabled, brake_pressed, lead, v_ego):
-    lead_valid = lead is not None and lead.status and lead.dRel > 0.0
-    if not enabled or brake_pressed or not lead_valid:
+    if not enabled or brake_pressed:
       self.reset()
       return False
+
+    lead_valid = lead is not None and lead.status and lead.dRel > 0.0
+    if not lead_valid:
+      # Preserve the stopped-distance anchor across a brief radar/vision
+      # dropout, but never keep applying launch acceleration without a lead.
+      self.active = False
+      self.confirm_frames = 0
+      self.timeout_frames = 0
+      self.lead_missing_frames += 1
+      self.state = PEDAL_LAUNCH_STATE_NO_LEAD
+      if self.lead_missing_frames > PEDAL_LAUNCH_LEAD_DROPOUT_FRAMES:
+        self.reset()
+        self.state = PEDAL_LAUNCH_STATE_NO_LEAD
+      return False
+
+    self.lead_missing_frames = 0
 
     v_ego = max(float(v_ego), 0.0)
     d_rel = float(lead.dRel)
@@ -130,47 +167,72 @@ class PedalLaunchController:
     v_lead = float(getattr(lead, 'vLead', v_ego + v_rel))
     a_lead = float(getattr(lead, 'aLeadK', 0.0))
 
-    unsafe = d_rel < PEDAL_LAUNCH_MIN_DISTANCE or \
-             v_rel <= PEDAL_LAUNCH_MAX_CLOSING_VREL or \
-             a_lead <= PEDAL_LAUNCH_MAX_LEAD_DECEL
-    if unsafe or v_ego >= PEDAL_LAUNCH_EXIT_VEGO - 1e-3:
+    if v_ego >= PEDAL_LAUNCH_EXIT_VEGO - 1e-3:
       self.reset()
+      self.state = PEDAL_LAUNCH_STATE_SPEED
+      return False
+
+    if self.stopped_d_rel is None:
+      self.stopped_d_rel = d_rel
+
+    self.safe_distance = max(
+      PEDAL_LAUNCH_HARD_MIN_DISTANCE,
+      min(PEDAL_LAUNCH_PREFERRED_MIN_DISTANCE,
+          self.stopped_d_rel - PEDAL_LAUNCH_STOPPED_DISTANCE_TOLERANCE))
+    self.distance_delta = d_rel - self.stopped_d_rel
+
+    if d_rel < self.safe_distance:
+      self.active = False
+      self.confirm_frames = 0
+      self.state = PEDAL_LAUNCH_STATE_BLOCKED_GAP
+      return False
+    if v_rel <= PEDAL_LAUNCH_MAX_CLOSING_VREL:
+      self.active = False
+      self.confirm_frames = 0
+      self.state = PEDAL_LAUNCH_STATE_BLOCKED_CLOSING
+      return False
+    if a_lead <= PEDAL_LAUNCH_MAX_LEAD_DECEL:
+      self.active = False
+      self.confirm_frames = 0
+      self.state = PEDAL_LAUNCH_STATE_BLOCKED_BRAKING
       return False
 
     if self.active:
       self.timeout_frames -= 1
       if self.timeout_frames <= 0:
         self.reset()
+        self.state = PEDAL_LAUNCH_STATE_TIMEOUT
         return False
+      self.state = PEDAL_LAUNCH_STATE_ACTIVE
       return True
 
     if v_ego >= PEDAL_LAUNCH_ENTER_MAX_VEGO - 1e-3:
       self.confirm_frames = 0
+      self.state = PEDAL_LAUNCH_STATE_SPEED
       return False
 
     lead_stationary = v_lead <= PEDAL_LAUNCH_STATIONARY_VLEAD and \
                       abs(v_rel) <= PEDAL_LAUNCH_STATIONARY_VREL
-    if lead_stationary:
-      # Follow slow radar drift while stopped, then freeze this reference as
-      # soon as the lead starts moving.
-      if self.stopped_d_rel is None:
-        self.stopped_d_rel = d_rel
-      else:
-        self.stopped_d_rel = 0.95 * self.stopped_d_rel + 0.05 * d_rel
+    distance_opened = self.distance_delta >= PEDAL_LAUNCH_MIN_DISTANCE_DELTA
+    if lead_stationary and not distance_opened:
+      # Only absorb very small stopped-radar drift. Never chase an opening
+      # distance, otherwise a slowly departing lead erases its own launch cue.
+      if abs(self.distance_delta) <= PEDAL_LAUNCH_REFERENCE_DRIFT:
+        self.stopped_d_rel = 0.995 * self.stopped_d_rel + 0.005 * d_rel
       self.confirm_frames = 0
+      self.state = PEDAL_LAUNCH_STATE_WAITING
       return False
 
-    if self.stopped_d_rel is None:
-      self.stopped_d_rel = d_rel
-    distance_opened = d_rel - self.stopped_d_rel >= PEDAL_LAUNCH_MIN_DISTANCE_DELTA
     lead_departing = v_lead > PEDAL_LAUNCH_MIN_VLEAD or distance_opened
     launch_candidate = lead_departing and v_rel > PEDAL_LAUNCH_MAX_CLOSING_VREL
     self.confirm_frames = self.confirm_frames + 1 if launch_candidate else 0
+    self.state = PEDAL_LAUNCH_STATE_CONFIRMING if launch_candidate else PEDAL_LAUNCH_STATE_WAITING
 
     if self.confirm_frames >= PEDAL_LAUNCH_CONFIRM_FRAMES:
       self.active = True
       self.confirm_frames = 0
       self.timeout_frames = PEDAL_LAUNCH_TIMEOUT_FRAMES
+      self.state = PEDAL_LAUNCH_STATE_ACTIVE
 
     return self.active
 
