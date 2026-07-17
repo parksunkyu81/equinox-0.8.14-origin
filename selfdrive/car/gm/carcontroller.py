@@ -1,12 +1,19 @@
 from cereal import car
 from common.numpy_fast import interp, clip
 from common.conversions import Conversions as CV
+from common.clock import sec_since_boot
 from selfdrive.car import apply_std_steer_torque_limits, create_gas_interceptor_command
 from selfdrive.car.gm import gmcan
 from selfdrive.car.gm.values import DBC, NO_ASCM, CanBus, CarControllerParams
 from opendbc.can.packer import CANPacker
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
-from selfdrive.controls.lib.pedal_follow import pedal_follow_urgent
+from selfdrive.controls.lib.pedal_follow import (PEDAL_DEADZONE_FLOOR,
+                                                PedalDeadzoneBoostController,
+                                                pedal_deadzone_recovery_safe,
+                                                pedal_follow_urgent)
+from selfdrive.car.gm.steer_scheduler import (GMSteeringCommandScheduler,
+                                              GM_STEER_RATE_DOWN,
+                                              GM_STEER_RATE_UP)
 
 VisualAlert = car.CarControl.HUDControl.VisualAlert
 GearShifter = car.CarState.GearShifter
@@ -28,7 +35,7 @@ CREEP_SPEED = 2.5   # 4km
 #   호출 후 반드시 원래 P.STEER_DELTA_UP/DOWN으로 복원한다.
 # =====================================================================
 DYN_DELTA_UP_BP = [0.0, 8.0, 10.0, 30.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
-DYN_DELTA_UP_V  = [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+DYN_DELTA_UP_V  = [7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0]
 
 DYN_DELTA_DOWN_BP = [0.0, 8.0, 10.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
 DYN_DELTA_DOWN_V  = [17.0, 17.0, 17.0, 17.0, 17.0, 17.0, 17.0, 17.0, 17.0, 17.0]
@@ -38,10 +45,10 @@ DYN_DEMAND_BP = [0.04, 0.12, 0.24, 0.40]
 DYN_DEMAND_V  = [0.00, 0.35, 0.75, 1.00]
 
 DYN_LOW_BASE_UP_BP = [0.0, 10.0, 30.0, 45.0, 60.0, 80.0, 110.0]
-DYN_LOW_BASE_UP_V  = [10.0, 10.0, 10.0, 10.0, 9.0, 8.0, 7.0]
+DYN_LOW_BASE_UP_V  = [7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0]
 
 DYN_LOW_BASE_DOWN_BP = [0.0, 10.0, 30.0, 45.0, 60.0, 80.0, 110.0]
-DYN_LOW_BASE_DOWN_V  = [14.0, 15.0, 15.0, 15.0, 15.0, 14.0, 14.0]
+DYN_LOW_BASE_DOWN_V  = [17.0, 17.0, 17.0, 17.0, 17.0, 17.0, 17.0]
 
 
 def get_dynamic_steer_delta(v_ego, new_steer, last_steer, steer_max,
@@ -50,9 +57,9 @@ def get_dynamic_steer_delta(v_ego, new_steer, last_steer, steer_max,
 
   The previous speed/demand based map changed LKAS torque slew while driving and
   made high-speed steering behavior hard to reason about. Keep the actual CAN
-  command path on the same conservative 10/17 limits as CarControllerParams.
+  command path on the same conservative 7/17 limits as CarControllerParams.
   """
-  return 10, 17
+  return GM_STEER_RATE_UP, GM_STEER_RATE_DOWN
 class CarController():
 
   def get_lead(self, sm):
@@ -71,8 +78,9 @@ class CarController():
     self._dyn_delta_down_last = 0
 
     self.accel = 0.0
+    self.pedal_deadzone_boost = PedalDeadzoneBoostController()
 
-    self.lka_steering_cmd_counter_last = -1
+    self.steer_command_scheduler = GMSteeringCommandScheduler()
     self.lka_icon_status_last = (False, False)
     #self.RestartForceAccel = Params().get_bool('RestartForceAccel')
 
@@ -117,8 +125,10 @@ class CarController():
 
     if CS.CP.enableGasInterceptor:
       # 이것이 없으면 저속에서 너무 공격적입니다.
-      if c.active and CS.adaptive_Cruise and not brake_pressed and \
-         CS.out.vEgo > V_CRUISE_ENABLE_MIN / CV.MS_TO_KPH:
+      pedal_launch_active = bool(getattr(controls, 'pedal_launch_active', False))
+      pedal_speed_allowed = CS.out.vEgo > V_CRUISE_ENABLE_MIN / CV.MS_TO_KPH or \
+                            pedal_launch_active
+      if c.active and CS.adaptive_Cruise and not brake_pressed and pedal_speed_allowed:
 
         # 가속 멀티플라이어 설정
         # 속도별 가속 배율 - 전체적으로 절반으로 줄임
@@ -136,20 +146,45 @@ class CarController():
                            0.182, 0.168, 0.178, 0.188]
                           )
 
-        pedal_command = acc_mult * self.accel
-        self.comma_pedal = float(clip(pedal_command, 0., 0.75))
+        pedal_command = float(clip(acc_mult * self.accel, 0., 0.75))
+        follow_smoother = getattr(controls, 'pedal_follow_smoother', None)
+        recovery_safe = pedal_deadzone_recovery_safe(follow_smoother, lead)
+        deadzone_candidate = recovery_safe and self.accel > 0.0 and \
+                             pedal_command < PEDAL_DEADZONE_FLOOR and \
+                             not pedal_launch_active and not urgent_lead_closing
+        self.comma_pedal = float(clip(
+          self.pedal_deadzone_boost.update(deadzone_candidate, pedal_command, CS.out.aEgo),
+          0., 0.75))
       else:
+        pedal_command = 0.0
+        deadzone_candidate = False
+        self.pedal_deadzone_boost.reset()
         self.comma_pedal = 0.0
     else:
+      pedal_command = 0.0
+      deadzone_candidate = False
+      self.pedal_deadzone_boost.reset()
       self.comma_pedal = 0.0
 
-    # Steering (50Hz)
-    # Avoid GM EPS faults when transmitting messages too close together: skip this transmit if we just received the
-    # next Panda loopback confirmation in the current CS frame.
-    if CS.lka_steering_cmd_counter != self.lka_steering_cmd_counter_last:
-      self.lka_steering_cmd_counter_last = CS.lka_steering_cmd_counter
-    elif (frame % P.STEER_STEP) == 0:
-      lkas_enabled = c.active and not (CS.out.steerFaultTemporary or CS.out.steerFaultPermanent) and CS.out.vEgo > P.MIN_STEER_SPEED
+    # These values are published by controlsd after this update, so the route
+    # log contains the raw command, applied floor, final command, and measured
+    # response from the same control frame for deadzone calibration.
+    controls.pedal_deadzone_boost_candidate = bool(deadzone_candidate)
+    controls.pedal_deadzone_boost_active = bool(self.pedal_deadzone_boost.active)
+    controls.pedal_deadzone_raw_command = float(pedal_command)
+    controls.pedal_deadzone_applied_command = float(self.comma_pedal)
+    controls.pedal_deadzone_floor = float(self.pedal_deadzone_boost.applied_floor)
+    controls.pedal_deadzone_accel_request = float(self.accel)
+    controls.pedal_deadzone_vehicle_accel = float(CS.out.aEgo)
+
+    # Steering (50 Hz). Loopback updates select the next rolling counter but do
+    # not suppress a due command. The monotonic scheduler also prevents rapid
+    # catch-up sends when controlsd resumes after a delayed frame.
+    steer_command_sent, idx = self.steer_command_scheduler.update(
+      sec_since_boot(), CS.lka_steering_cmd_counter)
+    lkas_enabled = c.active and not (CS.out.steerFaultTemporary or CS.out.steerFaultPermanent) and \
+                   CS.out.vEgo > P.MIN_STEER_SPEED
+    if steer_command_sent:
       if lkas_enabled:
         new_steer = int(round(actuators.steer * P.STEER_MAX))
         base_delta_up = int(P.STEER_DELTA_UP)
@@ -181,11 +216,19 @@ class CarController():
         self._dyn_steer_limited_prev = False
 
       self.apply_steer_last = apply_steer
-      # GM EPS faults on any gap in received message counters. To handle transient OP/Panda safety sync issues at the
-      # moment of disengaging, increment the counter based on the last message known to pass Panda safety checks.
-      idx = (CS.lka_steering_cmd_counter + 1) % 4
-
       can_sends.append(gmcan.create_steering_control(self.packer_pt, CanBus.POWERTRAIN, apply_steer, idx, lkas_enabled))
+
+    controls.gm_steer_command_sent = bool(steer_command_sent)
+    controls.gm_steer_command_gap_ms = float(self.steer_command_scheduler.last_interval * 1000.0)
+    controls.gm_steer_command_deadline_lag_ms = float(self.steer_command_scheduler.deadline_lag * 1000.0)
+    controls.gm_steer_command_counter = int(idx if idx is not None else 0)
+    controls.gm_steer_loopback_counter = int(CS.lka_steering_cmd_counter)
+    controls.gm_steer_loopback_changed = bool(self.steer_command_scheduler.loopback_changed)
+    controls.gm_steer_loopback_acked = bool(self.steer_command_scheduler.loopback_acked)
+    controls.gm_steer_command_gap_fault = bool(self.steer_command_scheduler.gap_fault)
+    controls.gm_lkas_status = int(CS.lkas_status)
+    controls.gm_steer_command_active = bool(lkas_enabled)
+    controls.gm_steer_command_torque = int(self.apply_steer_last)
 
     if CS.CP.enableGasInterceptor and (frame % 4) == 0:
       idx = (frame // 4) % 4

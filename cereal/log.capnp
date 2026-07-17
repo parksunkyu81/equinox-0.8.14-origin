@@ -636,6 +636,25 @@ struct ControlsState @0x97ff69c53601abf1 {
   pedalFollowTargetDistance @93 :Float32;
   pedalFollowGuardDistance @94 :Float32;
   pedalFollowPredictedDistance @95 :Float32;
+  pedalLaunchActive @96 :Bool;
+  pedalDeadzoneBoostCandidate @97 :Bool;
+  pedalDeadzoneBoostActive @98 :Bool;
+  pedalDeadzoneRawCommand @99 :Float32;
+  pedalDeadzoneAppliedCommand @100 :Float32;
+  pedalDeadzoneFloor @101 :Float32;
+  pedalDeadzoneAccelRequest @102 :Float32;
+  pedalDeadzoneVehicleAccel @103 :Float32;
+  gmSteerCommandGapMs @104 :Float32;
+  gmSteerCommandSent @105 :Bool;
+  gmSteerCommandCounter @106 :UInt8;
+  gmSteerLoopbackCounter @107 :UInt8;
+  gmSteerLoopbackChanged @108 :Bool;
+  gmLkasStatus @109 :UInt8;
+  gmSteerCommandActive @110 :Bool;
+  gmSteerCommandTorque @111 :Int16;
+  gmSteerCommandDeadlineLagMs @112 :Float32;
+  gmSteerCommandGapFault @113 :Bool;
+  gmSteerLoopbackAcked @114 :Bool;
 
 
 
