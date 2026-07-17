@@ -480,7 +480,9 @@ class Controls:
     def smooth_pedal_follow_accel(self, CS, requested_accel):
         enabled = self.CP.enableGasInterceptor and CS.adaptiveCruise and self.active
         lead = self.get_lead(self.sm)
-        return self.pedal_follow_smoother.update(enabled, requested_accel, lead, CS.vEgo)
+        target_distance = float(getattr(self.sm['dynamicFollowData'], 'targetFollowDistance', 0.0))
+        return self.pedal_follow_smoother.update(enabled, requested_accel, lead, CS.vEgo,
+                                                 target_distance=target_distance)
 
     def manual_brake_early_warning(self, CS):
         # Pedal-only longitudinal control needs more driver reaction time than
@@ -1518,6 +1520,10 @@ class Controls:
         controlsState.globalDfMod = float(Params().get("globalDfMod", encoding="utf8"))
         # self.sm['liveTorqueParameters']
         controlsState.dynamicTRValue = float(self.sm['dynamicFollowData'].mpcTR)
+        controlsState.pedalFollowAccelAuthority = float(self.pedal_follow_smoother.accel_authority)
+        controlsState.pedalFollowTargetDistance = float(self.pedal_follow_smoother.target_distance)
+        controlsState.pedalFollowGuardDistance = float(self.pedal_follow_smoother.guard_distance)
+        controlsState.pedalFollowPredictedDistance = float(self.pedal_follow_smoother.predicted_distance)
 
         controlsState.totalCameraOffset = totalCameraOffset
 

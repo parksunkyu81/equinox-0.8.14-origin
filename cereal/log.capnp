@@ -632,6 +632,10 @@ struct ControlsState @0x97ff69c53601abf1 {
   # Curv
   curvDriving @90 :Bool;
   curvSpeed @91 :Float32;
+  pedalFollowAccelAuthority @92 :Float32;
+  pedalFollowTargetDistance @93 :Float32;
+  pedalFollowGuardDistance @94 :Float32;
+  pedalFollowPredictedDistance @95 :Float32;
 
 
 
@@ -1867,6 +1871,10 @@ struct DynamicFollowData {
     mpcTR @0 :Float32;
     profilePred @1 :Int16;
     leadCatchupActive @2 :Bool;
+    catchupFactor @3 :Float32;
+    targetFollowDistance @4 :Float32;
+    predictedFollowDistance @5 :Float32;
+    baseTR @6 :Float32;
 }
 
 struct LaneSpeed {

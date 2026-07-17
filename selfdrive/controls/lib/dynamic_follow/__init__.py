@@ -10,6 +10,7 @@ from common.params import Params
 from selfdrive.controls.lib.dynamic_follow.auto_df import predict
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.dynamic_follow.support import LeadData, CarData, dfData, dfProfiles
+from selfdrive.controls.lib.pedal_follow import pedal_follow_geometry, pedal_follow_target_headway, smoothstep
 from common.data_collector import DataCollector
 
 travis = False
@@ -19,20 +20,19 @@ STOP_ACCEL_BOOST_TR_RAMP_END_SPEED = 30.0 * CV.KPH_TO_MS
 STOP_ACCEL_BOOST_TR_LOW = 1.00
 STOP_ACCEL_BOOST_TR_HIGH = 1.05
 LEAD_CATCHUP_MIN_SPEED = 20.0 * CV.KPH_TO_MS
-LEAD_CATCHUP_MAX_SPEED = 70.0 * CV.KPH_TO_MS
-LEAD_CATCHUP_ENTER_VREL = 0.30
-LEAD_CATCHUP_MAX_LEAD_DECEL = -0.15
-LEAD_CATCHUP_ABORT_LEAD_DECEL = -0.30
-LEAD_CATCHUP_MIN_DISTANCE = 5.5
-LEAD_CATCHUP_MIN_HEADWAY = 1.0
-LEAD_CATCHUP_COAST_HEADWAY = 0.90
-LEAD_CATCHUP_COAST_CLOSING_TIME = 2.0
-LEAD_CATCHUP_COAST_ABORT_MARGIN = 4.0
-LEAD_CATCHUP_ENTER_DISTANCE_MARGIN = 1.0
-LEAD_CATCHUP_CONFIRM_FRAMES = max(1, int(0.80 / DT_MDL))
-LEAD_CATCHUP_AUTO_CONFIRM_FRAMES = max(1, int(0.15 / DT_MDL))
-LEAD_CATCHUP_EXIT_CONFIRM_FRAMES = max(1, round(0.60 / DT_MDL))
-LEAD_CATCHUP_TR_REDUCTION = 0.12
+LEAD_CATCHUP_MAX_SPEED = 110.0 * CV.KPH_TO_MS
+LEAD_CATCHUP_GAP_START = 3.0
+LEAD_CATCHUP_GAP_FULL = 12.0
+LEAD_CATCHUP_CLOSING_START = 0.30
+LEAD_CATCHUP_CLOSING_FULL = 1.00
+LEAD_CATCHUP_SAFE_START_MARGIN = 2.0
+LEAD_CATCHUP_SAFE_FULL_MARGIN = 8.0
+LEAD_CATCHUP_LEAD_ACCEL_MIN = -0.30
+LEAD_CATCHUP_LEAD_ACCEL_FULL = 0.0
+LEAD_CATCHUP_RISE_TIME = 1.0
+LEAD_CATCHUP_FALL_TIME = 0.35
+LEAD_CATCHUP_ACTIVE_THRESHOLD = 0.05
+LEAD_CATCHUP_TR_REDUCTION = 0.10
 
 
 class DistanceModController:
@@ -98,8 +98,10 @@ class DynamicFollow:
     self.sng_TR = DEFAULT_TR  # 재가속 정지 및 이동 TR
     self.sng_speed = 20 / CV.MS_TO_KPH   # 28.8 kph  (DEF:18.0)
     self.lead_catchup_active = False
-    self._lead_catchup_confirm_frames = 0
-    self._lead_catchup_exit_frames = 0
+    self.lead_catchup_factor = 0.0
+    self.base_TR = DEFAULT_TR
+    self.target_follow_distance = 0.0
+    self.predicted_follow_distance = 0.0
 
     self._setup_collector()
     self._setup_changing_variables()
@@ -143,14 +145,17 @@ class DynamicFollow:
 
     if not self.lead_data.status:
       self._reset_lead_catchup()
+      self.base_TR = DEFAULT_TR
       self.TR = DEFAULT_TR
       #print("if not self.lead_data.status: ======================================== : ", self.TR)
     else:
       self._store_df_data()
-      self._update_lead_catchup()
-      self.TR = self._get_TR()
-      if self.lead_catchup_active:
-        self.TR = max(self.min_TR, self.TR - LEAD_CATCHUP_TR_REDUCTION)
+      self.base_TR = self._get_TR()
+      if self.stop_accel_boost:
+        self.base_TR = max(self.base_TR, pedal_follow_target_headway(self.car_data.v_ego))
+      self._update_lead_catchup(self.base_TR)
+      self.TR = max(self.min_TR,
+                    self.base_TR - LEAD_CATCHUP_TR_REDUCTION * self.lead_catchup_factor)
       #print("if self.lead_data.status: ======================================== : ", self.TR)
 
     if not travis:
@@ -194,6 +199,10 @@ class DynamicFollow:
       dat.dynamicFollowData.mpcTR = self.TR
       dat.dynamicFollowData.profilePred = self.model_profile
       dat.dynamicFollowData.leadCatchupActive = self.lead_catchup_active
+      dat.dynamicFollowData.catchupFactor = self.lead_catchup_factor
+      dat.dynamicFollowData.targetFollowDistance = self.target_follow_distance
+      dat.dynamicFollowData.predictedFollowDistance = self.predicted_follow_distance
+      dat.dynamicFollowData.baseTR = self.base_TR
       #print("dat.dynamicFollowData.mpcTR ======================================== : ", dat.dynamicFollowData.mpcTR)
       #print("dat.dynamicFollowData.profilePred ======================================== : ", dat.dynamicFollowData.profilePred)
       self.pm.send('dynamicFollowData', dat)
@@ -291,55 +300,54 @@ class DynamicFollow:
 
   def _reset_lead_catchup(self):
     self.lead_catchup_active = False
-    self._lead_catchup_confirm_frames = 0
-    self._lead_catchup_exit_frames = 0
+    self.lead_catchup_factor = 0.0
+    self.target_follow_distance = 0.0
+    self.predicted_follow_distance = 0.0
 
-  def _lead_catchup_safe_distance(self):
-    return LEAD_CATCHUP_MIN_DISTANCE + LEAD_CATCHUP_MIN_HEADWAY * max(self.car_data.v_ego, 0.0)
-
-  def _update_lead_catchup(self):
-    # Temporarily close only a clearly opening gap. The separate enter/exit
-    # distances and confirmation times prevent radar noise around one exact
-    # distance from repeatedly engaging and releasing pedal torque.
+  def _update_lead_catchup(self, base_TR):
+    # Build a continuous catch-up request from gap error, closing speed,
+    # predicted safety margin, and lead acceleration. This fades to zero before
+    # reaching the normal target gap, so catch-up never becomes a closer target.
     if not self.stop_accel_boost or not self.car_data.cruise_enabled or not self.lead_data.status:
       self._reset_lead_catchup()
       return
 
     v_ego = self.car_data.v_ego
-    v_rel = self.lead_data.v_lead - v_ego
+    v_lead = self.lead_data.v_lead
     a_lead = self.lead_data.a_lead
     d_rel = self.lead_data.x_lead
     speed_ok = LEAD_CATCHUP_MIN_SPEED <= v_ego <= LEAD_CATCHUP_MAX_SPEED
-    safe_distance = self._lead_catchup_safe_distance()
-    enter_distance_ok = d_rel is not None and \
-                        d_rel >= safe_distance + LEAD_CATCHUP_ENTER_DISTANCE_MARGIN
-    lead_not_braking = a_lead is not None and a_lead >= LEAD_CATCHUP_MAX_LEAD_DECEL
 
-    if self.lead_catchup_active:
-      hard_abort = not speed_ok or d_rel is None or a_lead is None
-      if hard_abort:
-        self._reset_lead_catchup()
-        return
+    if v_lead is None or d_rel is None or a_lead is None:
+      target_factor = 0.0
+    else:
+      v_rel = v_lead - v_ego
+      target_distance, guard_distance, predicted_distance, closing_speed = \
+        pedal_follow_geometry(v_ego, d_rel, v_rel, target_tr=base_TR)
+      self.target_follow_distance = target_distance
+      self.predicted_follow_distance = predicted_distance
 
-      closing_speed = max(-v_rel, 0.0)
-      coast_distance = LEAD_CATCHUP_MIN_DISTANCE + \
-                       LEAD_CATCHUP_COAST_HEADWAY * max(v_ego, 0.0) + \
-                       LEAD_CATCHUP_COAST_CLOSING_TIME * closing_speed
-      lead_braking_near = a_lead <= LEAD_CATCHUP_ABORT_LEAD_DECEL and \
-                          d_rel <= coast_distance + LEAD_CATCHUP_COAST_ABORT_MARGIN
-      soft_exit = d_rel <= coast_distance or lead_braking_near
-      self._lead_catchup_exit_frames = self._lead_catchup_exit_frames + 1 if soft_exit else 0
-      if self._lead_catchup_exit_frames >= LEAD_CATCHUP_EXIT_CONFIRM_FRAMES:
-        self._reset_lead_catchup()
-      return
+      if not speed_ok:
+        target_factor = 0.0
+      else:
+        gap_error = d_rel - target_distance
+        gap_factor = smoothstep(LEAD_CATCHUP_GAP_START, LEAD_CATCHUP_GAP_FULL, gap_error)
+        closing_factor = 1.0 - smoothstep(LEAD_CATCHUP_CLOSING_START,
+                                          LEAD_CATCHUP_CLOSING_FULL, closing_speed)
+        safe_factor = smoothstep(guard_distance + LEAD_CATCHUP_SAFE_START_MARGIN,
+                                 guard_distance + LEAD_CATCHUP_SAFE_FULL_MARGIN,
+                                 predicted_distance)
+        lead_factor = smoothstep(LEAD_CATCHUP_LEAD_ACCEL_MIN,
+                                 LEAD_CATCHUP_LEAD_ACCEL_FULL, a_lead)
+        target_factor = gap_factor * closing_factor * safe_factor * lead_factor
 
-    can_enter = speed_ok and enter_distance_ok and lead_not_braking and \
-                v_rel >= LEAD_CATCHUP_ENTER_VREL
-    self._lead_catchup_confirm_frames = self._lead_catchup_confirm_frames + 1 if can_enter else 0
-    confirm_frames = LEAD_CATCHUP_AUTO_CONFIRM_FRAMES if self.df_manager.is_auto else LEAD_CATCHUP_CONFIRM_FRAMES
-    if self._lead_catchup_confirm_frames >= confirm_frames:
-      self.lead_catchup_active = True
-      self._lead_catchup_confirm_frames = 0
+    if target_factor > self.lead_catchup_factor:
+      self.lead_catchup_factor = min(target_factor,
+                                     self.lead_catchup_factor + DT_MDL / LEAD_CATCHUP_RISE_TIME)
+    else:
+      self.lead_catchup_factor = max(target_factor,
+                                     self.lead_catchup_factor - DT_MDL / LEAD_CATCHUP_FALL_TIME)
+    self.lead_catchup_active = self.lead_catchup_factor >= LEAD_CATCHUP_ACTIVE_THRESHOLD
 
   def _get_TR(self):
     """if self.df_manager.is_auto:  # decide which profile to use, model profile will be updated before this
