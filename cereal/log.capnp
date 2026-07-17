@@ -659,6 +659,8 @@ struct ControlsState @0x97ff69c53601abf1 {
   pedalLaunchSafeDistance @116 :Float32;
   pedalLaunchDistanceDelta @117 :Float32;
   pedalLaunchConfirmTime @118 :Float32;
+  gmSteerRequestedTorque @119 :Int16;
+  gmSteerTorqueLimited @120 :Bool;
 
 
 

@@ -7,6 +7,39 @@ GM_STEER_RATE_UP = 7
 GM_STEER_RATE_DOWN = 17
 
 
+class GMSteeringLimitTracker:
+  """Track actuator limiting only when a GM steering command is transmitted.
+
+  controls runs at 100 Hz while GM steering commands are sent at 50 Hz. Comparing
+  the new 100 Hz request with the held actuator output on a non-send frame creates
+  a false rate-limit indication. Hold the result from the most recent transmitted
+  command instead, and clear it immediately when lateral control is inactive.
+  """
+  def __init__(self, torque_tolerance=1):
+    self.torque_tolerance = int(torque_tolerance)
+    self.requested_torque = 0
+    self.applied_torque = 0
+    self.limited = False
+
+  def update(self, command_sent, active, requested_torque=None, applied_torque=None):
+    if not active:
+      self.requested_torque = 0
+      self.applied_torque = 0
+      self.limited = False
+      return self.limited
+
+    if not command_sent:
+      return self.limited
+
+    if requested_torque is None or applied_torque is None:
+      raise ValueError("sent steering commands require requested and applied torque")
+
+    self.requested_torque = int(requested_torque)
+    self.applied_torque = int(applied_torque)
+    self.limited = abs(self.applied_torque - self.requested_torque) > self.torque_tolerance
+    return self.limited
+
+
 class GMSteeringCommandScheduler:
   """50 Hz monotonic scheduler synchronized by Panda TX loopback.
 

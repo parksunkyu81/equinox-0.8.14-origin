@@ -259,6 +259,8 @@ class Controls:
         self.gm_lkas_status = 0
         self.gm_steer_command_active = False
         self.gm_steer_command_torque = 0
+        self.gm_steer_requested_torque = 0
+        self.gm_steer_torque_limited = False
         self.active_cam = False
         self.over_speed_limit = False
 
@@ -1472,7 +1474,13 @@ class Controls:
             self.last_actuators, can_sends = self.CI.apply(CC, self)
             self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
             CC.actuatorsOutput = self.last_actuators
-            self.steer_limited = abs(CC.actuators.steer - CC.actuatorsOutput.steer) > 1e-2
+            if self.CP.carName == 'gm':
+                # GM calculates at 100 Hz but transmits steering at 50 Hz. The
+                # CarController state is based only on a command that was really
+                # sent, so an expected non-send frame cannot freeze the PID.
+                self.steer_limited = bool(self.gm_steer_torque_limited)
+            else:
+                self.steer_limited = abs(CC.actuators.steer - CC.actuatorsOutput.steer) > 1e-2
 
         # Disabled: 10~35km/h steer_clip feedback must not reduce target speed.
         self.low_speed_steer_clip_hold_frames = 0
@@ -1586,6 +1594,8 @@ class Controls:
         controlsState.gmLkasStatus = int(self.gm_lkas_status)
         controlsState.gmSteerCommandActive = bool(self.gm_steer_command_active)
         controlsState.gmSteerCommandTorque = int(self.gm_steer_command_torque)
+        controlsState.gmSteerRequestedTorque = int(self.gm_steer_requested_torque)
+        controlsState.gmSteerTorqueLimited = bool(self.gm_steer_torque_limited)
         controlsState.pedalLaunchState = int(self.pedal_launch_controller.state)
         controlsState.pedalLaunchSafeDistance = float(self.pedal_launch_controller.safe_distance)
         controlsState.pedalLaunchDistanceDelta = float(self.pedal_launch_controller.distance_delta)

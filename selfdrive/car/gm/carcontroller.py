@@ -11,7 +11,7 @@ from selfdrive.controls.lib.pedal_follow import (PEDAL_DEADZONE_FLOOR,
                                                 PedalDeadzoneBoostController,
                                                 pedal_deadzone_recovery_safe,
                                                 pedal_follow_urgent)
-from selfdrive.car.gm.steer_scheduler import (GMSteeringCommandScheduler,
+from selfdrive.car.gm.steer_scheduler import (GMSteeringCommandScheduler, GMSteeringLimitTracker,
                                               GM_STEER_RATE_DOWN,
                                               GM_STEER_RATE_UP)
 
@@ -81,6 +81,7 @@ class CarController():
     self.pedal_deadzone_boost = PedalDeadzoneBoostController()
 
     self.steer_command_scheduler = GMSteeringCommandScheduler()
+    self.steer_limit_tracker = GMSteeringLimitTracker()
     self.lka_icon_status_last = (False, False)
     #self.RestartForceAccel = Params().get_bool('RestartForceAccel')
 
@@ -184,9 +185,12 @@ class CarController():
       sec_since_boot(), CS.lka_steering_cmd_counter)
     lkas_enabled = c.active and not (CS.out.steerFaultTemporary or CS.out.steerFaultPermanent) and \
                    CS.out.vEgo > P.MIN_STEER_SPEED
+    requested_steer = None
+    applied_steer = None
     if steer_command_sent:
       if lkas_enabled:
         new_steer = int(round(actuators.steer * P.STEER_MAX))
+        requested_steer = new_steer
         base_delta_up = int(P.STEER_DELTA_UP)
         base_delta_down = int(P.STEER_DELTA_DOWN)
 
@@ -207,8 +211,7 @@ class CarController():
           P.STEER_DELTA_UP = base_delta_up
           P.STEER_DELTA_DOWN = base_delta_down
 
-        # 다음 프레임의 backoff 판단용. 요청 토크를 충분히 따라가지 못하면 limit으로 본다.
-        self._dyn_steer_limited_prev = bool(abs(int(apply_steer) - int(new_steer)) > 1)
+        applied_steer = apply_steer
         self._dyn_delta_up_last = dyn_delta_up
         self._dyn_delta_down_last = dyn_delta_down
       else:
@@ -217,6 +220,14 @@ class CarController():
 
       self.apply_steer_last = apply_steer
       can_sends.append(gmcan.create_steering_control(self.packer_pt, CanBus.POWERTRAIN, apply_steer, idx, lkas_enabled))
+
+    # A non-send frame is the normal 50 Hz zero-order hold, not a new actuator
+    # limit. Update this state only from a command that was actually transmitted.
+    self.steer_limit_tracker.update(
+      steer_command_sent, lkas_enabled,
+      requested_torque=requested_steer, applied_torque=applied_steer,
+    )
+    self._dyn_steer_limited_prev = self.steer_limit_tracker.limited
 
     controls.gm_steer_command_sent = bool(steer_command_sent)
     controls.gm_steer_command_gap_ms = float(self.steer_command_scheduler.last_interval * 1000.0)
@@ -229,6 +240,8 @@ class CarController():
     controls.gm_lkas_status = int(CS.lkas_status)
     controls.gm_steer_command_active = bool(lkas_enabled)
     controls.gm_steer_command_torque = int(self.apply_steer_last)
+    controls.gm_steer_requested_torque = int(self.steer_limit_tracker.requested_torque)
+    controls.gm_steer_torque_limited = bool(self.steer_limit_tracker.limited)
 
     if CS.CP.enableGasInterceptor and (frame % 4) == 0:
       idx = (frame // 4) % 4
