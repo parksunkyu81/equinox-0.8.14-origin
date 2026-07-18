@@ -73,8 +73,71 @@ from common.realtime import Priority, config_realtime_process, DT_MDL
 from common.filter_simple import FirstOrderFilter
 from selfdrive.swaglog import cloudlog
 from selfdrive.controls.lib.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
-from selfdrive.locationd.torque_profile import adaptive_equinox_bands, center_offset_residual, equinox_learning_confidence
 from common.numpy_fast import interp, clip
+
+
+def _profile_clip(value, lo, hi):
+    return max(float(lo), min(float(hi), float(value)))
+
+
+def center_offset_residual(lateral_accel, applied_steer, lat_accel_factor):
+    """Model intercept y - slope*x used for closed-loop center learning."""
+    return float(lateral_accel) - float(lat_accel_factor) * float(applied_steer)
+
+
+def equinox_learning_confidence(normal_counts, limited_counts, min_points,
+                                 clip_ratio=0.0, rate_ratio=0.0, driver_ratio=0.0,
+                                 start_points=1800.0, full_points=10000.0):
+    """Return 0..1 confidence for widening the Equinox learning envelope."""
+    normal = [max(0.0, float(v)) for v in normal_counts]
+    limited = [max(0.0, float(v)) for v in limited_counts]
+    required = [max(1.0, float(v)) for v in min_points]
+    if not normal or len(normal) != len(limited) or len(normal) != len(required):
+        return 0.0
+
+    counts = [n + 0.30 * l for n, l in zip(normal, limited)]
+    total = sum(counts)
+    total_progress = _profile_clip(
+        (total - float(start_points)) / max(float(full_points) - float(start_points), 1.0), 0.0, 1.0)
+    coverage = sum(_profile_clip(c / max(0.50 * r, 15.0), 0.0, 1.0)
+                   for c, r in zip(counts, required)) / float(len(counts))
+    coverage_progress = _profile_clip((coverage - 0.30) / 0.55, 0.0, 1.0)
+
+    split = len(counts) // 2
+    negative = sum(counts[:split])
+    positive = sum(counts[split:])
+    direction_balance = min(negative, positive) / max(max(negative, positive), 1.0)
+    balance_progress = _profile_clip((direction_balance - 0.30) / 0.50, 0.0, 1.0)
+
+    bad_ratio = max(_profile_clip(clip_ratio, 0.0, 1.0),
+                    _profile_clip(rate_ratio, 0.0, 1.0),
+                    _profile_clip(driver_ratio, 0.0, 1.0))
+    quality = _profile_clip(1.0 - (bad_ratio / 0.35), 0.0, 1.0)
+    return _profile_clip(total_progress * coverage_progress * balance_progress * quality, 0.0, 1.0)
+
+
+def adaptive_equinox_bands(lat_accel_anchor, friction_anchor, confidence):
+    """Return progressively wider, hard-bounded Equinox torque limits."""
+    conf = _profile_clip(confidence, 0.0, 1.0)
+    lat_anchor = float(lat_accel_anchor)
+    friction_anchor = float(friction_anchor)
+
+    factor_down = 0.025 + conf * (0.140 - 0.025)
+    factor_up = 0.035 + conf * (0.160 - 0.035)
+    friction_down = 0.065 + conf * (0.280 - 0.065)
+    friction_up = 0.065 + conf * (0.300 - 0.065)
+
+    factor_abs_min = 1.95 + conf * (1.75 - 1.95)
+    factor_abs_max = 2.12 + conf * (2.42 - 2.12)
+    friction_abs_min = 0.220 + conf * (0.165 - 0.220)
+    friction_abs_max = 0.245 + conf * (0.305 - 0.245)
+
+    min_factor = max((1.0 - factor_down) * lat_anchor, factor_abs_min)
+    max_factor = min((1.0 + factor_up) * lat_anchor, factor_abs_max)
+    min_friction = max((1.0 - friction_down) * friction_anchor, friction_abs_min)
+    max_friction = min((1.0 + friction_up) * friction_anchor, friction_abs_max)
+    return (float(min_factor), float(max_factor),
+            float(min_friction), float(max_friction))
 
 # -----------------------------
 # 로그 설정 (일자별 파일)
