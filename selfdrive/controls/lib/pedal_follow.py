@@ -26,6 +26,11 @@ PEDAL_FOLLOW_LEAD_BRAKING_ACCEL = -0.30
 PEDAL_FOLLOW_LEAD_HARD_BRAKING_ACCEL = -1.00
 PEDAL_FOLLOW_LEAD_BRAKING_MARGIN = 4.0
 PEDAL_FOLLOW_LEAD_BRAKING_CONFIRM_FRAMES = max(1, round(0.15 / DT_CTRL))
+# Keep the existing response timing while limiting the acceleration magnitude.
+# The cap rises with speed so low-speed departures stay calm without making
+# normal traffic-speed recovery unnecessarily slow.
+PEDAL_COMFORT_ACCEL_CAP_BP_KPH = [0.0, 10.0, 20.0, 40.0, 60.0, 100.0]
+PEDAL_COMFORT_ACCEL_CAP_V = [0.85, 0.95, 1.05, 1.10, 1.15, 1.20]
 PEDAL_DEADZONE_FLOOR = 0.060
 PEDAL_DEADZONE_CONFIRM_FRAMES = max(1, round(0.10 / DT_CTRL))
 PEDAL_DEADZONE_RAMP_FRAMES = max(1, round(0.25 / DT_CTRL))
@@ -61,6 +66,8 @@ PEDAL_LAUNCH_STATE_BLOCKED_BRAKING = 6
 PEDAL_LAUNCH_STATE_NO_LEAD = 7
 PEDAL_LAUNCH_STATE_SPEED = 8
 PEDAL_LAUNCH_STATE_TIMEOUT = 9
+PEDAL_MANUAL_LAUNCH_STOP_MAX_VEGO = 0.5 * CV.KPH_TO_MS
+PEDAL_MANUAL_LAUNCH_RESUME_MIN_VEGO = 1.0 * CV.KPH_TO_MS
 
 
 def smoothstep(edge0, edge1, value):
@@ -74,6 +81,12 @@ def pedal_follow_target_headway(v_ego):
   return float(interp(max(float(v_ego), 0.0) * CV.MS_TO_KPH,
                       PEDAL_FOLLOW_TARGET_TR_BP_KPH,
                       PEDAL_FOLLOW_TARGET_TR_V))
+
+
+def pedal_comfort_accel_cap(v_ego):
+  return float(interp(max(float(v_ego), 0.0) * CV.MS_TO_KPH,
+                      PEDAL_COMFORT_ACCEL_CAP_BP_KPH,
+                      PEDAL_COMFORT_ACCEL_CAP_V))
 
 
 def pedal_follow_geometry(v_ego, d_rel, v_rel, target_tr=None, target_distance=None):
@@ -237,6 +250,60 @@ class PedalLaunchController:
     return self.active
 
 
+class PedalManualLaunchGate:
+  """Require a real driver-pedal departure after every standstill.
+
+  Automated pedal output stays blocked while stopped. A driver gas press only
+  arms the handoff; the car must actually reach the resume speed before the
+  automated follower can take over, and it never adds pedal while the driver is
+  still pressing gas.
+  """
+  def __init__(self):
+    self.manual_required = False
+    self.manual_seen = False
+    self.auto_allowed = False
+
+  def reset(self):
+    self.manual_required = False
+    self.manual_seen = False
+    self.auto_allowed = False
+
+  def update(self, enabled, brake_pressed, gas_pressed, standstill, v_ego):
+    if not enabled:
+      self.reset()
+      return False
+
+    v_ego = max(float(v_ego), 0.0)
+    stopped = bool(standstill) or v_ego <= PEDAL_MANUAL_LAUNCH_STOP_MAX_VEGO
+
+    if brake_pressed:
+      if stopped:
+        self.manual_required = True
+      self.manual_seen = False
+      self.auto_allowed = False
+      return False
+
+    if stopped and not self.manual_required:
+      self.manual_required = True
+      self.manual_seen = False
+
+    if self.manual_required:
+      if gas_pressed:
+        self.manual_seen = True
+
+      if not self.manual_seen or v_ego < PEDAL_MANUAL_LAUNCH_RESUME_MIN_VEGO:
+        self.auto_allowed = False
+        return False
+
+      # A manual pedal press has produced real vehicle motion. The automated
+      # follower may take over only after the driver releases the pedal.
+      self.manual_required = False
+      self.manual_seen = False
+
+    self.auto_allowed = not bool(gas_pressed)
+    return self.auto_allowed
+
+
 class PedalDeadzoneBoostController:
   """Apply one short, ramped pedal floor after a confirmed safe recovery.
 
@@ -375,6 +442,8 @@ class PedalFollowSmoother:
 
   def update(self, enabled, requested_accel, lead, v_ego, target_distance=None, launch_active=False):
     requested_accel = float(requested_accel)
+    if enabled and requested_accel > 0.0:
+      requested_accel = min(requested_accel, pedal_comfort_accel_cap(v_ego))
     lead_valid = lead is not None and lead.status and lead.dRel > 0.0
 
     if not enabled:

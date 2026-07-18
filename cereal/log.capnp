@@ -661,6 +661,10 @@ struct ControlsState @0x97ff69c53601abf1 {
   pedalLaunchConfirmTime @118 :Float32;
   gmSteerRequestedTorque @119 :Int16;
   gmSteerTorqueLimited @120 :Bool;
+  pedalManualLaunchRequired @121 :Bool;
+  pedalManualLaunchSeen @122 :Bool;
+  pedalManualLaunchAutoAllowed @123 :Bool;
+  pedalComfortAccelCap @124 :Float32;
 
 
 
