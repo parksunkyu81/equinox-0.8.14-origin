@@ -7,7 +7,7 @@ from selfdrive.car.gm import gmcan
 from selfdrive.car.gm.values import DBC, NO_ASCM, CanBus, CarControllerParams
 from opendbc.can.packer import CANPacker
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
-from selfdrive.controls.lib.pedal_follow import (PEDAL_DEADZONE_FLOOR,
+from selfdrive.controls.lib.pedal_follow import (PEDAL_DEADZONE_FLOOR, PEDAL_LEAD_ACCEL_GAIN,
                                                 PedalDeadzoneBoostController,
                                                 pedal_comfort_accel_cap,
                                                 pedal_deadzone_recovery_safe,
@@ -123,21 +123,25 @@ class CarController():
     urgent_lead_closing = CS.CP.enableGasInterceptor and \
                           pedal_follow_urgent(lead, CS.out.vEgo)
     requested_accel = float(clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-    comfort_accel_cap = pedal_comfort_accel_cap(CS.out.vEgo)
-    if CS.CP.enableGasInterceptor and requested_accel > 0.0:
+    lead_valid = lead is not None and lead.status and lead.dRel > 0.0
+    comfort_accel_cap = pedal_comfort_accel_cap(CS.out.vEgo) * PEDAL_LEAD_ACCEL_GAIN if lead_valid else 0.0
+    if CS.CP.enableGasInterceptor and lead_valid and requested_accel > 0.0:
       requested_accel = min(requested_accel, comfort_accel_cap)
     manual_launch_auto_allowed = bool(getattr(controls, 'pedal_manual_launch_auto_allowed', False))
+    manual_launch_assist_active = bool(getattr(controls, 'pedal_manual_launch_assist_active', False))
+    pedal_automation_allowed = manual_launch_auto_allowed or manual_launch_assist_active
     manual_launch_blocked = (CS.out.standstill or CS.out.vEgo <= 0.5 * CV.KPH_TO_MS) and \
-                            not manual_launch_auto_allowed
+                            not pedal_automation_allowed
     self.accel = min(requested_accel, 0.0) if brake_pressed or urgent_lead_closing or \
                  manual_launch_blocked else requested_accel
 
     if CS.CP.enableGasInterceptor:
       # 이것이 없으면 저속에서 너무 공격적입니다.
       pedal_speed_allowed = CS.out.vEgo > V_CRUISE_ENABLE_MIN / CV.MS_TO_KPH or \
-                            manual_launch_auto_allowed
-      if c.active and CS.adaptive_Cruise and not brake_pressed and not CS.out.gasPressed and \
-         manual_launch_auto_allowed and pedal_speed_allowed:
+                            pedal_automation_allowed
+      driver_pedal_allows_output = not CS.out.gasPressed or manual_launch_assist_active
+      if c.active and CS.adaptive_Cruise and not brake_pressed and driver_pedal_allows_output and \
+         pedal_automation_allowed and pedal_speed_allowed:
 
         # 가속 멀티플라이어 설정
         # 속도별 가속 배율 - 전체적으로 절반으로 줄임
@@ -160,7 +164,7 @@ class CarController():
         recovery_safe = pedal_deadzone_recovery_safe(follow_smoother, lead)
         deadzone_candidate = recovery_safe and self.accel > 0.0 and \
                              pedal_command < PEDAL_DEADZONE_FLOOR and \
-                             not urgent_lead_closing
+                             not manual_launch_assist_active and not urgent_lead_closing
         self.comma_pedal = float(clip(
           self.pedal_deadzone_boost.update(deadzone_candidate, pedal_command, CS.out.aEgo),
           0., 0.75))

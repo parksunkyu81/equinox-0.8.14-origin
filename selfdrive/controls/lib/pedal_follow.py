@@ -31,6 +31,7 @@ PEDAL_FOLLOW_LEAD_BRAKING_CONFIRM_FRAMES = max(1, round(0.15 / DT_CTRL))
 # normal traffic-speed recovery unnecessarily slow.
 PEDAL_COMFORT_ACCEL_CAP_BP_KPH = [0.0, 10.0, 20.0, 40.0, 60.0, 100.0]
 PEDAL_COMFORT_ACCEL_CAP_V = [0.85, 0.95, 1.05, 1.10, 1.15, 1.20]
+PEDAL_LEAD_ACCEL_GAIN = 1.10
 PEDAL_DEADZONE_FLOOR = 0.060
 PEDAL_DEADZONE_CONFIRM_FRAMES = max(1, round(0.10 / DT_CTRL))
 PEDAL_DEADZONE_RAMP_FRAMES = max(1, round(0.25 / DT_CTRL))
@@ -130,6 +131,21 @@ def pedal_deadzone_recovery_safe(follow_smoother, lead):
          follow_smoother.predicted_distance >= follow_smoother.target_distance and \
          lead is not None and lead.status and lead.dRel > 0.0 and \
          lead.vRel >= -0.20
+
+
+def pedal_manual_launch_assist_safe(assist_authorized, brake_pressed, gas_pressed,
+                                    lead, distance_delta=0.0):
+  if not assist_authorized or brake_pressed or not gas_pressed or \
+     lead is None or not lead.status or lead.dRel < PEDAL_LAUNCH_PREFERRED_MIN_DISTANCE:
+    return False
+
+  v_rel = float(lead.vRel)
+  v_lead = float(getattr(lead, 'vLead', v_rel))
+  a_lead = float(getattr(lead, 'aLeadK', 0.0))
+  lead_departing = v_lead > PEDAL_LAUNCH_MIN_VLEAD or \
+                   float(distance_delta) >= PEDAL_LAUNCH_MIN_DISTANCE_DELTA
+  return lead_departing and v_rel > PEDAL_LAUNCH_MAX_CLOSING_VREL and \
+         a_lead > PEDAL_LAUNCH_MAX_LEAD_DECEL
 
 
 class PedalLaunchController:
@@ -261,11 +277,13 @@ class PedalManualLaunchGate:
   def __init__(self):
     self.manual_required = False
     self.manual_seen = False
+    self.assist_authorized = False
     self.auto_allowed = False
 
   def reset(self):
     self.manual_required = False
     self.manual_seen = False
+    self.assist_authorized = False
     self.auto_allowed = False
 
   def update(self, enabled, brake_pressed, gas_pressed, standstill, v_ego):
@@ -280,6 +298,7 @@ class PedalManualLaunchGate:
       if stopped:
         self.manual_required = True
       self.manual_seen = False
+      self.assist_authorized = False
       self.auto_allowed = False
       return False
 
@@ -290,6 +309,7 @@ class PedalManualLaunchGate:
     if self.manual_required:
       if gas_pressed:
         self.manual_seen = True
+        self.assist_authorized = True
 
       if not self.manual_seen or v_ego < PEDAL_MANUAL_LAUNCH_RESUME_MIN_VEGO:
         self.auto_allowed = False
@@ -300,6 +320,8 @@ class PedalManualLaunchGate:
       self.manual_required = False
       self.manual_seen = False
 
+    if not gas_pressed:
+      self.assist_authorized = False
     self.auto_allowed = not bool(gas_pressed)
     return self.auto_allowed
 
@@ -442,9 +464,14 @@ class PedalFollowSmoother:
 
   def update(self, enabled, requested_accel, lead, v_ego, target_distance=None, launch_active=False):
     requested_accel = float(requested_accel)
-    if enabled and requested_accel > 0.0:
-      requested_accel = min(requested_accel, pedal_comfort_accel_cap(v_ego))
     lead_valid = lead is not None and lead.status and lead.dRel > 0.0
+
+    # Preserve the original no-lead acceleration exactly. With a valid lead,
+    # increase positive response by 10% but keep the speed-dependent comfort cap
+    # and all following distance/closing-speed authority checks.
+    if enabled and lead_valid and requested_accel > 0.0:
+      requested_accel = min(requested_accel * PEDAL_LEAD_ACCEL_GAIN,
+                            pedal_comfort_accel_cap(v_ego) * PEDAL_LEAD_ACCEL_GAIN)
 
     if not enabled:
       self.reset()

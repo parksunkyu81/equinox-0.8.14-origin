@@ -38,7 +38,8 @@ from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, CON
 from selfdrive.car.gm.values import SLOW_ON_CURVES, MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
-from selfdrive.controls.lib.pedal_follow import PedalFollowSmoother, PedalManualLaunchGate
+from selfdrive.controls.lib.pedal_follow import (PedalFollowSmoother, PedalManualLaunchGate,
+                                                 pedal_manual_launch_assist_safe)
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
@@ -63,6 +64,7 @@ STOP_ACCEL_BOOST_RESTART_REDUCED_MAX_VEGO_KPH = 10.0
 STOP_ACCEL_BOOST_RESTART_FULL_ACCEL_VEGO_KPH = 15.0
 STOP_ACCEL_BOOST_RESTART_REDUCED_MIN_ACCEL = 0.75
 STOP_ACCEL_BOOST_RESTART_MIN_ACCEL = 0.95
+PEDAL_MANUAL_LAUNCH_ASSIST_MIN_ACCEL = 0.90
 FCW_MIN_CLOSING_SPEED = 0.8
 FCW_URGENT_TTC = 1.6
 FCW_CRITICAL_TTC = 1.0
@@ -242,6 +244,7 @@ class Controls:
         self.pedal_manual_launch_gate = PedalManualLaunchGate()
         self.pedal_manual_launch_required = False
         self.pedal_manual_launch_seen = False
+        self.pedal_manual_launch_assist_active = False
         self.pedal_manual_launch_auto_allowed = False
         self.pedal_comfort_accel_cap = 0.0
         self.pedal_deadzone_boost_candidate = False
@@ -359,6 +362,7 @@ class Controls:
         self.pedal_manual_launch_gate.reset()
         self.pedal_manual_launch_required = False
         self.pedal_manual_launch_seen = False
+        self.pedal_manual_launch_assist_active = False
         self.pedal_manual_launch_auto_allowed = False
 
     def set_stop_accel_boost_hold_result(self, hold, release_active=False):
@@ -442,7 +446,19 @@ class Controls:
         self.pedal_manual_launch_required = self.pedal_manual_launch_gate.manual_required
         self.pedal_manual_launch_seen = self.pedal_manual_launch_gate.manual_seen
 
+        prev_drel = getattr(self, "_stop_accel_boost_prev_drel", None)
+        distance_delta = 0.0 if prev_drel is None or lead is None else float(lead.dRel) - float(prev_drel)
+        self.pedal_manual_launch_assist_active = bool(launch_enabled and pedal_manual_launch_assist_safe(
+            self.pedal_manual_launch_gate.assist_authorized,
+            CS.brakePressed, CS.gasPressed, lead, distance_delta))
+        if lead is not None and lead.status and lead.dRel > 0.0:
+            self._stop_accel_boost_prev_drel = float(lead.dRel)
+
         if launch_enabled and self.pedal_manual_launch_required:
+            if self.pedal_manual_launch_assist_active:
+                self._stop_accel_boost_lead_departed = True
+                self._stop_accel_boost_release_frames = STOP_ACCEL_BOOST_RELEASE_HOLD_FRAMES
+                return self.set_stop_accel_boost_hold_result(False, True)
             self._stop_accel_boost_release_frames = 0
             self._stop_accel_boost_release_active = False
             self._stop_accel_boost_lead_departed = False
@@ -1329,7 +1345,9 @@ class Controls:
             elif self.active and self._stop_accel_boost_release_active:
                 lead = self.get_lead(self.sm)
                 v_ego_kph = CS.vEgo * CV.MS_TO_KPH
-                if self.stop_accel_boost_lead_clear_for_boost(CS, lead) and \
+                if self.pedal_manual_launch_assist_active:
+                    actuators.accel = max(actuators.accel, PEDAL_MANUAL_LAUNCH_ASSIST_MIN_ACCEL)
+                elif self.stop_accel_boost_lead_clear_for_boost(CS, lead) and \
                    STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH <= v_ego_kph <= STOP_ACCEL_BOOST_RESTART_MAX_VEGO_KPH and \
                    actuators.accel > 0.0:
                     actuators.accel = max(actuators.accel, self.stop_accel_boost_restart_min_accel(v_ego_kph))
@@ -1610,6 +1628,7 @@ class Controls:
         controlsState.pedalLaunchConfirmTime = 0.0
         controlsState.pedalManualLaunchRequired = bool(self.pedal_manual_launch_required)
         controlsState.pedalManualLaunchSeen = bool(self.pedal_manual_launch_seen)
+        controlsState.pedalManualLaunchAssistActive = bool(self.pedal_manual_launch_assist_active)
         controlsState.pedalManualLaunchAutoAllowed = bool(self.pedal_manual_launch_auto_allowed)
         controlsState.pedalComfortAccelCap = float(self.pedal_comfort_accel_cap)
 

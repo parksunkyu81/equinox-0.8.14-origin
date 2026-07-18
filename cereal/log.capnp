@@ -665,6 +665,7 @@ struct ControlsState @0x97ff69c53601abf1 {
   pedalManualLaunchSeen @122 :Bool;
   pedalManualLaunchAutoAllowed @123 :Bool;
   pedalComfortAccelCap @124 :Float32;
+  pedalManualLaunchAssistActive @125 :Bool;
 
 
 
