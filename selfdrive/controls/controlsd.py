@@ -38,7 +38,8 @@ from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, CON
 from selfdrive.car.gm.values import SLOW_ON_CURVES, MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
-from selfdrive.controls.lib.pedal_follow import (PedalFollowSmoother, PedalManualLaunchGate,
+from selfdrive.controls.lib.pedal_follow import (PedalFollowSmoother, PedalLeadDepartureTracker,
+                                                 PedalManualLaunchGate,
                                                  PedalStandstillBoostController,
                                                  pedal_manual_launch_assist_safe)
 
@@ -244,6 +245,7 @@ class Controls:
         self._stop_accel_boost_lead_departed = False
         self.pedal_follow_smoother = PedalFollowSmoother()
         self.pedal_launch_active = False
+        self.pedal_lead_departure_tracker = PedalLeadDepartureTracker()
         self.pedal_manual_launch_gate = PedalManualLaunchGate()
         self.pedal_standstill_boost = PedalStandstillBoostController()
         self.pedal_manual_launch_required = False
@@ -363,6 +365,7 @@ class Controls:
         self._stop_accel_boost_release_active = False
         self._stop_accel_boost_lead_departed = False
         self.pedal_launch_active = False
+        self.pedal_lead_departure_tracker.reset()
         self.pedal_manual_launch_gate.reset()
         self.pedal_standstill_boost.reset()
         self.pedal_manual_launch_required = False
@@ -455,15 +458,23 @@ class Controls:
         self.pedal_manual_launch_required = self.pedal_manual_launch_gate.manual_required
         self.pedal_manual_launch_seen = self.pedal_manual_launch_gate.manual_seen
 
-        prev_drel = getattr(self, "_stop_accel_boost_prev_drel", None)
-        distance_delta = 0.0 if prev_drel is None or lead is None else float(lead.dRel) - float(prev_drel)
-        self.pedal_manual_launch_assist_active = bool(launch_enabled and pedal_manual_launch_assist_safe(
+        # Compare against the distance captured when ego first stopped, not the
+        # previous 10 ms radar frame. A slowly departing lead only opens a few
+        # millimetres per frame, but the cumulative opening still proves that it
+        # has moved and must release the launch path without a multi-second wait.
+        lead_departure_confirmed, distance_delta = self.pedal_lead_departure_tracker.update(
+            launch_enabled, CS.brakePressed, lead, CS.standstill, CS.vEgo)
+        manual_launch_assist_candidate = bool(launch_enabled and pedal_manual_launch_assist_safe(
             self.pedal_manual_launch_gate.assist_authorized,
             CS.brakePressed, CS.gasPressed, lead, distance_delta) and
             CS.vEgo * CV.MS_TO_KPH <= STOP_ACCEL_BOOST_RESTART_MAX_VEGO_KPH)
         self.pedal_launch_active = self.pedal_standstill_boost.update(
-            launch_enabled, self.pedal_manual_launch_assist_active,
-            CS.brakePressed, lead, CS.vEgo)
+            launch_enabled, manual_launch_assist_candidate,
+            CS.brakePressed, lead, CS.vEgo, lead_departure_confirmed)
+        # The manual-pedal overlay is permitted only while the same dynamic
+        # gap/closing/lead-braking checks that govern the 1-20 km/h boost pass.
+        self.pedal_manual_launch_assist_active = bool(
+            manual_launch_assist_candidate and self.pedal_launch_active)
         if lead is not None and lead.status and lead.dRel > 0.0:
             self._stop_accel_boost_prev_drel = float(lead.dRel)
 
@@ -1645,12 +1656,15 @@ class Controls:
         controlsState.gmSteerCommandTorque = int(self.gm_steer_command_torque)
         controlsState.gmSteerRequestedTorque = int(self.gm_steer_requested_torque)
         controlsState.gmSteerTorqueLimited = bool(self.gm_steer_torque_limited)
-        # Legacy automatic-launch diagnostics stay explicitly disabled. Standstill
-        # departure is now represented by the manual-launch fields below.
+        # Automatic launch remains disabled. Reuse the existing distance/time
+        # diagnostics so a route log can prove whether the persistent stopped
+        # anchor saw the lead depart and how long the manual boost remained on.
         controlsState.pedalLaunchState = 0
         controlsState.pedalLaunchSafeDistance = 0.0
-        controlsState.pedalLaunchDistanceDelta = 0.0
-        controlsState.pedalLaunchConfirmTime = 0.0
+        controlsState.pedalLaunchDistanceDelta = float(
+            self.pedal_lead_departure_tracker.distance_delta)
+        controlsState.pedalLaunchConfirmTime = float(
+            self.pedal_standstill_boost.active_frames * DT_CTRL)
         controlsState.pedalManualLaunchRequired = bool(self.pedal_manual_launch_required)
         controlsState.pedalManualLaunchSeen = bool(self.pedal_manual_launch_seen)
         controlsState.pedalManualLaunchAssistActive = bool(self.pedal_manual_launch_assist_active)

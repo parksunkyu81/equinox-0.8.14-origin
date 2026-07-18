@@ -77,6 +77,8 @@ PEDAL_STANDSTILL_BOOST_MAX_CLOSING_VREL = -0.10
 PEDAL_STANDSTILL_BOOST_MAX_LEAD_DECEL = -0.30
 PEDAL_STANDSTILL_BOOST_MIN_VLEAD = 0.12
 PEDAL_STANDSTILL_BOOST_TIMEOUT_FRAMES = max(1, round(12.0 / DT_CTRL))
+PEDAL_DEPARTURE_TRACK_STOP_MAX_VEGO = 0.5 * CV.KPH_TO_MS
+PEDAL_DEPARTURE_TRACK_MAX_VEGO = 20.0 * CV.KPH_TO_MS
 
 
 def smoothstep(edge0, edge1, value):
@@ -334,6 +336,57 @@ class PedalManualLaunchGate:
     return self.auto_allowed
 
 
+class PedalLeadDepartureTracker:
+  """Detect lead departure from a persistent standstill distance anchor."""
+  def __init__(self):
+    self.stopped_d_rel = None
+    self.distance_delta = 0.0
+    self.departure_confirmed = False
+    self.was_stopped = False
+
+  def reset(self):
+    self.stopped_d_rel = None
+    self.distance_delta = 0.0
+    self.departure_confirmed = False
+    self.was_stopped = False
+
+  def update(self, enabled, brake_pressed, lead, standstill, v_ego):
+    v_ego = max(float(v_ego), 0.0)
+    lead_valid = lead is not None and lead.status and float(lead.dRel) > 0.0
+    if not enabled or not lead_valid or v_ego > PEDAL_DEPARTURE_TRACK_MAX_VEGO:
+      self.reset()
+      return False, 0.0
+
+    stopped = bool(standstill) or v_ego <= PEDAL_DEPARTURE_TRACK_STOP_MAX_VEGO
+    d_rel = float(lead.dRel)
+    v_rel = float(lead.vRel)
+    v_lead = float(getattr(lead, 'vLead', v_ego + v_rel))
+
+    # A new ego standstill starts a new departure event. Holding the brake does
+    # not erase the anchor; it only prevents the boost output elsewhere.
+    if stopped and not self.was_stopped:
+      self.stopped_d_rel = d_rel
+      self.distance_delta = 0.0
+      self.departure_confirmed = False
+    elif self.stopped_d_rel is None:
+      self.stopped_d_rel = d_rel
+
+    self.was_stopped = stopped
+    self.distance_delta = d_rel - float(self.stopped_d_rel)
+    if v_lead > PEDAL_LAUNCH_MIN_VLEAD or \
+       self.distance_delta >= PEDAL_LAUNCH_MIN_DISTANCE_DELTA:
+      self.departure_confirmed = True
+
+    lead_stationary = v_lead <= PEDAL_LAUNCH_STATIONARY_VLEAD and \
+                      abs(v_rel) <= PEDAL_LAUNCH_STATIONARY_VREL
+    if stopped and not self.departure_confirmed and lead_stationary and \
+       abs(self.distance_delta) <= PEDAL_LAUNCH_REFERENCE_DRIFT:
+      self.stopped_d_rel = 0.995 * float(self.stopped_d_rel) + 0.005 * d_rel
+      self.distance_delta = d_rel - float(self.stopped_d_rel)
+
+    return self.departure_confirmed, self.distance_delta
+
+
 class PedalStandstillBoostController:
   """Keep a driver-authorized standstill departure responsive through 20 km/h.
 
@@ -352,7 +405,7 @@ class PedalStandstillBoostController:
     self.active_frames = 0
 
   @staticmethod
-  def _lead_safe(lead, v_ego):
+  def _lead_safe(lead, v_ego, departure_confirmed=False):
     if lead is None or not lead.status:
       return False
     v_rel = float(lead.vRel)
@@ -363,23 +416,28 @@ class PedalStandstillBoostController:
       return False
     v_lead = float(getattr(lead, 'vLead', max(float(v_ego), 0.0) + v_rel))
     a_lead = float(getattr(lead, 'aLeadK', 0.0))
+    departure_evidence = v_lead > PEDAL_STANDSTILL_BOOST_MIN_VLEAD or bool(departure_confirmed)
     return v_rel > PEDAL_STANDSTILL_BOOST_MAX_CLOSING_VREL and \
-           v_lead > PEDAL_STANDSTILL_BOOST_MIN_VLEAD and \
+           departure_evidence and \
            a_lead > PEDAL_STANDSTILL_BOOST_MAX_LEAD_DECEL
 
-  def update(self, enabled, manual_authorized, brake_pressed, lead, v_ego):
+  def update(self, enabled, manual_authorized, brake_pressed, lead, v_ego,
+             departure_confirmed=False):
     if not enabled or brake_pressed:
       self.reset()
       return False
 
     v_ego = max(float(v_ego), 0.0)
-    lead_safe = self._lead_safe(lead, v_ego)
+    lead_safe = self._lead_safe(lead, v_ego, departure_confirmed)
+    newly_armed = False
     if manual_authorized:
       if not lead_safe:
         self.reset()
         return False
-      self.armed = True
-      self.active_frames = 0
+      if not self.armed:
+        self.armed = True
+        self.active_frames = 0
+        newly_armed = True
 
     if not self.armed:
       self.active = False
@@ -387,14 +445,17 @@ class PedalStandstillBoostController:
     if not lead_safe or v_ego > PEDAL_STANDSTILL_BOOST_MAX_VEGO:
       self.reset()
       return False
-    if v_ego < PEDAL_STANDSTILL_BOOST_MIN_VEGO:
-      self.active = False
-      return False
 
-    self.active_frames += 1
+    # Count the complete boost event, including time spent below 1 km/h. A
+    # continuously held driver pedal must not restart the timeout every frame.
+    if not newly_armed:
+      self.active_frames += 1
     if self.active_frames > PEDAL_STANDSTILL_BOOST_TIMEOUT_FRAMES:
       self.reset()
       return False
+    if v_ego < PEDAL_STANDSTILL_BOOST_MIN_VEGO:
+      self.active = bool(manual_authorized)
+      return self.active
 
     self.active = True
     return True
