@@ -39,6 +39,7 @@ from selfdrive.car.gm.values import SLOW_ON_CURVES, MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.pedal_follow import (PedalFollowSmoother, PedalManualLaunchGate,
+                                                 PedalStandstillBoostController,
                                                  pedal_manual_launch_assist_safe)
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
@@ -64,6 +65,8 @@ STOP_ACCEL_BOOST_RESTART_REDUCED_MAX_VEGO_KPH = 10.0
 STOP_ACCEL_BOOST_RESTART_FULL_ACCEL_VEGO_KPH = 15.0
 STOP_ACCEL_BOOST_RESTART_REDUCED_MIN_ACCEL = 0.75
 STOP_ACCEL_BOOST_RESTART_MIN_ACCEL = 0.95
+PEDAL_STANDSTILL_BOOST_ACCEL_BP_KPH = [1.0, 5.0, 10.0, 15.0, 20.0]
+PEDAL_STANDSTILL_BOOST_ACCEL_V = [0.90, 1.00, 1.05, 1.00, 0.85]
 PEDAL_MANUAL_LAUNCH_ASSIST_MIN_ACCEL = 0.90
 FCW_MIN_CLOSING_SPEED = 0.8
 FCW_URGENT_TTC = 1.6
@@ -242,6 +245,7 @@ class Controls:
         self.pedal_follow_smoother = PedalFollowSmoother()
         self.pedal_launch_active = False
         self.pedal_manual_launch_gate = PedalManualLaunchGate()
+        self.pedal_standstill_boost = PedalStandstillBoostController()
         self.pedal_manual_launch_required = False
         self.pedal_manual_launch_seen = False
         self.pedal_manual_launch_assist_active = False
@@ -360,6 +364,7 @@ class Controls:
         self._stop_accel_boost_lead_departed = False
         self.pedal_launch_active = False
         self.pedal_manual_launch_gate.reset()
+        self.pedal_standstill_boost.reset()
         self.pedal_manual_launch_required = False
         self.pedal_manual_launch_seen = False
         self.pedal_manual_launch_assist_active = False
@@ -393,6 +398,11 @@ class Controls:
                       [STOP_ACCEL_BOOST_RESTART_REDUCED_MIN_ACCEL,
                        STOP_ACCEL_BOOST_RESTART_REDUCED_MIN_ACCEL,
                        STOP_ACCEL_BOOST_RESTART_MIN_ACCEL])
+
+    def pedal_standstill_boost_min_accel(self, v_ego_kph):
+        return interp(v_ego_kph,
+                      PEDAL_STANDSTILL_BOOST_ACCEL_BP_KPH,
+                      PEDAL_STANDSTILL_BOOST_ACCEL_V)
 
     def stop_accel_boost_stationary_lead_hold_distance(self, CS):
         return STOP_ACCEL_BOOST_STATIONARY_LEAD_MIN_HOLD_DREL + \
@@ -440,7 +450,6 @@ class Controls:
         # real ego motion and the driver has released the pedal.
         launch_enabled = self.active and self.CP.enableGasInterceptor and CS.adaptiveCruise
         lead = self.get_lead(self.sm)
-        self.pedal_launch_active = False
         self.pedal_manual_launch_auto_allowed = self.pedal_manual_launch_gate.update(
             launch_enabled, CS.brakePressed, CS.gasPressed, CS.standstill, CS.vEgo)
         self.pedal_manual_launch_required = self.pedal_manual_launch_gate.manual_required
@@ -450,7 +459,11 @@ class Controls:
         distance_delta = 0.0 if prev_drel is None or lead is None else float(lead.dRel) - float(prev_drel)
         self.pedal_manual_launch_assist_active = bool(launch_enabled and pedal_manual_launch_assist_safe(
             self.pedal_manual_launch_gate.assist_authorized,
-            CS.brakePressed, CS.gasPressed, lead, distance_delta))
+            CS.brakePressed, CS.gasPressed, lead, distance_delta) and
+            CS.vEgo * CV.MS_TO_KPH <= STOP_ACCEL_BOOST_RESTART_MAX_VEGO_KPH)
+        self.pedal_launch_active = self.pedal_standstill_boost.update(
+            launch_enabled, self.pedal_manual_launch_assist_active,
+            CS.brakePressed, lead, CS.vEgo)
         if lead is not None and lead.status and lead.dRel > 0.0:
             self._stop_accel_boost_prev_drel = float(lead.dRel)
 
@@ -548,7 +561,8 @@ class Controls:
         target_distance = float(getattr(self.sm['dynamicFollowData'], 'targetFollowDistance', 0.0))
         return self.pedal_follow_smoother.update(enabled, requested_accel, lead, CS.vEgo,
                                                  target_distance=target_distance,
-                                                 launch_active=False)
+                                                 launch_active=(self.pedal_manual_launch_assist_active or
+                                                                self.pedal_launch_active))
 
     def manual_brake_early_warning(self, CS):
         # Pedal-only longitudinal control needs more driver reaction time than
@@ -1352,6 +1366,16 @@ class Controls:
                    STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH <= v_ego_kph <= STOP_ACCEL_BOOST_RESTART_MAX_VEGO_KPH and \
                    actuators.accel > 0.0:
                     actuators.accel = max(actuators.accel, self.stop_accel_boost_restart_min_accel(v_ego_kph))
+
+            # A standstill boost is armed only by the driver's launch pedal and
+            # remains valid only while the dedicated lead-safety controller is
+            # active. This intentionally overrides a stale/slow planner request;
+            # the following smoother receives the same launch flag below.
+            v_ego_kph = CS.vEgo * CV.MS_TO_KPH
+            if self.active and self.pedal_launch_active and \
+               STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH <= v_ego_kph <= STOP_ACCEL_BOOST_RESTART_MAX_VEGO_KPH:
+                actuators.accel = max(
+                    actuators.accel, self.pedal_standstill_boost_min_accel(v_ego_kph))
 
             # Steering PID loop and lateral MPC
             # lat_active = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \

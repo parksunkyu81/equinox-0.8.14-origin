@@ -69,6 +69,14 @@ PEDAL_LAUNCH_STATE_SPEED = 8
 PEDAL_LAUNCH_STATE_TIMEOUT = 9
 PEDAL_MANUAL_LAUNCH_STOP_MAX_VEGO = 0.5 * CV.KPH_TO_MS
 PEDAL_MANUAL_LAUNCH_RESUME_MIN_VEGO = 1.0 * CV.KPH_TO_MS
+PEDAL_STANDSTILL_BOOST_MIN_VEGO = 1.0 * CV.KPH_TO_MS
+PEDAL_STANDSTILL_BOOST_MAX_VEGO = 20.0 * CV.KPH_TO_MS
+PEDAL_STANDSTILL_BOOST_MIN_DISTANCE = 3.0
+PEDAL_STANDSTILL_BOOST_DISTANCE_HEADWAY = 0.75
+PEDAL_STANDSTILL_BOOST_MAX_CLOSING_VREL = -0.10
+PEDAL_STANDSTILL_BOOST_MAX_LEAD_DECEL = -0.30
+PEDAL_STANDSTILL_BOOST_MIN_VLEAD = 0.12
+PEDAL_STANDSTILL_BOOST_TIMEOUT_FRAMES = max(1, round(12.0 / DT_CTRL))
 
 
 def smoothstep(edge0, edge1, value):
@@ -144,8 +152,8 @@ def pedal_manual_launch_assist_safe(assist_authorized, brake_pressed, gas_presse
   a_lead = float(getattr(lead, 'aLeadK', 0.0))
   lead_departing = v_lead > PEDAL_LAUNCH_MIN_VLEAD or \
                    float(distance_delta) >= PEDAL_LAUNCH_MIN_DISTANCE_DELTA
-  return lead_departing and v_rel > PEDAL_LAUNCH_MAX_CLOSING_VREL and \
-         a_lead > PEDAL_LAUNCH_MAX_LEAD_DECEL
+  return lead_departing and v_rel > PEDAL_STANDSTILL_BOOST_MAX_CLOSING_VREL and \
+         a_lead > PEDAL_STANDSTILL_BOOST_MAX_LEAD_DECEL
 
 
 class PedalLaunchController:
@@ -324,6 +332,72 @@ class PedalManualLaunchGate:
       self.assist_authorized = False
     self.auto_allowed = not bool(gas_pressed)
     return self.auto_allowed
+
+
+class PedalStandstillBoostController:
+  """Keep a driver-authorized standstill departure responsive through 20 km/h.
+
+  The state can only arm from the manual launch assist, so an ordinary low-speed
+  following event can never enable it. Brake, lead loss, a close/closing lead,
+  lead braking, timeout, or speed above 20 km/h cancels it immediately.
+  """
+  def __init__(self):
+    self.armed = False
+    self.active = False
+    self.active_frames = 0
+
+  def reset(self):
+    self.armed = False
+    self.active = False
+    self.active_frames = 0
+
+  @staticmethod
+  def _lead_safe(lead, v_ego):
+    if lead is None or not lead.status:
+      return False
+    v_rel = float(lead.vRel)
+    minimum_distance = PEDAL_STANDSTILL_BOOST_MIN_DISTANCE + \
+                       PEDAL_STANDSTILL_BOOST_DISTANCE_HEADWAY * max(float(v_ego), 0.0)
+    predicted_distance = float(lead.dRel) + min(0.0, v_rel)
+    if float(lead.dRel) < minimum_distance or predicted_distance < minimum_distance:
+      return False
+    v_lead = float(getattr(lead, 'vLead', max(float(v_ego), 0.0) + v_rel))
+    a_lead = float(getattr(lead, 'aLeadK', 0.0))
+    return v_rel > PEDAL_STANDSTILL_BOOST_MAX_CLOSING_VREL and \
+           v_lead > PEDAL_STANDSTILL_BOOST_MIN_VLEAD and \
+           a_lead > PEDAL_STANDSTILL_BOOST_MAX_LEAD_DECEL
+
+  def update(self, enabled, manual_authorized, brake_pressed, lead, v_ego):
+    if not enabled or brake_pressed:
+      self.reset()
+      return False
+
+    v_ego = max(float(v_ego), 0.0)
+    lead_safe = self._lead_safe(lead, v_ego)
+    if manual_authorized:
+      if not lead_safe:
+        self.reset()
+        return False
+      self.armed = True
+      self.active_frames = 0
+
+    if not self.armed:
+      self.active = False
+      return False
+    if not lead_safe or v_ego > PEDAL_STANDSTILL_BOOST_MAX_VEGO:
+      self.reset()
+      return False
+    if v_ego < PEDAL_STANDSTILL_BOOST_MIN_VEGO:
+      self.active = False
+      return False
+
+    self.active_frames += 1
+    if self.active_frames > PEDAL_STANDSTILL_BOOST_TIMEOUT_FRAMES:
+      self.reset()
+      return False
+
+    self.active = True
+    return True
 
 
 class PedalDeadzoneBoostController:
