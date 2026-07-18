@@ -83,17 +83,25 @@ STABLE_TORQUE_LIMITED_SHRINK = 0.85
 # ==============================
 # liveTorqueParameters 자체는 학습값 그대로 유지하고,
 # 실제 torque 계산에만 임시 effective latAccelFactor/friction을 적용한다.
-DYN_TORQUE_PROFILE_ENABLED = False
+DYN_TORQUE_PROFILE_ENABLED = True
 
-# 로그 기반 목표값: 저속은 강하게, 고속은 안정적으로.
+# Speed breakpoints for small relative adjustments around the learned base.
 DYN_LAT_FACTOR_BP = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
 # v4 10~45kph 통합 개선:
 #  - 10~30kph는 안전 클램프 하한/상한까지 사용해 강한 저속 코너 보조
 #  - 30~35kph는 저속 강한 개선을 그대로 연장
 #  - 35~45kph는 bridge 구간으로 LatAccelFactor/Friction을 점진 완화해 추종력과 안정성을 같이 확보
-DYN_LAT_FACTOR_V  = [2.05, 2.05, 2.05, 2.05, 2.05, 2.05, 2.05, 2.05, 2.05, 2.08, 2.10, 2.10, 2.10]
 DYN_FRICTION_BP   = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
-DYN_FRICTION_V    = [0.230, 0.230, 0.230, 0.230, 0.230, 0.230, 0.230, 0.230, 0.230, 0.228, 0.225, 0.225, 0.225]
+
+# Equinox uses the learned live values as the base. These small relative scales
+# improve low/mid-speed corner authority and add high-speed stability without
+# pulling a well-learned vehicle back toward a hard-coded absolute target.
+DYN_LAT_FACTOR_SCALE_V = [1.000, 0.995, 0.985, 0.980, 0.980, 0.985, 0.990,
+                          0.995, 1.000, 1.010, 1.020, 1.025, 1.030]
+DYN_FRICTION_SCALE_V = [1.000, 1.010, 1.025, 1.030, 1.030, 1.025, 1.015,
+                        1.010, 1.000, 0.995, 0.985, 0.980, 0.980]
+DYN_PROFILE_MIN_POINTS = 1500
+DYN_PROFILE_FULL_POINTS = 6000
 
 # 실제 CarController의 STEER_DELTA_UP/DOWN은 carcontroller 쪽에서 적용해야 한다.
 # 아래 맵은 이 파일 안에서는 torque slew와 디버그용 목표값으로만 사용한다.
@@ -150,10 +158,10 @@ DYN_RATE_LIMITED_STRONG_TRACKING_GAP = 0.45
 DYN_RATE_LIMITED_STRONG_OUTPUT_GAP = 0.18
 
 # 최종 안전 클램프
-DYN_LAT_FACTOR_MIN = 1.95
-DYN_LAT_FACTOR_MAX = 2.12
-DYN_FRICTION_MIN = 0.220
-DYN_FRICTION_MAX = 0.235
+DYN_LAT_FACTOR_MIN = 1.75
+DYN_LAT_FACTOR_MAX = 2.42
+DYN_FRICTION_MIN = 0.165
+DYN_FRICTION_MAX = 0.305
 
 # Directional torque balance.
 # latAccelOffset remains the straight-line bias correction. These small,
@@ -178,6 +186,7 @@ class LatControlTorque(LatControl):
         self.torque_from_lateral_accel = CI.torque_from_lateral_accel()
         self.use_steering_angle = CP.lateralTuning.torque.useSteeringAngle
         self.steering_angle_deadzone_deg = CP.lateralTuning.torque.steeringAngleDeadzoneDeg
+        self._is_equinox_torque_profile = str(getattr(CP, 'carFingerprint', '')) == "CHEVROLET EQUINOX NO RADAR"
         self.update_live_torque_params(CP.lateralTuning.torque.latAccelFactor, CP.lateralTuning.torque.latAccelOffset,
                                        CP.lateralTuning.torque.friction)
 
@@ -213,10 +222,14 @@ class LatControlTorque(LatControl):
         self._dir_torque_last_side = 0
 
     def update_live_torque_params(self, latAccelFactor, latAccelOffset, friction, totalBucketPoints=0):
+        try:
+            safe_offset = float(clip(float(latAccelOffset), -0.10, 0.10))
+        except Exception:
+            safe_offset = 0.0
         base_params = {
             'latAccelFactor': latAccelFactor,
             'friction': friction,
-            'latAccelOffset': 0.0,
+            'latAccelOffset': safe_offset,
             'totalBucketPoints': totalBucketPoints,
         }
         # BUGFIX:
@@ -397,7 +410,7 @@ class LatControlTorque(LatControl):
         """
         base_params = dict(getattr(self, '_dyn_base_live_torque_params', self.live_torque_params))
 
-        if not DYN_TORQUE_PROFILE_ENABLED:
+        if not DYN_TORQUE_PROFILE_ENABLED or not self._is_equinox_torque_profile:
             self._dyn_effective_active = False
             self._dyn_last_blend = 0.0
             self.live_torque_params = dict(base_params)
@@ -498,18 +511,25 @@ class LatControlTorque(LatControl):
         cur_boost = float(clip(cur_boost, 0.0, 1.0))
         self._dyn_corner_boost = cur_boost
 
-        target_lat = float(interp(v_kph, DYN_LAT_FACTOR_BP, DYN_LAT_FACTOR_V))
-        target_fric = float(interp(v_kph, DYN_FRICTION_BP, DYN_FRICTION_V))
+        target_lat = base_lat * float(interp(v_kph, DYN_LAT_FACTOR_BP, DYN_LAT_FACTOR_SCALE_V))
+        target_fric = base_fric * float(interp(v_kph, DYN_FRICTION_BP, DYN_FRICTION_SCALE_V))
 
         # 저속은 코너 강도 기반, 중속은 완만한 코너 보조, 고속은 안정 게이트 기반으로 블렌딩.
-        blend = float(clip(max(cur_boost, mid_boost_target, high_gate), 0.0, 1.0))
+        learning_gate = float(interp(float(total_pts),
+                                     [DYN_PROFILE_MIN_POINTS, DYN_PROFILE_FULL_POINTS],
+                                     [0.0, 1.0]))
+        blend = float(clip(max(cur_boost, mid_boost_target, high_gate) * learning_gate, 0.0, 1.0))
         self._dyn_last_blend = float(blend)
 
         eff_lat = base_lat + (target_lat - base_lat) * blend
         eff_fric = base_fric + (target_fric - base_fric) * blend
 
-        eff_lat = float(clip(eff_lat, DYN_LAT_FACTOR_MIN, DYN_LAT_FACTOR_MAX))
-        eff_fric = float(clip(eff_fric, DYN_FRICTION_MIN, DYN_FRICTION_MAX))
+        eff_lat = float(clip(eff_lat,
+                             max(DYN_LAT_FACTOR_MIN, base_lat * 0.96),
+                             min(DYN_LAT_FACTOR_MAX, base_lat * 1.04)))
+        eff_fric = float(clip(eff_fric,
+                              max(DYN_FRICTION_MIN, base_fric * 0.90),
+                              min(DYN_FRICTION_MAX, base_fric * 1.10)))
 
         self._dyn_last_corner_strength = corner_strength
         self._dyn_last_low_speed_gate = low_gate

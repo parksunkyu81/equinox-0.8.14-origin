@@ -1279,13 +1279,14 @@ class Controls:
 
                 if (torque_params.latAccelFactorFiltered > 0) and (self.sm.valid['liveTorqueParameters']):
                     self.torque_latAccelFactor = torque_params.latAccelFactorFiltered
-                    self.torque_latAccelOffset = 0.0
+                    self.torque_latAccelOffset = torque_params.latAccelOffsetFiltered
                     self.torque_friction = torque_params.frictionCoefficientFiltered
                     self.totalBucketPoints = torque_params.totalBucketPoints
 
                     self.LaC.update_live_torque_params(torque_params.latAccelFactorFiltered,
-                                                       0.0,
-                                                       torque_params.frictionCoefficientFiltered)
+                                                       torque_params.latAccelOffsetFiltered,
+                                                       torque_params.frictionCoefficientFiltered,
+                                                       torque_params.totalBucketPoints)
 
             else:
                 self.torque_latAccelFactor = ntune_torque_get('latAccelFactor')  # LAT_ACCEL_FACTOR

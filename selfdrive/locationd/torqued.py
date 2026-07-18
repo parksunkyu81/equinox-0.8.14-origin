@@ -73,6 +73,7 @@ from common.realtime import Priority, config_realtime_process, DT_MDL
 from common.filter_simple import FirstOrderFilter
 from selfdrive.swaglog import cloudlog
 from selfdrive.controls.lib.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
+from selfdrive.locationd.torque_profile import adaptive_equinox_bands, center_offset_residual, equinox_learning_confidence
 from common.numpy_fast import interp, clip
 
 # -----------------------------
@@ -109,19 +110,13 @@ FRICTION_ANCHOR = 0.230
 # torqued는 liveTorqueParameters의 학습/앵커 값을 publish하므로, 기존 ltp_log의 latAF_f/fric_f만 보면
 # 코너에서도 값이 안 변하는 것처럼 보인다. 아래 값은 ltp_log 검증용 추정 표시값이며 제어 publish 값은 건드리지 않는다.
 DYN_LOG_LAT_FACTOR_BP = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
-DYN_LOG_LAT_FACTOR_V  = [2.05, 2.05, 2.05, 2.05, 2.05, 2.05, 2.05, 2.05, 2.05, 2.08, 2.10, 2.10, 2.10]
 DYN_LOG_FRICTION_BP   = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
-DYN_LOG_FRICTION_V    = [0.230, 0.230, 0.230, 0.230, 0.230, 0.230, 0.230, 0.230, 0.230, 0.228, 0.225, 0.225, 0.225]
 DYN_LOG_LOW_GATE_BP   = [0.0, 8.0, 10.0, 30.0, 35.0, 40.0, 45.0, 50.0]
 DYN_LOG_LOW_GATE_V    = [0.0, 0.0, 1.00, 1.00, 1.00, 0.70, 0.40, 0.0]
 DYN_LOG_MID_GATE_BP   = [35.0, 40.0, 45.0, 55.0, 60.0, 70.0]
 DYN_LOG_MID_GATE_V    = [0.25, 0.45, 0.55, 0.55, 0.30, 0.0]
 DYN_LOG_HIGH_GATE_BP  = [45.0, 60.0, 80.0, 110.0, 130.0]
 DYN_LOG_HIGH_GATE_V   = [0.0, 0.20, 0.75, 1.00, 1.00]
-DYN_LOG_LAT_FACTOR_MIN = 1.95
-DYN_LOG_LAT_FACTOR_MAX = 2.12
-DYN_LOG_FRICTION_MIN = 0.220
-DYN_LOG_FRICTION_MAX = 0.235
 
 # -----------------------------
 # Force targets (disable CP/cache overrides)
@@ -139,7 +134,7 @@ TARGET_FRICTION_BAND = 0.065
 #  - 초기에는 앵커 근처(안전)로 강하게 묶고,
 #  - 코너 포인트가 충분히 쌓이면(force band를 점진적으로 확장) raw 추정을 반영
 # -----------------------------
-FORCE_BAND_RELAX_ENABLED = False  # keep live tuning in a narrow safety band
+FORCE_BAND_RELAX_ENABLED = False  # legacy profiles remain in the narrow safety band
 
 # relax 시작/완전 해제 구간(코너+limited 코너 포인트 기준)
 FORCE_RELAX_START_MULT = 0.8  # 10~55km/h에서 필요한 보정이 더 빨리 살아나기 시작
@@ -156,7 +151,14 @@ LAT_ACCEL_FACTOR_ABS_MAX = 2.12
 FRICTION_ABS_MIN = 0.220
 FRICTION_ABS_MAX = 0.245
 # ✅ 직선 쏠림 보완: offset 학습 허용(단, 직선 샘플이 실제로 들어온 프레임에서만 업데이트 게이트)
-DISABLE_LATACCEL_OFFSET_LEARNING = True
+DISABLE_LATACCEL_OFFSET_LEARNING = False  # master kill switch; vehicle profile still gates activation
+
+# 2020 Korean Equinox 1.6 diesel / no-radar fingerprint. The wider envelope is
+# enabled only for this platform and only after balanced, high-quality samples.
+EQUINOX_TORQUE_FINGERPRINT = "CHEVROLET EQUINOX NO RADAR"
+EQUINOX_CENTER_OFFSET_ABS_MAX = 0.10
+EQUINOX_CENTER_OFFSET_MIN_KPH = 30.0
+EQUINOX_CENTER_OFFSET_MAX_KPH = 120.0
 
 # Published latAccelFactor assist.
 # Lower latAccelFactor commands more steering torque. Keep the learner stable, but
@@ -182,9 +184,9 @@ LIMITED_CORNER_WEIGHT = 0.30
 #  - aggressive:  빠르게 따라가되 step/clamp로 안전 확보
 LTP_OFFSET_PRESET = os.environ.get("LTP_OFFSET_PRESET", "balanced").lower().strip()
 _LTP_OFFSET_PRESETS = {
-    "conservative": {"min_ok_abs": 12, "min_ok_frac": 0.70, "min_ratio": 0.90, "step_max": 0.0015, "cooldown_s": 8.0},
-    "balanced": {"min_ok_abs": 8, "min_ok_frac": 0.65, "min_ratio": 0.85, "step_max": 0.0025, "cooldown_s": 5.0},
-    "aggressive": {"min_ok_abs": 6, "min_ok_frac": 0.60, "min_ratio": 0.80, "step_max": 0.0035, "cooldown_s": 3.0},
+    "conservative": {"min_ok_abs": 180, "min_ok_frac": 0.75, "min_ratio": 0.90, "step_max": 0.0015, "cooldown_s": 8.0},
+    "balanced": {"min_ok_abs": 120, "min_ok_frac": 0.70, "min_ratio": 0.85, "step_max": 0.0025, "cooldown_s": 5.0},
+    "aggressive": {"min_ok_abs": 80, "min_ok_frac": 0.65, "min_ratio": 0.80, "step_max": 0.0035, "cooldown_s": 3.0},
 }
 _LTP_OFFSET_CFG = _LTP_OFFSET_PRESETS.get(LTP_OFFSET_PRESET, _LTP_OFFSET_PRESETS["balanced"])
 
@@ -193,7 +195,7 @@ STRAIGHT_OK_MIN_FRAC = float(_LTP_OFFSET_CFG["min_ok_frac"])
 STRAIGHT_OK_MIN_RATIO = float(_LTP_OFFSET_CFG["min_ratio"])
 OFFSET_UPDATE_MAX_STEP = float(_LTP_OFFSET_CFG["step_max"])
 OFFSET_UPDATE_MIN_INTERVAL_S = float(_LTP_OFFSET_CFG["cooldown_s"])
-OFFSET_UPDATE_TARGET_ABS_MAX = 0.14
+OFFSET_UPDATE_TARGET_ABS_MAX = 0.10
 STRAIGHT_BIAS_OK_MULT = 1.00
 
 # 직선 오프셋(윈도우) 아웃라이어 제거(MAD 기반)
@@ -208,7 +210,7 @@ SOFT_LIVEVALID_MIN_POINTS_MIDSPD = 450
 SOFT_LIVEVALID_MIN_POINTS_HISPD = 700
 
 # Warm start(재시작 복원) 상태 파일
-LTP_STATE_VERSION = 2
+LTP_STATE_VERSION = 3
 LTP_STATE_SAVE_INTERVAL_S = 20.0  # faster warm-state persistence
 LTP_STATE_PATH = os.path.join(LTP_LOG_DIR, "ltp_state.json")
 LTP_STATE_PATH_PKL = os.path.join(LTP_LOG_DIR, "ltp_state.pkl")
@@ -320,6 +322,12 @@ STRAIGHT_LATACC_MAX = 0.15  # ✅ m/s^2
 # 직선 오프셋(Offset) 학습용: '거의 0 조향'만 허용
 STRAIGHT_STEER_MAX_FOR_OFFSET = 0.09  # normalized steer
 STRAIGHT_SAMPLE_RECENT_S = 1.0
+
+# Equinox center learning uses a stricter definition than general straight
+# sample collection. This rejects gentle curves and most lane-change transients.
+STRAIGHT_YAW_RATE_MAX = 0.012
+STRAIGHT_LATACC_MAX = 0.10
+STRAIGHT_STEER_MAX_FOR_OFFSET = 0.065
 
 # warm-up
 WARMUP_SECS = 30.0
@@ -455,7 +463,7 @@ QUALITY_STEER_PRESSED_LOW_SPEED_KPH = 30.0
 QUALITY_STEER_PRESSED_EXTEND_GUARD_KPH = 30.0
 QUALITY_FREEZE_HOLD_S = 0.65
 
-VERSION = 35  # bounded live torque tuning; clear fixed-profile and unsafe warm states
+VERSION = 36  # Equinox adaptive envelope and guarded center-offset learning
 
 
 def slope2rot(slope):
@@ -775,6 +783,13 @@ class TorqueEstimator:
         self.hist_len = int(HISTORY / DT_MDL)
         self.lag = CP.steerActuatorDelay + 0.2
 
+        self._car_fingerprint = getattr(CP, 'carFingerprint', None)
+        self._is_equinox_torque_profile = str(self._car_fingerprint) == EQUINOX_TORQUE_FINGERPRINT
+        self._offset_learning_enabled = bool(
+            self._is_equinox_torque_profile and not DISABLE_LATACCEL_OFFSET_LEARNING)
+        self._adaptive_band_confidence = 0.0
+        self._adaptive_band_limits = None
+
         self.offline_latAccelFactor = LAT_ACCEL_FACTOR_ANCHOR
         self.offline_friction = FRICTION_ANCHOR
         self.resets = 0
@@ -844,7 +859,7 @@ class TorqueEstimator:
         self.last_is_frozen = False
         self.stop_freeze_until = 0.0
 
-        self._straight_bias_win_s = 10.0
+        self._straight_bias_win_s = 20.0
         self._straight_bias = deque()
         self.last_straight_sampled = False
         self.last_straight_w = 0.0
@@ -948,8 +963,8 @@ class TorqueEstimator:
         self.max_lataccel_factor = (1.0 + FACTOR_SANITY) * self.offline_latAccelFactor
         self.min_friction = (1.0 - FRICTION_SANITY) * self.offline_friction
         self.max_friction = (1.0 + FRICTION_SANITY) * self.offline_friction
-        self.max_offset_abs = OFFSET_SANITY_ABS
-        self._car_fingerprint = getattr(CP, 'carFingerprint', None)
+        self.max_offset_abs = (EQUINOX_CENTER_OFFSET_ABS_MAX if self._offset_learning_enabled
+                               else OFFSET_SANITY_ABS)
         self._car_tune_type = CP.lateralTuning.which() if hasattr(CP, 'lateralTuning') else None
 
         self._pending_straight_restore = None
@@ -1204,8 +1219,10 @@ class TorqueEstimator:
         try:
             win = list(self._straight_bias) if hasattr(self, "_straight_bias") else []
             ok = [s for s in win if len(s) >= 6 and bool(s[5])]
-            # NOTE: straight window의 total을 "ok 샘플"로 두어야 오프셋 업데이트 최소 샘플 조건이 현실적으로 만족됩니다.
-            total = ok
+            # Keep rejected samples in the denominator. Treating total as only
+            # accepted samples made the quality ratio permanently equal to 1.0
+            # and allowed a short, biased straight segment to move the center.
+            total = [s for s in win if len(s) >= 6]
             self._straight_win_ok = int(len(ok))
             self._straight_win_total = int(len(total))
             self._straight_win_ok_ratio = float(
@@ -1224,14 +1241,25 @@ class TorqueEstimator:
             return int(STRAIGHT_OK_MIN_SAMPLES)
 
     def _offset_update_allowed(self) -> bool:
-        if DISABLE_LATACCEL_OFFSET_LEARNING:
+        if not self._offset_learning_enabled:
             return False
         t = float(getattr(self, "last_time", 0.0) or 0.0)
         vego = float(getattr(self, "last_vego", 0.0) or 0.0)
         # 저속에서도 straight_ok가 충분하면 오프셋 업데이트 허용
-        if vego < float(MIN_VEL_MS_BIAS):
+        v_kph = vego * 3.6
+        if not (EQUINOX_CENTER_OFFSET_MIN_KPH <= v_kph <= EQUINOX_CENTER_OFFSET_MAX_KPH):
             return False
         if not self._get_lat_active(t):
+            return False
+        if (bool(getattr(self, 'last_steer_clip', False)) or
+                bool(getattr(self, 'last_max_limited', False)) or
+                bool(getattr(self, 'last_rate_limited', False)) or
+                bool(getattr(self, 'last_rate_limited_strong', False)) or
+                bool(getattr(self, '_last_steer_override_db', False))):
+            return False
+        if t < float(getattr(self, '_qual_freeze_until', 0.0) or 0.0):
+            return False
+        if t < float(getattr(self, '_rate_transient_until', 0.0) or 0.0):
             return False
         try:
             if self._freeze_check(t, vego):
@@ -1567,11 +1595,17 @@ class TorqueEstimator:
             x_bounds=STEER_BUCKET_BOUNDS,
             min_points=self.min_bucket_points,
             min_points_total=self.min_points_total,
+            require_coverage=self._is_equinox_torque_profile,
+            coverage_ratio=0.25,
+            require_symmetry=self._is_equinox_torque_profile,
         )
         self.limited_corner_points = PointBuckets(
             x_bounds=STEER_BUCKET_BOUNDS,
             min_points=self.min_bucket_points,
             min_points_total=self.min_points_total,
+            require_coverage=self._is_equinox_torque_profile,
+            coverage_ratio=0.25,
+            require_symmetry=self._is_equinox_torque_profile,
         )
 
         self.high_steer_kept_pos = 0
@@ -1673,11 +1707,18 @@ class TorqueEstimator:
         if len(win) == 0:
             return float('nan'), 0, 0, 0.0
 
-        vals = [float(latacc) for (_, _, _, latacc, _, ok) in win if ok and np.isfinite(latacc)]
-        # NOTE: total/min_ok/ratio는 "ok 샘플(엄격 필터 통과)" 기준으로 계산해야 실제 업데이트가 가능합니다.
-        total = len(vals)  # ok 샘플 수
-        ok_n = total
-        ratio = 1.0 if total > 0 else 0.0
+        # Estimate the model intercept, not raw lateral acceleration. Once an
+        # offset is applied the closed loop uses a small counter-torque; using
+        # raw lateral acceleration alone would then drive the learned offset
+        # back toward zero and create a slow left/right cycle.
+        lat_factor = float(_sanitize_num(
+            self.filtered_params['latAccelFactor'].x, self.offline_latAccelFactor))
+        vals = [center_offset_residual(latacc, steer_app, lat_factor)
+                for (_, steer_app, _, latacc, _, ok) in win
+                if ok and steer_app is not None and np.isfinite(steer_app) and np.isfinite(latacc)]
+        total = len(win)
+        ok_n = len(vals)
+        ratio = float(ok_n) / float(total) if total > 0 else 0.0
         min_ok = self._straight_min_ok_required(total)
         if ok_n < int(min_ok):
             return float('nan'), ok_n, total, ratio
@@ -1720,12 +1761,19 @@ class TorqueEstimator:
             decay_use = base_decay
 
             if param == 'latAccelOffset':
-                decay_use = min(MAX_FILTER_DECAY, max(base_decay, base_decay * 1.5))
                 try:
                     value = float(np.clip(float(value), float(cur) - float(OFFSET_UPDATE_MAX_STEP),
                                           float(cur) + float(OFFSET_UPDATE_MAX_STEP)))
                 except Exception:
                     pass
+
+                # Offset candidates already pass a long-window median, strict
+                # straight gate, cooldown, and step limiter. Feeding the small
+                # step through the 40-200 s general parameter filter again made
+                # useful centering correction take hours. Apply only the bounded
+                # step here; the 5 s cooldown limits it to 0.0005 m/s^2 per second.
+                self.filtered_params[param].x = float(value)
+                continue
 
             # SAFETY: do not dynamically lower latAccelFactor faster in curves.
             # The previous curve-only fast decrease increased steering assist during
@@ -1735,7 +1783,31 @@ class TorqueEstimator:
             self.filtered_params[param].update_alpha(decay_use)
             self.filtered_params[param].update(value)
 
+    def _equinox_learning_confidence(self):
+        if not self._is_equinox_torque_profile:
+            return 0.0
+        try:
+            confidence = equinox_learning_confidence(
+                self.corner_points.bucket_lengths(),
+                self.limited_corner_points.bucket_lengths(),
+                self.min_bucket_points,
+                clip_ratio=float(getattr(self, '_qual_clip_quality_ratio', 0.0) or 0.0),
+                rate_ratio=float(getattr(self, '_qual_rate_strong_ratio', 0.0) or 0.0),
+                driver_ratio=float(getattr(self, '_qual_steer_pressed_ratio', 0.0) or 0.0),
+            )
+        except Exception:
+            confidence = 0.0
+        self._adaptive_band_confidence = float(confidence)
+        return float(confidence)
+
     def _dynamic_bands(self):
+        if self._is_equinox_torque_profile:
+            confidence = self._equinox_learning_confidence()
+            limits = adaptive_equinox_bands(
+                self.offline_latAccelFactor, self.offline_friction, confidence)
+            self._adaptive_band_limits = tuple(float(v) for v in limits)
+            return self._adaptive_band_limits
+
         if FORCE_TARGET_TUNING:
             # ✅ (1) FORCE 밴드 비대칭 + (개선) 포인트가 쌓일수록 점진 완화(=raw 반영)
             anchorF = float(self.offline_latAccelFactor)
@@ -1785,7 +1857,8 @@ class TorqueEstimator:
 
     def _coerce_params(self, latFactor, latOffset, friction):
         curF = _sanitize_num(self.filtered_params['latAccelFactor'].x, self.offline_latAccelFactor)
-        curO = 0.0 if DISABLE_LATACCEL_OFFSET_LEARNING else _sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0)
+        curO = (_sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0)
+                if self._offset_learning_enabled else 0.0)
         curR = _sanitize_num(self.filtered_params['frictionCoefficient'].x, self.offline_friction)
 
         min_factor, max_factor, min_fric, max_fric = self._dynamic_bands()
@@ -2315,7 +2388,9 @@ class TorqueEstimator:
 
                 steer_app = self.last_steer_applied
                 straight_ok = (
-                        (vego is not None and vego > MIN_VEL_MS_BIAS) and
+                        self._offset_learning_enabled and
+                        (vego is not None and
+                         EQUINOX_CENTER_OFFSET_MIN_KPH <= (vego * 3.6) <= EQUINOX_CENTER_OFFSET_MAX_KPH) and
                         (yaw_rate is not None and abs(yaw_rate) <= STRAIGHT_YAW_RATE_MAX) and
                         (abs(lateral_acc) <= STRAIGHT_LATACC_MAX) and
                         (steer is not None and np.isfinite(steer) and abs(steer) <= STRAIGHT_STEER_MAX_FOR_OFFSET) and
@@ -2326,10 +2401,8 @@ class TorqueEstimator:
                         (not is_frozen) and
                         (not self.last_steer_clip) and
                         (not self.last_max_limited) and
-                        (
-                                (not self.last_rate_limited_strong) or
-                                (float(getattr(self, 'last_delta_err', 0.0)) <= STRAIGHT_RATE_LIM_ALLOW_DELTA)
-                        )
+                        (not self.last_rate_limited) and
+                        (not self.last_rate_limited_strong)
                 )
                 # ✅ BUGFIX: straight_ok가 True인 순간을 기록(오프셋 업데이트 게이트)
                 if straight_ok:
@@ -2920,11 +2993,21 @@ class TorqueEstimator:
                 min_boost *= 0.55
             low_boost = max(low_boost, min_boost)
 
-        blend = float(np.clip(max(low_boost, mid_boost, high_gate), 0.0, 1.0))
-        target_lat = float(np.interp(v_kph, DYN_LOG_LAT_FACTOR_BP, DYN_LOG_LAT_FACTOR_V))
-        target_fric = float(np.interp(v_kph, DYN_LOG_FRICTION_BP, DYN_LOG_FRICTION_V))
-        eff_lat = float(np.clip(base_lat + (target_lat - base_lat) * blend, DYN_LOG_LAT_FACTOR_MIN, DYN_LOG_LAT_FACTOR_MAX))
-        eff_fric = float(np.clip(base_fric + (target_fric - base_fric) * blend, DYN_LOG_FRICTION_MIN, DYN_LOG_FRICTION_MAX))
+        total_pts = len(self.corner_points) + len(self.straight_points) + len(self.limited_corner_points)
+        learning_gate = float(np.interp(total_pts, [1500.0, 6000.0], [0.0, 1.0]))
+        blend = float(np.clip(max(low_boost, mid_boost, high_gate) * learning_gate, 0.0, 1.0))
+        lat_scale = float(np.interp(v_kph, DYN_LOG_LAT_FACTOR_BP,
+                                    [1.000, 0.995, 0.985, 0.980, 0.980, 0.985, 0.990,
+                                     0.995, 1.000, 1.010, 1.020, 1.025, 1.030]))
+        fric_scale = float(np.interp(v_kph, DYN_LOG_FRICTION_BP,
+                                     [1.000, 1.010, 1.025, 1.030, 1.030, 1.025, 1.015,
+                                      1.010, 1.000, 0.995, 0.985, 0.980, 0.980]))
+        target_lat = base_lat * lat_scale
+        target_fric = base_fric * fric_scale
+        eff_lat = float(np.clip(base_lat + (target_lat - base_lat) * blend,
+                                max(1.75, base_lat * 0.96), min(2.42, base_lat * 1.04)))
+        eff_fric = float(np.clip(base_fric + (target_fric - base_fric) * blend,
+                                 max(0.165, base_fric * 0.90), min(0.305, base_fric * 1.10)))
         return eff_lat, eff_fric, blend, corner_strength, low_gate, mid_gate, high_gate
 
     def _log_to_file(self, msg):
@@ -3058,6 +3141,11 @@ class TorqueEstimator:
                 "latAO_f": round(float(ltp.latAccelOffsetFiltered), 5),
                 "fric_raw": round(float(ltp.frictionCoefficientRaw), 5),
                 "fric_f": round(float(ltp.frictionCoefficientFiltered), 5),
+                "equinox_profile": bool(self._is_equinox_torque_profile),
+                "adaptive_band_confidence": round(float(getattr(self, "_adaptive_band_confidence", 0.0)), 5),
+                "adaptive_band_limits": (None if self._adaptive_band_limits is None else
+                                         [round(float(v), 6) for v in self._adaptive_band_limits]),
+                "offset_learning_enabled": bool(self._offset_learning_enabled),
                 "dyn_latAF_eff_est": round(float(dyn_latAF), 5),
                 "dyn_fric_eff_est": round(float(dyn_fric), 5),
                 "dyn_blend_est": round(float(dyn_blend), 4),
@@ -3119,7 +3207,8 @@ class TorqueEstimator:
             return msg
 
         curF = _sanitize_num(self.filtered_params['latAccelFactor'].x, self.offline_latAccelFactor)
-        curO = 0.0 if DISABLE_LATACCEL_OFFSET_LEARNING else _sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0)
+        curO = (_sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0)
+                if self._offset_learning_enabled else 0.0)
         curR = _sanitize_num(self.filtered_params['frictionCoefficient'].x, self.offline_friction)
 
         liveTorqueParameters.latAccelFactorRaw = float(curF)
@@ -3374,8 +3463,8 @@ class TorqueEstimator:
             latFactor_blend = latFactor_c
             friction_use = friction_c
 
-            latOffset_base = 0.0 if DISABLE_LATACCEL_OFFSET_LEARNING else _sanitize_num(
-                self.filtered_params['latAccelOffset'].x, 0.0)
+            latOffset_base = (_sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0)
+                              if self._offset_learning_enabled else 0.0)
             latOffset_blend = float(latOffset_base)
 
             win = list(self._straight_bias) if hasattr(self, "_straight_bias") else []
@@ -3390,7 +3479,7 @@ class TorqueEstimator:
                 latOffset_blend = (1.0 - w_off) * float(latOffset_base) + w_off * float(latOffset_s)
 
             if _finite(latFactor_blend): liveTorqueParameters.latAccelFactorRaw = float(latFactor_blend)
-            if _finite(latOffset_blend) and not DISABLE_LATACCEL_OFFSET_LEARNING:
+            if _finite(latOffset_blend) and self._offset_learning_enabled:
                 liveTorqueParameters.latAccelOffsetRaw = float(latOffset_blend)
             if _finite(friction_use):    liveTorqueParameters.frictionCoefficientRaw = float(friction_use)
 
@@ -3635,9 +3724,9 @@ class TorqueEstimator:
         minF, maxF, minR, maxR = self._dynamic_bands()
         fF = float(
             np.clip(_sanitize_num(self.filtered_params['latAccelFactor'].x, self.offline_latAccelFactor), minF, maxF))
-        fO = 0.0 if DISABLE_LATACCEL_OFFSET_LEARNING else float(
-            np.clip(_sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0), -self.max_offset_abs,
-                    self.max_offset_abs))
+        fO = (float(np.clip(_sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0),
+                           -self.max_offset_abs, self.max_offset_abs))
+              if self._offset_learning_enabled else 0.0)
         fR = float(
             np.clip(_sanitize_num(self.filtered_params['frictionCoefficient'].x, self.offline_friction), minR, maxR))
 
@@ -3756,9 +3845,10 @@ def main(sm=None, pm=None):
                 estimator_ref.filtered_params['frictionCoefficient'].x = float(
                     np.clip(_sanitize_num(estimator_ref.filtered_params['frictionCoefficient'].x, FRICTION_ANCHOR),
                             minR, maxR))
-                estimator_ref.filtered_params['latAccelOffset'].x = 0.0 if DISABLE_LATACCEL_OFFSET_LEARNING else float(
-                    np.clip(_sanitize_num(estimator_ref.filtered_params['latAccelOffset'].x, 0.0),
-                            -estimator_ref.max_offset_abs, estimator_ref.max_offset_abs))
+                estimator_ref.filtered_params['latAccelOffset'].x = (
+                    float(np.clip(_sanitize_num(estimator_ref.filtered_params['latAccelOffset'].x, 0.0),
+                                  -estimator_ref.max_offset_abs, estimator_ref.max_offset_abs))
+                    if estimator_ref._offset_learning_enabled else 0.0)
         except Exception:
             pass
         changed = (
@@ -3848,8 +3938,9 @@ def main(sm=None, pm=None):
 
                 cur.latAccelFactorFiltered = merge_with_cache(prev.latAccelFactorFiltered, cur.latAccelFactorFiltered,
                                                               EMA_ALPHA)
-                cur.latAccelOffsetFiltered = 0.0 if DISABLE_LATACCEL_OFFSET_LEARNING else merge_with_cache(
+                cur.latAccelOffsetFiltered = (merge_with_cache(
                     prev.latAccelOffsetFiltered, cur.latAccelOffsetFiltered, EMA_ALPHA)
+                    if estimator._offset_learning_enabled else 0.0)
                 cur.frictionCoefficientFiltered = merge_with_cache(prev.frictionCoefficientFiltered,
                                                                    cur.frictionCoefficientFiltered, EMA_ALPHA)
                 cur.decay = max(prev.decay, cur.decay)
