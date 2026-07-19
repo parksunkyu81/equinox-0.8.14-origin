@@ -41,8 +41,9 @@ from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.pedal_follow import (PedalFollowSmoother, PedalLeadDepartureTracker,
                                                  PedalManualLaunchGate,
                                                  PedalStandstillBoostController,
-                                                 PEDAL_STANDSTILL_BOOST_GAIN,
-                                                 pedal_manual_launch_assist_safe)
+                                                 pedal_manual_launch_assist_safe,
+                                                 pedal_standstill_boost_accel,
+                                                 pedal_standstill_boost_min_distance)
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
@@ -67,9 +68,6 @@ STOP_ACCEL_BOOST_RESTART_REDUCED_MAX_VEGO_KPH = 10.0
 STOP_ACCEL_BOOST_RESTART_FULL_ACCEL_VEGO_KPH = 15.0
 STOP_ACCEL_BOOST_RESTART_REDUCED_MIN_ACCEL = 0.75
 STOP_ACCEL_BOOST_RESTART_MIN_ACCEL = 0.95
-PEDAL_STANDSTILL_BOOST_ACCEL_BP_KPH = [1.0, 5.0, 10.0, 15.0, 20.0]
-PEDAL_STANDSTILL_BOOST_ACCEL_V = [0.90, 1.00, 1.05, 1.00, 0.85]
-PEDAL_MANUAL_LAUNCH_ASSIST_MIN_ACCEL = 0.90
 FCW_MIN_CLOSING_SPEED = 0.8
 FCW_URGENT_TTC = 1.6
 FCW_CRITICAL_TTC = 1.0
@@ -403,12 +401,6 @@ class Controls:
                        STOP_ACCEL_BOOST_RESTART_REDUCED_MIN_ACCEL,
                        STOP_ACCEL_BOOST_RESTART_MIN_ACCEL])
 
-    def pedal_standstill_boost_min_accel(self, v_ego_kph):
-        return PEDAL_STANDSTILL_BOOST_GAIN * interp(
-            v_ego_kph,
-            PEDAL_STANDSTILL_BOOST_ACCEL_BP_KPH,
-            PEDAL_STANDSTILL_BOOST_ACCEL_V)
-
     def stop_accel_boost_stationary_lead_hold_distance(self, CS):
         return STOP_ACCEL_BOOST_STATIONARY_LEAD_MIN_HOLD_DREL + \
                STOP_ACCEL_BOOST_STATIONARY_LEAD_HOLD_HEADWAY * max(CS.vEgo, 0.0)
@@ -468,7 +460,7 @@ class Controls:
             launch_enabled, CS.brakePressed, lead, CS.standstill, CS.vEgo)
         manual_launch_assist_candidate = bool(launch_enabled and pedal_manual_launch_assist_safe(
             self.pedal_manual_launch_gate.assist_authorized,
-            CS.brakePressed, CS.gasPressed, lead, distance_delta) and
+            CS.brakePressed, CS.gasPressed, lead, distance_delta, CS.vEgo) and
             CS.vEgo * CV.MS_TO_KPH <= STOP_ACCEL_BOOST_RESTART_MAX_VEGO_KPH)
         self.pedal_launch_active = self.pedal_standstill_boost.update(
             launch_enabled, manual_launch_assist_candidate,
@@ -1376,7 +1368,7 @@ class Controls:
                 if self.pedal_manual_launch_assist_active:
                     actuators.accel = max(
                         actuators.accel,
-                        PEDAL_MANUAL_LAUNCH_ASSIST_MIN_ACCEL * PEDAL_STANDSTILL_BOOST_GAIN)
+                        pedal_standstill_boost_accel(CS.vEgo))
                 elif self.stop_accel_boost_lead_clear_for_boost(CS, lead) and \
                    STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH <= v_ego_kph <= STOP_ACCEL_BOOST_RESTART_MAX_VEGO_KPH and \
                    actuators.accel > 0.0:
@@ -1390,7 +1382,7 @@ class Controls:
             if self.active and self.pedal_launch_active and \
                STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH <= v_ego_kph <= STOP_ACCEL_BOOST_RESTART_MAX_VEGO_KPH:
                 actuators.accel = max(
-                    actuators.accel, self.pedal_standstill_boost_min_accel(v_ego_kph))
+                    actuators.accel, pedal_standstill_boost_accel(CS.vEgo))
 
             # Steering PID loop and lateral MPC
             # lat_active = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
@@ -1660,11 +1652,12 @@ class Controls:
         controlsState.gmSteerCommandTorque = int(self.gm_steer_command_torque)
         controlsState.gmSteerRequestedTorque = int(self.gm_steer_requested_torque)
         controlsState.gmSteerTorqueLimited = bool(self.gm_steer_torque_limited)
-        # Automatic launch remains disabled. Reuse the existing distance/time
-        # diagnostics so a route log can prove whether the persistent stopped
-        # anchor saw the lead depart and how long the manual boost remained on.
+        # Automatic launch remains disabled. Publish the fixed speed-based
+        # boost floor; the stopped-distance anchor is used only to prove that
+        # the lead departed, never to relax this distance threshold.
         controlsState.pedalLaunchState = 0
-        controlsState.pedalLaunchSafeDistance = 0.0
+        controlsState.pedalLaunchSafeDistance = float(
+            pedal_standstill_boost_min_distance(CS.vEgo))
         controlsState.pedalLaunchDistanceDelta = float(
             self.pedal_lead_departure_tracker.distance_delta)
         controlsState.pedalLaunchConfirmTime = float(

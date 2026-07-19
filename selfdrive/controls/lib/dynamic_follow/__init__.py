@@ -32,7 +32,9 @@ LEAD_CATCHUP_LEAD_ACCEL_FULL = 0.0
 LEAD_CATCHUP_RISE_TIME = 1.0
 LEAD_CATCHUP_FALL_TIME = 0.35
 LEAD_CATCHUP_ACTIVE_THRESHOLD = 0.05
-LEAD_CATCHUP_TR_REDUCTION = 0.10
+# Pedal-only longitudinal control cannot brake. A lead may reduce acceleration,
+# but must not shorten headway to request more acceleration than the no-lead path.
+LEAD_CATCHUP_TR_REDUCTION = 0.0
 
 
 class DistanceModController:
@@ -76,8 +78,10 @@ class DynamicFollow:
     #self.op_params = opParams()
     self.df_profiles = dfProfiles()
     self.df_manager = dfManager()
-    self.dmc_v_rel = DistanceModController(k_i=0.042, k_d=0.08, x_clip=[-1, 0, 0.66], mods=[1.15, 1., 0.95])
-    self.dmc_a_rel = DistanceModController(k_i=0.042 * 1.05, k_d=0.08, x_clip=[-1, 0, 0.33], mods=[1.15, 1., 0.98])  # a_lead loop is 5% faster
+    # Relative speed/acceleration may increase the requested gap when closing,
+    # but must never shorten it to create extra comma-pedal acceleration.
+    self.dmc_v_rel = DistanceModController(k_i=0.042, k_d=0.08, x_clip=[-1, 0, 0.66], mods=[1.15, 1., 1.])
+    self.dmc_a_rel = DistanceModController(k_i=0.042 * 1.05, k_d=0.08, x_clip=[-1, 0, 0.33], mods=[1.15, 1., 1.])  # a_lead loop is 5% faster
 
     if not travis:
       self.pm = messaging.PubMaster(['dynamicFollowData'])

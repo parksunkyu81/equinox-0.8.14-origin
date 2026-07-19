@@ -26,17 +26,18 @@ PEDAL_FOLLOW_LEAD_BRAKING_ACCEL = -0.30
 PEDAL_FOLLOW_LEAD_HARD_BRAKING_ACCEL = -1.00
 PEDAL_FOLLOW_LEAD_BRAKING_MARGIN = 4.0
 PEDAL_FOLLOW_LEAD_BRAKING_CONFIRM_FRAMES = max(1, round(0.15 / DT_CTRL))
-# Keep the existing response timing while limiting the acceleration magnitude.
-# The cap rises with speed so low-speed departures stay calm without making
-# normal traffic-speed recovery unnecessarily slow.
-PEDAL_COMFORT_ACCEL_CAP_BP_KPH = [0.0, 10.0, 20.0, 40.0, 60.0, 100.0]
-PEDAL_COMFORT_ACCEL_CAP_V = [0.85, 0.95, 1.05, 1.10, 1.15, 1.20]
-PEDAL_LEAD_ACCEL_GAIN = 1.10
+# The comma pedal cannot brake, so lead presence must never increase the base
+# positive-acceleration request. Use the same 1.0 m/s^2 ceiling with and without
+# a lead; lead geometry may only reduce authority below this ceiling.
+PEDAL_BASE_ACCEL_CAP = 1.0
+PEDAL_LEAD_ACCEL_GAIN = 1.0
 PEDAL_STANDSTILL_BOOST_GAIN = 1.10
-# Fixed final-output reduction for comma-pedal acceleration with no valid lead.
-# Apply only to positive acceleration so coast/deceleration behavior is intact.
-PEDAL_NO_LEAD_ACCEL_SCALE = 0.85
+PEDAL_STANDSTILL_BOOST_ACCEL_BP_KPH = [1.0, 5.0, 10.0, 15.0, 20.0]
+PEDAL_STANDSTILL_BOOST_ACCEL_V = [0.90, 1.00, 1.05, 1.00, 0.85]
+PEDAL_STANDSTILL_BOOST_MAX_ACCEL = max(PEDAL_STANDSTILL_BOOST_ACCEL_V) * PEDAL_STANDSTILL_BOOST_GAIN
+PEDAL_NO_LEAD_ACCEL_SCALE = 1.0
 PEDAL_DEADZONE_FLOOR = 0.060
+PEDAL_DEADZONE_BOOST_ENABLED = False
 PEDAL_DEADZONE_CONFIRM_FRAMES = max(1, round(0.10 / DT_CTRL))
 PEDAL_DEADZONE_RAMP_FRAMES = max(1, round(0.25 / DT_CTRL))
 PEDAL_DEADZONE_MAX_ACTIVE_FRAMES = max(1, round(0.80 / DT_CTRL))
@@ -53,9 +54,6 @@ PEDAL_FOLLOW_CRITICAL_MIN_DISTANCE = 3.0
 PEDAL_FOLLOW_CRITICAL_HEADWAY = 0.35
 PEDAL_LAUNCH_ENTER_MAX_VEGO = 2.0 * CV.KPH_TO_MS
 PEDAL_LAUNCH_EXIT_VEGO = 3.0 * CV.KPH_TO_MS
-PEDAL_LAUNCH_PREFERRED_MIN_DISTANCE = 3.0
-PEDAL_LAUNCH_HARD_MIN_DISTANCE = 1.5
-PEDAL_LAUNCH_STOPPED_DISTANCE_TOLERANCE = 0.10
 PEDAL_LAUNCH_MIN_VLEAD = 0.12
 PEDAL_LAUNCH_MIN_DISTANCE_DELTA = 0.10
 PEDAL_LAUNCH_MAX_CLOSING_VREL = -0.20
@@ -104,20 +102,34 @@ def pedal_follow_target_headway(v_ego):
 
 
 def pedal_comfort_accel_cap(v_ego):
-  return float(interp(max(float(v_ego), 0.0) * CV.MS_TO_KPH,
-                      PEDAL_COMFORT_ACCEL_CAP_BP_KPH,
-                      PEDAL_COMFORT_ACCEL_CAP_V))
+  del v_ego
+  return PEDAL_BASE_ACCEL_CAP
+
+
+def pedal_standstill_boost_min_distance(v_ego):
+  """Fixed launch/follow floor, independent of the distance at standstill."""
+  return PEDAL_STANDSTILL_BOOST_MIN_DISTANCE + \
+         PEDAL_STANDSTILL_BOOST_DISTANCE_HEADWAY * max(float(v_ego), 0.0)
+
+
+def pedal_standstill_boost_accel(v_ego):
+  base_accel = interp(max(float(v_ego), 0.0) * CV.MS_TO_KPH,
+                      PEDAL_STANDSTILL_BOOST_ACCEL_BP_KPH,
+                      PEDAL_STANDSTILL_BOOST_ACCEL_V)
+  return float(base_accel * PEDAL_STANDSTILL_BOOST_GAIN)
 
 
 def pedal_effective_lead_accel_cap(v_ego, standstill_boost_active=False):
-  boost_gain = PEDAL_STANDSTILL_BOOST_GAIN if standstill_boost_active else 1.0
-  return pedal_comfort_accel_cap(v_ego) * PEDAL_LEAD_ACCEL_GAIN * boost_gain
+  if standstill_boost_active:
+    return PEDAL_STANDSTILL_BOOST_MAX_ACCEL
+  return pedal_comfort_accel_cap(v_ego) * PEDAL_LEAD_ACCEL_GAIN
 
 
-def pedal_apply_no_lead_accel_reduction(requested_accel, lead_valid):
+def pedal_apply_base_accel_cap(requested_accel, standstill_boost_active=False):
   requested_accel = float(requested_accel)
-  if not lead_valid and requested_accel > 0.0:
-    return requested_accel * PEDAL_NO_LEAD_ACCEL_SCALE
+  if requested_accel > 0.0:
+    accel_cap = PEDAL_STANDSTILL_BOOST_MAX_ACCEL if standstill_boost_active else PEDAL_BASE_ACCEL_CAP
+    return min(requested_accel, accel_cap)
   return requested_accel
 
 
@@ -178,9 +190,10 @@ def pedal_deadzone_recovery_safe(follow_smoother, lead):
 
 
 def pedal_manual_launch_assist_safe(assist_authorized, brake_pressed, gas_pressed,
-                                    lead, distance_delta=0.0):
+                                    lead, distance_delta=0.0, v_ego=0.0):
   if not assist_authorized or brake_pressed or not gas_pressed or \
-     lead is None or not lead.status or lead.dRel < PEDAL_LAUNCH_PREFERRED_MIN_DISTANCE:
+     lead is None or not lead.status or \
+     lead.dRel < pedal_standstill_boost_min_distance(v_ego):
     return False
 
   v_rel = float(lead.vRel)
@@ -200,7 +213,7 @@ class PedalLaunchController:
     self.stopped_d_rel = None
     self.lead_missing_frames = 0
     self.state = PEDAL_LAUNCH_STATE_DISABLED
-    self.safe_distance = PEDAL_LAUNCH_PREFERRED_MIN_DISTANCE
+    self.safe_distance = pedal_standstill_boost_min_distance(0.0)
     self.distance_delta = 0.0
 
   def reset(self):
@@ -210,7 +223,7 @@ class PedalLaunchController:
     self.stopped_d_rel = None
     self.lead_missing_frames = 0
     self.state = PEDAL_LAUNCH_STATE_DISABLED
-    self.safe_distance = PEDAL_LAUNCH_PREFERRED_MIN_DISTANCE
+    self.safe_distance = pedal_standstill_boost_min_distance(0.0)
     self.distance_delta = 0.0
 
   def update(self, enabled, brake_pressed, lead, v_ego):
@@ -248,10 +261,9 @@ class PedalLaunchController:
     if self.stopped_d_rel is None:
       self.stopped_d_rel = d_rel
 
-    self.safe_distance = max(
-      PEDAL_LAUNCH_HARD_MIN_DISTANCE,
-      min(PEDAL_LAUNCH_PREFERRED_MIN_DISTANCE,
-          self.stopped_d_rel - PEDAL_LAUNCH_STOPPED_DISTANCE_TOLERANCE))
+    # Do not relax the launch floor for a close initial stop. The stopped-gap
+    # anchor is retained only to confirm that the lead has actually departed.
+    self.safe_distance = pedal_standstill_boost_min_distance(v_ego)
     self.distance_delta = d_rel - self.stopped_d_rel
 
     if d_rel < self.safe_distance:
@@ -443,8 +455,7 @@ class PedalStandstillBoostController:
     if lead is None or not lead.status:
       return False
     v_rel = float(lead.vRel)
-    minimum_distance = PEDAL_STANDSTILL_BOOST_MIN_DISTANCE + \
-                       PEDAL_STANDSTILL_BOOST_DISTANCE_HEADWAY * max(float(v_ego), 0.0)
+    minimum_distance = pedal_standstill_boost_min_distance(v_ego)
     predicted_distance = float(lead.dRel) + min(0.0, v_rel)
     if float(lead.dRel) < minimum_distance or predicted_distance < minimum_distance:
       return False
@@ -641,10 +652,8 @@ class PedalFollowSmoother:
     requested_accel = float(requested_accel)
     lead_valid = lead is not None and lead.status and lead.dRel > 0.0
 
-    # This smoother owns lead following only. The fixed no-lead reduction is
-    # applied later in the final GM pedal-output layer, after lead validity is
-    # known for the exact CAN command frame. With a valid lead, increase positive
-    # response by 10% but retain every distance/closing-speed authority check.
+    # Lead presence never raises the base acceleration request. It only enables
+    # the distance/closing-speed authority checks below, which can reduce it.
     if enabled and lead_valid and requested_accel > 0.0:
       requested_accel = min(requested_accel * PEDAL_LEAD_ACCEL_GAIN,
                             pedal_effective_lead_accel_cap(v_ego, launch_active))

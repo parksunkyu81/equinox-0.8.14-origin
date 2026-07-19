@@ -16,6 +16,8 @@ Table of Contents
 
 * [What is openpilot?](#what-is-openpilot)
 * [Running in a car](#running-in-a-car)
+* [Comma Pedal 지침서](docs/comma_pedal.md)
+* [Torque Steer 지침서](docs/torque_steer.md)
 * [Running on PC](#running-on-pc)
 * [Community and Contributing](#community-and-contributing)
 * [User Data and comma Account](#user-data-and-comma-account)

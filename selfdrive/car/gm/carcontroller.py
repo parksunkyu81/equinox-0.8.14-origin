@@ -7,9 +7,10 @@ from selfdrive.car.gm import gmcan
 from selfdrive.car.gm.values import DBC, NO_ASCM, CanBus, CarControllerParams
 from opendbc.can.packer import CANPacker
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
-from selfdrive.controls.lib.pedal_follow import (PEDAL_DEADZONE_FLOOR,
+from selfdrive.controls.lib.pedal_follow import (PEDAL_DEADZONE_BOOST_ENABLED,
+                                                PEDAL_DEADZONE_FLOOR,
                                                 PedalDeadzoneBoostController,
-                                                pedal_apply_no_lead_accel_reduction,
+                                                pedal_apply_base_accel_cap,
                                                 pedal_deadzone_recovery_safe,
                                                 pedal_effective_lead_accel_cap,
                                                 pedal_follow_critical)
@@ -131,15 +132,11 @@ class CarController():
     lead_valid = lead is not None and lead.status and lead.dRel > 0.0
     standstill_boost_active = bool(getattr(controls, 'pedal_launch_active', False))
     comfort_accel_cap = pedal_effective_lead_accel_cap(
-      CS.out.vEgo, standstill_boost_active) if lead_valid else 0.0
+      CS.out.vEgo, standstill_boost_active) if CS.CP.enableGasInterceptor else 0.0
     if CS.CP.enableGasInterceptor:
+      requested_accel = pedal_apply_base_accel_cap(requested_accel, standstill_boost_active)
       if lead_valid and requested_accel > 0.0:
         requested_accel = min(requested_accel, comfort_accel_cap)
-      else:
-        # User-selected permanent calibration: no-lead positive acceleration is
-        # exactly 15% lower at the final command layer. Lead following and every
-        # standstill-launch boost path bypass this reduction.
-        requested_accel = pedal_apply_no_lead_accel_reduction(requested_accel, lead_valid)
     manual_launch_auto_allowed = bool(getattr(controls, 'pedal_manual_launch_auto_allowed', False))
     manual_launch_assist_active = bool(getattr(controls, 'pedal_manual_launch_assist_active', False))
     pedal_automation_allowed = manual_launch_auto_allowed or manual_launch_assist_active
@@ -174,7 +171,7 @@ class CarController():
 
         pedal_command = float(clip(acc_mult * self.accel, 0., 0.75))
         recovery_safe = pedal_deadzone_recovery_safe(follow_smoother, lead)
-        deadzone_candidate = recovery_safe and self.accel > 0.0 and \
+        deadzone_candidate = PEDAL_DEADZONE_BOOST_ENABLED and recovery_safe and self.accel > 0.0 and \
                              pedal_command < PEDAL_DEADZONE_FLOOR and \
                              not manual_launch_assist_active and not urgent_lead_closing
         self.comma_pedal = float(clip(
