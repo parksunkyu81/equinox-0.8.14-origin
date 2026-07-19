@@ -90,7 +90,82 @@ Live Torque는 실제 주행에서 조향 토크와 횡가속도의 관계를 �
 - `controlsd.py`는 현재 `liveValid` 필드가 아니라 메시지 유효성과 `latAccelFactorFiltered > 0` 조건으로 적용 여부를 판단합니다.
 - `liveTorqueParameters`에 보이는 학습 기준값과 코너에서 실제 사용되는 동적 유효값은 다를 수 있습니다. 조향감을 분석할 때는 둘을 구분해야 합니다.
 
-## 6. 확인해야 할 로그
+## 6. 차량 중앙 정렬
+
+### 현재 구현의 의미
+
+현재 추가된 중앙 정렬 기능은 차선 안에서 목표 경로를 좌우로 이동시키는 기능이 아닙니다. 직선에서 차량이나 조향계가 한쪽으로 쏠릴 때 필요한 작은 토크 편향을 Live Torque의 `latAccelOffset`으로 학습하는 기능입니다.
+
+토크 변환식은 다음과 같습니다.
+
+```text
+조향 토크 = (목표 횡가속도 - latAccelOffset) / latAccelFactor + friction 보상
+```
+
+따라서 `latAccelOffset`은 직진 상태의 지속적인 좌우 토크 불균형을 보정하지만, 카메라가 인식한 차선 중심이나 lateral planner의 목표 경로 자체를 바꾸지는 않습니다.
+
+### 현재 추가된 기능
+
+- 중앙 오프셋 학습은 `CHEVROLET EQUINOX NO RADAR` 프로파일에서만 활성화됩니다.
+- 최근 **20초 직선 품질 창**을 이용합니다.
+- 단순 횡가속도 평균이 아니라 `실제 횡가속도 - latAccelFactor × 적용 조향값` 잔차의 중앙값을 사용합니다. 이미 보정 토크가 적용된 뒤 오프셋이 다시 `0`으로 끌려가는 좌우 반복 현상을 줄이기 위한 방식입니다.
+- MAD 방식으로 직선 샘플의 이상치를 제거합니다.
+- 코너 학습 포인트가 충분하지 않아도 고품질 직선 샘플이 확보되면 중앙 오프셋을 먼저 학습할 수 있습니다.
+- 동적 저속·고속 토크 프로파일은 `latAccelFactor`와 `friction`만 바꾸며, 학습된 `latAccelOffset`은 그대로 유지합니다.
+
+### 직선 샘플 인정 조건
+
+다음 조건을 모두 만족할 때만 중앙 정렬용 직선 샘플로 인정합니다.
+
+| 조건 | 현재 기준 |
+|---|---|
+| 차량 프로파일 | `CHEVROLET EQUINOX NO RADAR` |
+| 속도 | `30~120 km/h` |
+| 요레이트 절댓값 | `0.012 rad/s` 이하 |
+| 횡가속도 절댓값 | `0.10 m/s²` 이하 |
+| 학습용·현재 적용 조향값 절댓값 | 각각 `0.065` 이하 |
+| 횡조향 상태 | 활성 상태 |
+| 운전자 조향 개입 | 없어야 함 |
+| 토크 제한 | clip, max limit, rate limit이 없어야 함 |
+| 샘플 상태 | 정지·저속 동결 상태가 아니어야 함 |
+
+기본 `balanced` 프리셋에서는 최근 창에 정상 샘플이 최소 `120개` 필요하고 정상 비율이 `85%` 이상이어야 합니다.
+실제 오프셋 업데이트 단계에서는 품질 동결, 급격한 조향 과도, clip 및 rate limit 상태를 다시 검사합니다.
+
+### 업데이트 안전 제한
+
+| 항목 | `balanced` 기본값 |
+|---|---|
+| 오프셋 전체 제한 | `-0.10~0.10` |
+| 1회 최대 변화량 | `0.0025` |
+| 최소 업데이트 간격 | `5초` |
+| 코너 추정과 혼합할 때의 직선값 비중 | 최대 `10%` |
+| 이상치 제거 | 중앙값 기준 MAD `3.5배` |
+
+환경변수 `LTP_OFFSET_PRESET`으로 `conservative`, `balanced`, `aggressive`를 선택할 수 있습니다. 현재 기본값은 `balanced`이며 실제 차량에서는 충분한 로그 검증 없이 `aggressive`를 사용하지 않는 것이 좋습니다.
+
+### 중앙 정렬 확인 방법
+
+Live Torque 로그 `/data/openpilot/ltp_logs`에서 다음 항목을 확인합니다.
+
+- 적용 상태: `offset_learning_enabled`, `liveValid`
+- 오프셋 값: `latAO_raw`, `latAO_f`
+- 업데이트·차단: `latAO_evt`, `latAO_blk`와 그 안의 `reasons`
+- 직선 품질: `straight_samples`, `straight_win_ok`, `straight_win_total`, `straight_win_ok_ratio`
+- 직선 상태: `straight_bias_mean`, `straight_yaw_pass_ratio`, `straight_latacc_med`
+- 방해 조건: 운전자 개입, `clip`, `max_limited`, `rate_limited`, `quality_window`
+
+`latAO_f`가 한쪽 방향으로 서서히 안정되고 직선에서 반복 조향이 줄어드는지 확인해야 합니다. 양수와 음수를 곧바로 좌·우로 단정하지 말고, 차량 좌표계와 실제 주행 로그를 함께 비교해야 합니다.
+
+### 기타 참고 사항
+
+- Live Torque가 실제 제어에서 비활성화되면 `controlsd.py`가 `latAccelOffset=0`을 사용하므로 중앙 정렬 학습값도 적용되지 않습니다.
+- 방향별 코너 토크 보정인 `DIRECTIONAL_TORQUE_COMP_ENABLED`는 현재 `False`입니다. 중앙 오프셋은 직선 편향을 보정하지만 좌회전과 우회전의 응답 차이를 별도로 보정하지는 않습니다.
+- 차량이 차선 중앙이 아닌 일정한 위치로 주행한다면 `latAccelOffset`만의 문제로 단정할 수 없습니다. 카메라 캘리브레이션, 목표 경로, 타이어 공기압·편마모, 휠 얼라인먼트, EPS 영점과 도로 횡경사를 함께 확인해야 합니다.
+- 편경사가 큰 도로만 반복 주행하면 도로 기울기를 차량 편향으로 학습할 가능성이 있습니다. 평탄한 직선과 반대 방향 주행 로그를 함께 비교하는 것이 좋습니다.
+- `LiveTorqueReset=1`로 초기화하면 중앙 오프셋 학습도 다시 시작됩니다.
+
+## 7. 확인해야 할 로그
 
 조향 변경 후에는 다음 항목을 함께 확인합니다.
 
@@ -101,7 +176,7 @@ Live Torque는 실제 주행에서 조향 토크와 횡가속도의 관계를 �
 - 토크 제한: `gmSteerCommandTorque`, `gmSteerRequestedTorque`, `gmSteerTorqueLimited`
 - 제어 상태: 운전자 개입, 포화 상태, 조향 오류, 속도 구간
 
-## 7. 변경 원칙
+## 8. 변경 원칙
 
 1. 최대 토크 `300`, 전송 주기 `50 Hz`, 증가·감소 제한 `7/17`은 각각 따로 검증합니다.
 2. 저속 응답을 높일 때는 운전자 개입과 토크 포화가 자연스럽게 유지되는지 확인합니다.
@@ -109,7 +184,7 @@ Live Torque는 실제 주행에서 조향 토크와 횡가속도의 관계를 �
 4. 변경 후 저속 코너, 직선 복귀, 고속 완만한 곡선, 운전자 덮어쓰기, 조향 오류 상황을 모두 시험합니다.
 5. 실제 도로 시험 전에 단위 테스트, 리플레이 또는 폐쇄된 환경에서 먼저 검증합니다.
 
-## 8. 관련 소스
+## 9. 관련 소스
 
 - 토크 제어기: `selfdrive/controls/lib/latcontrol_torque.py`
 - GM 조향 명령 적용: `selfdrive/car/gm/carcontroller.py`
