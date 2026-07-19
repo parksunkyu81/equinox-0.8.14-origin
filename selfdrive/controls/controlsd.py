@@ -41,6 +41,7 @@ from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.pedal_follow import (PedalFollowSmoother, PedalLeadDepartureTracker,
                                                  PedalManualLaunchGate,
                                                  PedalStandstillBoostController,
+                                                 PEDAL_STANDSTILL_BOOST_GAIN,
                                                  pedal_manual_launch_assist_safe)
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
@@ -403,9 +404,10 @@ class Controls:
                        STOP_ACCEL_BOOST_RESTART_MIN_ACCEL])
 
     def pedal_standstill_boost_min_accel(self, v_ego_kph):
-        return interp(v_ego_kph,
-                      PEDAL_STANDSTILL_BOOST_ACCEL_BP_KPH,
-                      PEDAL_STANDSTILL_BOOST_ACCEL_V)
+        return PEDAL_STANDSTILL_BOOST_GAIN * interp(
+            v_ego_kph,
+            PEDAL_STANDSTILL_BOOST_ACCEL_BP_KPH,
+            PEDAL_STANDSTILL_BOOST_ACCEL_V)
 
     def stop_accel_boost_stationary_lead_hold_distance(self, CS):
         return STOP_ACCEL_BOOST_STATIONARY_LEAD_MIN_HOLD_DREL + \
@@ -1372,7 +1374,9 @@ class Controls:
                 lead = self.get_lead(self.sm)
                 v_ego_kph = CS.vEgo * CV.MS_TO_KPH
                 if self.pedal_manual_launch_assist_active:
-                    actuators.accel = max(actuators.accel, PEDAL_MANUAL_LAUNCH_ASSIST_MIN_ACCEL)
+                    actuators.accel = max(
+                        actuators.accel,
+                        PEDAL_MANUAL_LAUNCH_ASSIST_MIN_ACCEL * PEDAL_STANDSTILL_BOOST_GAIN)
                 elif self.stop_accel_boost_lead_clear_for_boost(CS, lead) and \
                    STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH <= v_ego_kph <= STOP_ACCEL_BOOST_RESTART_MAX_VEGO_KPH and \
                    actuators.accel > 0.0:

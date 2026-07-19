@@ -7,11 +7,12 @@ from selfdrive.car.gm import gmcan
 from selfdrive.car.gm.values import DBC, NO_ASCM, CanBus, CarControllerParams
 from opendbc.can.packer import CANPacker
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
-from selfdrive.controls.lib.pedal_follow import (PEDAL_DEADZONE_FLOOR, PEDAL_LEAD_ACCEL_GAIN,
+from selfdrive.controls.lib.pedal_follow import (PEDAL_DEADZONE_FLOOR,
                                                 PedalDeadzoneBoostController,
-                                                pedal_comfort_accel_cap,
+                                                pedal_apply_no_lead_accel_reduction,
                                                 pedal_deadzone_recovery_safe,
-                                                pedal_follow_urgent)
+                                                pedal_effective_lead_accel_cap,
+                                                pedal_follow_critical)
 from selfdrive.car.gm.steer_scheduler import (GMSteeringCommandScheduler, GMSteeringLimitTracker,
                                               GM_STEER_RATE_DOWN,
                                               GM_STEER_RATE_UP)
@@ -118,15 +119,27 @@ class CarController():
     # ---------------------------------------------------------------
     brake_pressed = bool(CS.out.brakePressed)
     lead = self.get_lead(controls.sm)
-    # This car cannot command the brakes. A clearly closing lead therefore
-    # gets an immediate gas cut in the final GM output layer as well.
+    # A single moderate radar-relative-speed outlier must not kill the pedal in
+    # this final layer after the smoother rejected it. Truly critical geometry
+    # still cuts immediately; ordinary urgent geometry uses the smoother's
+    # 100 ms confirmation state.
+    follow_smoother = getattr(controls, 'pedal_follow_smoother', None)
     urgent_lead_closing = CS.CP.enableGasInterceptor and \
-                          pedal_follow_urgent(lead, CS.out.vEgo)
+                          (pedal_follow_critical(lead, CS.out.vEgo) or
+                           bool(getattr(follow_smoother, 'urgent_active', False)))
     requested_accel = float(clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
     lead_valid = lead is not None and lead.status and lead.dRel > 0.0
-    comfort_accel_cap = pedal_comfort_accel_cap(CS.out.vEgo) * PEDAL_LEAD_ACCEL_GAIN if lead_valid else 0.0
-    if CS.CP.enableGasInterceptor and lead_valid and requested_accel > 0.0:
-      requested_accel = min(requested_accel, comfort_accel_cap)
+    standstill_boost_active = bool(getattr(controls, 'pedal_launch_active', False))
+    comfort_accel_cap = pedal_effective_lead_accel_cap(
+      CS.out.vEgo, standstill_boost_active) if lead_valid else 0.0
+    if CS.CP.enableGasInterceptor:
+      if lead_valid and requested_accel > 0.0:
+        requested_accel = min(requested_accel, comfort_accel_cap)
+      else:
+        # User-selected permanent calibration: no-lead positive acceleration is
+        # exactly 15% lower at the final command layer. Lead following and every
+        # standstill-launch boost path bypass this reduction.
+        requested_accel = pedal_apply_no_lead_accel_reduction(requested_accel, lead_valid)
     manual_launch_auto_allowed = bool(getattr(controls, 'pedal_manual_launch_auto_allowed', False))
     manual_launch_assist_active = bool(getattr(controls, 'pedal_manual_launch_assist_active', False))
     pedal_automation_allowed = manual_launch_auto_allowed or manual_launch_assist_active
@@ -160,7 +173,6 @@ class CarController():
                           )
 
         pedal_command = float(clip(acc_mult * self.accel, 0., 0.75))
-        follow_smoother = getattr(controls, 'pedal_follow_smoother', None)
         recovery_safe = pedal_deadzone_recovery_safe(follow_smoother, lead)
         deadzone_candidate = recovery_safe and self.accel > 0.0 and \
                              pedal_command < PEDAL_DEADZONE_FLOOR and \

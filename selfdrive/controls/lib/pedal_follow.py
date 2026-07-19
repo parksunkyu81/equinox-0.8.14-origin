@@ -32,6 +32,10 @@ PEDAL_FOLLOW_LEAD_BRAKING_CONFIRM_FRAMES = max(1, round(0.15 / DT_CTRL))
 PEDAL_COMFORT_ACCEL_CAP_BP_KPH = [0.0, 10.0, 20.0, 40.0, 60.0, 100.0]
 PEDAL_COMFORT_ACCEL_CAP_V = [0.85, 0.95, 1.05, 1.10, 1.15, 1.20]
 PEDAL_LEAD_ACCEL_GAIN = 1.10
+PEDAL_STANDSTILL_BOOST_GAIN = 1.10
+# Fixed final-output reduction for comma-pedal acceleration with no valid lead.
+# Apply only to positive acceleration so coast/deceleration behavior is intact.
+PEDAL_NO_LEAD_ACCEL_SCALE = 0.85
 PEDAL_DEADZONE_FLOOR = 0.060
 PEDAL_DEADZONE_CONFIRM_FRAMES = max(1, round(0.10 / DT_CTRL))
 PEDAL_DEADZONE_RAMP_FRAMES = max(1, round(0.25 / DT_CTRL))
@@ -42,6 +46,11 @@ PEDAL_FOLLOW_URGENT_VREL = -0.80
 PEDAL_FOLLOW_URGENT_TTC = 3.0
 PEDAL_FOLLOW_URGENT_MIN_DISTANCE = 5.5
 PEDAL_FOLLOW_URGENT_HEADWAY = 0.8
+PEDAL_FOLLOW_URGENT_CONFIRM_FRAMES = max(1, round(0.10 / DT_CTRL))
+PEDAL_FOLLOW_CRITICAL_TTC = 1.5
+PEDAL_FOLLOW_CRITICAL_VREL = -2.0
+PEDAL_FOLLOW_CRITICAL_MIN_DISTANCE = 3.0
+PEDAL_FOLLOW_CRITICAL_HEADWAY = 0.35
 PEDAL_LAUNCH_ENTER_MAX_VEGO = 2.0 * CV.KPH_TO_MS
 PEDAL_LAUNCH_EXIT_VEGO = 3.0 * CV.KPH_TO_MS
 PEDAL_LAUNCH_PREFERRED_MIN_DISTANCE = 3.0
@@ -100,6 +109,18 @@ def pedal_comfort_accel_cap(v_ego):
                       PEDAL_COMFORT_ACCEL_CAP_V))
 
 
+def pedal_effective_lead_accel_cap(v_ego, standstill_boost_active=False):
+  boost_gain = PEDAL_STANDSTILL_BOOST_GAIN if standstill_boost_active else 1.0
+  return pedal_comfort_accel_cap(v_ego) * PEDAL_LEAD_ACCEL_GAIN * boost_gain
+
+
+def pedal_apply_no_lead_accel_reduction(requested_accel, lead_valid):
+  requested_accel = float(requested_accel)
+  if not lead_valid and requested_accel > 0.0:
+    return requested_accel * PEDAL_NO_LEAD_ACCEL_SCALE
+  return requested_accel
+
+
 def pedal_follow_geometry(v_ego, d_rel, v_rel, target_tr=None, target_distance=None):
   v_ego = max(float(v_ego), 0.0)
   v_rel = float(v_rel)
@@ -132,6 +153,19 @@ def pedal_follow_urgent(lead, v_ego):
                     PEDAL_FOLLOW_URGENT_HEADWAY * max(float(v_ego), 0.0)
   return lead.dRel <= urgent_distance and \
          (lead.vRel <= PEDAL_FOLLOW_URGENT_VREL or ttc <= PEDAL_FOLLOW_URGENT_TTC)
+
+
+def pedal_follow_critical(lead, v_ego):
+  """True only when one sample is severe enough to require an immediate cut."""
+  if lead is None or not lead.status or lead.dRel <= 0.0 or lead.vRel >= 0.0:
+    return False
+
+  closing_speed = -float(lead.vRel)
+  ttc = float(lead.dRel) / max(closing_speed, 0.1)
+  critical_distance = PEDAL_FOLLOW_CRITICAL_MIN_DISTANCE + \
+                      PEDAL_FOLLOW_CRITICAL_HEADWAY * max(float(v_ego), 0.0)
+  return ttc <= PEDAL_FOLLOW_CRITICAL_TTC or \
+         (lead.dRel <= critical_distance and lead.vRel <= PEDAL_FOLLOW_CRITICAL_VREL)
 
 
 def pedal_deadzone_recovery_safe(follow_smoother, lead):
@@ -540,6 +574,8 @@ class PedalFollowSmoother:
     self.recovery_frames = 0
     self.lead_missing_frames = 0
     self.lead_braking_frames = 0
+    self.urgent_candidate_frames = 0
+    self.urgent_active = False
     self.output_accel = None
 
   def reset(self):
@@ -551,6 +587,8 @@ class PedalFollowSmoother:
     self.recovery_frames = 0
     self.lead_missing_frames = 0
     self.lead_braking_frames = 0
+    self.urgent_candidate_frames = 0
+    self.urgent_active = False
     self.output_accel = None
 
   def _update_limited_output(self, requested_accel, desired_accel, can_recover):
@@ -574,6 +612,8 @@ class PedalFollowSmoother:
     return min(float(requested_accel), self.output_accel)
 
   def _update_missing_lead(self, requested_accel):
+    self.urgent_candidate_frames = 0
+    self.urgent_active = False
     if self.output_accel is None:
       self.reset()
       return float(requested_accel)
@@ -601,12 +641,13 @@ class PedalFollowSmoother:
     requested_accel = float(requested_accel)
     lead_valid = lead is not None and lead.status and lead.dRel > 0.0
 
-    # Preserve the original no-lead acceleration exactly. With a valid lead,
-    # increase positive response by 10% but keep the speed-dependent comfort cap
-    # and all following distance/closing-speed authority checks.
+    # This smoother owns lead following only. The fixed no-lead reduction is
+    # applied later in the final GM pedal-output layer, after lead validity is
+    # known for the exact CAN command frame. With a valid lead, increase positive
+    # response by 10% but retain every distance/closing-speed authority check.
     if enabled and lead_valid and requested_accel > 0.0:
       requested_accel = min(requested_accel * PEDAL_LEAD_ACCEL_GAIN,
-                            pedal_comfort_accel_cap(v_ego) * PEDAL_LEAD_ACCEL_GAIN)
+                            pedal_effective_lead_accel_cap(v_ego, launch_active))
 
     if not enabled:
       self.reset()
@@ -616,7 +657,12 @@ class PedalFollowSmoother:
 
     self.lead_missing_frames = 0
 
-    if pedal_follow_urgent(lead, v_ego):
+    urgent_candidate = pedal_follow_urgent(lead, v_ego)
+    critical_now = pedal_follow_critical(lead, v_ego)
+    self.urgent_candidate_frames = self.urgent_candidate_frames + 1 if urgent_candidate else 0
+    self.urgent_active = critical_now or \
+                         self.urgent_candidate_frames >= PEDAL_FOLLOW_URGENT_CONFIRM_FRAMES
+    if self.urgent_active:
       self.state = 'urgent'
       self.accel_authority = 0.0
       self.recovery_frames = 0
