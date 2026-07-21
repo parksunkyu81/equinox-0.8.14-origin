@@ -38,36 +38,11 @@ from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, CON
 from selfdrive.car.gm.values import SLOW_ON_CURVES, MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
-from selfdrive.controls.lib.pedal_follow import (PedalFollowSmoother, PedalLeadDepartureTracker,
-                                                 PedalManualLaunchGate,
-                                                 PedalStandstillBoostController,
-                                                 pedal_manual_launch_assist_safe,
-                                                 pedal_standstill_boost_accel,
-                                                 pedal_standstill_boost_min_distance)
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
 
 SOFT_DISABLE_TIME = 3  # seconds
-STOP_ACCEL_BOOST_HOLD_MAX_VEGO = 20.0 * CV.KPH_TO_MS
-STOP_ACCEL_BOOST_PID_RESET_MAX_VEGO = 1.0
-STOP_ACCEL_BOOST_START_MIN_DREL = 3.0
-STOP_ACCEL_BOOST_STATIONARY_LEAD_MIN_HOLD_DREL = 12.0
-STOP_ACCEL_BOOST_STATIONARY_LEAD_HOLD_HEADWAY = 1.0
-STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VLEAD = 0.30
-STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VREL = 0.15
-STOP_ACCEL_BOOST_RELEASE_MIN_DREL = 0.1
-STOP_ACCEL_BOOST_RELEASE_MIN_VLEAD = 0.01
-STOP_ACCEL_BOOST_RELEASE_MIN_VREL = 0.0
-STOP_ACCEL_BOOST_RELEASE_MIN_DREL_DELTA = 0.005
-STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL = -0.20
-STOP_ACCEL_BOOST_RELEASE_HOLD_FRAMES = int(1.2 / DT_CTRL)
-STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH = 1.0
-STOP_ACCEL_BOOST_RESTART_MAX_VEGO_KPH = 20.0
-STOP_ACCEL_BOOST_RESTART_REDUCED_MAX_VEGO_KPH = 10.0
-STOP_ACCEL_BOOST_RESTART_FULL_ACCEL_VEGO_KPH = 15.0
-STOP_ACCEL_BOOST_RESTART_REDUCED_MIN_ACCEL = 0.75
-STOP_ACCEL_BOOST_RESTART_MIN_ACCEL = 0.95
 FCW_MIN_CLOSING_SPEED = 0.8
 FCW_URGENT_TTC = 1.6
 FCW_CRITICAL_TTC = 1.0
@@ -239,18 +214,6 @@ class Controls:
         self.slowing_down = False
         self.slowing_down_alert = False
         self.slowing_down_sound_alert = False
-        self._stop_accel_boost_release_frames = 0
-        self._stop_accel_boost_release_active = False
-        self._stop_accel_boost_lead_departed = False
-        self.pedal_follow_smoother = PedalFollowSmoother()
-        self.pedal_launch_active = False
-        self.pedal_lead_departure_tracker = PedalLeadDepartureTracker()
-        self.pedal_manual_launch_gate = PedalManualLaunchGate()
-        self.pedal_standstill_boost = PedalStandstillBoostController()
-        self.pedal_manual_launch_required = False
-        self.pedal_manual_launch_seen = False
-        self.pedal_manual_launch_assist_active = False
-        self.pedal_manual_launch_auto_allowed = False
         self.pedal_comfort_accel_cap = 0.0
         self.pedal_deadzone_boost_candidate = False
         self.pedal_deadzone_boost_active = False
@@ -360,184 +323,12 @@ class Controls:
         self.slowing_down = False
         self.slowing_down_alert = False
         self.slowing_down_sound_alert = False
-        self._stop_accel_boost_release_frames = 0
-        self._stop_accel_boost_release_active = False
-        self._stop_accel_boost_lead_departed = False
-        self.pedal_launch_active = False
-        self.pedal_lead_departure_tracker.reset()
-        self.pedal_manual_launch_gate.reset()
-        self.pedal_standstill_boost.reset()
-        self.pedal_manual_launch_required = False
-        self.pedal_manual_launch_seen = False
-        self.pedal_manual_launch_assist_active = False
-        self.pedal_manual_launch_auto_allowed = False
-
-    def set_stop_accel_boost_hold_result(self, hold, release_active=False):
-        self._stop_accel_boost_release_active = release_active
-        self._stop_accel_boost_hold_frame = self.sm.frame
-        self._stop_accel_boost_hold_result = hold
-        return hold
 
     def get_lead(self, sm):
         radar = sm['radarState']
         if radar.leadOne.status:
             return radar.leadOne
         return None
-
-    def stop_accel_boost_lead_moving(self, lead):
-        return lead is not None and lead.status and \
-               lead.vLead > STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VLEAD and \
-               lead.vRel > STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VREL
-
-    def stop_accel_boost_lead_safe_to_start(self, lead):
-        return lead is not None and lead.status and lead.dRel >= STOP_ACCEL_BOOST_START_MIN_DREL
-
-    def stop_accel_boost_restart_min_accel(self, v_ego_kph):
-        return interp(v_ego_kph,
-                      [STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH,
-                       STOP_ACCEL_BOOST_RESTART_REDUCED_MAX_VEGO_KPH,
-                       STOP_ACCEL_BOOST_RESTART_FULL_ACCEL_VEGO_KPH],
-                      [STOP_ACCEL_BOOST_RESTART_REDUCED_MIN_ACCEL,
-                       STOP_ACCEL_BOOST_RESTART_REDUCED_MIN_ACCEL,
-                       STOP_ACCEL_BOOST_RESTART_MIN_ACCEL])
-
-    def stop_accel_boost_stationary_lead_hold_distance(self, CS):
-        return STOP_ACCEL_BOOST_STATIONARY_LEAD_MIN_HOLD_DREL + \
-               STOP_ACCEL_BOOST_STATIONARY_LEAD_HOLD_HEADWAY * max(CS.vEgo, 0.0)
-
-    def stop_accel_boost_near_stationary_lead(self, CS, lead):
-        return lead is not None and lead.status and lead.dRel > 0.0 and \
-               lead.dRel <= self.stop_accel_boost_stationary_lead_hold_distance(CS) and \
-               lead.vLead <= STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VLEAD
-
-    def stop_accel_boost_lead_clear_for_boost(self, CS, lead):
-        if lead is None or not lead.status or lead.dRel <= 0.0:
-            return False
-
-        if lead.dRel > self.stop_accel_boost_stationary_lead_hold_distance(CS):
-            return True
-
-        return self.stop_accel_boost_lead_safe_to_start(lead) and \
-               lead.vLead > STOP_ACCEL_BOOST_LEAD_MOVING_MIN_VLEAD and \
-               lead.vRel > STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL
-
-    def stop_accel_boost_lead_starting(self, lead):
-        if lead is None or not lead.status or lead.dRel < STOP_ACCEL_BOOST_RELEASE_MIN_DREL:
-            return False
-
-        prev_drel = getattr(self, "_stop_accel_boost_prev_drel", None)
-        drel_delta = 0.0
-        if prev_drel is not None:
-            try:
-                drel_delta = float(lead.dRel) - float(prev_drel)
-            except Exception:
-                drel_delta = 0.0
-
-        return lead.vRel > STOP_ACCEL_BOOST_RELEASE_MIN_VREL or \
-               ((lead.vLead > STOP_ACCEL_BOOST_RELEASE_MIN_VLEAD or
-                 drel_delta > STOP_ACCEL_BOOST_RELEASE_MIN_DREL_DELTA) and
-                lead.vRel > STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL)
-
-    def stop_accel_boost_hold_stationary_lead(self, CS):
-        if getattr(self, "_stop_accel_boost_hold_frame", -1) == self.sm.frame:
-            return self._stop_accel_boost_hold_result
-
-        # Standstill departure is driver-authorized only. A moving lead must not
-        # release automated pedal output until a manual gas press has produced
-        # real ego motion and the driver has released the pedal.
-        launch_enabled = self.active and self.CP.enableGasInterceptor and CS.adaptiveCruise
-        lead = self.get_lead(self.sm)
-        self.pedal_manual_launch_auto_allowed = self.pedal_manual_launch_gate.update(
-            launch_enabled, CS.brakePressed, CS.gasPressed, CS.standstill, CS.vEgo)
-        self.pedal_manual_launch_required = self.pedal_manual_launch_gate.manual_required
-        self.pedal_manual_launch_seen = self.pedal_manual_launch_gate.manual_seen
-
-        # Compare against the distance captured when ego first stopped, not the
-        # previous 10 ms radar frame. A slowly departing lead only opens a few
-        # millimetres per frame, but the cumulative opening still proves that it
-        # has moved and must release the launch path without a multi-second wait.
-        lead_departure_confirmed, distance_delta = self.pedal_lead_departure_tracker.update(
-            launch_enabled, CS.brakePressed, lead, CS.standstill, CS.vEgo)
-        manual_launch_assist_candidate = bool(launch_enabled and pedal_manual_launch_assist_safe(
-            self.pedal_manual_launch_gate.assist_authorized,
-            CS.brakePressed, CS.gasPressed, lead, distance_delta, CS.vEgo) and
-            CS.vEgo * CV.MS_TO_KPH <= STOP_ACCEL_BOOST_RESTART_MAX_VEGO_KPH)
-        self.pedal_launch_active = self.pedal_standstill_boost.update(
-            launch_enabled, manual_launch_assist_candidate,
-            CS.brakePressed, lead, CS.vEgo, lead_departure_confirmed)
-        # The manual-pedal overlay is permitted only while the same dynamic
-        # gap/closing/lead-braking checks that govern the 1-20 km/h boost pass.
-        self.pedal_manual_launch_assist_active = bool(
-            manual_launch_assist_candidate and self.pedal_launch_active)
-        if lead is not None and lead.status and lead.dRel > 0.0:
-            self._stop_accel_boost_prev_drel = float(lead.dRel)
-
-        if launch_enabled and self.pedal_manual_launch_required:
-            if self.pedal_manual_launch_assist_active:
-                self._stop_accel_boost_lead_departed = True
-                self._stop_accel_boost_release_frames = STOP_ACCEL_BOOST_RELEASE_HOLD_FRAMES
-                return self.set_stop_accel_boost_hold_result(False, True)
-            self._stop_accel_boost_release_frames = 0
-            self._stop_accel_boost_release_active = False
-            self._stop_accel_boost_lead_departed = False
-            return self.set_stop_accel_boost_hold_result(True)
-
-        hold_enabled = self.stop_accel_boost and CS.adaptiveCruise and \
-                       CS.vEgo <= STOP_ACCEL_BOOST_HOLD_MAX_VEGO
-        if not hold_enabled:
-            self._stop_accel_boost_lead_departed = False
-            return self.set_stop_accel_boost_hold_result(False)
-
-        if lead is None or lead.dRel <= 0.0:
-            self._stop_accel_boost_prev_drel = None
-            self._stop_accel_boost_release_frames = 0
-            self._stop_accel_boost_lead_departed = False
-            return self.set_stop_accel_boost_hold_result(False)
-
-        if self.stop_accel_boost_near_stationary_lead(CS, lead):
-            self._stop_accel_boost_prev_drel = float(lead.dRel)
-            self._stop_accel_boost_release_frames = 0
-            self._stop_accel_boost_lead_departed = False
-            return self.set_stop_accel_boost_hold_result(True)
-
-        if lead.dRel > self.stop_accel_boost_stationary_lead_hold_distance(CS):
-            self._stop_accel_boost_prev_drel = float(lead.dRel)
-            self._stop_accel_boost_release_frames = 0
-            self._stop_accel_boost_lead_departed = False
-            return self.set_stop_accel_boost_hold_result(False, True)
-
-        lead_starting = self.stop_accel_boost_lead_starting(lead) and \
-                        self.stop_accel_boost_lead_safe_to_start(lead)
-        self._stop_accel_boost_prev_drel = float(lead.dRel)
-
-        # Keep a confirmed lead departure across the short release-frame window.
-        # Clear it immediately when the ego is closing at an unsafe rate.
-        if lead_starting:
-            self._stop_accel_boost_lead_departed = True
-        elif lead.vRel <= STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL:
-            self._stop_accel_boost_lead_departed = False
-            self._stop_accel_boost_release_frames = 0
-
-        post_roll_restart = self._stop_accel_boost_lead_departed and \
-                            self.stop_accel_boost_lead_safe_to_start(lead) and \
-                            lead.vRel > STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL and \
-                            CS.vEgo * CV.MS_TO_KPH >= STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH
-        if post_roll_restart:
-            return self.set_stop_accel_boost_hold_result(False, True)
-
-        if lead_starting:
-            self._stop_accel_boost_release_frames = STOP_ACCEL_BOOST_RELEASE_HOLD_FRAMES
-            return self.set_stop_accel_boost_hold_result(False, True)
-
-        if self._stop_accel_boost_release_frames > 0 and lead.vRel > STOP_ACCEL_BOOST_RELEASE_MAX_CLOSING_VREL:
-            self._stop_accel_boost_release_frames -= 1
-            return self.set_stop_accel_boost_hold_result(False, True)
-
-        self._stop_accel_boost_release_frames = 0
-
-        return self.set_stop_accel_boost_hold_result(
-            not (self.stop_accel_boost_lead_moving(lead) and
-                 self.stop_accel_boost_lead_safe_to_start(lead)))
 
     def op_fcw_dangerous_lead(self, CS):
         lead = self.get_lead(self.sm)
@@ -559,15 +350,6 @@ class Controls:
 
         already_decelerating = CS.aEgo <= FCW_DECEL_SUPPRESS
         return not already_decelerating or critical_now
-
-    def smooth_pedal_follow_accel(self, CS, requested_accel):
-        enabled = self.CP.enableGasInterceptor and CS.adaptiveCruise and self.active
-        lead = self.get_lead(self.sm)
-        target_distance = float(getattr(self.sm['dynamicFollowData'], 'targetFollowDistance', 0.0))
-        return self.pedal_follow_smoother.update(enabled, requested_accel, lead, CS.vEgo,
-                                                 target_distance=target_distance,
-                                                 launch_active=(self.pedal_manual_launch_assist_active or
-                                                                self.pedal_launch_active))
 
     def manual_brake_early_warning(self, CS):
         # Pedal-only longitudinal control needs more driver reaction time than
@@ -1097,7 +879,6 @@ class Controls:
         stock_long_is_braking = self.enabled and not self.CP.openpilotLongitudinalControl and CS.aEgo < -1.25
         model_fcw = self.sm['modelV2'].meta.hardBrakePredicted and not CS.brakePressed and not stock_long_is_braking
         planner_fcw = self.sm['longitudinalPlan'].fcw and self.enabled
-        self.stop_accel_boost_hold_stationary_lead(CS)
         manual_brake_fcw = self.enabled and self.manual_brake_early_warning(CS)
         if not self.disable_op_fcw and (manual_brake_fcw or
                                         (self.op_fcw_dangerous_lead(CS) and (planner_fcw or model_fcw))):
@@ -1350,39 +1131,9 @@ class Controls:
             t_since_plan = (self.sm.frame - self.sm.rcv_frame['longitudinalPlan']) * DT_CTRL
 
             actuators.accel = self.LoC.update(self.active, CS, long_plan, pid_accel_limits, t_since_plan)
-            stationary_lead_hold = self.stop_accel_boost_hold_stationary_lead(CS)
             if CS.brakePressed:
-                self._stop_accel_boost_release_frames = 0
-                self._stop_accel_boost_release_active = False
-                self._stop_accel_boost_lead_departed = False
-                self.pedal_launch_active = False
                 actuators.accel = min(actuators.accel, 0.0)
                 self.LoC.reset(v_pid=CS.vEgo)
-            elif self.active and stationary_lead_hold:
-                actuators.accel = min(actuators.accel, 0.0)
-                if CS.vEgo <= STOP_ACCEL_BOOST_PID_RESET_MAX_VEGO:
-                    self.LoC.reset(v_pid=CS.vEgo)
-            elif self.active and self._stop_accel_boost_release_active:
-                lead = self.get_lead(self.sm)
-                v_ego_kph = CS.vEgo * CV.MS_TO_KPH
-                if self.pedal_manual_launch_assist_active:
-                    actuators.accel = max(
-                        actuators.accel,
-                        pedal_standstill_boost_accel(CS.vEgo))
-                elif self.stop_accel_boost_lead_clear_for_boost(CS, lead) and \
-                   STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH <= v_ego_kph <= STOP_ACCEL_BOOST_RESTART_MAX_VEGO_KPH and \
-                   actuators.accel > 0.0:
-                    actuators.accel = max(actuators.accel, self.stop_accel_boost_restart_min_accel(v_ego_kph))
-
-            # A standstill boost is armed only by the driver's launch pedal and
-            # remains valid only while the dedicated lead-safety controller is
-            # active. This intentionally overrides a stale/slow planner request;
-            # the following smoother receives the same launch flag below.
-            v_ego_kph = CS.vEgo * CV.MS_TO_KPH
-            if self.active and self.pedal_launch_active and \
-               STOP_ACCEL_BOOST_RESTART_MIN_VEGO_KPH <= v_ego_kph <= STOP_ACCEL_BOOST_RESTART_MAX_VEGO_KPH:
-                actuators.accel = max(
-                    actuators.accel, pedal_standstill_boost_accel(CS.vEgo))
 
             # Steering PID loop and lateral MPC
             # lat_active = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
@@ -1414,13 +1165,9 @@ class Controls:
                 lac_log.saturated = abs(steer) >= 0.9
 
         # Send a "steering required alert" if saturation count has reached the limit (조향 제어 초과)
-        # Driver brake is the final authority over every longitudinal path,
-        # including restart boost and joystick/debug acceleration.
+        # Driver brake is the final authority over every longitudinal path.
         if CS.brakePressed:
-            self.pedal_follow_smoother.reset()
             actuators.accel = min(actuators.accel, 0.0)
-        else:
-            actuators.accel = self.smooth_pedal_follow_accel(CS, actuators.accel)
 
         if lac_log.active and lac_log.saturated and not CS.steeringPressed:
             dpath_points = lat_plan.dPathPoints
@@ -1627,11 +1374,11 @@ class Controls:
         controlsState.globalDfMod = float(Params().get("globalDfMod", encoding="utf8"))
         # self.sm['liveTorqueParameters']
         controlsState.dynamicTRValue = float(self.sm['dynamicFollowData'].mpcTR)
-        controlsState.pedalFollowAccelAuthority = float(self.pedal_follow_smoother.accel_authority)
-        controlsState.pedalFollowTargetDistance = float(self.pedal_follow_smoother.target_distance)
-        controlsState.pedalFollowGuardDistance = float(self.pedal_follow_smoother.guard_distance)
-        controlsState.pedalFollowPredictedDistance = float(self.pedal_follow_smoother.predicted_distance)
-        controlsState.pedalLaunchActive = bool(self.pedal_launch_active)
+        controlsState.pedalFollowAccelAuthority = 1.0
+        controlsState.pedalFollowTargetDistance = 0.0
+        controlsState.pedalFollowGuardDistance = 0.0
+        controlsState.pedalFollowPredictedDistance = 0.0
+        controlsState.pedalLaunchActive = False
         controlsState.pedalDeadzoneBoostCandidate = bool(self.pedal_deadzone_boost_candidate)
         controlsState.pedalDeadzoneBoostActive = bool(self.pedal_deadzone_boost_active)
         controlsState.pedalDeadzoneRawCommand = float(self.pedal_deadzone_raw_command)
@@ -1652,20 +1399,15 @@ class Controls:
         controlsState.gmSteerCommandTorque = int(self.gm_steer_command_torque)
         controlsState.gmSteerRequestedTorque = int(self.gm_steer_requested_torque)
         controlsState.gmSteerTorqueLimited = bool(self.gm_steer_torque_limited)
-        # Automatic launch remains disabled. Publish the fixed speed-based
-        # boost floor; the stopped-distance anchor is used only to prove that
-        # the lead departed, never to relax this distance threshold.
+        # Legacy pedal-safety diagnostics remain neutral for schema compatibility.
         controlsState.pedalLaunchState = 0
-        controlsState.pedalLaunchSafeDistance = float(
-            pedal_standstill_boost_min_distance(CS.vEgo))
-        controlsState.pedalLaunchDistanceDelta = float(
-            self.pedal_lead_departure_tracker.distance_delta)
-        controlsState.pedalLaunchConfirmTime = float(
-            self.pedal_standstill_boost.active_frames * DT_CTRL)
-        controlsState.pedalManualLaunchRequired = bool(self.pedal_manual_launch_required)
-        controlsState.pedalManualLaunchSeen = bool(self.pedal_manual_launch_seen)
-        controlsState.pedalManualLaunchAssistActive = bool(self.pedal_manual_launch_assist_active)
-        controlsState.pedalManualLaunchAutoAllowed = bool(self.pedal_manual_launch_auto_allowed)
+        controlsState.pedalLaunchSafeDistance = 0.0
+        controlsState.pedalLaunchDistanceDelta = 0.0
+        controlsState.pedalLaunchConfirmTime = 0.0
+        controlsState.pedalManualLaunchRequired = False
+        controlsState.pedalManualLaunchSeen = False
+        controlsState.pedalManualLaunchAssistActive = False
+        controlsState.pedalManualLaunchAutoAllowed = False
         controlsState.pedalComfortAccelCap = float(self.pedal_comfort_accel_cap)
 
         controlsState.totalCameraOffset = totalCameraOffset

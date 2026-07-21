@@ -9,8 +9,6 @@ from common.filter_simple import FirstOrderFilter
 from common.realtime import DT_MDL
 from selfdrive.modeld.constants import T_IDXS
 from selfdrive.controls.lib.longcontrol import LongCtrlState
-from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
-from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, CONTROL_N
 from selfdrive.swaglog import cloudlog
 
@@ -142,8 +140,14 @@ def limit_stop_acceleration(v_ego, a_target):
 
 class Planner:
   def __init__(self, CP, init_v=0.0, init_a=0.0):
+    # Keep the accel-limit helpers lightweight for final actuator users. The
+    # generated Acados solver is only needed when the planner itself starts.
+    from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
+    from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as t_idxs_mpc
+
     self.CP = CP
     self.mpc = LongitudinalMpc()
+    self.t_idxs_mpc = t_idxs_mpc
 
     self.fcw = False
 
@@ -190,17 +194,17 @@ class Planner:
     if (len(sm['modelV2'].position.x) == 33 and
          len(sm['modelV2'].velocity.x) == 33 and
           len(sm['modelV2'].acceleration.x) == 33):
-      x = np.interp(T_IDXS_MPC, T_IDXS, sm['modelV2'].position.x)
-      v = np.interp(T_IDXS_MPC, T_IDXS, sm['modelV2'].velocity.x)
-      a = np.interp(T_IDXS_MPC, T_IDXS, sm['modelV2'].acceleration.x)
+      x = np.interp(self.t_idxs_mpc, T_IDXS, sm['modelV2'].position.x)
+      v = np.interp(self.t_idxs_mpc, T_IDXS, sm['modelV2'].velocity.x)
+      a = np.interp(self.t_idxs_mpc, T_IDXS, sm['modelV2'].acceleration.x)
     else:
-      x = np.zeros(len(T_IDXS_MPC))
-      v = np.zeros(len(T_IDXS_MPC))
-      a = np.zeros(len(T_IDXS_MPC))
+      x = np.zeros(len(self.t_idxs_mpc))
+      v = np.zeros(len(self.t_idxs_mpc))
+      a = np.zeros(len(self.t_idxs_mpc))
     self.mpc.update(sm['carState'], sm['radarState'], sm['modelV2'], v_cruise, x, v, a, prev_accel_constraint)
-    self.v_desired_trajectory = np.interp(T_IDXS[:CONTROL_N], T_IDXS_MPC, self.mpc.v_solution)
-    self.a_desired_trajectory = np.interp(T_IDXS[:CONTROL_N], T_IDXS_MPC, self.mpc.a_solution)
-    self.j_desired_trajectory = np.interp(T_IDXS[:CONTROL_N], T_IDXS_MPC[:-1], self.mpc.j_solution)
+    self.v_desired_trajectory = np.interp(T_IDXS[:CONTROL_N], self.t_idxs_mpc, self.mpc.v_solution)
+    self.a_desired_trajectory = np.interp(T_IDXS[:CONTROL_N], self.t_idxs_mpc, self.mpc.a_solution)
+    self.j_desired_trajectory = np.interp(T_IDXS[:CONTROL_N], self.t_idxs_mpc[:-1], self.mpc.j_solution)
 
     self.fcw = self.mpc.crash_cnt > 5
     if self.fcw:

@@ -10,7 +10,6 @@ from common.params import Params
 from selfdrive.controls.lib.dynamic_follow.auto_df import predict
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.dynamic_follow.support import LeadData, CarData, dfData, dfProfiles
-from selfdrive.controls.lib.pedal_follow import pedal_follow_geometry, pedal_follow_target_headway, smoothstep
 from common.data_collector import DataCollector
 
 travis = False
@@ -23,6 +22,37 @@ LEAD_CATCHUP_MIN_SPEED = 20.0 * CV.KPH_TO_MS
 LEAD_CATCHUP_MAX_SPEED = 110.0 * CV.KPH_TO_MS
 LEAD_CATCHUP_GAP_START = 3.0
 LEAD_CATCHUP_GAP_FULL = 12.0
+FOLLOW_TARGET_TR_BP_KPH = [0.0, 20.0, 40.0, 60.0, 80.0, 100.0]
+FOLLOW_TARGET_TR_V = [1.00, 1.05, 1.10, 1.17, 1.22, 1.25]
+FOLLOW_MIN_DISTANCE = 5.5
+FOLLOW_GUARD_TR_MARGIN = 0.20
+FOLLOW_GUARD_MIN_TR = 0.80
+FOLLOW_PREDICTION_TIME = 2.0
+FOLLOW_GUARD_CLOSING_TIME = 2.0
+
+
+def smoothstep(edge0, edge1, value):
+  if edge1 <= edge0:
+    return float(value >= edge1)
+  x = float(clip((float(value) - edge0) / (edge1 - edge0), 0.0, 1.0))
+  return x * x * (3.0 - 2.0 * x)
+
+
+def follow_target_headway(v_ego):
+  return float(interp(max(float(v_ego), 0.0) * CV.MS_TO_KPH,
+                      FOLLOW_TARGET_TR_BP_KPH, FOLLOW_TARGET_TR_V))
+
+
+def follow_geometry(v_ego, d_rel, v_rel, target_tr):
+  v_ego = max(float(v_ego), 0.0)
+  v_rel = float(v_rel)
+  closing_speed = max(-v_rel, 0.0)
+  target_distance = FOLLOW_MIN_DISTANCE + max(float(target_tr), 0.0) * v_ego
+  guard_tr = max(float(target_tr) - FOLLOW_GUARD_TR_MARGIN, FOLLOW_GUARD_MIN_TR)
+  guard_distance = FOLLOW_MIN_DISTANCE + guard_tr * v_ego + \
+                   FOLLOW_GUARD_CLOSING_TIME * closing_speed
+  predicted_distance = float(d_rel) + FOLLOW_PREDICTION_TIME * v_rel
+  return target_distance, guard_distance, predicted_distance, closing_speed
 LEAD_CATCHUP_CLOSING_START = 0.30
 LEAD_CATCHUP_CLOSING_FULL = 1.00
 LEAD_CATCHUP_SAFE_START_MARGIN = 2.0
@@ -156,7 +186,7 @@ class DynamicFollow:
       self._store_df_data()
       self.base_TR = self._get_TR()
       if self.stop_accel_boost:
-        self.base_TR = max(self.base_TR, pedal_follow_target_headway(self.car_data.v_ego))
+        self.base_TR = max(self.base_TR, follow_target_headway(self.car_data.v_ego))
       self._update_lead_catchup(self.base_TR)
       self.TR = max(self.min_TR,
                     self.base_TR - LEAD_CATCHUP_TR_REDUCTION * self.lead_catchup_factor)
@@ -327,7 +357,7 @@ class DynamicFollow:
     else:
       v_rel = v_lead - v_ego
       target_distance, guard_distance, predicted_distance, closing_speed = \
-        pedal_follow_geometry(v_ego, d_rel, v_rel, target_tr=base_TR)
+        follow_geometry(v_ego, d_rel, v_rel, target_tr=base_TR)
       self.target_follow_distance = target_distance
       self.predicted_follow_distance = predicted_distance
 

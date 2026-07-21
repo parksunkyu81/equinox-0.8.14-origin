@@ -7,13 +7,7 @@ from selfdrive.car.gm import gmcan
 from selfdrive.car.gm.values import DBC, NO_ASCM, CanBus, CarControllerParams
 from opendbc.can.packer import CANPacker
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
-from selfdrive.controls.lib.pedal_follow import (PEDAL_DEADZONE_BOOST_ENABLED,
-                                                PEDAL_DEADZONE_FLOOR,
-                                                PedalDeadzoneBoostController,
-                                                pedal_apply_base_accel_cap,
-                                                pedal_deadzone_recovery_safe,
-                                                pedal_effective_lead_accel_cap,
-                                                pedal_follow_critical)
+from selfdrive.controls.lib.longitudinal_planner import calc_cruise_accel_limits
 from selfdrive.car.gm.steer_scheduler import (GMSteeringCommandScheduler, GMSteeringLimitTracker,
                                               GM_STEER_RATE_DOWN,
                                               GM_STEER_RATE_UP)
@@ -64,13 +58,6 @@ def get_dynamic_steer_delta(v_ego, new_steer, last_steer, steer_max,
   """
   return GM_STEER_RATE_UP, GM_STEER_RATE_DOWN
 class CarController():
-
-  def get_lead(self, sm):
-    radar = sm['radarState']
-    if radar.leadOne.status:
-      return radar.leadOne
-    return None
-
   def __init__(self, dbc_name, CP, VM):
     self.apply_steer_last = 0
     self.comma_pedal = 0.0
@@ -81,7 +68,6 @@ class CarController():
     self._dyn_delta_down_last = 0
 
     self.accel = 0.0
-    self.pedal_deadzone_boost = PedalDeadzoneBoostController()
 
     self.steer_command_scheduler = GMSteeringCommandScheduler()
     self.steer_limit_tracker = GMSteeringLimitTracker()
@@ -119,39 +105,20 @@ class CarController():
     # 따라서 종방향 계산은 매 프레임 먼저 갱신하고, CAN 전송 주기만 별도로 유지한다.
     # ---------------------------------------------------------------
     brake_pressed = bool(CS.out.brakePressed)
-    lead = self.get_lead(controls.sm)
-    # A single moderate radar-relative-speed outlier must not kill the pedal in
-    # this final layer after the smoother rejected it. Truly critical geometry
-    # still cuts immediately; ordinary urgent geometry uses the smoother's
-    # 100 ms confirmation state.
-    follow_smoother = getattr(controls, 'pedal_follow_smoother', None)
-    urgent_lead_closing = CS.CP.enableGasInterceptor and \
-                          (pedal_follow_critical(lead, CS.out.vEgo) or
-                           bool(getattr(follow_smoother, 'urgent_active', False)))
     requested_accel = float(clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-    lead_valid = lead is not None and lead.status and lead.dRel > 0.0
-    standstill_boost_active = bool(getattr(controls, 'pedal_launch_active', False))
-    comfort_accel_cap = pedal_effective_lead_accel_cap(
-      CS.out.vEgo, standstill_boost_active) if CS.CP.enableGasInterceptor else 0.0
+    comfort_accel_cap = 0.0
     if CS.CP.enableGasInterceptor:
-      requested_accel = pedal_apply_base_accel_cap(requested_accel, standstill_boost_active)
-      if lead_valid and requested_accel > 0.0:
+      comfort_accel_cap = calc_cruise_accel_limits(CS.out.vEgo)[1]
+      if requested_accel > 0.0:
         requested_accel = min(requested_accel, comfort_accel_cap)
-    manual_launch_auto_allowed = bool(getattr(controls, 'pedal_manual_launch_auto_allowed', False))
-    manual_launch_assist_active = bool(getattr(controls, 'pedal_manual_launch_assist_active', False))
-    pedal_automation_allowed = manual_launch_auto_allowed or manual_launch_assist_active
-    manual_launch_blocked = (CS.out.standstill or CS.out.vEgo <= 0.5 * CV.KPH_TO_MS) and \
-                            not pedal_automation_allowed
-    self.accel = min(requested_accel, 0.0) if brake_pressed or urgent_lead_closing or \
-                 manual_launch_blocked else requested_accel
+    standstill_blocked = CS.out.standstill or CS.out.vEgo <= 0.5 * CV.KPH_TO_MS
+    self.accel = min(requested_accel, 0.0) if brake_pressed or standstill_blocked else requested_accel
 
     if CS.CP.enableGasInterceptor:
       # 이것이 없으면 저속에서 너무 공격적입니다.
-      pedal_speed_allowed = CS.out.vEgo > V_CRUISE_ENABLE_MIN / CV.MS_TO_KPH or \
-                            pedal_automation_allowed
-      driver_pedal_allows_output = not CS.out.gasPressed or manual_launch_assist_active
-      if c.active and CS.adaptive_Cruise and not brake_pressed and driver_pedal_allows_output and \
-         pedal_automation_allowed and pedal_speed_allowed:
+      pedal_speed_allowed = CS.out.vEgo > V_CRUISE_ENABLE_MIN / CV.MS_TO_KPH
+      if c.active and CS.adaptive_Cruise and not brake_pressed and not CS.out.gasPressed and \
+         pedal_speed_allowed:
 
         # 가속 멀티플라이어 설정
         # 속도별 가속 배율 - 전체적으로 절반으로 줄임
@@ -170,32 +137,20 @@ class CarController():
                           )
 
         pedal_command = float(clip(acc_mult * self.accel, 0., 0.75))
-        recovery_safe = pedal_deadzone_recovery_safe(follow_smoother, lead)
-        deadzone_candidate = PEDAL_DEADZONE_BOOST_ENABLED and recovery_safe and self.accel > 0.0 and \
-                             pedal_command < PEDAL_DEADZONE_FLOOR and \
-                             not manual_launch_assist_active and not urgent_lead_closing
-        self.comma_pedal = float(clip(
-          self.pedal_deadzone_boost.update(deadzone_candidate, pedal_command, CS.out.aEgo),
-          0., 0.75))
+        self.comma_pedal = pedal_command
       else:
         pedal_command = 0.0
-        deadzone_candidate = False
-        self.pedal_deadzone_boost.reset()
         self.comma_pedal = 0.0
     else:
       pedal_command = 0.0
-      deadzone_candidate = False
-      self.pedal_deadzone_boost.reset()
       self.comma_pedal = 0.0
 
-    # These values are published by controlsd after this update, so the route
-    # log contains the raw command, applied floor, final command, and measured
-    # response from the same control frame for deadzone calibration.
-    controls.pedal_deadzone_boost_candidate = bool(deadzone_candidate)
-    controls.pedal_deadzone_boost_active = bool(self.pedal_deadzone_boost.active)
+    # Keep legacy diagnostics populated for log/schema compatibility.
+    controls.pedal_deadzone_boost_candidate = False
+    controls.pedal_deadzone_boost_active = False
     controls.pedal_deadzone_raw_command = float(pedal_command)
     controls.pedal_deadzone_applied_command = float(self.comma_pedal)
-    controls.pedal_deadzone_floor = float(self.pedal_deadzone_boost.applied_floor)
+    controls.pedal_deadzone_floor = 0.0
     controls.pedal_deadzone_accel_request = float(self.accel)
     controls.pedal_deadzone_vehicle_accel = float(CS.out.aEgo)
     controls.pedal_comfort_accel_cap = float(comfort_accel_cap)
