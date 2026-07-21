@@ -108,7 +108,9 @@ class CarController():
     requested_accel = float(clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
     comfort_accel_cap = 0.0
     if CS.CP.enableGasInterceptor:
-      comfort_accel_cap = calc_cruise_accel_limits(CS.out.vEgo)[1]
+      # Use the same lead/no-lead profile selected by longitudinal_planner.
+      following_profile = bool(controls.sm['longitudinalPlan'].following)
+      comfort_accel_cap = calc_cruise_accel_limits(CS.out.vEgo, following_profile)[1]
       if requested_accel > 0.0:
         requested_accel = min(requested_accel, comfort_accel_cap)
     standstill_blocked = CS.out.standstill or CS.out.vEgo <= 0.5 * CV.KPH_TO_MS
