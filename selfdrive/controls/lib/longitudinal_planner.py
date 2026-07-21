@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import math
 import numpy as np
-from common.numpy_fast import interp
+from common.numpy_fast import clip, interp
 
 import cereal.messaging as messaging
 from common.conversions import Conversions as CV
@@ -16,7 +16,8 @@ from selfdrive.swaglog import cloudlog
 LON_MPC_STEP = 0.2  # first step is 0.2s
 AWARENESS_DECEL = -0.2  # car smoothly decel at .2m/s^2 when user is distracted
 LEAD_PROFILE_CONFIRM_FRAMES = max(1, round(0.15 / DT_MDL))
-LEAD_PROFILE_DROPOUT_HOLD_FRAMES = max(1, round(0.20 / DT_MDL))
+LEAD_PROFILE_RAMP_UP_TIME = 0.60
+LEAD_PROFILE_RAMP_UP_STEP = min(1.0, DT_MDL / LEAD_PROFILE_RAMP_UP_TIME)
 
 # 가속도를 낮추어 엑셀 사용을 최소화합니다.
 """_A_CRUISE_MIN_V_FOLLOWING = [-1.5, -1.5, -1.2, -1.0, -0.8]
@@ -122,34 +123,38 @@ _A_TOTAL_MAX_V = [
   4.62,  # 100 km/h : +10% accel room in mild highway curves
 ]
 
-def calc_cruise_accel_limits(v_ego, following=False):
+def calc_cruise_accel_limits(v_ego, following=0.0):
     v_ego_kph = v_ego * CV.MS_TO_KPH
-    min_values = _A_CRUISE_MIN_V_FOLLOWING if following else _A_CRUISE_MIN_V
-    max_values = _A_CRUISE_MAX_V_FOLLOWING if following else _A_CRUISE_MAX_V
-    a_cruise_min = interp(v_ego_kph, _A_CRUISE_MIN_BP, min_values)
-    a_cruise_max = interp(v_ego_kph, _A_CRUISE_MAX_BP, max_values)
+    following_factor = float(clip(following, 0.0, 1.0))
+    no_lead_min = interp(v_ego_kph, _A_CRUISE_MIN_BP, _A_CRUISE_MIN_V)
+    following_min = interp(v_ego_kph, _A_CRUISE_MIN_BP, _A_CRUISE_MIN_V_FOLLOWING)
+    no_lead_max = interp(v_ego_kph, _A_CRUISE_MAX_BP, _A_CRUISE_MAX_V)
+    following_max = interp(v_ego_kph, _A_CRUISE_MAX_BP, _A_CRUISE_MAX_V_FOLLOWING)
+    a_cruise_min = interp(following_factor, [0.0, 1.0], [no_lead_min, following_min])
+    a_cruise_max = interp(following_factor, [0.0, 1.0], [no_lead_max, following_max])
     return [a_cruise_min, a_cruise_max]
 
 
 class LeadAccelProfileSelector:
-  """Debounce lead presence before switching acceleration-limit profiles."""
+  """Confirm a lead, ramp up authority, and drop authority immediately on loss."""
   def __init__(self):
     self.following = False
+    self.following_factor = 0.0
     self.present_frames = 0
-    self.missing_frames = 0
 
   def update(self, has_lead):
     if has_lead:
       self.present_frames += 1
-      self.missing_frames = 0
       if self.present_frames >= LEAD_PROFILE_CONFIRM_FRAMES:
         self.following = True
+        self.following_factor = min(1.0, self.following_factor + LEAD_PROFILE_RAMP_UP_STEP)
     else:
+      # The following profile has the higher positive-acceleration ceiling.
+      # Never hold that extra authority after the lead is no longer valid.
       self.present_frames = 0
-      self.missing_frames += 1
-      if self.missing_frames >= LEAD_PROFILE_DROPOUT_HOLD_FRAMES:
-        self.following = False
-    return self.following
+      self.following = False
+      self.following_factor = 0.0
+    return self.following, self.following_factor
 
 def limit_accel_in_turns(v_ego, angle_steers, a_target, CP):
     v_ego_kph = v_ego * CV.MS_TO_KPH
@@ -175,6 +180,8 @@ class Planner:
     self.t_idxs_mpc = t_idxs_mpc
     self.accel_profile_selector = LeadAccelProfileSelector()
     self.following_profile = False
+    self.following_profile_factor = 0.0
+    self.accel_limit_max = calc_cruise_accel_limits(init_v)[1]
 
     self.fcw = False
 
@@ -207,8 +214,9 @@ class Planner:
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
 
     has_lead = bool(sm['radarState'].leadOne.status)
-    self.following_profile = self.accel_profile_selector.update(has_lead)
-    accel_limits = calc_cruise_accel_limits(v_ego, self.following_profile)
+    self.following_profile, self.following_profile_factor = self.accel_profile_selector.update(has_lead)
+    accel_limits = calc_cruise_accel_limits(v_ego, self.following_profile_factor)
+    self.accel_limit_max = float(accel_limits[1])
     accel_limits_turns = limit_accel_in_turns(v_ego, sm['carState'].steeringAngleDeg, accel_limits, self.CP)
     if force_slow_decel:
       accel_limits_turns[1] = min(accel_limits_turns[1], AWARENESS_DECEL)
@@ -258,6 +266,8 @@ class Planner:
 
     longitudinalPlan.hasLead = sm['radarState'].leadOne.status
     longitudinalPlan.following = self.following_profile
+    longitudinalPlan.accelLimitMax = self.accel_limit_max
+    longitudinalPlan.accelProfileFactor = self.following_profile_factor
     longitudinalPlan.longitudinalPlanSource = self.mpc.source
     longitudinalPlan.fcw = self.fcw
 

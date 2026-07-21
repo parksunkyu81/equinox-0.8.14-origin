@@ -7,7 +7,6 @@ from selfdrive.car.gm import gmcan
 from selfdrive.car.gm.values import DBC, NO_ASCM, CanBus, CarControllerParams
 from opendbc.can.packer import CANPacker
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
-from selfdrive.controls.lib.longitudinal_planner import calc_cruise_accel_limits
 from selfdrive.car.gm.steer_scheduler import (GMSteeringCommandScheduler, GMSteeringLimitTracker,
                                               GM_STEER_RATE_DOWN,
                                               GM_STEER_RATE_UP)
@@ -105,15 +104,15 @@ class CarController():
     # 따라서 종방향 계산은 매 프레임 먼저 갱신하고, CAN 전송 주기만 별도로 유지한다.
     # ---------------------------------------------------------------
     brake_pressed = bool(CS.out.brakePressed)
-    requested_accel = float(clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+    raw_requested_accel = float(clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+    requested_accel = raw_requested_accel
     comfort_accel_cap = 0.0
     if CS.CP.enableGasInterceptor:
-      # Use the same lead/no-lead profile selected by longitudinal_planner.
-      following_profile = bool(controls.sm['longitudinalPlan'].following)
-      comfort_accel_cap = calc_cruise_accel_limits(CS.out.vEgo, following_profile)[1]
+      # Use the exact lead/no-lead blended cap selected by the planner.
+      comfort_accel_cap = max(0.0, float(controls.sm['longitudinalPlan'].accelLimitMax))
       if requested_accel > 0.0:
         requested_accel = min(requested_accel, comfort_accel_cap)
-    standstill_blocked = CS.out.standstill or CS.out.vEgo <= 0.5 * CV.KPH_TO_MS
+    standstill_blocked = CS.out.standstill or CS.out.vEgo <= V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS
     self.accel = min(requested_accel, 0.0) if brake_pressed or standstill_blocked else requested_accel
 
     if CS.CP.enableGasInterceptor:
@@ -122,8 +121,8 @@ class CarController():
       if c.active and CS.adaptive_Cruise and not brake_pressed and not CS.out.gasPressed and \
          pedal_speed_allowed:
 
-        # 가속 멀티플라이어 설정
-        # 속도별 가속 배율 - 전체적으로 절반으로 줄임
+        # Speed-dependent pedal conversion baseline. Tune this map from logged
+        # pedal command versus measured vehicle acceleration before PID gains.
         """acc_mult = interp(CS.out.vEgo,
                           [0., 10.0 * CV.KPH_TO_MS, 18.0 * CV.KPH_TO_MS, 30.0 * CV.KPH_TO_MS,
                            60.0 * CV.KPH_TO_MS, 80.0 * CV.KPH_TO_MS, 100.0 * CV.KPH_TO_MS],
@@ -153,7 +152,9 @@ class CarController():
     controls.pedal_deadzone_raw_command = float(pedal_command)
     controls.pedal_deadzone_applied_command = float(self.comma_pedal)
     controls.pedal_deadzone_floor = 0.0
-    controls.pedal_deadzone_accel_request = float(self.accel)
+    # Preserve the pre-cap request for road-log PID/pedal-map tuning. Applied
+    # acceleration remains available in carControl.actuatorsOutput.accel.
+    controls.pedal_deadzone_accel_request = raw_requested_accel
     controls.pedal_deadzone_vehicle_accel = float(CS.out.aEgo)
     controls.pedal_comfort_accel_cap = float(comfort_accel_cap)
 

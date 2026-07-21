@@ -88,7 +88,9 @@ class LongControl:
                                                        v_target, v_target_future, CS.brakePressed,
                                                        CS.cruiseState.standstill)
 
-    gas_override = bool(CS.gasPressed) and not bool(self.CP.enableGasInterceptor)
+    # Driver gas always owns longitudinal propulsion. Reset the PID while the
+    # pedal is pressed so a hidden integral cannot be released afterwards.
+    gas_override = bool(CS.gasPressed)
     if self.long_control_state == LongCtrlState.off or gas_override or CS.brakePressed:
       self.reset(CS.vEgo)
       output_accel = 0.

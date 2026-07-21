@@ -30,7 +30,12 @@ class CarInterface(CarInterfaceBase):
     @staticmethod
     def get_pid_accel_limits(CP, current_speed, cruise_speed):
        params = CarControllerParams(CP)
-       return params.ACCEL_MIN, params.ACCEL_MAX
+       # A gas interceptor can add propulsion but cannot apply braking. Keep
+       # the closed-loop controller from integrating into an unreachable
+       # negative output; the planner may still request deceleration for its
+       # trajectory and warning logic.
+       accel_min = 0.0 if CP.enableGasInterceptor else params.ACCEL_MIN
+       return accel_min, params.ACCEL_MAX
        #v_current_kph = current_speed * CV.MS_TO_KPH
        #accel_max_bp = [10., 20., 50.]
        #accel_max_v = [0.7, 1.0, 0.95]
@@ -160,9 +165,8 @@ class CarInterface(CarInterfaceBase):
         ret.tireStiffnessFront, ret.tireStiffnessRear = scale_tire_stiffness(ret.mass, ret.wheelbase, ret.centerToFront,
                                                                              tire_stiffness_factor=tire_stiffness_factor)
 
-        # longitudinal
-        # GPT recommand code
-        # 가속감이 줄어들고, 더 부드러운 가속 및 감속이 가능해지며, 연비가 개선
+        # Longitudinal baseline. Adjust kp/ki and actuator delay only after the
+        # pedal-command/vehicle-acceleration response has been measured in logs.
         ret.longitudinalTuning.kpBP = [0., 5. * CV.KPH_TO_MS, 10. * CV.KPH_TO_MS, 20. * CV.KPH_TO_MS,
                                        30. * CV.KPH_TO_MS, 50. * CV.KPH_TO_MS, 60. * CV.KPH_TO_MS,
                                        80. * CV.KPH_TO_MS, 130. * CV.KPH_TO_MS]
