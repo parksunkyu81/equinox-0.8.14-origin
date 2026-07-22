@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import math
 import numpy as np
-from common.numpy_fast import clip, interp
+from common.numpy_fast import interp
 
 import cereal.messaging as messaging
 from common.conversions import Conversions as CV
@@ -9,156 +9,34 @@ from common.filter_simple import FirstOrderFilter
 from common.realtime import DT_MDL
 from selfdrive.modeld.constants import T_IDXS
 from selfdrive.controls.lib.longcontrol import LongCtrlState
+from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
+from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, CONTROL_N
 from selfdrive.swaglog import cloudlog
 
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
 AWARENESS_DECEL = -0.2  # car smoothly decel at .2m/s^2 when user is distracted
-LEAD_PROFILE_CONFIRM_FRAMES = max(1, round(0.15 / DT_MDL))
-LEAD_PROFILE_RAMP_UP_TIME = 0.60
-LEAD_PROFILE_RAMP_UP_STEP = min(1.0, DT_MDL / LEAD_PROFILE_RAMP_UP_TIME)
 
 # 가속도를 낮추어 엑셀 사용을 최소화합니다.
-"""_A_CRUISE_MIN_V_FOLLOWING = [-1.5, -1.5, -1.2, -1.0, -0.8]
+_A_CRUISE_MIN_V_FOLLOWING = [-1.5, -1.5, -1.2, -1.0, -0.8]
 _A_CRUISE_MIN_V = [-0.8, -1.0, -0.8, -0.5, -0.3]
 _A_CRUISE_MIN_BP = [0., 15., 30., 55., 85.]
 
 _A_CRUISE_MAX_V = [0.8, 0.7, 0.6, 0.5, 0.4]  # 최대 가속도를 낮추어 연비를 개선
 _A_CRUISE_MAX_V_FOLLOWING = [1.0, 0.9, 0.7, 0.5, 0.4]
-_A_CRUISE_MAX_BP = _A_CRUISE_MIN_BP"""
+_A_CRUISE_MAX_BP = _A_CRUISE_MIN_BP
 
-# =========================
-# Cruise accel limits
-# BP: km/h
-# =========================
+_A_TOTAL_MAX_V = [2.5, 3.0, 4.0]  # 회전 시 가속 제한을 낮춤
+_A_TOTAL_MAX_BP = [0., 25., 55.]
 
-_A_CRUISE_MIN_BP = [0., 10., 20., 30., 40., 55., 70., 85., 100.]
-_A_CRUISE_MAX_BP = [0., 1., 10., 15., 20., 30., 40., 55., 70., 85., 100.]
-
-# 앞차 추종 중 최소 가속도
-# 음수 = 감속 허용치 / gas cut 허용치
-# 저속 -1.5는 유지하되, 고속으로 갈수록 부드럽게 완화
-_A_CRUISE_MIN_V_FOLLOWING = [
-  -0.90,  # 0 km/h  : manual-brake style, prefer coast over strong gas cut
-  -1.00,  # 10 km/h : traffic following with light decel reserve
-  -1.00,  # 20 km/h : keep restart recovery from staying deeply negative
-  -0.95,  # 30 km/h : gentle lift-off behavior
-  -0.90,  # 40 km/h : coast-biased following
-  -1.00,  # 55 km/h : 기존값 유지
-  -0.90,  # 70 km/h : 고속 진입 완화
-  -0.80,  # 85 km/h : 기존값 유지
-  -0.70,  # 100 km/h: 고속 울컥/급감속 요구 감소
-]
-
-# 앞차가 없을 때 최소 가속도
-# 불필요한 감속/가속 반복을 줄이기 위해 추종보다 훨씬 약하게 설정
-_A_CRUISE_MIN_V = [
-  -0.80,  # 0 km/h
-  -0.90,  # 10 km/h
-  -0.95,  # 20 km/h
-  -0.80,  # 30 km/h
-  -0.65,  # 40 km/h
-  -0.50,  # 55 km/h
-  -0.40,  # 70 km/h
-  -0.30,  # 85 km/h
-  -0.25,  # 100 km/h
-]
-
-# 앞차가 없을 때 최대 가속도
-# 콤마 페달 사용 기준: 엑셀 사용을 최소화하고 부드럽게 가속
-_A_CRUISE_MAX_V = [
-  1.10,  # 0 km/h
-  1.2045,  # 1 km/h
-  1.155,  # 10 km/h
-  1.10,  # 15 km/h
-  0.95,  # 20 km/h
-  0.792,  # 30 km/h
-  0.755,  # 40 km/h
-  0.735,  # 55 km/h
-  0.770,  # 70 km/h : +10% for better highway speed recovery
-  0.832,  # 85 km/h : +10% for better highway speed recovery
-  0.748,  # 100 km/h: +10% for better highway speed recovery
-]
-
-# 앞차 추종 중 최대 가속도
-# 앞차 따라붙을 때는 일반 cruise보다 조금 더 허용하지만,
-# 40km/h 이후부터는 과한 재가속을 억제
-_A_CRUISE_MAX_V_FOLLOWING = [
-  1.4784,  # 0 km/h  : +10% from the reduced low-speed boost
-  1.619464,  # 1 km/h  : +10% from the reduced low-speed boost
-  1.55848,  # 10 km/h : +10% from the reduced low-speed boost
-  1.694,  # 15 km/h : original boost restored
-  1.47,  # 20 km/h : original boost
-  0.93,  # 30 km/h
-  0.89,  # 40 km/h
-  0.86,  # 55 km/h
-  0.902,  # 70 km/h : +10% for better highway speed recovery
-  0.924,  # 85 km/h : +10% for better highway speed recovery
-  0.814,  # 100 km/h: +10% for better highway speed recovery
-]
-
-"""_A_TOTAL_MAX_V = [2.5, 3.0, 4.0]  # 회전 시 가속 제한을 낮춤
-_A_TOTAL_MAX_BP = [0., 25., 55.]"""
-
-# =========================
-# 코너에서 가속을 얼마나 허용할지 정하는 값
-# BP: km/h
-# =========================
-
-_A_TOTAL_MAX_BP = [0., 10., 20., 30., 40., 55., 70., 85., 100.]
-
-# 코너에서 종가속 + 횡가속 합산 제한
-# 낮을수록 코너 중 가속을 더 강하게 제한
-# 높을수록 코너 중 가속 허용이 커짐
-_A_TOTAL_MAX_V = [
-  2.00,  # 0 km/h   : 저속 급회전/출발가속 억제
-  2.15,  # 10 km/h  : 저속 코너에서 페달 튐 억제
-  2.35,  # 20 km/h  : 골목/교차로 회전 중 과가속 방지
-  2.65,  # 30 km/h  : 저중속 코너 안정성 우선
-  2.90,  # 40 km/h  : 시내 속도에서는 예측 가능한 가속 유지
-  3.12,  # 55 km/h  : 55~60km/h 부근 갑작스러운 가속 해제 방지
-  3.69,  # 70 km/h  : +10% accel room in mild highway curves
-  4.35,  # 85 km/h  : +10% accel room in mild highway curves
-  4.62,  # 100 km/h : +10% accel room in mild highway curves
-]
-
-def calc_cruise_accel_limits(v_ego, following=0.0):
-    v_ego_kph = v_ego * CV.MS_TO_KPH
-    following_factor = float(clip(following, 0.0, 1.0))
-    no_lead_min = interp(v_ego_kph, _A_CRUISE_MIN_BP, _A_CRUISE_MIN_V)
-    following_min = interp(v_ego_kph, _A_CRUISE_MIN_BP, _A_CRUISE_MIN_V_FOLLOWING)
-    no_lead_max = interp(v_ego_kph, _A_CRUISE_MAX_BP, _A_CRUISE_MAX_V)
-    following_max = interp(v_ego_kph, _A_CRUISE_MAX_BP, _A_CRUISE_MAX_V_FOLLOWING)
-    a_cruise_min = interp(following_factor, [0.0, 1.0], [no_lead_min, following_min])
-    a_cruise_max = interp(following_factor, [0.0, 1.0], [no_lead_max, following_max])
+def calc_cruise_accel_limits(v_ego):
+    a_cruise_min = interp(v_ego, _A_CRUISE_MIN_BP, _A_CRUISE_MIN_V_FOLLOWING)
+    a_cruise_max = interp(v_ego, _A_CRUISE_MAX_BP, _A_CRUISE_MAX_V_FOLLOWING)
     return [a_cruise_min, a_cruise_max]
 
-
-class LeadAccelProfileSelector:
-  """Confirm a lead, ramp up authority, and drop authority immediately on loss."""
-  def __init__(self):
-    self.following = False
-    self.following_factor = 0.0
-    self.present_frames = 0
-
-  def update(self, has_lead):
-    if has_lead:
-      self.present_frames += 1
-      if self.present_frames >= LEAD_PROFILE_CONFIRM_FRAMES:
-        self.following = True
-        self.following_factor = min(1.0, self.following_factor + LEAD_PROFILE_RAMP_UP_STEP)
-    else:
-      # The following profile has the higher positive-acceleration ceiling.
-      # Never hold that extra authority after the lead is no longer valid.
-      self.present_frames = 0
-      self.following = False
-      self.following_factor = 0.0
-    return self.following, self.following_factor
-
 def limit_accel_in_turns(v_ego, angle_steers, a_target, CP):
-    v_ego_kph = v_ego * CV.MS_TO_KPH
-    a_total_max = interp(v_ego_kph, _A_TOTAL_MAX_BP, _A_TOTAL_MAX_V)
+    a_total_max = interp(v_ego, _A_TOTAL_MAX_BP, _A_TOTAL_MAX_V)
     a_y = v_ego ** 2 * angle_steers * CV.DEG_TO_RAD / (CP.steerRatio * CP.wheelbase)
     a_x_allowed = math.sqrt(max(a_total_max ** 2 - a_y ** 2, 0.))
     return [a_target[0], min(a_target[1], a_x_allowed)]
@@ -170,18 +48,8 @@ def limit_stop_acceleration(v_ego, a_target):
 
 class Planner:
   def __init__(self, CP, init_v=0.0, init_a=0.0):
-    # Keep the accel-limit helpers lightweight for final actuator users. The
-    # generated Acados solver is only needed when the planner itself starts.
-    from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
-    from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as t_idxs_mpc
-
     self.CP = CP
     self.mpc = LongitudinalMpc()
-    self.t_idxs_mpc = t_idxs_mpc
-    self.accel_profile_selector = LeadAccelProfileSelector()
-    self.following_profile = False
-    self.following_profile_factor = 0.0
-    self.accel_limit_max = calc_cruise_accel_limits(init_v)[1]
 
     self.fcw = False
 
@@ -213,10 +81,7 @@ class Planner:
 
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
 
-    has_lead = bool(sm['radarState'].leadOne.status)
-    self.following_profile, self.following_profile_factor = self.accel_profile_selector.update(has_lead)
-    accel_limits = calc_cruise_accel_limits(v_ego, self.following_profile_factor)
-    self.accel_limit_max = float(accel_limits[1])
+    accel_limits = calc_cruise_accel_limits(v_ego)
     accel_limits_turns = limit_accel_in_turns(v_ego, sm['carState'].steeringAngleDeg, accel_limits, self.CP)
     if force_slow_decel:
       accel_limits_turns[1] = min(accel_limits_turns[1], AWARENESS_DECEL)
@@ -231,17 +96,17 @@ class Planner:
     if (len(sm['modelV2'].position.x) == 33 and
          len(sm['modelV2'].velocity.x) == 33 and
           len(sm['modelV2'].acceleration.x) == 33):
-      x = np.interp(self.t_idxs_mpc, T_IDXS, sm['modelV2'].position.x)
-      v = np.interp(self.t_idxs_mpc, T_IDXS, sm['modelV2'].velocity.x)
-      a = np.interp(self.t_idxs_mpc, T_IDXS, sm['modelV2'].acceleration.x)
+      x = np.interp(T_IDXS_MPC, T_IDXS, sm['modelV2'].position.x)
+      v = np.interp(T_IDXS_MPC, T_IDXS, sm['modelV2'].velocity.x)
+      a = np.interp(T_IDXS_MPC, T_IDXS, sm['modelV2'].acceleration.x)
     else:
-      x = np.zeros(len(self.t_idxs_mpc))
-      v = np.zeros(len(self.t_idxs_mpc))
-      a = np.zeros(len(self.t_idxs_mpc))
+      x = np.zeros(len(T_IDXS_MPC))
+      v = np.zeros(len(T_IDXS_MPC))
+      a = np.zeros(len(T_IDXS_MPC))
     self.mpc.update(sm['carState'], sm['radarState'], sm['modelV2'], v_cruise, x, v, a, prev_accel_constraint)
-    self.v_desired_trajectory = np.interp(T_IDXS[:CONTROL_N], self.t_idxs_mpc, self.mpc.v_solution)
-    self.a_desired_trajectory = np.interp(T_IDXS[:CONTROL_N], self.t_idxs_mpc, self.mpc.a_solution)
-    self.j_desired_trajectory = np.interp(T_IDXS[:CONTROL_N], self.t_idxs_mpc[:-1], self.mpc.j_solution)
+    self.v_desired_trajectory = np.interp(T_IDXS[:CONTROL_N], T_IDXS_MPC, self.mpc.v_solution)
+    self.a_desired_trajectory = np.interp(T_IDXS[:CONTROL_N], T_IDXS_MPC, self.mpc.a_solution)
+    self.j_desired_trajectory = np.interp(T_IDXS[:CONTROL_N], T_IDXS_MPC[:-1], self.mpc.j_solution)
 
     self.fcw = self.mpc.crash_cnt > 5
     if self.fcw:
@@ -265,9 +130,6 @@ class Planner:
     longitudinalPlan.jerks = self.j_desired_trajectory.tolist()
 
     longitudinalPlan.hasLead = sm['radarState'].leadOne.status
-    longitudinalPlan.following = self.following_profile
-    longitudinalPlan.accelLimitMax = self.accel_limit_max
-    longitudinalPlan.accelProfileFactor = self.following_profile_factor
     longitudinalPlan.longitudinalPlanSource = self.mpc.source
     longitudinalPlan.fcw = self.fcw
 
