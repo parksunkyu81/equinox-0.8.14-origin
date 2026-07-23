@@ -165,14 +165,19 @@ class CarInterface(CarInterfaceBase):
 
         # Longitudinal baseline. Adjust kp/ki and actuator delay only after the
         # pedal-command/vehicle-acceleration response has been measured in logs.
-        ret.longitudinalTuning.kpBP = [0., 5. * CV.KPH_TO_MS, 10. * CV.KPH_TO_MS, 20. * CV.KPH_TO_MS,
+        """ret.longitudinalTuning.kpBP = [0., 5. * CV.KPH_TO_MS, 10. * CV.KPH_TO_MS, 20. * CV.KPH_TO_MS,
                                        30. * CV.KPH_TO_MS, 50. * CV.KPH_TO_MS, 60. * CV.KPH_TO_MS,
                                        80. * CV.KPH_TO_MS, 130. * CV.KPH_TO_MS]
-        #ret.longitudinalTuning.kpV = [0.86, 0.79, 0.7, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4]  # Reduced kpV values for smoother acceleration
         ret.longitudinalTuning.kpV = [0.8, 0.74, 0.66, 0.61, 0.56, 0.51, 0.46, 0.42, 0.38]
         ret.longitudinalTuning.kiBP = [0., 25. * CV.KPH_TO_MS, 130. * CV.KPH_TO_MS]
-        #ret.longitudinalTuning.kiV = [0.18, 0.13, 0.1]  # [0.1, 0.075, 0.05] Ki 값을 높이면 시스템이 오차를 빠르게 보상하려고 하여 반응이 빨라짐
-        ret.longitudinalTuning.kiV = [0.16, 0.12, 0.08]
+        ret.longitudinalTuning.kiV = [0.16, 0.12, 0.08]"""
+
+        # HONDA
+        ret.longitudinalTuning.kpBP = [0., 5., 35.]
+        ret.longitudinalTuning.kpV = [1.2, 0.8, 0.5]
+        ret.longitudinalTuning.kiBP = [0., 35.]
+        ret.longitudinalTuning.kiV = [0.18, 0.12]
+
         ret.longitudinalActuatorDelayLowerBound = 0.05  # 값을 줄이면 액츄에이터의 지연시간이 감소하여 보다 빠른 응답
         ret.longitudinalActuatorDelayUpperBound = 0.1
 
