@@ -31,7 +31,10 @@ _A_CRUISE_MIN_BP = [
 ]
 
 _A_CRUISE_MAX_V = [0.8, 0.7, 0.6, 0.5, 0.4]  # 최대 가속도를 낮추어 연비를 개선
-_A_CRUISE_MAX_V_FOLLOWING = [1.0, 0.9, 0.7, 0.5, 0.4]
+# The gas-interceptor road log shows ample PID demand being clipped by this
+# ceiling below 55 km/h. Raise that observed range by 0.15 m/s^2, then taper
+# back to the existing high-speed limit where no tuning data is available.
+_A_CRUISE_MAX_V_FOLLOWING = [1.15, 1.05, 0.85, 0.65, 0.4]
 _A_CRUISE_MAX_BP = _A_CRUISE_MIN_BP
 
 _A_TOTAL_MAX_V = [2.5, 3.0, 4.0]  # 회전 시 가속 제한을 낮춤
