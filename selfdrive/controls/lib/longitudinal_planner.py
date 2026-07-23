@@ -19,30 +19,17 @@ LON_MPC_STEP = 0.2  # first step is 0.2s
 AWARENESS_DECEL = -0.2  # car smoothly decel at .2m/s^2 when user is distracted
 
 # 가속도를 낮추어 엑셀 사용을 최소화합니다.
-_A_CRUISE_MIN_V_FOLLOWING = [-1.5, -1.5, -1.2, -1.0, -0.8]
-_A_CRUISE_MIN_V = [-0.8, -1.0, -0.8, -0.5, -0.3]
+_A_CRUISE_MIN_V_FOLLOWING = [-1.5, -1.5, -1.2, -1.0]
+_A_CRUISE_MIN_V = [-1.2, -1.0, -0.8, -0.5]
 # 방법 2: 기준점을 m/s로 정의
-_A_CRUISE_MIN_BP = [
-  0.0,
-  15.0 * CV.KPH_TO_MS,
-  30.0 * CV.KPH_TO_MS,
-  55.0 * CV.KPH_TO_MS,
-  85.0 * CV.KPH_TO_MS,
-]
+_A_CRUISE_MIN_BP = [0., 15., 25., 40.]
 
-_A_CRUISE_MAX_V = [0.8, 0.7, 0.6, 0.5, 0.4]  # 최대 가속도를 낮추어 연비를 개선
-# The gas-interceptor road log shows ample PID demand being clipped by this
-# ceiling below 55 km/h. Raise that observed range by 0.15 m/s^2, then taper
-# back to the existing high-speed limit where no tuning data is available.
-_A_CRUISE_MAX_V_FOLLOWING = [1.15, 1.05, 0.85, 0.65, 0.4]
+_A_CRUISE_MAX_V = [1.3, 1.1, 0.7, 0.6]  # 최대 가속도를 낮추어 연비를 개선
+_A_CRUISE_MAX_V_FOLLOWING = [1.5, 1.2, 0.8, 0.6]
 _A_CRUISE_MAX_BP = _A_CRUISE_MIN_BP
 
-_A_TOTAL_MAX_V = [2.5, 3.0, 4.0]  # 회전 시 가속 제한을 낮춤
-_A_TOTAL_MAX_BP = [
-  0.0,
-  25.0 * CV.KPH_TO_MS,
-  55.0 * CV.KPH_TO_MS,
-]
+_A_TOTAL_MAX_V = [1.7, 3.2]  # 회전 시 가속 제한을 낮춤
+_A_TOTAL_MAX_BP = [20., 40.]
 
 def calc_cruise_accel_limits(v_ego):
     a_cruise_min = interp(v_ego, _A_CRUISE_MIN_BP, _A_CRUISE_MIN_V_FOLLOWING)
