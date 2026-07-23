@@ -12,7 +12,7 @@ from common.profiler import Profiler
 from common.params import Params, put_nonblocking
 import cereal.messaging as messaging
 from common.conversions import Conversions as CV
-from selfdrive.swaglog import cloudlog
+from selfdrive.swaglog import SWAGLOG_DIR, cloudlog
 from selfdrive.boardd.boardd import can_list_to_can_capnp
 from selfdrive.car.car_helpers import get_car, get_startup_event, get_one_can
 from selfdrive.controls.lib.lane_planner import CAMERA_OFFSET
@@ -38,6 +38,7 @@ from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, CON
 from selfdrive.car.gm.values import SLOW_ON_CURVES, MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
+from selfdrive.controls.lib.pedal_tuning_logger import PedalTuningLogger
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
@@ -173,6 +174,12 @@ class Controls:
 
         self.LoC = LongControl(self.CP)
         self.VM = VehicleModel(self.CP)
+        self.pedal_tuning_logger = None
+        self.pedal_tuning_error_logged = False
+        if self.CP.carName == "gm" and self.CP.enableGasInterceptor and params.get_bool("PedalTuningLogEnabled"):
+            pedal_tuning_dir = os.path.join(SWAGLOG_DIR, "pedal_tuning")
+            self.pedal_tuning_logger = PedalTuningLogger(pedal_tuning_dir)
+            cloudlog.info("pedal tuning CSV logging enabled at %s", pedal_tuning_dir)
 
         if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
             self.LaC = LatControlAngle(self.CP, self.CI)
@@ -1277,6 +1284,23 @@ class Controls:
             self.last_actuators, can_sends = self.CI.apply(CC, self)
             self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
             CC.actuatorsOutput = self.last_actuators
+            if self.pedal_tuning_logger is not None:
+                self.pedal_tuning_logger.log_sample(
+                    mono_time_s=start_time,
+                    v_ego_mps=CS.vEgo,
+                    pid_accel_request_mps2=self.pedal_deadzone_accel_request,
+                    accel_limit_max_mps2=self.sm['longitudinalPlan'].accelLimitMax,
+                    applied_accel_mps2=self.last_actuators.accel,
+                    pedal_command=self.last_actuators.gas,
+                    vehicle_accel_mps2=CS.aEgo,
+                    brake_pressed=CS.brakePressed,
+                    gas_pressed=CS.gasPressed,
+                    controls_active=self.active,
+                    adaptive_cruise=CS.adaptiveCruise,
+                )
+                if self.pedal_tuning_logger.last_error is not None and not self.pedal_tuning_error_logged:
+                    cloudlog.error("pedal tuning CSV logging failed: %s", self.pedal_tuning_logger.last_error)
+                    self.pedal_tuning_error_logged = True
             if self.CP.carName == 'gm':
                 # GM calculates at 100 Hz but transmits steering at 50 Hz. The
                 # CarController state is based only on a command that was really

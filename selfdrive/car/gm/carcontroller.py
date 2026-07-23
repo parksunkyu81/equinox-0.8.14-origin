@@ -108,7 +108,7 @@ class CarController():
     requested_accel = raw_requested_accel
     comfort_accel_cap = 0.0
     if CS.CP.enableGasInterceptor:
-      # Use the exact lead/no-lead blended cap selected by the planner.
+      # max(0.0, 값)은 상한이 음수가 되지 않도록 합니다.
       comfort_accel_cap = max(0.0, float(controls.sm['longitudinalPlan'].accelLimitMax))
       if requested_accel > 0.0:
         requested_accel = min(requested_accel, comfort_accel_cap)

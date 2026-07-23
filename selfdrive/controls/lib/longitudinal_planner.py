@@ -21,14 +21,25 @@ AWARENESS_DECEL = -0.2  # car smoothly decel at .2m/s^2 when user is distracted
 # 가속도를 낮추어 엑셀 사용을 최소화합니다.
 _A_CRUISE_MIN_V_FOLLOWING = [-1.5, -1.5, -1.2, -1.0, -0.8]
 _A_CRUISE_MIN_V = [-0.8, -1.0, -0.8, -0.5, -0.3]
-_A_CRUISE_MIN_BP = [0., 15., 30., 55., 85.]
+# 방법 2: 기준점을 m/s로 정의
+_A_CRUISE_MIN_BP = [
+  0.0,
+  15.0 * CV.KPH_TO_MS,
+  30.0 * CV.KPH_TO_MS,
+  55.0 * CV.KPH_TO_MS,
+  85.0 * CV.KPH_TO_MS,
+]
 
 _A_CRUISE_MAX_V = [0.8, 0.7, 0.6, 0.5, 0.4]  # 최대 가속도를 낮추어 연비를 개선
 _A_CRUISE_MAX_V_FOLLOWING = [1.0, 0.9, 0.7, 0.5, 0.4]
 _A_CRUISE_MAX_BP = _A_CRUISE_MIN_BP
 
 _A_TOTAL_MAX_V = [2.5, 3.0, 4.0]  # 회전 시 가속 제한을 낮춤
-_A_TOTAL_MAX_BP = [0., 25., 55.]
+_A_TOTAL_MAX_BP = [
+  0.0,
+  25.0 * CV.KPH_TO_MS,
+  55.0 * CV.KPH_TO_MS,
+]
 
 def calc_cruise_accel_limits(v_ego):
     a_cruise_min = interp(v_ego, _A_CRUISE_MIN_BP, _A_CRUISE_MIN_V_FOLLOWING)
@@ -50,6 +61,7 @@ class Planner:
   def __init__(self, CP, init_v=0.0, init_a=0.0):
     self.CP = CP
     self.mpc = LongitudinalMpc()
+    self.accel_limit_max = float(calc_cruise_accel_limits(init_v)[1])
 
     self.fcw = False
 
@@ -82,6 +94,10 @@ class Planner:
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
 
     accel_limits = calc_cruise_accel_limits(v_ego)
+    # Publish the same positive-acceleration ceiling used to build this
+    # planner cycle so the final comma-pedal layer never reads the schema's
+    # default 0.0 for an otherwise valid plan.
+    self.accel_limit_max = float(accel_limits[1])
     accel_limits_turns = limit_accel_in_turns(v_ego, sm['carState'].steeringAngleDeg, accel_limits, self.CP)
     if force_slow_decel:
       accel_limits_turns[1] = min(accel_limits_turns[1], AWARENESS_DECEL)
@@ -130,6 +146,7 @@ class Planner:
     longitudinalPlan.jerks = self.j_desired_trajectory.tolist()
 
     longitudinalPlan.hasLead = sm['radarState'].leadOne.status
+    longitudinalPlan.accelLimitMax = self.accel_limit_max
     longitudinalPlan.longitudinalPlanSource = self.mpc.source
     longitudinalPlan.fcw = self.fcw
 

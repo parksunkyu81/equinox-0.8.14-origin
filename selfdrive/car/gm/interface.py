@@ -30,10 +30,8 @@ class CarInterface(CarInterfaceBase):
     @staticmethod
     def get_pid_accel_limits(CP, current_speed, cruise_speed):
        params = CarControllerParams(CP)
-       # A gas interceptor can add propulsion but cannot apply braking. Keep
-       # the closed-loop controller from integrating into an unreachable
-       # negative output; the planner may still request deceleration for its
-       # trajectory and warning logic.
+       # 누적된 값을 흔히 적분 와인드업이라고 합니다. 이후 상황이 바뀌었을 때 반응이 늦거나 이상해질 수 있습니다. --> 콤마 페달 차량에서는 최저 출력을 0.0으로 제한
+       # 플래너는 감속이 얼마나 필요한지 계산하지만, 콤마 페달은 브레이크를 사용할 수 없으므로 실제 PID 출력은 0까지만 내립니다.
        accel_min = 0.0 if CP.enableGasInterceptor else params.ACCEL_MIN
        return accel_min, params.ACCEL_MAX
        #v_current_kph = current_speed * CV.MS_TO_KPH

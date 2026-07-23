@@ -88,8 +88,7 @@ class LongControl:
                                                        v_target, v_target_future, CS.brakePressed,
                                                        CS.cruiseState.standstill)
 
-    # Driver gas always owns longitudinal propulsion. Reset the PID while the
-    # pedal is pressed so a hidden integral cannot be released afterwards.
+    # 운전자가 가속페달을 밟으면 자동 가속을 즉시 중지하고 PID 누적값을 지워, 운전자가 페달을 놓은 뒤 갑자기 자동 가속하는 것을 방지하는 코드입니다.
     gas_override = bool(CS.gasPressed)
     if self.long_control_state == LongCtrlState.off or gas_override or CS.brakePressed:
       self.reset(CS.vEgo)
