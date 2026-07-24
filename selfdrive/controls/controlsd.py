@@ -184,7 +184,9 @@ class Controls:
             cloudlog.info("pedal tuning CSV logging enabled at %s", pedal_tuning_dir)
         self.steering_tuning_logger = None
         self.steering_tuning_error_logged = False
-        if self.CP.lateralTuning.which() == 'torque' and params.get_bool("SteeringTuningLogEnabled"):
+        steering_tuning_enabled = os.environ.get("STEERING_TUNING_LOG_ENABLED", "1").strip().lower() \
+                                   not in ("0", "false", "no", "off")
+        if self.CP.lateralTuning.which() == 'torque' and steering_tuning_enabled:
             steering_tuning_dir = os.path.join(SWAGLOG_DIR, "steering_tuning")
             self.steering_tuning_logger = SteeringTuningLogger(steering_tuning_dir)
             cloudlog.info("steering tuning CSV logging enabled at %s", steering_tuning_dir)
