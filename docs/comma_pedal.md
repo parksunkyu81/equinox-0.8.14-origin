@@ -14,10 +14,9 @@
 - 정차 차량이나 급감속 차량을 만나도 실제 브레이크는 운전자가 밟아야 한다.
 - 운전자가 가속페달 또는 브레이크를 밟으면 자동 가속을 끄고 PID 누적값도 초기화한다.
 
-현재 소스에는 중요한 불일치가 하나 있다.
+`StopAccelBoost=1`이면 정차 중 앞차 출발을 새 레이더 샘플 2회로 확인한 뒤, 정지 상태부터 `25 km/h`까지 제한된 출발 가속 하한을 적용한다.
 
-> `accelLimitMax`를 적용해 `self.accel`은 제한하지만, 실제 페달 계산은 제한 전 값인 `actuators.accel`을 사용한다.
-> 따라서 **현재 최종 페달 명령에는 `accelLimitMax` 상한이 직접 적용되지 않는다.**
+`accelLimitMax`와 출발 부스트를 적용한 최종 가속값 `self.accel`이 실제 페달 계산에도 동일하게 사용된다.
 
 ## 전체 동작 차트
 
@@ -37,7 +36,7 @@ flowchart TD
 
   L["운전자 브레이크"] --> H
   M["운전자 가속페달"] --> H
-  N["1 km/h 이하"] --> H
+  N["1 km/h 이하·출발 부스트 비활성"] --> H
 ```
 
 | 단계 | 쉽게 말하면 | 주요 소스 |
@@ -191,22 +190,20 @@ requested_accel = min(requested_accel, comfort_accel_cap)
 self.accel = requested_accel
 ```
 
-하지만 실제 페달 계산은 현재 다음과 같다.
+실제 페달 계산도 제한이 끝난 `self.accel`을 사용한다.
 
 ```python
-pedal_command = acc_mult * actuators.accel
+pedal_command = acc_mult * self.accel
 self.comma_pedal = clip(pedal_command, 0., 0.85)
 ```
 
 ```mermaid
 flowchart TD
   A["PID 원래 요청 actuators.accel"] --> B["accelLimitMax 적용"]
-  B --> C["self.accel: 로그·actuatorsOutput"]
-  A --> D["현재 실제 페달 계산"]
-  D --> E["acc_mult × actuators.accel"]
+  B --> C["출발 부스트 활성 시 가속 하한 적용"]
+  C --> D["self.accel"]
+  D --> E["acc_mult × self.accel"]
   E --> F["comma_pedal"]
-
-  B -. "현재 연결되지 않음" .-> D
 ```
 
 예를 들어 PID가 `1.0 m/s²`, `accelLimitMax`가 `0.6 m/s²`, `acc_mult`가 `0.23`이면:
@@ -214,11 +211,10 @@ flowchart TD
 | 항목 | 현재 값 |
 |---|---:|
 | PID 원래 요청 | 1.00 m/s² |
-| `self.accel`과 CSV의 적용 가속도 | 0.60 m/s² |
-| 상한을 올바르게 쓴 페달 명령 | `0.23 × 0.60 = 0.138` |
-| 현재 실제 소스의 페달 명령 | `0.23 × 1.00 = 0.230` |
+| 제한 후 `self.accel` | 0.60 m/s² |
+| 실제 페달 명령 | `0.23 × 0.60 = 0.138` |
 
-따라서 공급 경로는 연결돼 있지만, **최종 소비 지점이 제한 후 값이 아니라 제한 전 값을 사용한다.** 튜닝 전에 `pedal_command = acc_mult * self.accel`로 경로를 일치시키는 것이 우선이다.
+출발 부스트가 활성화된 동안에는 속도별 부스트 하한이 `accelLimitMax`보다 조금 높을 때 그 하한까지만 임시 허용하며, 최대 `1.05 m/s²`를 넘지 않는다.
 
 ## 현재 속도별 페달 맵
 
@@ -226,20 +222,18 @@ flowchart TD
 
 | 속도 | `acc_mult` |
 |---:|---:|
-| 0 km/h | 0.150 |
-| 10 km/h | 0.165 |
-| 18 km/h | 0.180 |
+| 0 km/h | 0.180 |
 | 30 km/h | 0.210 |
 | 60 km/h | 0.230 |
 | 80 km/h 이상 | 0.250 |
 
 ```text
-현재 실제 페달 명령 = clip(acc_mult × actuators.accel, 0.0, 0.85)
+현재 실제 페달 명령 = clip(acc_mult × self.accel, 0.0, 0.85)
 ```
 
 | PID 요청 | 속도 | 계산된 페달 명령 |
 |---:|---:|---:|
-| 0.8 m/s² | 20 km/h | 약 0.148 |
+| 0.8 m/s² | 20 km/h | 0.160 |
 | 0.8 m/s² | 30 km/h | 0.168 |
 | 0.8 m/s² | 60 km/h | 0.184 |
 | 0.8 m/s² | 80 km/h | 0.200 |
@@ -317,6 +311,81 @@ TR이 작아짐 → 앞차를 더 가까이 추종 → 재가속이 빠른 적�
 
 계산된 TR은 `dynamicFollowData.mpcTR`로도 발행되어 UI와 로그에서 확인할 수 있다.
 
+## 앞차 출발 부스트: 0~25 km/h
+
+`StopAccelBoost=1`이면 내 차와 앞차가 함께 정지한 상태를 확인한 뒤, 앞차가 출발할 때 일반 PID보다 빠르게 출발하도록 제한된 가속도 하한을 적용한다.
+
+```mermaid
+stateDiagram-v2
+  [*] --> WAITING
+  WAITING --> CONFIRMING: 앞차 출발 후보
+  CONFIRMING --> ACTIVE: 새 레이더 샘플 2회 확인
+  ACTIVE --> NORMAL: 25 km/h 도달
+  ACTIVE --> BLOCKED: 브레이크·가속페달·위험 조건
+  BLOCKED --> WAITING: 다시 정차 조건 확인
+```
+
+CSV의 `launch_state` 값은 다음처럼 읽으면 된다.
+
+| 값 | 상태 | 뜻 |
+|---:|---|---|
+| 0 | DISABLED | 출발 부스트 미사용·대기 조건 아님 |
+| 1 | WAITING | 내 차와 앞차의 정차 확인 완료 또는 진행 중 |
+| 2 | CONFIRMING | 앞차 출발 후보 확인 중 |
+| 3 | ACTIVE | 0~25 km/h 부스트 적용 중 |
+| 4~6 | BLOCKED | 거리 부족·접근·앞차 감속으로 차단 |
+| 7~11 | EXIT | 앞차/레이더 소실·속도·시간초과·운전자 개입·`forceDecel` |
+
+100 Hz 제어 프레임이 아니라 약 15 Hz의 **새 레이더 메시지**만 확인 횟수에 포함한다. 같은 레이더 값을 여러 번 읽어 잘못 출발하는 것을 막기 위한 처리다.
+
+### 출발 준비와 감지
+
+| 항목 | 기준 |
+|---|---:|
+| 내 차 정지 판정 | `0.5 km/h` 이하 |
+| 정차 확인 시간 | `0.5초` |
+| 정차 앞차 거리 | `3~20m` |
+| 대기 중 해제 | 내 차가 먼저 `1 km/h` 초과 |
+| 앞차 정지 속도 | `0.08 m/s` 이하 |
+| 출발 속도 신호 | `vLeadK ≥ 0.30 m/s` |
+| 거리 증가 신호 | 정차 기준보다 `0.20m` 이상, `vRel ≥ 0.10 m/s` |
+| 출발 확인 | 새 레이더 샘플 2회 |
+| 브레이크 중 출발 기억 | 최대 `1.5초` |
+
+브레이크를 밟고 있는 동안에는 절대 가속하지 않는다. 그동안 앞차 출발이 확인되면 짧게 기억했다가, 브레이크를 놓았을 때 거리와 상대속도가 여전히 안전한 경우에만 부스트를 시작한다.
+
+### 속도별 가속 하한
+
+| 차량 속도 | 부스트 가속도 하한 |
+|---:|---:|
+| 0 km/h | 0.70 m/s² |
+| 5 km/h | 0.90 m/s² |
+| 10 km/h | 1.00 m/s² |
+| 15 km/h | 0.95 m/s² |
+| 20 km/h | 0.75 m/s² |
+| 25 km/h | 0.00 m/s² |
+
+```text
+부스트 요청 = max(PID 요청, 속도별 부스트 하한)
+최대 허용값 = min(1.05, max(accelLimitMax, 부스트 하한))
+```
+
+처음 `0.4초`는 늦게 갱신된 플래너 요청을 보완한다. 이후에는 PID가 양의 가속을 요청하거나 앞차와의 거리가 안전하게 벌어지는 동안만 유지한다. `25 km/h`에서는 부스트 하한이 `0`이 되어 일반 PID로 자연스럽게 인계된다.
+
+### 즉시 해제 조건
+
+- 운전자 브레이크 또는 가속페달
+- ACC·`adaptive_Cruise` 해제
+- `forceDecel`
+- 앞차 또는 레이더 메시지 소실이 `0.2초`를 넘음
+- `vRel ≤ -0.20 m/s`로 앞차에 접근
+- 앞차 가속도 `aLeadK ≤ -0.30 m/s²`
+- 현재 거리 또는 1초 뒤 예상거리가 안전거리보다 작음
+- `25 km/h` 도달
+- 작동시간 `10초` 초과
+
+안전거리는 `3.0 + 0.75 × 내 차 속도(m/s)`로 계산한다. Python 제어기뿐 아니라 Panda 안전 훅도 브레이크나 운전자 가속페달이 감지되면 0이 아닌 페달 명령을 차단한다.
+
 ## 자동 페달 허용 조건
 
 다음 조건을 모두 만족해야 페달 명령이 만들어진다.
@@ -333,7 +402,7 @@ flowchart TD
   D -- "아니오" --> X
   D -- "예" --> E{"운전자 가속페달을 안 밟았나?"}
   E -- "아니오" --> X
-  E -- "예" --> F{"속도 > 1 km/h?"}
+  E -- "예" --> F{"속도 > 1 km/h 또는 출발 부스트 활성?"}
   F -- "아니오" --> X
   F -- "예" --> P["자동 페달 계산"]
 ```
@@ -360,9 +429,11 @@ flowchart TD
 | `forceDecel` 활성 | 음수 계획, PID 출력은 0 방향 | 발을 뗀 것처럼 자연 감속 |
 | 운전자 가속페달 | 자동 페달 0, PID 초기화 | 운전자가 직접 가속 |
 | 운전자 브레이크 | 자동 페달 0, PID 초기화 | 운전자가 직접 감속 |
-| 1 km/h 이하 | 자동 페달 0 | 자동 출발하지 않음 |
+| 정차 상태, 앞차도 정지 | 자동 페달 0, 출발 거리 저장 | 앞차 출발을 대기 |
+| 앞차 출발 확인 | 0~25 km/h 부스트 하한 적용 | 출발 지연이 감소 |
+| 25 km/h 도달 | 부스트 종료, 일반 PID 인계 | 가속이 점차 정상화 |
 
-다만 현재 `accelLimitMax` 우회 때문에 “속도가 높아질수록 계획 상한이 감소”하는 효과가 최종 페달 명령에 그대로 보장되지는 않는다.
+`StopAccelBoost=0`이거나 출발 안전 조건을 만족하지 않으면 기존처럼 `1 km/h` 이하에서 자동 페달을 차단한다.
 
 ## CAN과 펌웨어
 
@@ -377,16 +448,27 @@ DAC 2 = max(자동 명령 2, 운전자 페달 2)
 
 오류 상태에서는 자동 명령을 버리고 운전자 페달을 그대로 출력한다.
 
-### 정적 소스 검토에서 발견되는 통신 불일치
+### 현재 명령 주기와 카운터
 
-| 항목 | 현재 송신 측 | 현재 펌웨어 측 | 영향 가능성 |
-|---|---:|---:|---|
-| 명령 주기 | 약 25 Hz, 40 ms | 타이머 주석 약 732 Hz, 타임아웃 10틱 ≈ 14 ms | 다음 명령 전에 `FAULT_TIMEOUT` 가능 |
-| 롤링 카운터 | `0→1→2→3→0` | `0~15` 연속 증가 기대 | `3→0` 패킷 거부 가능 |
+| 항목 | 현재 값 |
+|---|---:|
+| 페달 명령 주기 | 50 Hz, 약 20 ms |
+| 펌웨어 타이머 | 주석 기준 약 732 Hz |
+| 펌웨어 타임아웃 | 73틱, 약 100 ms |
+| 롤링 카운터 | `1→2→...→15→0` |
 
-이는 소스만 보고 판단한 결과다. 실제 하드웨어 타이머와 CAN 로그에서 `GAS_SENSOR.STATE`, 명령 간격, 수신 카운터를 확인해야 한다.
+송신 측과 펌웨어가 모두 4비트 `0~15` 연속 카운터를 사용한다. 첫 명령은 펌웨어 초기값 `0` 다음에 오는 `1`부터 시작한다.
 
-GM Panda 안전 훅도 브레이크·가속페달 상태를 계산하지만, 현재 `current_controls_allowed`에는 계산된 `pedal_pressed`가 반영되지 않는다. 자동 페달 차단이 주로 Python 제어기 한 계층에 의존하는 상태이므로 별도 안전 검토가 필요하다.
+GM Panda 안전 훅은 브레이크 또는 운전자 가속페달이 눌린 상태에서 0이 아닌 `MSG_TX_PEDAL` 명령을 거부한다. 실제 장치에서는 계속 `GAS_SENSOR.STATE`, 명령 간격과 카운터를 확인해야 한다.
+
+Windows에서 Docker로 미리 빌드한 `panda/board/obj/pedal.bin.signed`를 장치에 복사했다면, Panda가 연결된 openpilot 장치에서 다음 명령으로 페달 MCU만 CAN 업데이트할 수 있다.
+
+```bash
+cd /data/openpilot
+python3 panda/tests/pedal/enter_canloader.py panda/board/obj/pedal.bin.signed
+```
+
+이 명령은 시동이 꺼지고 차량이 움직이지 않는 상태에서만 실행한다. 업데이트 중 전원이나 Panda 연결을 끊지 않는다.
 
 ## 경량 페달 튜닝 CSV
 
@@ -410,41 +492,47 @@ GM Panda 안전 훅도 브레이크·가속페달 상태를 계산하지만, 현
 | CSV 컬럼 | 의미 |
 |---|---|
 | `v_ego_kph` | 차량 속도 |
-| `pid_accel_request_mps2` | 상한 적용 전 PID 요청 |
+| `pid_accel_request_mps2` | 출발 부스트 적용 전 PID 요청 |
 | `accel_limit_max_mps2` | 플래너의 기본 최대값 |
+| `launch_accel_request_mps2` | 출발 부스트 적용 후 요청 |
+| `launch_accel_floor_mps2` | 현재 속도의 부스트 하한 |
 | `applied_accel_mps2` | `self.accel`, 즉 상한 적용 후 진단값 |
 | `pedal_command` | 실제 최종 페달 명령 |
 | `vehicle_accel_mps2` | 측정 차량 가속도 |
+| `lead_d_rel_m`, `lead_v_rel_mps` | 앞차 거리와 상대속도 |
+| `lead_v_mps`, `lead_accel_mps2` | 필터링된 앞차 속도와 가속도 |
+| `radar_age_s` | 마지막 레이더 메시지 경과시간 |
+| `launch_state`, `launch_active` | 출발 상태와 활성 여부 |
 | `brake_pressed`, `gas_pressed` | 운전자 입력 |
 | `controls_active`, `adaptive_cruise` | 자동 제어 상태 |
 
-현재 상한 우회 여부는 다음처럼 바로 확인할 수 있다.
+출발 부스트 동작은 다음처럼 확인한다.
 
 ```text
-pid_accel_request > accel_limit_max
-그리고
-pedal_command ≈ acc_mult × pid_accel_request
+launch_state = 3
+launch_accel_request ≥ launch_accel_floor
+pedal_command ≈ acc_mult × applied_accel
 ```
 
-이 패턴이면 실제 페달이 `applied_accel_mps2`가 아니라 제한 전 PID 요청을 사용하고 있다는 뜻이다.
+브레이크·가속페달·앞차 접근·레이더 지연 시 `launch_active`가 즉시 `0`으로 바뀌는지도 함께 확인한다.
 
 ## 튜닝 권장 순서
 
 ```mermaid
 flowchart LR
-  A["1. 단위 확인"] --> B["2. accelLimitMax 우회 수정"]
-  B --> C["3. CAN 주기·카운터 검증"]
+  A["1. 단위 확인"] --> B["2. CAN 주기·카운터 검증"]
+  B --> C["3. 출발 상태·차단 조건 검증"]
   C --> D["4. 페달 명령→실제 가속도 측정"]
-  D --> E["5. acc_mult 조정"]
+  D --> E["5. 출발 하한·acc_mult 조정"]
   E --> F["6. PID kp·ki 조정"]
   F --> G["7. 폐쇄된 환경에서 재검증"]
 ```
 
 1. 속도 기준점이 m/s인지 km/h 변환값인지 먼저 확정한다.
-2. 최종 페달 계산이 제한 후 값 `self.accel`을 사용하도록 연결한다.
-3. CAN 명령 주기, 펌웨어 타임아웃과 4비트 카운터를 일치시킨다.
+2. CAN 명령 50 Hz, 펌웨어 타임아웃과 4비트 카운터가 실제 장치에서도 일치하는지 확인한다.
+3. 출발 감지, 브레이크·가속페달, 거리 부족과 레이더 지연 차단을 검증한다.
 4. 평지에서 속도 구간별 `pedal_command → vehicle_accel_mps2`를 기록한다.
-5. 같은 요청에 실제 가속도가 일정해지도록 `acc_mult`를 먼저 조정한다.
+5. 출발 가속 하한과 `acc_mult`를 먼저 조정한다.
 6. 그 다음 목표 속도 접근성과 잔여 오차를 보며 `kp`, `ki`를 조정한다.
 
 ## 빠른 진단표
@@ -452,10 +540,11 @@ flowchart LR
 | 증상 | 우선 확인할 값 |
 |---|---|
 | PID 요청은 큰데 적용 가속도가 작음 | `accelLimitMax` |
-| 적용 가속도는 작지만 페달 명령이 큼 | `actuators.accel` 우회 경로 |
+| 앞차가 출발해도 부스트가 켜지지 않음 | `launch_state`, 레이더 갱신, 정차 거리 |
+| 부스트가 즉시 꺼짐 | 안전거리, `vRel`, `aLeadK`, `radar_age_s` |
 | 페달 명령이 계속 0 | `active`, `adaptive_Cruise`, 속도, 브레이크·가속페달 |
 | 페달 명령은 있는데 실제 가속이 없음 | CAN `0x200`, CRC, 카운터, `GAS_SENSOR.STATE` |
-| 약 40 ms마다 페달이 끊기는 느낌 | 25 Hz 송신과 펌웨어 타임아웃 |
+| 페달이 주기적으로 끊기는 느낌 | 50 Hz 송신 간격과 펌웨어 상태 |
 | 운전자 페달을 놓은 뒤 튀는 현상 | PID reset 여부와 `gasPressed` 임계값 |
 
 ## 안전 주의

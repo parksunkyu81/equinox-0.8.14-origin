@@ -106,7 +106,9 @@ void CAN1_TX_IRQ_Handler(void) {
 uint16_t gas_set_0 = 0;
 uint16_t gas_set_1 = 0;
 
-#define MAX_TIMEOUT 10U
+// TIM3 runs at about 732 Hz. Allow roughly 100 ms for a new host command;
+// controlsd normally sends at 50 Hz (20 ms).
+#define MAX_TIMEOUT 73U
 uint32_t timeout = 0;
 uint32_t current_index = 0;
 
