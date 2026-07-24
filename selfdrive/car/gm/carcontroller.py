@@ -15,8 +15,6 @@ VisualAlert = car.CarControl.HUDControl.VisualAlert
 GearShifter = car.CarState.GearShifter
 
 CREEP_SPEED = 2.5   # 4km
-PEDAL_COMMAND_STEP = 2  # 100 Hz control loop -> 50 Hz pedal command
-PEDAL_COUNTER_CYCLE = 16
 
 
 # =====================================================================
@@ -109,22 +107,17 @@ class CarController():
     raw_requested_accel = float(clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
     requested_accel = raw_requested_accel
     comfort_accel_cap = 0.0
-    launch_active = bool(getattr(controls, 'pedal_launch_active', False))
-    launch_accel_floor = max(0.0, float(getattr(controls, 'pedal_launch_accel_floor', 0.0)))
     if CS.CP.enableGasInterceptor:
       # max(0.0, 값)은 상한이 음수가 되지 않도록 합니다.
       comfort_accel_cap = max(0.0, float(controls.sm['longitudinalPlan'].accelLimitMax))
-      if launch_active:
-        comfort_accel_cap = max(comfort_accel_cap, launch_accel_floor)
       if requested_accel > 0.0:
         requested_accel = min(requested_accel, comfort_accel_cap)
-    standstill_blocked = (CS.out.standstill or
-                          CS.out.vEgo <= V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS) and not launch_active
+    standstill_blocked = CS.out.standstill or CS.out.vEgo <= V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS
     self.accel = min(requested_accel, 0.0) if brake_pressed or standstill_blocked else requested_accel
 
     if CS.CP.enableGasInterceptor:
       # 이것이 없으면 저속에서 너무 공격적입니다.
-      pedal_speed_allowed = CS.out.vEgo > V_CRUISE_ENABLE_MIN / CV.MS_TO_KPH or launch_active
+      pedal_speed_allowed = CS.out.vEgo > V_CRUISE_ENABLE_MIN / CV.MS_TO_KPH
       if c.active and CS.adaptive_Cruise and not brake_pressed and not CS.out.gasPressed and \
          pedal_speed_allowed:
 
@@ -144,8 +137,8 @@ class CarController():
                           [0., 30 * CV.KPH_TO_MS, 60 * CV.KPH_TO_MS, 80 * CV.KPH_TO_MS],
                           [0.18, 0.21, 0.23, 0.25]
                           )
-        # Apply the planner/launch-limited acceleration, not the pre-cap request.
-        pedal_command = acc_mult * self.accel
+        # 원래 가속 명령 계산
+        pedal_command = acc_mult * actuators.accel
         # 연비 향상을 위해 클리핑
         self.comma_pedal = clip(pedal_command, 0., 0.85)  # 최대 0.8까지만 허용하여 연비 개선
 
@@ -163,10 +156,9 @@ class CarController():
     controls.pedal_deadzone_raw_command = float(pedal_command)
     controls.pedal_deadzone_applied_command = float(self.comma_pedal)
     controls.pedal_deadzone_floor = 0.0
-    # Preserve the original PID request from before launch/cap processing.
-    # Applied acceleration remains in carControl.actuatorsOutput.accel.
-    controls.pedal_deadzone_accel_request = float(
-      getattr(controls, 'pedal_launch_pid_accel_request', raw_requested_accel))
+    # Preserve the pre-cap request for road-log PID/pedal-map tuning. Applied
+    # acceleration remains available in carControl.actuatorsOutput.accel.
+    controls.pedal_deadzone_accel_request = raw_requested_accel
     controls.pedal_deadzone_vehicle_accel = float(CS.out.aEgo)
     controls.pedal_comfort_accel_cap = float(comfort_accel_cap)
 
@@ -235,10 +227,8 @@ class CarController():
     controls.gm_steer_requested_torque = int(self.steer_limit_tracker.requested_torque)
     controls.gm_steer_torque_limited = bool(self.steer_limit_tracker.limited)
 
-    if CS.CP.enableGasInterceptor and (frame % PEDAL_COMMAND_STEP) == 0:
-      # Firmware requires a sequential 4-bit counter. Start at one so a freshly
-      # booted pedal (current_index == 0) accepts the first command.
-      idx = ((frame // PEDAL_COMMAND_STEP) + 1) % PEDAL_COUNTER_CYCLE
+    if CS.CP.enableGasInterceptor and (frame % 4) == 0:
+      idx = (frame // 4) % 4
       can_sends.append(create_gas_interceptor_command(self.packer_pt, self.comma_pedal, idx))
 
     # Show green icon when LKA(차로이탈방지보조) torque is applied, and

@@ -104,8 +104,9 @@ static int gm_rx_hook(CANPacket_t *to_push) {
     // Gas Interceptor Check
     if (addr == MSG_RX_PEDAL) {
       gas_interceptor_detected = 1;
-      int gas_interceptor = GM_GET_INTERCEPTOR(to_push);
-      gas_pressed = gas_interceptor > GM_GAS_INTERCEPTOR_THRESHOLD;
+      //int gas_interceptor = GM_GET_INTERCEPTOR(to_push);
+      //gas_pressed = gas_interceptor > HONDA_GAS_INTERCEPTOR_THRESHOLD;
+      //gas_interceptor_prev = gas_interceptor;
     }
 
     if ((addr == MSG_RX_GAS) && (!gas_interceptor_detected)) {
@@ -149,10 +150,7 @@ static int gm_tx_hook(CANPacket_t *to_send, bool longitudinal_allowed) {
 
   // GAS: safety check (interceptor)
   if (addr == MSG_TX_PEDAL) {
-    // The interceptor adds propulsion, so brake and driver gas must block a
-    // non-zero command in Panda as well as in the Python controller.
-    bool pedal_actuation_allowed = current_controls_allowed && !brake_pressed_prev && !gas_pressed_prev;
-    if (!pedal_actuation_allowed) {
+    if (!current_controls_allowed) {
       if (GET_BYTE(to_send, 0) || GET_BYTE(to_send, 1)) {
         tx = 0;
       }

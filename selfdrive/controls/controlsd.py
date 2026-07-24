@@ -38,7 +38,6 @@ from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, CON
 from selfdrive.car.gm.values import SLOW_ON_CURVES, MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
-from selfdrive.controls.lib.pedal_launch import PedalLaunchBoostController
 from selfdrive.controls.lib.pedal_tuning_logger import PedalTuningLogger
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
@@ -212,7 +211,6 @@ class Controls:
 
         self.slow_on_curves = Params().get_bool('SccSmootherSlowOnCurves')
         self.stop_accel_boost = Params().get_bool('StopAccelBoost')
-        self.pedal_launch_controller = PedalLaunchBoostController()
 
         self.min_set_speed_clu = self.kph_to_clu(MIN_SET_SPEED_KPH)
         self.max_set_speed_clu = self.kph_to_clu(MAX_SET_SPEED_KPH)
@@ -231,20 +229,6 @@ class Controls:
         self.pedal_deadzone_floor = 0.0
         self.pedal_deadzone_accel_request = 0.0
         self.pedal_deadzone_vehicle_accel = 0.0
-        self.pedal_launch_active = False
-        self.pedal_launch_state = 0
-        self.pedal_launch_safe_distance = 0.0
-        self.pedal_launch_distance_delta = 0.0
-        self.pedal_launch_confirm_time = 0.0
-        self.pedal_launch_accel_floor = 0.0
-        self.pedal_launch_pid_accel_request = 0.0
-        self.pedal_launch_accel_request = 0.0
-        self.pedal_launch_radar_age = 0.0
-        self.pedal_launch_lead_valid = False
-        self.pedal_launch_lead_d_rel = 0.0
-        self.pedal_launch_lead_v_rel = 0.0
-        self.pedal_launch_lead_v = 0.0
-        self.pedal_launch_lead_a = 0.0
         self.gm_steer_command_sent = False
         self.gm_steer_command_gap_ms = 0.0
         self.gm_steer_command_deadline_lag_ms = 0.0
@@ -352,50 +336,6 @@ class Controls:
         if radar.leadOne.status:
             return radar.leadOne
         return None
-
-    def update_pedal_launch(self, CS, requested_accel):
-        now = sec_since_boot()
-        lead = self.get_lead(self.sm)
-        radar_updated = bool(self.sm.updated.get('radarState', False))
-        radar_mono_time = float(self.sm.logMonoTime.get('radarState', 0)) / 1e9
-        radar_age = max(0.0, now - radar_mono_time) if radar_mono_time > 0.0 else float("inf")
-        force_decel = (self.sm['driverMonitoringState'].awarenessStatus < 0.) or \
-                      (self.state == State.softDisabling)
-        launch_enabled = self.stop_accel_boost and self.CP.carName == "gm" and \
-                         self.CP.enableGasInterceptor and self.active and CS.adaptiveCruise
-
-        self.pedal_launch_pid_accel_request = float(requested_accel)
-        launch_accel = self.pedal_launch_controller.update(
-            enabled=launch_enabled,
-            brake_pressed=CS.brakePressed,
-            gas_pressed=CS.gasPressed,
-            standstill=CS.standstill,
-            v_ego=CS.vEgo,
-            lead=lead,
-            radar_updated=radar_updated,
-            radar_age=radar_age,
-            requested_accel=requested_accel,
-            accel_limit_max=self.sm['longitudinalPlan'].accelLimitMax,
-            force_decel=force_decel,
-            now=now,
-        )
-
-        controller = self.pedal_launch_controller
-        self.pedal_launch_active = bool(controller.active)
-        self.pedal_launch_state = int(controller.state)
-        self.pedal_launch_safe_distance = float(controller.safe_distance)
-        self.pedal_launch_distance_delta = float(controller.distance_delta)
-        self.pedal_launch_confirm_time = float(controller.confirm_time)
-        self.pedal_launch_accel_floor = float(controller.accel_floor)
-        self.pedal_launch_accel_request = float(launch_accel)
-        self.pedal_launch_radar_age = float(radar_age if math.isfinite(radar_age) else 999.0)
-
-        self.pedal_launch_lead_valid = lead is not None
-        self.pedal_launch_lead_d_rel = float(lead.dRel) if lead is not None else 0.0
-        self.pedal_launch_lead_v_rel = float(lead.vRel) if lead is not None else 0.0
-        self.pedal_launch_lead_v = float(lead.vLeadK) if lead is not None else 0.0
-        self.pedal_launch_lead_a = float(lead.aLeadK) if lead is not None else 0.0
-        return float(launch_accel)
 
     def op_fcw_dangerous_lead(self, CS):
         lead = self.get_lead(self.sm)
@@ -1201,7 +1141,6 @@ class Controls:
             if CS.brakePressed:
                 actuators.accel = min(actuators.accel, 0.0)
                 self.LoC.reset(v_pid=CS.vEgo)
-            actuators.accel = self.update_pedal_launch(CS, actuators.accel)
 
             # Steering PID loop and lateral MPC
             # lat_active = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
@@ -1349,21 +1288,11 @@ class Controls:
                 self.pedal_tuning_logger.log_sample(
                     mono_time_s=start_time,
                     v_ego_mps=CS.vEgo,
-                    pid_accel_request_mps2=self.pedal_launch_pid_accel_request,
+                    pid_accel_request_mps2=self.pedal_deadzone_accel_request,
                     accel_limit_max_mps2=self.sm['longitudinalPlan'].accelLimitMax,
-                    launch_accel_request_mps2=self.pedal_launch_accel_request,
-                    launch_accel_floor_mps2=self.pedal_launch_accel_floor,
                     applied_accel_mps2=self.last_actuators.accel,
                     pedal_command=self.last_actuators.gas,
                     vehicle_accel_mps2=CS.aEgo,
-                    lead_valid=self.pedal_launch_lead_valid,
-                    lead_d_rel_m=self.pedal_launch_lead_d_rel,
-                    lead_v_rel_mps=self.pedal_launch_lead_v_rel,
-                    lead_v_mps=self.pedal_launch_lead_v,
-                    lead_accel_mps2=self.pedal_launch_lead_a,
-                    radar_age_s=self.pedal_launch_radar_age,
-                    launch_state=self.pedal_launch_state,
-                    launch_active=self.pedal_launch_active,
                     brake_pressed=CS.brakePressed,
                     gas_pressed=CS.gasPressed,
                     controls_active=self.active,
@@ -1473,7 +1402,7 @@ class Controls:
         controlsState.pedalFollowTargetDistance = 0.0
         controlsState.pedalFollowGuardDistance = 0.0
         controlsState.pedalFollowPredictedDistance = 0.0
-        controlsState.pedalLaunchActive = bool(self.pedal_launch_active)
+        controlsState.pedalLaunchActive = False
         controlsState.pedalDeadzoneBoostCandidate = bool(self.pedal_deadzone_boost_candidate)
         controlsState.pedalDeadzoneBoostActive = bool(self.pedal_deadzone_boost_active)
         controlsState.pedalDeadzoneRawCommand = float(self.pedal_deadzone_raw_command)
@@ -1494,10 +1423,11 @@ class Controls:
         controlsState.gmSteerCommandTorque = int(self.gm_steer_command_torque)
         controlsState.gmSteerRequestedTorque = int(self.gm_steer_requested_torque)
         controlsState.gmSteerTorqueLimited = bool(self.gm_steer_torque_limited)
-        controlsState.pedalLaunchState = int(self.pedal_launch_state)
-        controlsState.pedalLaunchSafeDistance = float(self.pedal_launch_safe_distance)
-        controlsState.pedalLaunchDistanceDelta = float(self.pedal_launch_distance_delta)
-        controlsState.pedalLaunchConfirmTime = float(self.pedal_launch_confirm_time)
+        # Legacy pedal-safety diagnostics remain neutral for schema compatibility.
+        controlsState.pedalLaunchState = 0
+        controlsState.pedalLaunchSafeDistance = 0.0
+        controlsState.pedalLaunchDistanceDelta = 0.0
+        controlsState.pedalLaunchConfirmTime = 0.0
         controlsState.pedalManualLaunchRequired = False
         controlsState.pedalManualLaunchSeen = False
         controlsState.pedalManualLaunchAssistActive = False
