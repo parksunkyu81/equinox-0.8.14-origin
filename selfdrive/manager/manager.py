@@ -63,6 +63,7 @@ def manager_init() -> None:
     ("NewRadarInterface", "0"),
     ("StopAccelBoost", "1"),
     ("PedalTuningLogEnabled", "1"),
+    ("SteeringTuningLogEnabled", "1"),
 
     ("IsLiveTorque", "1"),
     ("IsLowSpeedFactor", "1"),
