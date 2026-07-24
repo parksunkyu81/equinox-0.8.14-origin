@@ -63,13 +63,16 @@ def manager_init() -> None:
     ("NewRadarInterface", "0"),
     ("StopAccelBoost", "1"),
     ("PedalTuningLogEnabled", "1"),
+    ("SteeringTuningLogEnabled", "1"),
 
     ("IsLiveTorque", "1"),
     ("IsLowSpeedFactor", "1"),
     ("E2ELong", "0"),
 
-    ("TorqueFriction", "120"),
-    ("TorqueMaxLatAccel", "30"),
+    # Stored scales: friction x1000, latAccelFactor x10. Keep defaults inside
+    # torqued's accepted bounds so the displayed values match applied values.
+    ("TorqueFriction", "230"),
+    ("TorqueMaxLatAccel", "20.5"),
 
     # Dynamic TR
     ("CustomTREnabled", "1"),
