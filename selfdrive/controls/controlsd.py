@@ -40,7 +40,6 @@ from selfdrive.car.gm.values import SLOW_ON_CURVES, MIN_CURVE_SPEED
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.pedal_launch import PedalLaunchBoostController
 from selfdrive.controls.lib.pedal_tuning_logger import PedalTuningLogger
-from selfdrive.controls.lib.steering_tuning_logger import SteeringTuningLogger
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
@@ -182,12 +181,6 @@ class Controls:
             pedal_tuning_dir = os.path.join(SWAGLOG_DIR, "pedal_tuning")
             self.pedal_tuning_logger = PedalTuningLogger(pedal_tuning_dir)
             cloudlog.info("pedal tuning CSV logging enabled at %s", pedal_tuning_dir)
-        self.steering_tuning_logger = None
-        self.steering_tuning_error_logged = False
-        if self.CP.lateralTuning.which() == 'torque' and params.get_bool("SteeringTuningLogEnabled"):
-            steering_tuning_dir = os.path.join(SWAGLOG_DIR, "steering_tuning")
-            self.steering_tuning_logger = SteeringTuningLogger(steering_tuning_dir)
-            cloudlog.info("steering tuning CSV logging enabled at %s", steering_tuning_dir)
 
         if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
             self.LaC = LatControlAngle(self.CP, self.CI)
@@ -1386,46 +1379,6 @@ class Controls:
                 self.steer_limited = bool(self.gm_steer_torque_limited)
             else:
                 self.steer_limited = abs(CC.actuators.steer - CC.actuatorsOutput.steer) > 1e-2
-            if self.steering_tuning_logger is not None:
-                torque_debug = self.LaC.get_dynamic_debug_torque_params()
-                live_params = self.sm['liveParameters']
-                self.steering_tuning_logger.log_sample(
-                    mono_time_s=start_time,
-                    v_ego_mps=CS.vEgo,
-                    controls_active=self.active,
-                    desired_curvature=self.desired_curvature,
-                    desired_lateral_accel_mps2=lac_log.desiredLateralAccel,
-                    actual_lateral_accel_mps2=lac_log.actualLateralAccel,
-                    steering_angle_deg=CS.steeringAngleDeg,
-                    angle_offset_deg=live_params.angleOffsetDeg,
-                    angle_offset_average_deg=live_params.angleOffsetAverageDeg,
-                    roll_rad=live_params.roll,
-                    lat_accel_factor=torque_debug['latAccelFactor'],
-                    friction=torque_debug['friction'],
-                    center_offset_target_mps2=torque_debug['centerOffsetTarget'],
-                    center_offset_applied_mps2=torque_debug['centerOffsetApplied'],
-                    center_offset_rate_limited=torque_debug['centerOffsetRateLimited'],
-                    pid_error=lac_log.error,
-                    pid_p=lac_log.p,
-                    pid_i=lac_log.i,
-                    pid_f=lac_log.f,
-                    pid_output=lac_log.output,
-                    requested_steer=actuators.steer,
-                    applied_steer=self.last_actuators.steer,
-                    steer_limited=self.steer_limited,
-                    steering_pressed=CS.steeringPressed,
-                    steering_torque=CS.steeringTorque,
-                    center_i_unwind_active=torque_debug['centerIUnwindActive'],
-                    center_i_before_unwind=torque_debug['centerIBeforeUnwind'],
-                    center_i_after_unwind=torque_debug['centerIAfterUnwind'],
-                    directional_enabled=torque_debug['directionalEnabled'],
-                    directional_assist_left=torque_debug['dirAssistLeft'],
-                    directional_assist_right=torque_debug['dirAssistRight'],
-                    directional_side=torque_debug['dirAssistSide'],
-                )
-                if self.steering_tuning_logger.last_error is not None and not self.steering_tuning_error_logged:
-                    cloudlog.error("steering tuning CSV logging failed: %s", self.steering_tuning_logger.last_error)
-                    self.steering_tuning_error_logged = True
 
         # Disabled: 10~35km/h steer_clip feedback must not reduce target speed.
         self.low_speed_steer_clip_hold_frames = 0

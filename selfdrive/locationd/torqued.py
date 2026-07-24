@@ -3883,7 +3883,7 @@ def main(sm=None, pm=None):
                 return float(default), None
 
         is_live_param = _param_bool("IsLiveTorque", True)
-        is_live = is_live_param
+        is_live = True
         lat_raw, lat_param_raw = _param_float_scaled("TorqueMaxLatAccel", 2.05, "lat")
         fric_raw, fric_param_raw = _param_float_scaled("TorqueFriction", 0.230, "friction")
 

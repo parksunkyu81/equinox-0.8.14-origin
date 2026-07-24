@@ -2,10 +2,8 @@ import math
 
 from cereal import log
 from common.numpy_fast import interp, clip
-from common.realtime import DT_CTRL
 from selfdrive.controls.lib.latcontrol import LatControl, MIN_STEER_SPEED
 from selfdrive.controls.lib.pid import PIDController
-from selfdrive.controls.lib.torque_center import limit_center_offset, unwind_center_integral
 from selfdrive.controls.lib.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
 from common.params import Params
 from decimal import Decimal
@@ -179,6 +177,7 @@ DIRECTIONAL_TORQUE_ASSIST_MIN = 0.94
 DIRECTIONAL_TORQUE_ASSIST_MAX = 1.08
 DIRECTIONAL_TORQUE_FRICTION_GAIN = 0.55
 
+
 class LatControlTorque(LatControl):
     def __init__(self, CP, CI):
         super().__init__(CP, CI)
@@ -187,12 +186,6 @@ class LatControlTorque(LatControl):
         self.torque_from_lateral_accel = CI.torque_from_lateral_accel()
         self.use_steering_angle = CP.lateralTuning.torque.useSteeringAngle
         self.steering_angle_deadzone_deg = CP.lateralTuning.torque.steeringAngleDeadzoneDeg
-        self._center_offset_target = 0.0
-        self._center_offset_applied = 0.0
-        self._center_offset_rate_limited = False
-        self._center_i_unwind_active = False
-        self._center_i_before_unwind = 0.0
-        self._center_i_after_unwind = 0.0
         self._is_equinox_torque_profile = str(getattr(CP, 'carFingerprint', '')) == "CHEVROLET EQUINOX NO RADAR"
         self.update_live_torque_params(CP.lateralTuning.torque.latAccelFactor, CP.lateralTuning.torque.latAccelOffset,
                                        CP.lateralTuning.torque.friction)
@@ -213,7 +206,6 @@ class LatControlTorque(LatControl):
         # 이렇게 하지 않으면 실제 토크 계산은 dynamic 값을 쓰더라도 디버그/화면에서는 고정값처럼 보인다.
         self._dyn_base_live_torque_params = dict(self.live_torque_params)
         self._dyn_last_effective_params = dict(self.live_torque_params)
-        self._last_applied_torque_params = dict(self.live_torque_params)
         self._dyn_effective_active = False
         self._dyn_last_blend = 0.0
         self._dyn_last_corner_strength = 0.0
@@ -229,42 +221,11 @@ class LatControlTorque(LatControl):
         self._dir_torque_assist_right = 1.0
         self._dir_torque_last_side = 0
 
-    def reset(self):
-        super().reset()
-        # LatControl.reset() only clears saturation state. Torque PID state must
-        # also be cleared or an integral learned before disengagement can be
-        # released when lateral control is engaged again.
-        self.pid.reset()
-        self._center_i_unwind_active = False
-        self._center_i_before_unwind = 0.0
-        self._center_i_after_unwind = 0.0
-
-    def _limit_center_offset(self, lat_accel_offset):
-        current = float(getattr(self, '_center_offset_applied', 0.0) or 0.0)
-        target, applied, rate_limited = limit_center_offset(current, lat_accel_offset, DT_CTRL)
-        self._center_offset_target = target
-        self._center_offset_applied = applied
-        self._center_offset_rate_limited = rate_limited
-        return applied
-
-    def _unwind_center_integrator(self, v_ego, desired_lateral_accel, actual_lateral_accel,
-                                  error, steering_pressed=False, steer_limited=False):
-        self._center_i_unwind_active = False
-        self._center_i_before_unwind = float(self.pid.i)
-        self._center_i_after_unwind = float(self.pid.i)
-
-        new_integral, active = unwind_center_integral(
-            self.pid.i, v_ego, desired_lateral_accel, actual_lateral_accel,
-            error, DT_CTRL, steering_pressed=steering_pressed,
-            steer_limited=steer_limited
-        )
-        self.pid.i = new_integral
-        self._center_i_unwind_active = active
-        self._center_i_after_unwind = float(self.pid.i)
-        return active
-
     def update_live_torque_params(self, latAccelFactor, latAccelOffset, friction, totalBucketPoints=0):
-        safe_offset = self._limit_center_offset(latAccelOffset)
+        try:
+            safe_offset = float(clip(float(latAccelOffset), -0.10, 0.10))
+        except Exception:
+            safe_offset = 0.0
         base_params = {
             'latAccelFactor': latAccelFactor,
             'friction': friction,
@@ -598,7 +559,7 @@ class LatControlTorque(LatControl):
         except Exception:
             base = dict(getattr(self, 'live_torque_params', {}))
         try:
-            eff = dict(getattr(self, '_last_applied_torque_params', base))
+            eff = dict(getattr(self, '_dyn_last_effective_params', base))
         except Exception:
             eff = dict(base)
         return {
@@ -616,13 +577,6 @@ class LatControlTorque(LatControl):
             'dirAssistLeft': float(getattr(self, '_dir_torque_assist_left', 1.0) or 1.0),
             'dirAssistRight': float(getattr(self, '_dir_torque_assist_right', 1.0) or 1.0),
             'dirAssistSide': int(getattr(self, '_dir_torque_last_side', 0) or 0),
-            'directionalEnabled': bool(DIRECTIONAL_TORQUE_COMP_ENABLED),
-            'centerOffsetTarget': float(getattr(self, '_center_offset_target', 0.0) or 0.0),
-            'centerOffsetApplied': float(getattr(self, '_center_offset_applied', 0.0) or 0.0),
-            'centerOffsetRateLimited': bool(getattr(self, '_center_offset_rate_limited', False)),
-            'centerIUnwindActive': bool(getattr(self, '_center_i_unwind_active', False)),
-            'centerIBeforeUnwind': float(getattr(self, '_center_i_before_unwind', 0.0) or 0.0),
-            'centerIAfterUnwind': float(getattr(self, '_center_i_after_unwind', 0.0) or 0.0),
             'targetDeltaUp': float(getattr(self, '_dyn_last_target_delta_up', 0.0) or 0.0),
             'targetDeltaDown': float(getattr(self, '_dyn_last_target_delta_down', 0.0) or 0.0),
             'rateLimitedStrong': bool(getattr(self, '_dyn_last_rate_limited_strong', False)),
@@ -679,7 +633,6 @@ class LatControlTorque(LatControl):
             self._dyn_last_blend = 0.0
             if hasattr(self, '_dyn_base_live_torque_params'):
                 self.live_torque_params = dict(self._dyn_base_live_torque_params)
-                self._last_applied_torque_params = dict(self._dyn_base_live_torque_params)
         else:
             if self.use_steering_angle:
                 actual_curvature = -VM.calc_curvature(math.radians(CS.steeringAngleDeg - params.angleOffsetDeg),
@@ -713,10 +666,6 @@ class LatControlTorque(LatControl):
             measurement = actual_lateral_accel + low_speed_factor * actual_curvature
 
             error = setpoint - measurement
-            center_i_unwind_active = self._unwind_center_integrator(
-                CS.vEgo, desired_lateral_accel, actual_lateral_accel, error,
-                steering_pressed=CS.steeringPressed, steer_limited=steer_limited
-            )
 
             effective_torque_params = self._get_dynamic_torque_params(
                 CS.vEgo, desired_curvature, desired_lateral_accel, actual_lateral_accel,
@@ -730,7 +679,6 @@ class LatControlTorque(LatControl):
                 effective_torque_params, CS.vEgo, desired_lateral_accel, actual_lateral_accel,
                 steering_pressed=CS.steeringPressed, steer_limited=steer_limited
             )
-            self._last_applied_torque_params = dict(effective_torque_params)
 
             pid_log.error = self.torque_from_lateral_accel(lateral_accel_value=error,
                                                            torque_params=effective_torque_params)
@@ -746,7 +694,6 @@ class LatControlTorque(LatControl):
                 steer_limited or
                 CS.steeringPressed or
                 CS.vEgo < 5 or
-                center_i_unwind_active or
                 (hs_guard_active and self._hs_guard_hold_frames > 0)
             )
             output_torque = self.pid.update(pid_log.error,
@@ -798,9 +745,6 @@ class LatControlTorque(LatControl):
             pid_log.output = -output_torque
             pid_log.actualLateralAccel = actual_lateral_accel
             pid_log.desiredLateralAccel = desired_lateral_accel
-            pid_log.latAccelFactor = float(effective_torque_params.get('latAccelFactor', 0.0))
-            pid_log.latAccelOffset = float(effective_torque_params.get('latAccelOffset', 0.0))
-            pid_log.friction = float(effective_torque_params.get('friction', 0.0))
             pid_log.saturated = self._check_saturation(self.steer_max - abs(output_torque) < 1e-3, CS, steer_limited)
 
             if hs_guard_active:
