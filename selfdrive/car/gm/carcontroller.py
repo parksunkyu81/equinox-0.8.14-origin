@@ -128,17 +128,21 @@ class CarController():
                            60.0 * CV.KPH_TO_MS, 80.0 * CV.KPH_TO_MS, 100.0 * CV.KPH_TO_MS],
                           [0.132, 0.145, 0.158, 0.185, 0.162, 0.173, 0.184]
                           # (기존: 0.12,0.132,0.144,0.168,0.18,0.192,0.204)
-                          ) """
-
-        acc_mult = interp(CS.out.vEgo,
-                          [0., 30.0 * CV.KPH_TO_MS,
-                           40.0 * CV.KPH_TO_MS, 60.0 * CV.KPH_TO_MS, 80.0 * CV.KPH_TO_MS, 100.0 * CV.KPH_TO_MS],
-                          [0.158, 0.185,
-                           0.182, 0.168, 0.178, 0.188]
                           )
 
-        pedal_command = float(clip(acc_mult * self.accel, 0., 0.75))
-        self.comma_pedal = pedal_command
+        pedal_command = float(clip(acc_mult * self.accel, 0., 0.75))"""
+
+        # 가속 멀티플라이어 설정
+        acc_mult = interp(CS.out.vEgo,
+                          [0., 10.0 * CV.KPH_TO_MS, 18.0 * CV.KPH_TO_MS, 30 * CV.KPH_TO_MS, 60 * CV.KPH_TO_MS, 80 * CV.KPH_TO_MS],
+                          [0.15, 0.165, 0.18, 0.21, 0.23, 0.25]
+                          )
+        # 원래 가속 명령 계산
+        pedal_command = acc_mult * actuators.accel
+        # 연비 향상을 위해 클리핑
+        self.comma_pedal = clip(pedal_command, 0., 0.85)  # 최대 0.8까지만 허용하여 연비 개선
+
+        # self.comma_pedal = pedal_command
       else:
         pedal_command = 0.0
         self.comma_pedal = 0.0

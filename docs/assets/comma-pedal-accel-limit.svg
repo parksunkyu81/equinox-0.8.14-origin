@@ -1,73 +1,79 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="520" viewBox="0 0 1000 520" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="560" viewBox="0 0 1100 560" role="img" aria-labelledby="title desc">
   <title id="title">현재 플래너의 속도별 기본 가속도 범위</title>
-  <desc id="desc">현재 소스의 A_CRUISE_MIN과 A_CRUISE_MAX 곡선을 0에서 150 km/h까지 표시한다. 최대 가속 기준점은 0, 15, 25, 40 m/s다.</desc>
+  <desc id="desc">현재 소스에서 항상 사용되는 FOLLOWING 최소·최대 가속도 곡선이다. 속도 기준점 0, 15, 30, 55, 85는 미터 매 초이며 각각 0, 54, 108, 198, 306 킬로미터 매 시다.</desc>
   <style>
-    :root { --bg:#fff; --fg:#202124; --muted:#5f6368; --grid:#dfe3e8; --max:#2878d0; --min:#d97706; --zero:#8b949e; }
+    :root { --bg:#fff; --fg:#202124; --muted:#5f6368; --grid:#dfe3e8; --max:#2878d0; --min:#d97706; --zero:#8b949e; --road:#eaf3ff; }
     @media (prefers-color-scheme: dark) {
-      :root { --bg:#17191c; --fg:#f1f3f4; --muted:#b0b7c3; --grid:#3a4048; --max:#6eb4ff; --min:#ffb454; --zero:#8b949e; }
+      :root { --bg:#17191c; --fg:#f1f3f4; --muted:#b0b7c3; --grid:#3a4048; --max:#6eb4ff; --min:#ffb454; --zero:#8b949e; --road:#1d2a38; }
     }
     .bg { fill:var(--bg); }
+    .road { fill:var(--road); }
     .grid { stroke:var(--grid); stroke-width:1; }
     .axis { stroke:var(--muted); stroke-width:1.5; }
     .zero { stroke:var(--zero); stroke-width:2; stroke-dasharray:7 6; }
     .max-line { fill:none; stroke:var(--max); stroke-width:4; stroke-linecap:round; stroke-linejoin:round; }
     .min-line { fill:none; stroke:var(--min); stroke-width:4; stroke-linecap:round; stroke-linejoin:round; }
     .max-point { fill:var(--bg); stroke:var(--max); stroke-width:3; }
-    .min-point { fill:var(--min); stroke:var(--bg); stroke-width:2; }
+    .min-point { fill:var(--bg); stroke:var(--min); stroke-width:3; }
     text { fill:var(--fg); font-family:"Noto Sans KR","Malgun Gothic",Arial,sans-serif; font-size:14px; }
     .muted { fill:var(--muted); }
     .legend { font-size:15px; font-weight:600; }
     .note { font-size:13px; }
+    .title { font-size:18px; font-weight:700; }
   </style>
 
-  <rect class="bg" width="1000" height="520"/>
-  <text x="90" y="28" class="muted">MPC 기본 계획 범위 (m/s²)</text>
+  <rect class="bg" width="1100" height="560"/>
+  <text x="90" y="28" class="title">현재 FOLLOWING 기본 가속도 범위</text>
+  <text x="90" y="50" class="muted">세로축: 계획 가속도 (m/s²) · 가로축: 실제 차량 속도 (km/h)</text>
+
+  <!-- Common road-speed area, 0–130 km/h -->
+  <rect class="road" x="90" y="70" width="365.6" height="390"/>
+  <text x="100" y="91" class="muted note">일반 주행·튜닝 구간 0–130 km/h</text>
 
   <g aria-hidden="true">
-    <line class="grid" x1="90" y1="76.7" x2="950" y2="76.7"/><text class="muted" x="76" y="81.7" text-anchor="end">1.2</text>
-    <line class="grid" x1="90" y1="135" x2="950" y2="135"/><text class="muted" x="76" y="140" text-anchor="end">0.8</text>
-    <line class="grid" x1="90" y1="193.3" x2="950" y2="193.3"/><text class="muted" x="76" y="198.3" text-anchor="end">0.4</text>
-    <line class="zero" x1="90" y1="251.7" x2="950" y2="251.7"/><text class="muted" x="76" y="256.7" text-anchor="end">0.0</text>
-    <line class="grid" x1="90" y1="310" x2="950" y2="310"/><text class="muted" x="76" y="315" text-anchor="end">-0.4</text>
-    <line class="grid" x1="90" y1="368.3" x2="950" y2="368.3"/><text class="muted" x="76" y="373.3" text-anchor="end">-0.8</text>
-    <line class="grid" x1="90" y1="426.7" x2="950" y2="426.7"/><text class="muted" x="76" y="431.7" text-anchor="end">-1.2</text>
+    <line class="grid" x1="90" y1="100" x2="990" y2="100"/><text class="muted" x="76" y="105" text-anchor="end">1.0</text>
+    <line class="grid" x1="90" y1="172" x2="990" y2="172"/><text class="muted" x="76" y="177" text-anchor="end">0.5</text>
+    <line class="zero" x1="90" y1="244" x2="990" y2="244"/><text class="muted" x="76" y="249" text-anchor="end">0.0</text>
+    <line class="grid" x1="90" y1="316" x2="990" y2="316"/><text class="muted" x="76" y="321" text-anchor="end">-0.5</text>
+    <line class="grid" x1="90" y1="388" x2="990" y2="388"/><text class="muted" x="76" y="393" text-anchor="end">-1.0</text>
+    <line class="grid" x1="90" y1="460" x2="990" y2="460"/><text class="muted" x="76" y="465" text-anchor="end">-1.5</text>
   </g>
 
-  <line class="axis" x1="90" y1="50" x2="90" y2="440"/>
-  <line class="axis" x1="90" y1="440" x2="950" y2="440"/>
+  <line class="axis" x1="90" y1="70" x2="90" y2="460"/>
+  <line class="axis" x1="90" y1="460" x2="990" y2="460"/>
 
   <g aria-hidden="true">
-    <line class="axis" x1="90" y1="440" x2="90" y2="447"/><text class="muted" x="90" y="468" text-anchor="middle">0</text>
-    <line class="axis" x1="262" y1="440" x2="262" y2="447"/><text class="muted" x="262" y="468" text-anchor="middle">30</text>
-    <line class="axis" x1="434" y1="440" x2="434" y2="447"/><text class="muted" x="434" y="468" text-anchor="middle">60</text>
-    <line class="axis" x1="606" y1="440" x2="606" y2="447"/><text class="muted" x="606" y="468" text-anchor="middle">90</text>
-    <line class="axis" x1="778" y1="440" x2="778" y2="447"/><text class="muted" x="778" y="468" text-anchor="middle">120</text>
-    <line class="axis" x1="950" y1="440" x2="950" y2="447"/><text class="muted" x="950" y="468" text-anchor="middle">150</text>
-  </g>
-  <text x="950" y="492" text-anchor="end" class="muted">실제 차량 속도 (km/h)</text>
-
-  <polyline class="max-line" points="90,76.7 399.6,76.7 606,135 915.6,164.2 950,164.2"/>
-  <polyline class="min-line" points="90,426.7 950,426.7"/>
-
-  <g aria-label="최대 계획값 기준점">
-    <circle class="max-point" cx="90" cy="76.7" r="6"/>
-    <circle class="max-point" cx="399.6" cy="76.7" r="6"/>
-    <circle class="max-point" cx="606" cy="135" r="6"/>
-    <circle class="max-point" cx="915.6" cy="164.2" r="6"/>
-    <text class="muted note" x="399.6" y="64" text-anchor="middle">54 km/h · 1.2</text>
-    <text class="muted note" x="606" y="122" text-anchor="middle">90 km/h · 0.8</text>
-    <text class="muted note" x="915.6" y="151" text-anchor="end">144 km/h · 0.6</text>
-  </g>
-  <g aria-label="최소 계획값">
-    <circle class="min-point" cx="90" cy="426.7" r="6"/>
-    <circle class="min-point" cx="950" cy="426.7" r="6"/>
+    <line class="axis" x1="90" y1="460" x2="90" y2="467"/><text class="muted" x="90" y="488" text-anchor="middle">0</text>
+    <line class="axis" x1="230.6" y1="460" x2="230.6" y2="467"/><text class="muted" x="230.6" y="488" text-anchor="middle">50</text>
+    <line class="axis" x1="371.3" y1="460" x2="371.3" y2="467"/><text class="muted" x="371.3" y="488" text-anchor="middle">100</text>
+    <line class="axis" x1="511.9" y1="460" x2="511.9" y2="467"/><text class="muted" x="511.9" y="488" text-anchor="middle">150</text>
+    <line class="axis" x1="652.5" y1="460" x2="652.5" y2="467"/><text class="muted" x="652.5" y="488" text-anchor="middle">200</text>
+    <line class="axis" x1="793.1" y1="460" x2="793.1" y2="467"/><text class="muted" x="793.1" y="488" text-anchor="middle">250</text>
+    <line class="axis" x1="933.8" y1="460" x2="933.8" y2="467"/><text class="muted" x="933.8" y="488" text-anchor="middle">300</text>
+    <line class="axis" x1="990" y1="460" x2="990" y2="467"/><text class="muted" x="990" y="488" text-anchor="middle">320</text>
   </g>
 
-  <g transform="translate(90 508)">
+  <!-- points: 0,54,108,198,306 km/h -->
+  <polyline class="max-line" points="90,100 241.9,114.4 393.8,143.2 646.9,172 950.6,186.4"/>
+  <polyline class="min-line" points="90,460 241.9,460 393.8,416.8 646.9,388 950.6,359.2"/>
+
+  <g aria-label="속도 기준점">
+    <circle class="max-point" cx="90" cy="100" r="6"/><circle class="min-point" cx="90" cy="460" r="6"/>
+    <circle class="max-point" cx="241.9" cy="114.4" r="6"/><circle class="min-point" cx="241.9" cy="460" r="6"/>
+    <circle class="max-point" cx="393.8" cy="143.2" r="6"/><circle class="min-point" cx="393.8" cy="416.8" r="6"/>
+    <circle class="max-point" cx="646.9" cy="172" r="6"/><circle class="min-point" cx="646.9" cy="388" r="6"/>
+    <circle class="max-point" cx="950.6" cy="186.4" r="6"/><circle class="min-point" cx="950.6" cy="359.2" r="6"/>
+    <text class="muted note" x="241.9" y="105" text-anchor="middle">15 m/s = 54 km/h</text>
+    <text class="muted note" x="393.8" y="134" text-anchor="middle">30 m/s = 108 km/h</text>
+    <text class="muted note" x="646.9" y="162" text-anchor="middle">55 m/s = 198 km/h</text>
+    <text class="muted note" x="950.6" y="177" text-anchor="end">85 m/s = 306 km/h</text>
+  </g>
+
+  <g transform="translate(90 528)">
     <line class="max-line" x1="0" y1="0" x2="34" y2="0"/><circle class="max-point" cx="17" cy="0" r="5"/>
     <text class="legend" x="46" y="5">최대 계획값</text>
-    <line class="min-line" x1="184" y1="0" x2="218" y2="0"/><circle class="min-point" cx="201" cy="0" r="6"/>
-    <text class="legend" x="230" y="5">최소 계획값 -1.2</text>
-    <text class="muted note" x="490" y="5">소스 기준점: 0 / 15 / 25 / 40 m/s</text>
+    <line class="min-line" x1="184" y1="0" x2="218" y2="0"/><circle class="min-point" cx="201" cy="0" r="5"/>
+    <text class="legend" x="230" y="5">최소 계획값</text>
+    <text class="muted note" x="410" y="5">소스 기준점은 km/h가 아니라 m/s</text>
   </g>
 </svg>

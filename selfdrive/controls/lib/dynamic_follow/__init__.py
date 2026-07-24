@@ -14,57 +14,6 @@ from common.data_collector import DataCollector
 
 travis = False
 DEFAULT_TR = 1.3   #1.45
-STOP_ACCEL_BOOST_TR_MAX_SPEED = 20.0 * CV.KPH_TO_MS
-STOP_ACCEL_BOOST_TR_RAMP_END_SPEED = 30.0 * CV.KPH_TO_MS
-STOP_ACCEL_BOOST_TR_LOW = 1.00
-STOP_ACCEL_BOOST_TR_HIGH = 1.05
-LEAD_CATCHUP_MIN_SPEED = 20.0 * CV.KPH_TO_MS
-LEAD_CATCHUP_MAX_SPEED = 110.0 * CV.KPH_TO_MS
-LEAD_CATCHUP_GAP_START = 3.0
-LEAD_CATCHUP_GAP_FULL = 12.0
-FOLLOW_TARGET_TR_BP_KPH = [0.0, 20.0, 40.0, 60.0, 80.0, 100.0]
-FOLLOW_TARGET_TR_V = [1.00, 1.05, 1.10, 1.17, 1.22, 1.25]
-FOLLOW_MIN_DISTANCE = 5.5
-FOLLOW_GUARD_TR_MARGIN = 0.20
-FOLLOW_GUARD_MIN_TR = 0.80
-FOLLOW_PREDICTION_TIME = 2.0
-FOLLOW_GUARD_CLOSING_TIME = 2.0
-
-
-def smoothstep(edge0, edge1, value):
-  if edge1 <= edge0:
-    return float(value >= edge1)
-  x = float(clip((float(value) - edge0) / (edge1 - edge0), 0.0, 1.0))
-  return x * x * (3.0 - 2.0 * x)
-
-
-def follow_target_headway(v_ego):
-  return float(interp(max(float(v_ego), 0.0) * CV.MS_TO_KPH,
-                      FOLLOW_TARGET_TR_BP_KPH, FOLLOW_TARGET_TR_V))
-
-
-def follow_geometry(v_ego, d_rel, v_rel, target_tr):
-  v_ego = max(float(v_ego), 0.0)
-  v_rel = float(v_rel)
-  closing_speed = max(-v_rel, 0.0)
-  target_distance = FOLLOW_MIN_DISTANCE + max(float(target_tr), 0.0) * v_ego
-  guard_tr = max(float(target_tr) - FOLLOW_GUARD_TR_MARGIN, FOLLOW_GUARD_MIN_TR)
-  guard_distance = FOLLOW_MIN_DISTANCE + guard_tr * v_ego + \
-                   FOLLOW_GUARD_CLOSING_TIME * closing_speed
-  predicted_distance = float(d_rel) + FOLLOW_PREDICTION_TIME * v_rel
-  return target_distance, guard_distance, predicted_distance, closing_speed
-LEAD_CATCHUP_CLOSING_START = 0.30
-LEAD_CATCHUP_CLOSING_FULL = 1.00
-LEAD_CATCHUP_SAFE_START_MARGIN = 2.0
-LEAD_CATCHUP_SAFE_FULL_MARGIN = 8.0
-LEAD_CATCHUP_LEAD_ACCEL_MIN = -0.30
-LEAD_CATCHUP_LEAD_ACCEL_FULL = 0.0
-LEAD_CATCHUP_RISE_TIME = 1.0
-LEAD_CATCHUP_FALL_TIME = 0.35
-LEAD_CATCHUP_ACTIVE_THRESHOLD = 0.05
-# Pedal-only longitudinal control cannot brake. A lead may reduce acceleration,
-# but must not shorten headway to request more acceleration than the no-lead path.
-LEAD_CATCHUP_TR_REDUCTION = 0.0
 
 
 class DistanceModController:
@@ -108,10 +57,8 @@ class DynamicFollow:
     #self.op_params = opParams()
     self.df_profiles = dfProfiles()
     self.df_manager = dfManager()
-    # Relative speed/acceleration may increase the requested gap when closing,
-    # but must never shorten it to create extra comma-pedal acceleration.
-    self.dmc_v_rel = DistanceModController(k_i=0.042, k_d=0.08, x_clip=[-1, 0, 0.66], mods=[1.15, 1., 1.])
-    self.dmc_a_rel = DistanceModController(k_i=0.042 * 1.05, k_d=0.08, x_clip=[-1, 0, 0.33], mods=[1.15, 1., 1.])  # a_lead loop is 5% faster
+    self.dmc_v_rel = DistanceModController(k_i=0.042, k_d=0.08, x_clip=[-1, 0, 0.66], mods=[1.15, 1., 0.95])
+    self.dmc_a_rel = DistanceModController(k_i=0.042 * 1.05, k_d=0.08, x_clip=[-1, 0, 0.33], mods=[1.15, 1., 0.98])  # a_lead loop is 5% faster
 
     if not travis:
       self.pm = messaging.PubMaster(['dynamicFollowData'])
@@ -131,11 +78,6 @@ class DynamicFollow:
 
     self.sng_TR = DEFAULT_TR  # 재가속 정지 및 이동 TR
     self.sng_speed = 20 / CV.MS_TO_KPH   # 28.8 kph  (DEF:18.0)
-    self.lead_catchup_active = False
-    self.lead_catchup_factor = 0.0
-    self.base_TR = DEFAULT_TR
-    self.target_follow_distance = 0.0
-    self.predicted_follow_distance = 0.0
 
     self._setup_collector()
     self._setup_changing_variables()
@@ -178,18 +120,11 @@ class DynamicFollow:
       self._gather_data()
 
     if not self.lead_data.status:
-      self._reset_lead_catchup()
-      self.base_TR = DEFAULT_TR
       self.TR = DEFAULT_TR
       #print("if not self.lead_data.status: ======================================== : ", self.TR)
     else:
       self._store_df_data()
-      self.base_TR = self._get_TR()
-      if self.stop_accel_boost:
-        self.base_TR = max(self.base_TR, follow_target_headway(self.car_data.v_ego))
-      self._update_lead_catchup(self.base_TR)
-      self.TR = max(self.min_TR,
-                    self.base_TR - LEAD_CATCHUP_TR_REDUCTION * self.lead_catchup_factor)
+      self.TR = self._get_TR()
       #print("if self.lead_data.status: ======================================== : ", self.TR)
 
     if not travis:
@@ -232,11 +167,6 @@ class DynamicFollow:
       dat = messaging.new_message('dynamicFollowData')
       dat.dynamicFollowData.mpcTR = self.TR
       dat.dynamicFollowData.profilePred = self.model_profile
-      dat.dynamicFollowData.leadCatchupActive = self.lead_catchup_active
-      dat.dynamicFollowData.catchupFactor = self.lead_catchup_factor
-      dat.dynamicFollowData.targetFollowDistance = self.target_follow_distance
-      dat.dynamicFollowData.predictedFollowDistance = self.predicted_follow_distance
-      dat.dynamicFollowData.baseTR = self.base_TR
       #print("dat.dynamicFollowData.mpcTR ======================================== : ", dat.dynamicFollowData.mpcTR)
       #print("dat.dynamicFollowData.profilePred ======================================== : ", dat.dynamicFollowData.profilePred)
       self.pm.send('dynamicFollowData', dat)
@@ -319,70 +249,6 @@ class DynamicFollow:
 
     return [y - (y * global_df_mod * interp(x, speeds, mods)) for x, y in zip(x_vel, y_dist)]
 
-  def _stop_accel_boost_tr(self, TR):
-    if not self.stop_accel_boost or not self.lead_data.status:
-      return TR
-
-    if self.car_data.v_ego > STOP_ACCEL_BOOST_TR_RAMP_END_SPEED:
-      return TR
-
-    boost_TR = interp(self.car_data.v_ego,
-                      [0.0, STOP_ACCEL_BOOST_TR_MAX_SPEED, STOP_ACCEL_BOOST_TR_RAMP_END_SPEED],
-                      [STOP_ACCEL_BOOST_TR_LOW, STOP_ACCEL_BOOST_TR_HIGH, TR])
-    boost_TR = max(boost_TR, self.min_TR)
-    return min(TR, boost_TR)
-
-  def _reset_lead_catchup(self):
-    self.lead_catchup_active = False
-    self.lead_catchup_factor = 0.0
-    self.target_follow_distance = 0.0
-    self.predicted_follow_distance = 0.0
-
-  def _update_lead_catchup(self, base_TR):
-    # Build a continuous catch-up request from gap error, closing speed,
-    # predicted safety margin, and lead acceleration. This fades to zero before
-    # reaching the normal target gap, so catch-up never becomes a closer target.
-    if not self.stop_accel_boost or not self.car_data.cruise_enabled or not self.lead_data.status:
-      self._reset_lead_catchup()
-      return
-
-    v_ego = self.car_data.v_ego
-    v_lead = self.lead_data.v_lead
-    a_lead = self.lead_data.a_lead
-    d_rel = self.lead_data.x_lead
-    speed_ok = LEAD_CATCHUP_MIN_SPEED <= v_ego <= LEAD_CATCHUP_MAX_SPEED
-
-    if v_lead is None or d_rel is None or a_lead is None:
-      target_factor = 0.0
-    else:
-      v_rel = v_lead - v_ego
-      target_distance, guard_distance, predicted_distance, closing_speed = \
-        follow_geometry(v_ego, d_rel, v_rel, target_tr=base_TR)
-      self.target_follow_distance = target_distance
-      self.predicted_follow_distance = predicted_distance
-
-      if not speed_ok:
-        target_factor = 0.0
-      else:
-        gap_error = d_rel - target_distance
-        gap_factor = smoothstep(LEAD_CATCHUP_GAP_START, LEAD_CATCHUP_GAP_FULL, gap_error)
-        closing_factor = 1.0 - smoothstep(LEAD_CATCHUP_CLOSING_START,
-                                          LEAD_CATCHUP_CLOSING_FULL, closing_speed)
-        safe_factor = smoothstep(guard_distance + LEAD_CATCHUP_SAFE_START_MARGIN,
-                                 guard_distance + LEAD_CATCHUP_SAFE_FULL_MARGIN,
-                                 predicted_distance)
-        lead_factor = smoothstep(LEAD_CATCHUP_LEAD_ACCEL_MIN,
-                                 LEAD_CATCHUP_LEAD_ACCEL_FULL, a_lead)
-        target_factor = gap_factor * closing_factor * safe_factor * lead_factor
-
-    if target_factor > self.lead_catchup_factor:
-      self.lead_catchup_factor = min(target_factor,
-                                     self.lead_catchup_factor + DT_MDL / LEAD_CATCHUP_RISE_TIME)
-    else:
-      self.lead_catchup_factor = max(target_factor,
-                                     self.lead_catchup_factor - DT_MDL / LEAD_CATCHUP_FALL_TIME)
-    self.lead_catchup_active = self.lead_catchup_factor >= LEAD_CATCHUP_ACTIVE_THRESHOLD
-
   def _get_TR(self):
     """if self.df_manager.is_auto:  # decide which profile to use, model profile will be updated before this
       df_profile = self.model_profile
@@ -404,11 +270,11 @@ class DynamicFollow:
       #y_dist = [1.15, 1.3781, 1.3791, 1.3457, 1.3134, 1.3145, 1.318, 1.3485, 1.257, 1.144, 0.979, 0.9461, 0.9156]
       y_dist = [1.23, 1.21, 1.18, 1.1781, 1.1791, 1.1457, 1.1134, 1.1145, 1.118, 1.1485, 0.957, 0.944, 0.879, 0.8461, 0.8156]
     elif df_profile == self.df_profiles.stock:  # default to stock
-      return self._stop_accel_boost_tr(1.45)
+      return 1.45
     elif df_profile == self.df_profiles.auto:
-      return self._stop_accel_boost_tr(DEFAULT_TR)
+      return DEFAULT_TR
     elif df_profile == self.df_profiles.roadtrip:  # previous stock following distance
-      return self._stop_accel_boost_tr(1.8)
+      return 1.8
     else:
       raise Exception('Unknown profile type: {}'.format(df_profile))
 
@@ -432,7 +298,6 @@ class DynamicFollow:
 
     TR *= v_rel_dist_factor
     TR *= a_lead_dist_factor
-    TR = self._stop_accel_boost_tr(TR)
 
     return float(clip(TR, self.min_TR, 2.7))
 
@@ -487,14 +352,12 @@ class DynamicFollow:
     #self.car_data.cruise_enabled = CS.adaptive_Cruise
 
   def _get_live_params(self):
-    params = Params()
     #self.global_df_mod = self.op_params.get('global_df_mod')
-    self.global_df_mod = float(params.get("globalDfMod", encoding="utf8"))
+    self.global_df_mod = float(Params().get("globalDfMod", encoding="utf8"))
     if self.global_df_mod != 1.:
       self.global_df_mod = clip(self.global_df_mod, 0.85, 2.5)
 
     #self.min_TR = self.op_params.get('min_TR')
-    self.min_TR = float(params.get("minTR", encoding="utf8"))
+    self.min_TR = float(Params().get("minTR", encoding="utf8"))
     if self.min_TR != 1.:
       self.min_TR = clip(self.min_TR, 0.85, 2.7)
-    self.stop_accel_boost = params.get_bool("StopAccelBoost")

@@ -14,41 +14,43 @@ from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDX
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, CONTROL_N
 from selfdrive.swaglog import cloudlog
 
+
 LON_MPC_STEP = 0.2  # first step is 0.2s
 AWARENESS_DECEL = -0.2  # car smoothly decel at .2m/s^2 when user is distracted
-A_CRUISE_MIN = -1.2
-A_CRUISE_MAX_VALS = [1.2, 1.2, 0.8, 0.6]
-A_CRUISE_MAX_BP = [0., 15., 25., 40.]
 
-# Lookup table for turns
-_A_TOTAL_MAX_V = [1.7, 3.2]
-_A_TOTAL_MAX_BP = [20., 40.]
+# 가속도를 낮추어 엑셀 사용을 최소화합니다.
+_A_CRUISE_MIN_V_FOLLOWING = [-1.5, -1.5, -1.2, -1.0, -0.8]
+_A_CRUISE_MIN_V = [-0.8, -1.0, -0.8, -0.5, -0.3]
+_A_CRUISE_MIN_BP = [0., 15., 30., 55., 85.]
 
+_A_CRUISE_MAX_V = [0.8, 0.7, 0.6, 0.5, 0.4]  # 최대 가속도를 낮추어 연비를 개선
+_A_CRUISE_MAX_V_FOLLOWING = [1.0, 0.9, 0.7, 0.5, 0.4]
+_A_CRUISE_MAX_BP = _A_CRUISE_MIN_BP
 
-def get_max_accel(v_ego):
-  return interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS)
+_A_TOTAL_MAX_V = [2.5, 3.0, 4.0]  # 회전 시 가속 제한을 낮춤
+_A_TOTAL_MAX_BP = [0., 25., 55.]
 
+def calc_cruise_accel_limits(v_ego):
+    a_cruise_min = interp(v_ego, _A_CRUISE_MIN_BP, _A_CRUISE_MIN_V_FOLLOWING)
+    a_cruise_max = interp(v_ego, _A_CRUISE_MAX_BP, _A_CRUISE_MAX_V_FOLLOWING)
+    return [a_cruise_min, a_cruise_max]
 
 def limit_accel_in_turns(v_ego, angle_steers, a_target, CP):
-  """
-  This function returns a limited long acceleration allowed, depending on the existing lateral acceleration
-  this should avoid accelerating when losing the target in turns
-  """
+    a_total_max = interp(v_ego, _A_TOTAL_MAX_BP, _A_TOTAL_MAX_V)
+    a_y = v_ego ** 2 * angle_steers * CV.DEG_TO_RAD / (CP.steerRatio * CP.wheelbase)
+    a_x_allowed = math.sqrt(max(a_total_max ** 2 - a_y ** 2, 0.))
+    return [a_target[0], min(a_target[1], a_x_allowed)]
 
-  # FIXME: This function to calculate lateral accel is incorrect and should use the VehicleModel
-  # The lookup table for turns should also be updated if we do this
-  a_total_max = interp(v_ego, _A_TOTAL_MAX_BP, _A_TOTAL_MAX_V)
-  a_y = v_ego ** 2 * angle_steers * CV.DEG_TO_RAD / (CP.steerRatio * CP.wheelbase)
-  a_x_allowed = math.sqrt(max(a_total_max ** 2 - a_y ** 2, 0.))
-
-  return [a_target[0], min(a_target[1], a_x_allowed)]
-
+def limit_stop_acceleration(v_ego, a_target):
+    if v_ego < 0.5:  # 감속을 부드럽게 조정
+      a_target = max(a_target, AWARENESS_DECEL / 2)
+    return a_target
 
 class Planner:
   def __init__(self, CP, init_v=0.0, init_a=0.0):
     self.CP = CP
     self.mpc = LongitudinalMpc()
-    self.accel_limit_max = float(get_max_accel(init_v))
+    self.accel_limit_max = float(calc_cruise_accel_limits(init_v)[1])
 
     self.fcw = False
 
@@ -70,29 +72,26 @@ class Planner:
     long_control_off = sm['controlsState'].longControlState == LongCtrlState.off
     force_slow_decel = sm['controlsState'].forceDecel
 
-    # Reset current state when not engaged, or user is controlling the speed
     reset_state = long_control_off if self.CP.openpilotLongitudinalControl else not sm['controlsState'].enabled
 
-    # No change cost when user is controlling the speed, or when standstill
     prev_accel_constraint = not (reset_state or sm['carState'].standstill)
 
     if reset_state:
       self.v_desired_filter.x = v_ego
       self.a_desired = 0.0
 
-    # Prevent divergence, smooth in current v_ego
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
 
-    accel_limits = [A_CRUISE_MIN, get_max_accel(v_ego)]
+    accel_limits = calc_cruise_accel_limits(v_ego)
     self.accel_limit_max = float(accel_limits[1])
     accel_limits_turns = limit_accel_in_turns(v_ego, sm['carState'].steeringAngleDeg, accel_limits, self.CP)
     if force_slow_decel:
-      # if required so, force a smooth deceleration
       accel_limits_turns[1] = min(accel_limits_turns[1], AWARENESS_DECEL)
       accel_limits_turns[0] = min(accel_limits_turns[0], accel_limits_turns[1])
-    # clip limits, cannot init MPC outside of bounds
     accel_limits_turns[0] = min(accel_limits_turns[0], self.a_desired + 0.05)
     accel_limits_turns[1] = max(accel_limits_turns[1], self.a_desired - 0.05)
+
+    accel_limits_turns[1] = limit_stop_acceleration(v_ego, accel_limits_turns[1])
 
     self.mpc.set_accel_limits(accel_limits_turns[0], accel_limits_turns[1])
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
@@ -107,17 +106,14 @@ class Planner:
       v = np.zeros(len(T_IDXS_MPC))
       a = np.zeros(len(T_IDXS_MPC))
     self.mpc.update(sm['carState'], sm['radarState'], sm['modelV2'], v_cruise, x, v, a, prev_accel_constraint)
-
     self.v_desired_trajectory = np.interp(T_IDXS[:CONTROL_N], T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(T_IDXS[:CONTROL_N], T_IDXS_MPC, self.mpc.a_solution)
     self.j_desired_trajectory = np.interp(T_IDXS[:CONTROL_N], T_IDXS_MPC[:-1], self.mpc.j_solution)
 
-    # TODO counter is only needed because radar is glitchy, remove once radar is gone
     self.fcw = self.mpc.crash_cnt > 5
     if self.fcw:
       cloudlog.info("FCW triggered")
 
-    # Interpolate 0.05 seconds and save as starting point for next iteration
     a_prev = self.a_desired
     self.a_desired = float(interp(DT_MDL, T_IDXS[:CONTROL_N], self.a_desired_trajectory))
     self.v_desired_filter.x = self.v_desired_filter.x + DT_MDL * (self.a_desired + a_prev) / 2.0
