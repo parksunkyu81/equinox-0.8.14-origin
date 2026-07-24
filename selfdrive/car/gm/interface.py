@@ -173,7 +173,7 @@ class CarInterface(CarInterfaceBase):
         ret.longitudinalTuning.kiV = [0.16, 0.12, 0.08]"""
 
         # HONDA
-        ret.longitudinalTuning.kpBP = [0., 5., 35.]
+        ret.longitudinalTuning.kpBP = [0., 8., 35.]
         ret.longitudinalTuning.kpV = [1.2, 0.8, 0.5]
         ret.longitudinalTuning.kiBP = [0., 35.]
         ret.longitudinalTuning.kiV = [0.18, 0.12]
