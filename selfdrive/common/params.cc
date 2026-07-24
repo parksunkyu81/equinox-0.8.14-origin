@@ -208,7 +208,6 @@ std::unordered_map<std::string, uint32_t> keys = {
 
     {"StopAccelBoost", PERSISTENT},
     {"PedalTuningLogEnabled", PERSISTENT},
-    {"SteeringTuningLogEnabled", PERSISTENT},
 
     {"TorqueFriction", PERSISTENT},
     {"TorqueMaxLatAccel", PERSISTENT},
