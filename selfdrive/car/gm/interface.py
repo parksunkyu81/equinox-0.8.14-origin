@@ -176,7 +176,7 @@ class CarInterface(CarInterfaceBase):
         ret.longitudinalTuning.kpBP = [0., 10. * CV.KPH_TO_MS, 20. * CV.KPH_TO_MS,
                                        30. * CV.KPH_TO_MS, 50. * CV.KPH_TO_MS, 60. * CV.KPH_TO_MS,
                                        80. * CV.KPH_TO_MS, 130. * CV.KPH_TO_MS]
-        ret.longitudinalTuning.kpV = [0.90, 0.85, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4]  # Reduced kpV values for smoother acceleration
+        ret.longitudinalTuning.kpV = [0.85, 0.79, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4]  # Reduced kpV values for smoother acceleration
         #ret.longitudinalTuning.kpV = [0.8, 0.74, 0.66, 0.61, 0.56, 0.51, 0.46, 0.42, 0.38]
         ret.longitudinalTuning.kiBP = [0., 25. * CV.KPH_TO_MS, 130. * CV.KPH_TO_MS]
         # ret.longitudinalTuning.kiV = [0.18, 0.13, 0.1]  # [0.1, 0.075, 0.05] Ki 값을 높이면 시스템이 오차를 빠르게 보상하려고 하여 반응이 빨라짐
