@@ -131,9 +131,9 @@ class CarController():
                           ) """
 
         acc_mult = interp(CS.out.vEgo,
-                          [0., 10.0 * CV.KPH_TO_MS, 20.0 * CV.KPH_TO_MS, 30.0 * CV.KPH_TO_MS,
+                          [0., 30.0 * CV.KPH_TO_MS,
                            40.0 * CV.KPH_TO_MS, 60.0 * CV.KPH_TO_MS, 80.0 * CV.KPH_TO_MS, 100.0 * CV.KPH_TO_MS],
-                          [0.132, 0.145, 0.158, 0.185,
+                          [0.158, 0.185,
                            0.182, 0.168, 0.178, 0.188]
                           )
 
