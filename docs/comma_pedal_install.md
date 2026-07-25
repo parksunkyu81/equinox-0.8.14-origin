@@ -147,3 +147,21 @@ USB 장치에 기록하지 않고 파일만 검사합니다.
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\output\pedal-firmware-gm-low-impedance-0.8.14\flash_pedal_dfu_docker.ps1 -SkipImageBuild -VerifyOnly
 ```
+
+### 랜선을 뽑은 다음 다시 연결후 513번 보여야 한다. 
+
+```powershell
+cd /data/openpilot
+python3 selfdrive/debug/can_printer.py --bus 0 --max_msg 514
+
+0201( 513)(...)
+```
+추가로 페달 인식 여부를 확인합니다.
+```powershell
+python3 -c 'from common.params import Params; from cereal import car; d=Params().get("CarParams"); print("enableGasInterceptor:", car.CarParams.from_bytes(d).enableGasInterceptor if d else "NO CarParams")'
+```
+
+정상 결과:
+```powershell
+enableGasInterceptor: True
+``` 
