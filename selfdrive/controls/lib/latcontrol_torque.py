@@ -163,6 +163,12 @@ DYN_LAT_FACTOR_MAX = 2.42
 DYN_FRICTION_MIN = 0.165
 DYN_FRICTION_MAX = 0.305
 
+# A learned center offset is applied to feedforward even on a straight road.
+# Keep the final controller-side clamp independent from torqued so a stale or
+# malformed publisher can never create a large continuous steering bias.
+LAT_ACCEL_OFFSET_ABS_MAX = 0.03
+LAT_ACCEL_OFFSET_DEADBAND = 0.003
+
 # Directional torque balance.
 # latAccelOffset remains the straight-line bias correction. These small,
 # bounded per-direction assists compensate left/right corner response
@@ -223,7 +229,11 @@ class LatControlTorque(LatControl):
 
     def update_live_torque_params(self, latAccelFactor, latAccelOffset, friction, totalBucketPoints=0):
         try:
-            safe_offset = float(clip(float(latAccelOffset), -0.10, 0.10))
+            safe_offset = float(clip(float(latAccelOffset),
+                                     -LAT_ACCEL_OFFSET_ABS_MAX,
+                                     LAT_ACCEL_OFFSET_ABS_MAX))
+            if abs(safe_offset) < LAT_ACCEL_OFFSET_DEADBAND:
+                safe_offset = 0.0
         except Exception:
             safe_offset = 0.0
         base_params = {

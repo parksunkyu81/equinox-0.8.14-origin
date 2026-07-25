@@ -219,9 +219,10 @@ DISABLE_LATACCEL_OFFSET_LEARNING = False  # master kill switch; vehicle profile 
 # 2020 Korean Equinox 1.6 diesel / no-radar fingerprint. The wider envelope is
 # enabled only for this platform and only after balanced, high-quality samples.
 EQUINOX_TORQUE_FINGERPRINT = "CHEVROLET EQUINOX NO RADAR"
-EQUINOX_CENTER_OFFSET_ABS_MAX = 0.10
+EQUINOX_CENTER_OFFSET_ABS_MAX = 0.03
 EQUINOX_CENTER_OFFSET_MIN_KPH = 30.0
 EQUINOX_CENTER_OFFSET_MAX_KPH = 120.0
+EQUINOX_CENTER_OFFSET_MAX_ROLL_RAD = math.radians(1.5)
 
 # Published latAccelFactor assist.
 # Lower latAccelFactor commands more steering torque. Keep the learner stable, but
@@ -247,9 +248,9 @@ LIMITED_CORNER_WEIGHT = 0.30
 #  - aggressive:  빠르게 따라가되 step/clamp로 안전 확보
 LTP_OFFSET_PRESET = os.environ.get("LTP_OFFSET_PRESET", "balanced").lower().strip()
 _LTP_OFFSET_PRESETS = {
-    "conservative": {"min_ok_abs": 180, "min_ok_frac": 0.75, "min_ratio": 0.90, "step_max": 0.0015, "cooldown_s": 8.0},
-    "balanced": {"min_ok_abs": 120, "min_ok_frac": 0.70, "min_ratio": 0.85, "step_max": 0.0025, "cooldown_s": 5.0},
-    "aggressive": {"min_ok_abs": 80, "min_ok_frac": 0.65, "min_ratio": 0.80, "step_max": 0.0035, "cooldown_s": 3.0},
+    "conservative": {"min_ok_abs": 1200, "min_ok_frac": 0.85, "min_ratio": 0.95, "step_max": 0.00025, "cooldown_s": 15.0},
+    "balanced": {"min_ok_abs": 900, "min_ok_frac": 0.80, "min_ratio": 0.90, "step_max": 0.00050, "cooldown_s": 10.0},
+    "aggressive": {"min_ok_abs": 600, "min_ok_frac": 0.75, "min_ratio": 0.88, "step_max": 0.00075, "cooldown_s": 8.0},
 }
 _LTP_OFFSET_CFG = _LTP_OFFSET_PRESETS.get(LTP_OFFSET_PRESET, _LTP_OFFSET_PRESETS["balanced"])
 
@@ -258,7 +259,8 @@ STRAIGHT_OK_MIN_FRAC = float(_LTP_OFFSET_CFG["min_ok_frac"])
 STRAIGHT_OK_MIN_RATIO = float(_LTP_OFFSET_CFG["min_ratio"])
 OFFSET_UPDATE_MAX_STEP = float(_LTP_OFFSET_CFG["step_max"])
 OFFSET_UPDATE_MIN_INTERVAL_S = float(_LTP_OFFSET_CFG["cooldown_s"])
-OFFSET_UPDATE_TARGET_ABS_MAX = 0.10
+OFFSET_UPDATE_TARGET_ABS_MAX = EQUINOX_CENTER_OFFSET_ABS_MAX
+OFFSET_MIN_OBSERVATION_S = 60.0
 STRAIGHT_BIAS_OK_MULT = 1.00
 
 # 직선 오프셋(윈도우) 아웃라이어 제거(MAD 기반)
@@ -526,7 +528,7 @@ QUALITY_STEER_PRESSED_LOW_SPEED_KPH = 30.0
 QUALITY_STEER_PRESSED_EXTEND_GUARD_KPH = 30.0
 QUALITY_FREEZE_HOLD_S = 0.65
 
-VERSION = 36  # Equinox adaptive envelope and guarded center-offset learning
+VERSION = 37  # Conservative, per-drive center-offset learning
 
 
 def slope2rot(slope):
@@ -922,7 +924,7 @@ class TorqueEstimator:
         self.last_is_frozen = False
         self.stop_freeze_until = 0.0
 
-        self._straight_bias_win_s = 20.0
+        self._straight_bias_win_s = 90.0
         self._straight_bias = deque()
         self.last_straight_sampled = False
         self.last_straight_w = 0.0
@@ -1030,7 +1032,6 @@ class TorqueEstimator:
                                else OFFSET_SANITY_ABS)
         self._car_tune_type = CP.lateralTuning.which() if hasattr(CP, 'lateralTuning') else None
 
-        self._pending_straight_restore = None
         warm_loaded, warm_params, warm_decay = self._try_restore_warm_state(CP)
         if warm_loaded:
             initial_params = warm_params
@@ -1336,6 +1337,15 @@ class TorqueEstimator:
             return False
 
         self._update_straight_window_stats()
+        try:
+            sample_times = [
+                float(s[0]) for s in self._straight_bias
+                if isinstance(s, (list, tuple)) and len(s) >= 6 and np.isfinite(s[0])
+            ]
+            if len(sample_times) < 2 or (max(sample_times) - min(sample_times)) < OFFSET_MIN_OBSERVATION_S:
+                return False
+        except Exception:
+            return False
         min_ok = self._straight_min_ok_required(self._straight_win_total)
         if self._straight_win_ok < int(min_ok):
             return False
@@ -1446,7 +1456,10 @@ class TorqueEstimator:
 
             init = {
                 'latAccelFactor': float(filt.get('latAccelFactor', self.base_params['latAccelFactor'])),
-                'latAccelOffset': float(filt.get('latAccelOffset', self.base_params['latAccelOffset'])),
+                # Center offset is road/camber dependent. Relearn it from
+                # current-drive straight samples instead of restoring a bias
+                # learned on a previous route.
+                'latAccelOffset': 0.0,
                 'frictionCoefficient': float(filt.get('frictionCoefficient', self.base_params['frictionCoefficient'])),
             }
 
@@ -1520,11 +1533,6 @@ class TorqueEstimator:
                 # 버전 차이로 버킷 복원을 스킵했을 때도, 필터 값만으로 빠른 liveValid를 지원
                 pass
 
-            win = st.get("straightWindow", {}) or {}
-            samples = win.get("samples", None)
-            if isinstance(samples, list) and len(samples) > 0:
-                self._pending_straight_restore = samples
-
             cloudlog.warning(
                 f"LiveTorque: warm state restored ({src})" + (" [filtered-only]" if not restore_buckets else ""))
             self._warm_restored = True
@@ -1534,24 +1542,6 @@ class TorqueEstimator:
             cloudlog.exception(f"LiveTorque: warm restore failed: {e}")
             return False, {}, self.decay
 
-    def _apply_pending_straight_restore(self, t_now: float):
-        if not self._pending_straight_restore:
-            return
-        try:
-            for it in self._pending_straight_restore:
-                if not (isinstance(it, (list, tuple)) and len(it) >= 6):
-                    continue
-                age_s = float(it[0])
-                if age_s < 0.0 or age_s > float(self._straight_bias_win_s) * 1.5:
-                    continue
-                tt = float(t_now) - float(age_s)
-                self._straight_bias.append((tt, float(it[1]), float(it[2]), float(it[3]), float(it[4]), bool(it[5])))
-            self._pending_straight_restore = None
-            self._update_straight_window_stats()
-        except Exception as e:
-            cloudlog.exception(f"LiveTorque: apply pending straight window failed: {e}")
-            self._pending_straight_restore = None
-
     def save_warm_state(self, reason: str = "periodic"):
         try:
             os.makedirs(LTP_LOG_DIR, exist_ok=True)
@@ -1559,21 +1549,11 @@ class TorqueEstimator:
             t_ref = float(self.last_time) if (self.last_time is not None and np.isfinite(self.last_time)) else float(
                 time.monotonic())
 
-            samples = []
-            for (tt, steer_app, yaw_rate, latacc, vego, ok) in list(self._straight_bias):
-                try:
-                    age = float(max(0.0, min(float(self._straight_bias_win_s), t_ref - float(tt))))
-                    samples.append([age, float(steer_app), float(yaw_rate), float(latacc), float(vego), bool(ok)])
-                except Exception:
-                    continue
-
             try:
                 latF = float(self.filtered_params['latAccelFactor'].x)
-                latO = float(self.filtered_params['latAccelOffset'].x)
                 fric = float(self.filtered_params['frictionCoefficient'].x)
             except Exception:
                 latF = float(self.base_params['latAccelFactor'])
-                latO = float(self.base_params['latAccelOffset'])
                 fric = float(self.base_params['frictionCoefficient'])
 
             st = {
@@ -1588,7 +1568,8 @@ class TorqueEstimator:
 
                 "filtered": {
                     "latAccelFactor": float(latF),
-                    "latAccelOffset": float(latO),
+                    # Persist no directional center bias across drives.
+                    "latAccelOffset": 0.0,
                     "frictionCoefficient": float(fric),
                     "decay": float(self.decay),
                 },
@@ -1601,7 +1582,7 @@ class TorqueEstimator:
 
                 "straightWindow": {
                     "win_s": float(self._straight_bias_win_s),
-                    "samples": samples[-800:],
+                    "samples": [],
                 },
             }
 
@@ -2391,7 +2372,6 @@ class TorqueEstimator:
                 return
 
         elif which == "liveLocationKalman":
-            self._apply_pending_straight_restore(t)
             if len(self.raw_points['steer_torque']) == self.hist_len:
                 yaw_rate = msg.angularVelocityCalibrated.value[2]
                 roll = msg.orientationNED.value[0]
@@ -2454,6 +2434,8 @@ class TorqueEstimator:
                         self._offset_learning_enabled and
                         (vego is not None and
                          EQUINOX_CENTER_OFFSET_MIN_KPH <= (vego * 3.6) <= EQUINOX_CENTER_OFFSET_MAX_KPH) and
+                        (roll is not None and np.isfinite(roll) and
+                         abs(roll) <= EQUINOX_CENTER_OFFSET_MAX_ROLL_RAD) and
                         (yaw_rate is not None and abs(yaw_rate) <= STRAIGHT_YAW_RATE_MAX) and
                         (abs(lateral_acc) <= STRAIGHT_LATACC_MAX) and
                         (steer is not None and np.isfinite(steer) and abs(steer) <= STRAIGHT_STEER_MAX_FOR_OFFSET) and
@@ -4001,9 +3983,10 @@ def main(sm=None, pm=None):
 
                 cur.latAccelFactorFiltered = merge_with_cache(prev.latAccelFactorFiltered, cur.latAccelFactorFiltered,
                                                               EMA_ALPHA)
-                cur.latAccelOffsetFiltered = (merge_with_cache(
-                    prev.latAccelOffsetFiltered, cur.latAccelOffsetFiltered, EMA_ALPHA)
-                    if estimator._offset_learning_enabled else 0.0)
+                # Center offset is deliberately session-local. Never merge a
+                # previous route's directional bias into the persistent cache.
+                cur.latAccelOffsetRaw = 0.0
+                cur.latAccelOffsetFiltered = 0.0
                 cur.frictionCoefficientFiltered = merge_with_cache(prev.frictionCoefficientFiltered,
                                                                    cur.frictionCoefficientFiltered, EMA_ALPHA)
                 cur.decay = max(prev.decay, cur.decay)
@@ -4080,7 +4063,6 @@ def main(sm=None, pm=None):
                     try:
                         estimator.reset()
                         estimator._straight_bias = deque()
-                        estimator._pending_straight_restore = None
                         estimator._straight_win_ok = 0;
                         estimator._straight_win_total = 0;
                         estimator._straight_win_ok_ratio = 0.0
