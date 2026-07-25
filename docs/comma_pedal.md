@@ -388,46 +388,6 @@ DAC 2 = max(자동 명령 2, 운전자 페달 2)
 
 GM Panda 안전 훅도 브레이크·가속페달 상태를 계산하지만, 현재 `current_controls_allowed`에는 계산된 `pedal_pressed`가 반영되지 않는다. 자동 페달 차단이 주로 Python 제어기 한 계층에 의존하는 상태이므로 별도 안전 검토가 필요하다.
 
-## 경량 페달 튜닝 CSV
-
-전체 `loggerd`는 현재 프로세스 목록에서 주석 처리돼 있지만, 콤마 페달 튜닝 CSV는 별도 백그라운드 스레드로 기록한다.
-
-| 환경 | 저장 폴더 |
-|---|---|
-| 차량 장치 | `/data/log/pedal_tuning/` |
-| PC | `~/.comma/log/pedal_tuning/` |
-
-기록 조건과 용량:
-
-- GM 콤마 페달 장착 차량
-- `PedalTuningLogEnabled=1`
-- 최대 `10 Hz`
-- 파일당 약 `5 MB`
-- 최근 10개 파일, 총 약 `50 MB`
-- 약 1초마다 버퍼 플러시
-- 쓰기 큐가 가득 차면 제어 루프를 막지 않고 샘플을 버림
-
-| CSV 컬럼 | 의미 |
-|---|---|
-| `v_ego_kph` | 차량 속도 |
-| `pid_accel_request_mps2` | 상한 적용 전 PID 요청 |
-| `accel_limit_max_mps2` | 플래너의 기본 최대값 |
-| `applied_accel_mps2` | `self.accel`, 즉 상한 적용 후 진단값 |
-| `pedal_command` | 실제 최종 페달 명령 |
-| `vehicle_accel_mps2` | 측정 차량 가속도 |
-| `brake_pressed`, `gas_pressed` | 운전자 입력 |
-| `controls_active`, `adaptive_cruise` | 자동 제어 상태 |
-
-현재 상한 우회 여부는 다음처럼 바로 확인할 수 있다.
-
-```text
-pid_accel_request > accel_limit_max
-그리고
-pedal_command ≈ acc_mult × pid_accel_request
-```
-
-이 패턴이면 실제 페달이 `applied_accel_mps2`가 아니라 제한 전 PID 요청을 사용하고 있다는 뜻이다.
-
 ## 튜닝 권장 순서
 
 ```mermaid
