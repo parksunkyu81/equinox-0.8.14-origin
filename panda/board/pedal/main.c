@@ -241,12 +241,17 @@ void TIM3_IRQ_Handler(void) {
   }
 }
 
+// Scale the original low-impedance comma pedal ADC readings for GM vehicles.
+uint32_t adjust_gm_adc(uint32_t read_val) {
+  return ((read_val * 1545U) / 1000U) + 25U;
+}
+
 // ***************************** main code *****************************
 
 void pedal(void) {
   // read/write
-  pdl0 = adc_get(ADCCHAN_ACCEL0);
-  pdl1 = adc_get(ADCCHAN_ACCEL1);
+  pdl0 = adjust_gm_adc(adc_get(ADCCHAN_ACCEL0));
+  pdl1 = adjust_gm_adc(adc_get(ADCCHAN_ACCEL1));
 
   // write the pedal to the DAC
   if (state == NO_FAULT) {

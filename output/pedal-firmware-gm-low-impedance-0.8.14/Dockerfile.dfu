@@ -1,0 +1,19 @@
+FROM ubuntu:20.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    coreutils \
+    dfu-util \
+    usbutils \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY flash_pedal_dfu.sh /usr/local/bin/flash-pedal-dfu
+RUN sed -i 's/\r$//' /usr/local/bin/flash-pedal-dfu \
+  && chmod 0755 /usr/local/bin/flash-pedal-dfu
+
+WORKDIR /firmware
+
+ENTRYPOINT ["/usr/local/bin/flash-pedal-dfu"]
+CMD ["verify"]

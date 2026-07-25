@@ -1,0 +1,29 @@
+FROM ubuntu:20.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG TOOLCHAIN_URL=https://developer.arm.com/-/media/Files/downloads/gnu-rm/9-2019q4/gcc-arm-none-eabi-9-2019-q4-major-x86_64-linux.tar.bz2
+ARG TOOLCHAIN_MD5=fe0029de4f4ec43cf7008944e34ff8cc
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    bzip2 \
+    ca-certificates \
+    curl \
+    libncurses5 \
+    python3 \
+    python3-pip \
+  && curl --fail --location --retry 3 \
+    "${TOOLCHAIN_URL}" \
+    --output /tmp/gcc-arm-none-eabi.tar.bz2 \
+  && echo "${TOOLCHAIN_MD5}  /tmp/gcc-arm-none-eabi.tar.bz2" | md5sum --check --strict \
+  && tar -xjf /tmp/gcc-arm-none-eabi.tar.bz2 -C /opt \
+  && python3 -m pip install --no-cache-dir \
+    pycryptodome==3.20.0 \
+    scons==3.1.2 \
+  && rm -rf /tmp/gcc-arm-none-eabi.tar.bz2 /var/lib/apt/lists/*
+
+RUN ln -s /usr/bin/python3 /usr/local/bin/python
+
+ENV PATH=/opt/gcc-arm-none-eabi-9-2019-q4-major/bin:${PATH}
+
+WORKDIR /build
