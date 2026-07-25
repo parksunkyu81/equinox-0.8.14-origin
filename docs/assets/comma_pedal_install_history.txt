@@ -1,0 +1,160 @@
+Windows PowerShell
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+PS C:\Windows\system32> cd C:\py_workspace\equinox-0.8.14-origin
+PS C:\py_workspace\equinox-0.8.14-origin> docker run --rm comma-pedal-dfu:official-v0.8.14-6d19b46e verify
+official-source pedal application SHA-256 OK: 20dbf2d3e3fcb8a69086b5adcd60cc4a07b3e3f88d5b8f2115f93112df136131
+official-source pedal application size OK: 6760 bytes
+official-source pedal bootstub SHA-256 OK: d28409c912e20fe065bae2334b2072e5f20721d22b1f3a8ac0f5e63a9764c435
+official-source pedal bootstub size OK: 13308 bytes
+comma.ai official-source comma pedal recovery for openpilot v0.8.14
+
+Important:
+comma.ai did not attach a prebuilt pedal binary to the v0.8.14 GitHub release.
+These binaries were built locally from the exact official commaai/panda source
+commit referenced by the official openpilot v0.8.14 tag.
+
+Official openpilot release:
+tag: v0.8.14
+commit: 29e2b3f75787612894fc13b260c39473ee68ce51
+URL: https://github.com/commaai/openpilot/releases/tag/v0.8.14
+
+Official panda source:
+repository: https://github.com/commaai/panda
+commit: 6d19b46ef525b0ae224e0bf7db71918e96f9be66
+URL: https://github.com/commaai/panda/tree/6d19b46ef525b0ae224e0bf7db71918e96f9be66
+
+Official source verification:
+board/pedal/main.c git blob: c21c89f4a07681e9f82629e51519a5a9da99009f
+board/pedal/recover.sh git blob: 98c5e1986208104d9d91a9c2430f73864c6d21b5
+source definition: #define MAX_TIMEOUT 10U
+ELF instruction: cmp r3, #10
+
+Build environment:
+Ubuntu 22.04
+arm-none-eabi-gcc 10.3.1 20210621
+SCons 4.0.1
+PEDAL=1, official source debug signing certificate
+
+Application:
+file: pedal.bin.signed
+size: 6760 bytes
+SHA-256: 20dbf2d3e3fcb8a69086b5adcd60cc4a07b3e3f88d5b8f2115f93112df136131
+DFU address: 0x08004000
+
+Bootstub:
+file: bootstub.pedal.bin
+size: 13308 bytes
+SHA-256: d28409c912e20fe065bae2334b2072e5f20721d22b1f3a8ac0f5e63a9764c435
+DFU address: 0x08000000
+
+Flash order matches official board/pedal/recover.sh:
+1. application at 0x08004000
+2. bootstub at 0x08000000 with DFU leave
+PEDAL_OFFICIAL_V0814_IMAGES_VERIFIED
+PS C:\py_workspace\equinox-0.8.14-origin> usbipd list
+Connected:
+BUSID  VID:PID    DEVICE                                                        STATE
+2-5    14cd:1212  USB 대용량 저장 장치                                          Not shared
+2-8    0a0a:247c  2M USB Camera                                                 Not shared
+2-9    0483:df11  STM32  BOOTLOADER                                             Shared
+2-10   13d3:3591  Realtek Bluetooth Adapter                                     Not shared
+
+Persisted:
+GUID                                  DEVICE
+
+PS C:\py_workspace\equinox-0.8.14-origin> usbipd bind --busid 2-9
+usbipd: info: Device with busid '2-9' was already shared.
+PS C:\py_workspace\equinox-0.8.14-origin> usbipd attach --wsl --busid 2-9
+usbipd: info: Using WSL distribution 'docker-desktop' to attach; the device will be available in all WSL 2 distributions.
+usbipd: info: Loading vhci_hcd module.
+usbipd: info: Detected networking mode 'nat'.
+usbipd: info: Using IP address 172.17.192.1 to reach the host.
+usbipd: info: Firewall check not possible with this distribution (no bash, or wrong version of bash).
+PS C:\py_workspace\equinox-0.8.14-origin> docker run --rm --privileged `
+>>   -v /dev/bus/usb:/dev/bus/usb `
+>>   comma-pedal-dfu:official-v0.8.14-6d19b46e list
+USB devices:
+Bus 002 Device 001: ID 1d6b:0003 Linux 6.6.114.1-microsoft-standard-WSL2 vhci_hcd USB/IP Virtual Host Controller
+Bus 001 Device 003: ID 0483:df11 STMicroelectronics STM32  BOOTLOADER
+Bus 001 Device 001: ID 1d6b:0002 Linux 6.6.114.1-microsoft-standard-WSL2 vhci_hcd USB/IP Virtual Host Controller
+
+STM32 DFU interfaces:
+dfu-util 0.11
+
+Copyright 2005-2009 Weston Schmidt, Harald Welte and OpenMoko Inc.
+Copyright 2010-2021 Tormod Volden and Stefan Schmidt
+This program is Free Software and has ABSOLUTELY NO WARRANTY
+Please report bugs to http://sourceforge.net/p/dfu-util/tickets/
+
+Found DFU: [0483:df11] ver=2200, devnum=3, cfg=1, intf=0, path="1-1", alt=3, name="@Device Feature/0xFFFF0000/01*004 e", serial="325A34743039"
+Found DFU: [0483:df11] ver=2200, devnum=3, cfg=1, intf=0, path="1-1", alt=2, name="@OTP Memory /0x1FFF7800/01*512 e,01*016 e", serial="325A34743039"
+Found DFU: [0483:df11] ver=2200, devnum=3, cfg=1, intf=0, path="1-1", alt=1, name="@Option Bytes  /0x1FFFC000/01*016 e", serial="325A34743039"
+Found DFU: [0483:df11] ver=2200, devnum=3, cfg=1, intf=0, path="1-1", alt=0, name="@Internal Flash  /0x08000000/04*016Kg,01*064Kg,07*128Kg", serial="325A34743039"
+PEDAL_OFFICIAL_V0814_DFU_READY
+PS C:\py_workspace\equinox-0.8.14-origin> docker run --rm --privileged `
+>>   -v /dev/bus/usb:/dev/bus/usb `
+>>   -e CONFIRM_OFFICIAL_PEDAL_DFU_FLASH=YES `
+>>   comma-pedal-dfu:official-v0.8.14-6d19b46e flash
+official-source pedal application SHA-256 OK: 20dbf2d3e3fcb8a69086b5adcd60cc4a07b3e3f88d5b8f2115f93112df136131
+official-source pedal application size OK: 6760 bytes
+official-source pedal bootstub SHA-256 OK: d28409c912e20fe065bae2334b2072e5f20721d22b1f3a8ac0f5e63a9764c435
+official-source pedal bootstub size OK: 13308 bytes
+Writing official-source pedal application at 0x08004000...
+dfu-util: Warning: Invalid DFU suffix signature
+dfu-util: A valid DFU suffix will be required in a future dfu-util release
+dfu-util 0.11
+
+Copyright 2005-2009 Weston Schmidt, Harald Welte and OpenMoko Inc.
+Copyright 2010-2021 Tormod Volden and Stefan Schmidt
+This program is Free Software and has ABSOLUTELY NO WARRANTY
+Please report bugs to http://sourceforge.net/p/dfu-util/tickets/
+
+Opening DFU capable USB device...
+Device ID 0483:df11
+Device DFU version 011a
+Claiming USB DFU Interface...
+Setting Alternate Interface #0 ...
+Determining device status...
+DFU state(10) = dfuERROR, status(10) = Device's firmware is corrupt. It cannot return to run-time (non-DFU) operations
+Clearing status
+Determining device status...
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+DFU mode device DFU version 011a
+Device returned transfer size 2048
+DfuSe interface name: "Internal Flash  "
+Downloading element to address = 0x08004000, size = 6760
+Erase           [=========================] 100%         6760 bytes
+Erase    done.
+Download        [=========================] 100%         6760 bytes
+Download done.
+File downloaded successfully
+Writing matching official-source bootstub at 0x08000000, then leaving DFU...
+dfu-util 0.11
+
+Copyright 2005-2009 Weston Schmidt, Harald Welte and OpenMoko Inc.
+Copyright 2010-2021 Tormod Volden and Stefan Schmidt
+This program is Free Software and has ABSOLUTELY NO WARRANTY
+Please report bugs to http://sourceforge.net/p/dfu-util/tickets/
+
+dfu-util: Warning: Invalid DFU suffix signature
+dfu-util: A valid DFU suffix will be required in a future dfu-util release
+Opening DFU capable USB device...
+Device ID 0483:df11
+Device DFU version 011a
+Claiming USB DFU Interface...
+Setting Alternate Interface #0 ...
+Determining device status...
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+DFU mode device DFU version 011a
+Device returned transfer size 2048
+DfuSe interface name: "Internal Flash  "
+Downloading element to address = 0x08000000, size = 13308
+Erase           [=========================] 100%        13308 bytes
+Erase    done.
+Download        [=========================] 100%        13308 bytes
+Download done.
+File downloaded successfully
+Submitting leave request...
+Transitioning to dfuMANIFEST state
+PEDAL_OFFICIAL_V0814_FLASH_COMPLETE
