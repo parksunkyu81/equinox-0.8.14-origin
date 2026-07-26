@@ -1,4 +1,5 @@
 from selfdrive.car import make_can_msg
+from selfdrive.car.gm.steer_diagnostics import gm_lkas_checksum
 
 def create_steering_control(packer, bus, apply_steer, idx, lkas_active):
 
@@ -6,7 +7,7 @@ def create_steering_control(packer, bus, apply_steer, idx, lkas_active):
     "LKASteeringCmdActive": lkas_active,
     "LKASteeringCmd": apply_steer,
     "RollingCounter": idx,
-    "LKASteeringCmdChecksum": 0x1000 - (lkas_active << 11) - (apply_steer & 0x7ff) - idx
+    "LKASteeringCmdChecksum": gm_lkas_checksum(lkas_active, apply_steer, idx),
   }
 
   return packer.make_can_msg("ASCMLKASteeringCmd", bus, values)

@@ -1,7 +1,6 @@
 GM_STEER_STEP = 2
 GM_STEER_COMMAND_PERIOD = 0.020
-GM_STEER_MIN_COMMAND_INTERVAL = 0.018
-GM_STEER_DEADLINE_EARLY_TOLERANCE = 0.002
+GM_STEER_MIN_SAFE_INTERVAL = 0.018
 GM_STEER_GAP_FAULT_THRESHOLD = 0.035
 GM_STEER_RATE_UP = 7
 GM_STEER_RATE_DOWN = 17
@@ -41,57 +40,94 @@ class GMSteeringLimitTracker:
 
 
 class GMSteeringCommandScheduler:
-  """50 Hz monotonic scheduler synchronized by Panda TX loopback.
+  """Official-style 50 Hz GM scheduler synchronized by Panda TX loopback.
 
-  Loopback updates select the next rolling counter but never suppress a due
-  command. When an acknowledgement is missing, the same counter is retried so
-  the EPS never observes a counter gap. Scheduling from the actual send time
-  prevents catch-up bursts after a delayed control loop.
+  GM EPS can fault when steering commands arrive too close together or when the
+  rolling counter is duplicated/skipped. Match the openpilot 0.8.14 behavior:
+  never send in the control cycle where a new Panda TX loopback is observed.
+  Also suppress a due command until the previous command is acknowledged,
+  rather than retransmitting the same rolling counter.
   """
-  def __init__(self, period=GM_STEER_COMMAND_PERIOD,
-               min_interval=GM_STEER_MIN_COMMAND_INTERVAL,
-               early_tolerance=GM_STEER_DEADLINE_EARLY_TOLERANCE):
+  def __init__(self, step=GM_STEER_STEP, period=GM_STEER_COMMAND_PERIOD,
+               min_safe_interval=GM_STEER_MIN_SAFE_INTERVAL):
+    self.step = int(step)
     self.period = float(period)
-    self.min_interval = float(min_interval)
-    self.early_tolerance = float(early_tolerance)
-    self.next_deadline = None
+    self.min_safe_interval = float(min_safe_interval)
     self.last_send_time = None
     self.last_interval = 0.0
     self.deadline_lag = 0.0
+    self.time_since_last_send = 0.0
     self.last_loopback_counter = None
     self.last_sent_counter = None
     self.loopback_changed = False
     self.loopback_acked = True
     self.gap_fault = False
+    self.unacked_fault = False
+    self.due = False
+    self.block_reason = "initial_sync"
 
-  def update(self, now, loopback_counter):
+  def update(self, now, frame, loopback_counter):
     now = float(now)
+    frame = int(frame)
     loopback_counter = int(loopback_counter) % 4
-    self.loopback_changed = self.last_loopback_counter is not None and \
-                            loopback_counter != self.last_loopback_counter
+
+    first_loopback = self.last_loopback_counter is None
+    self.loopback_changed = first_loopback or loopback_counter != self.last_loopback_counter
     self.last_loopback_counter = loopback_counter
     self.loopback_acked = self.last_sent_counter is None or \
                           loopback_counter == self.last_sent_counter
+    self.due = (frame % self.step) == 0
 
-    if self.next_deadline is None:
-      self.next_deadline = now
+    if self.last_send_time is None:
+      self.time_since_last_send = 0.0
+      self.deadline_lag = 0.0
+      self.gap_fault = False
+    else:
+      self.time_since_last_send = max(now - self.last_send_time, 0.0)
+      self.deadline_lag = max(self.time_since_last_send - self.period, 0.0)
+      self.gap_fault = self.time_since_last_send > GM_STEER_GAP_FAULT_THRESHOLD
 
-    due = now + self.early_tolerance >= self.next_deadline
-    separated = self.last_send_time is None or \
-                now - self.last_send_time + 1e-9 >= self.min_interval
-    if not due or not separated:
-      return False, self.last_sent_counter
+    self.unacked_fault = self.due and not self.loopback_acked
 
-    self.last_interval = 0.0 if self.last_send_time is None else now - self.last_send_time
-    self.deadline_lag = max(now - self.next_deadline, 0.0)
+    # The first loopback value only establishes the camera/Panda counter. This
+    # is the same initial synchronization performed by the official controller.
+    if first_loopback:
+      self.block_reason = "initial_sync"
+      return False, None
+
+    if not self.due:
+      self.block_reason = "not_due"
+      return False, None
+
+    # A changed loopback means the previous command has just been observed from
+    # Panda TX. Do not enqueue another command in the same control cycle.
+    if self.loopback_changed:
+      self.block_reason = "loopback_changed"
+      return False, None
+
+    # Never retry the same counter when TX acknowledgement is missing. A retry
+    # is also invalid data to the EPS; wait for the real loopback instead.
+    if not self.loopback_acked:
+      self.block_reason = "unacked"
+      return False, None
+
+    # This is a safety backstop, not a second scheduler. The fixed frame gate
+    # above owns timing; this guard only prevents a control-loop catch-up from
+    # placing two valid, acknowledged commands less than 18ms apart.
+    if self.last_send_time is not None and self.time_since_last_send < self.min_safe_interval:
+      self.block_reason = "min_interval"
+      return False, None
+
+    self.last_interval = 0.0 if self.last_send_time is None else max(now - self.last_send_time, 0.0)
+    self.deadline_lag = 0.0 if self.last_send_time is None else max(self.last_interval - self.period, 0.0)
     self.gap_fault = self.last_send_time is not None and \
                      self.last_interval > GM_STEER_GAP_FAULT_THRESHOLD
 
-    # Only advance from a counter confirmed by Panda loopback. If the previous
-    # command did not pass safety/TX, retry its counter instead of creating a
-    # rolling-counter gap at the EPS.
+    # Advance only from a counter confirmed by Panda TX loopback.
     counter = (loopback_counter + 1) % 4
     self.last_sent_counter = counter
     self.last_send_time = now
-    self.next_deadline = now + self.period
+    self.time_since_last_send = 0.0
+    self.loopback_acked = False
+    self.block_reason = "sent"
     return True, counter

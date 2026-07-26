@@ -10,6 +10,9 @@ from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
 from selfdrive.car.gm.steer_scheduler import (GMSteeringCommandScheduler, GMSteeringLimitTracker,
                                               GM_STEER_RATE_DOWN,
                                               GM_STEER_RATE_UP)
+from selfdrive.car.gm.steer_diagnostics import GMSteeringDiagnosticLogger, gm_lkas_checksum
+from selfdrive.car.gm.pedal_command import (calculate_gm_pedal_command,
+                                           gm_pedal_control_allowed, limit_gm_pedal_accel)
 
 VisualAlert = car.CarControl.HUDControl.VisualAlert
 GearShifter = car.CarState.GearShifter
@@ -70,6 +73,7 @@ class CarController():
 
     self.steer_command_scheduler = GMSteeringCommandScheduler()
     self.steer_limit_tracker = GMSteeringLimitTracker()
+    self.steer_diagnostic_logger = GMSteeringDiagnosticLogger()
     self.lka_icon_status_last = (False, False)
     #self.RestartForceAccel = Params().get_bool('RestartForceAccel')
 
@@ -91,6 +95,7 @@ class CarController():
 
     # Send CAN commands.
     can_sends = []
+    control_now = sec_since_boot()
 
     # ---------------------------------------------------------------
     # Longitudinal path must be updated on every update() call.
@@ -110,16 +115,23 @@ class CarController():
     if CS.CP.enableGasInterceptor:
       # max(0.0, 값)은 상한이 음수가 되지 않도록 합니다.
       comfort_accel_cap = max(0.0, float(controls.sm['longitudinalPlan'].accelLimitMax))
-      if requested_accel > 0.0:
-        requested_accel = min(requested_accel, comfort_accel_cap)
     standstill_blocked = CS.out.standstill or CS.out.vEgo <= V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS
-    self.accel = min(requested_accel, 0.0) if brake_pressed or standstill_blocked else requested_accel
+    self.accel = limit_gm_pedal_accel(
+      requested_accel, comfort_accel_cap,
+      blocked=brake_pressed or standstill_blocked,
+    ) if CS.CP.enableGasInterceptor else requested_accel
 
     if CS.CP.enableGasInterceptor:
       # 이것이 없으면 저속에서 너무 공격적입니다.
       pedal_speed_allowed = CS.out.vEgo > V_CRUISE_ENABLE_MIN / CV.MS_TO_KPH
-      if c.active and CS.adaptive_Cruise and not brake_pressed and not CS.out.gasPressed and \
-         pedal_speed_allowed:
+      # adaptive_Cruise is the legacy enable latch for pedal-equipped cars in
+      # this fork; the longitudinal output below is still comma pedal 0x200.
+      pedal_control_allowed = gm_pedal_control_allowed(
+        c.active, CS.adaptive_Cruise, brake_pressed,
+        CS.out.gasPressed, pedal_speed_allowed,
+      )
+
+      if pedal_control_allowed:
 
         # Speed-dependent pedal conversion baseline. Tune this map from logged
         # pedal command versus measured vehicle acceleration before PID gains.
@@ -138,10 +150,12 @@ class CarController():
                           [0.185, 0.178, 0.175, 0.170, 0.172, 0.183]
                           #[0.18, 0.21, 0.23, 0.25]
                           )
-        # 원래 가속 명령 계산
-        pedal_command = acc_mult * actuators.accel
-        # 연비 향상을 위해 클리핑
-        self.comma_pedal = clip(pedal_command, 0., 0.85)  # 최대 0.8까지만 허용하여 연비 개선
+        # Root-cause fix: the physical 0x200 pedal command must use the same
+        # planner-capped acceleration stored in self.accel. The old raw
+        # actuators.accel path over-commanded the pedal, caused overshoot, and
+        # made the PID legitimately fall to zero on the following correction.
+        pedal_command = calculate_gm_pedal_command(self.accel, acc_mult)
+        self.comma_pedal = pedal_command
 
         # self.comma_pedal = pedal_command
       else:
@@ -163,15 +177,18 @@ class CarController():
     controls.pedal_deadzone_vehicle_accel = float(CS.out.aEgo)
     controls.pedal_comfort_accel_cap = float(comfort_accel_cap)
 
-    # Steering (50 Hz). Loopback updates select the next rolling counter but do
-    # not suppress a due command. The monotonic scheduler also prevents rapid
-    # catch-up sends when controlsd resumes after a delayed frame.
+    # Steering (50 Hz). Match the official 0.8.14 loopback gate: suppress a
+    # command in the cycle where Panda TX loopback changes, and never resend an
+    # unacknowledged rolling counter.
+    steer_now = control_now
     steer_command_sent, idx = self.steer_command_scheduler.update(
-      sec_since_boot(), CS.lka_steering_cmd_counter)
+      steer_now, frame, CS.lka_steering_cmd_counter)
     lkas_enabled = c.active and not (CS.out.steerFaultTemporary or CS.out.steerFaultPermanent) and \
                    CS.out.vEgo > P.MIN_STEER_SPEED
     requested_steer = None
     applied_steer = None
+    steer_command_checksum = None
+    steer_command_dat_hex = ""
     if steer_command_sent:
       if lkas_enabled:
         new_steer = int(round(actuators.steer * P.STEER_MAX))
@@ -204,7 +221,11 @@ class CarController():
         self._dyn_steer_limited_prev = False
 
       self.apply_steer_last = apply_steer
-      can_sends.append(gmcan.create_steering_control(self.packer_pt, CanBus.POWERTRAIN, apply_steer, idx, lkas_enabled))
+      steer_command_checksum = gm_lkas_checksum(lkas_enabled, apply_steer, idx)
+      steer_command = gmcan.create_steering_control(self.packer_pt, CanBus.POWERTRAIN,
+                                                    apply_steer, idx, lkas_enabled)
+      steer_command_dat_hex = bytes(steer_command[2]).hex()
+      can_sends.append(steer_command)
 
     # A non-send frame is the normal 50 Hz zero-order hold, not a new actuator
     # limit. Update this state only from a command that was actually transmitted.
@@ -227,6 +248,34 @@ class CarController():
     controls.gm_steer_command_torque = int(self.apply_steer_last)
     controls.gm_steer_requested_torque = int(self.steer_limit_tracker.requested_torque)
     controls.gm_steer_torque_limited = bool(self.steer_limit_tracker.limited)
+
+    self.steer_diagnostic_logger.log(
+      mono_time_s=steer_now,
+      frame=int(frame),
+      command_due=bool(self.steer_command_scheduler.due),
+      command_sent=bool(steer_command_sent),
+      command_block_reason=self.steer_command_scheduler.block_reason,
+      command_counter=int(idx) if steer_command_sent else "",
+      command_torque=int(self.apply_steer_last) if steer_command_sent else "",
+      command_active=bool(lkas_enabled) if steer_command_sent else "",
+      command_checksum=steer_command_checksum if steer_command_sent else "",
+      command_dat_hex=steer_command_dat_hex,
+      loopbacks=list(CS.lka_steering_cmd_loopbacks),
+      loopback_latest_counter=int(CS.lka_steering_cmd_counter),
+      loopback_changed=bool(self.steer_command_scheduler.loopback_changed),
+      loopback_acked=bool(self.steer_command_scheduler.loopback_acked),
+      send_interval_ms=float(self.steer_command_scheduler.last_interval * 1000.0),
+      time_since_send_ms=float(self.steer_command_scheduler.time_since_last_send * 1000.0),
+      deadline_lag_ms=float(self.steer_command_scheduler.deadline_lag * 1000.0),
+      gap_fault=bool(self.steer_command_scheduler.gap_fault),
+      unacked_fault=bool(self.steer_command_scheduler.unacked_fault),
+      pscm_lkas_status=int(CS.lkas_status),
+      pscm_torque_delivered=float(CS.out.steeringTorqueEps),
+      pscm_driver_torque=float(CS.out.steeringTorque),
+      steer_fault_temporary=bool(CS.out.steerFaultTemporary),
+      steer_fault_permanent=bool(CS.out.steerFaultPermanent),
+      can_valid=bool(CS.out.canValid),
+    )
 
     if CS.CP.enableGasInterceptor and (frame % 4) == 0:
       idx = (frame // 4) % 4

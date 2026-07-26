@@ -45,7 +45,7 @@ def launcher(proc: str, name: str) -> None:
   except Exception:
     # can't install the crash handler because sys.excepthook doesn't play nice
     # with threads, so catch it here.
-    sentry.capture_exception()
+    sentry.capture_exception(process_name=name)
     raise
 
 
