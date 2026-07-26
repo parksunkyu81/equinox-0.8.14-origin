@@ -16,17 +16,6 @@ GearShifter = car.CarState.GearShifter
 
 CREEP_SPEED = 2.5   # 4km
 
-# Simple lead-launch booster. It only scales an existing positive planner
-# request; it never creates acceleration by itself.
-LOW_SPEED_BOOST_MIN_KPH = 1.0
-LOW_SPEED_BOOST_MAX_KPH = 20.0
-LOW_SPEED_BOOST_BP_KPH = [1.0, 5.0, 10.0, 15.0, 20.0]
-LOW_SPEED_BOOST_FACTOR = [1.20, 1.20, 1.15, 1.08, 1.00]
-LOW_SPEED_BOOST_MIN_LEAD_SPEED_MS = 0.5
-LOW_SPEED_BOOST_MIN_LEAD_PULLAWAY_MS = 0.15
-LOW_SPEED_BOOST_MIN_DISTANCE_M = 3.0
-LOW_SPEED_BOOST_MAX_DISTANCE_M = 40.0
-
 
 # =====================================================================
 # Dynamic GM steering torque delta map
@@ -129,9 +118,6 @@ class CarController():
     if CS.CP.enableGasInterceptor:
       # 이것이 없으면 저속에서 너무 공격적입니다.
       pedal_speed_allowed = CS.out.vEgo > V_CRUISE_ENABLE_MIN / CV.MS_TO_KPH
-      pedal_boost_candidate = False
-      pedal_boost_active = False
-      base_pedal_command = 0.0
       if c.active and CS.adaptive_Cruise and not brake_pressed and not CS.out.gasPressed and \
          pedal_speed_allowed:
 
@@ -152,30 +138,8 @@ class CarController():
                           [0.185, 0.178, 0.175, 0.168, 0.17, 0.180]
                           #[0.18, 0.21, 0.23, 0.25]
                           )
-        # 앞차가 실제로 출발해 멀어지고 있으며 플래너도 양의 가속을
-        # 요청한 경우에만 1~20km/h 저속 추종 부스터를 적용한다.
-        boost_factor = 1.0
-        v_ego_kph = float(CS.out.vEgo * CV.MS_TO_KPH)
-        try:
-          lead = controls.sm['radarState'].leadOne
-          pedal_boost_candidate = bool(
-            LOW_SPEED_BOOST_MIN_KPH <= v_ego_kph <= LOW_SPEED_BOOST_MAX_KPH and
-            lead.status and
-            LOW_SPEED_BOOST_MIN_DISTANCE_M <= float(lead.dRel) <= LOW_SPEED_BOOST_MAX_DISTANCE_M and
-            float(lead.vLead) >= LOW_SPEED_BOOST_MIN_LEAD_SPEED_MS and
-            float(lead.vRel) >= LOW_SPEED_BOOST_MIN_LEAD_PULLAWAY_MS and
-            self.accel > 0.0
-          )
-        except Exception:
-          pedal_boost_candidate = False
-
-        if pedal_boost_candidate:
-          boost_factor = float(interp(v_ego_kph, LOW_SPEED_BOOST_BP_KPH, LOW_SPEED_BOOST_FACTOR))
-          pedal_boost_active = boost_factor > 1.0
-
-        # comfort accel 상한이 반영된 self.accel을 사용한다.
-        base_pedal_command = acc_mult * max(self.accel, 0.0)
-        pedal_command = base_pedal_command * boost_factor
+        # 원래 가속 명령 계산
+        pedal_command = acc_mult * actuators.accel
         # 연비 향상을 위해 클리핑
         self.comma_pedal = clip(pedal_command, 0., 0.85)  # 최대 0.8까지만 허용하여 연비 개선
 
@@ -186,14 +150,11 @@ class CarController():
     else:
       pedal_command = 0.0
       self.comma_pedal = 0.0
-      pedal_boost_candidate = False
-      pedal_boost_active = False
-      base_pedal_command = 0.0
 
     # Keep legacy diagnostics populated for log/schema compatibility.
-    controls.pedal_deadzone_boost_candidate = bool(pedal_boost_candidate)
-    controls.pedal_deadzone_boost_active = bool(pedal_boost_active)
-    controls.pedal_deadzone_raw_command = float(base_pedal_command)
+    controls.pedal_deadzone_boost_candidate = False
+    controls.pedal_deadzone_boost_active = False
+    controls.pedal_deadzone_raw_command = float(pedal_command)
     controls.pedal_deadzone_applied_command = float(self.comma_pedal)
     controls.pedal_deadzone_floor = 0.0
     # Preserve the pre-cap request for road-log PID/pedal-map tuning. Applied
