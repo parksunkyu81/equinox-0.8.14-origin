@@ -35,7 +35,7 @@ class TestGMSteeringCommandScheduler(unittest.TestCase):
     self.assertEqual(sent_counters, [1, 2, 3, 0, 1])
     self.assertAlmostEqual(scheduler.last_interval, 0.02, places=6)
 
-  def test_ack_on_due_frame_blocks_same_cycle_send(self):
+  def test_ack_on_due_cycle_blocks_then_resumes_on_next_cycle(self):
     scheduler = GMSteeringCommandScheduler()
     scheduler.update(0.00, 0, 0)
     scheduler.update(0.01, 1, 0)
@@ -50,8 +50,7 @@ class TestGMSteeringCommandScheduler(unittest.TestCase):
     self.assertIsNone(counter)
     self.assertEqual(scheduler.block_reason, "loopback_changed")
 
-    scheduler.update(0.05, 5, 1)
-    sent, counter = scheduler.update(0.06, 6, 1)
+    sent, counter = scheduler.update(0.05, 5, 1)
     self.assertTrue(sent)
     self.assertEqual(counter, 2)
 
@@ -71,26 +70,24 @@ class TestGMSteeringCommandScheduler(unittest.TestCase):
     scheduler.update(0.05, 5, 1)
     self.assertEqual(scheduler.update(0.06, 6, 1), (True, 2))
 
-  def test_frame_gate_not_monotonic_deadline_controls_send(self):
+  def test_monotonic_deadline_does_not_depend_on_frame_parity(self):
     scheduler = GMSteeringCommandScheduler()
     scheduler.update(10.000, 0, 0)
-    scheduler.update(10.200, 1, 0)
-    self.assertEqual(scheduler.update(10.201, 2, 0), (True, 1))
+    self.assertEqual(scheduler.update(10.010, 2, 0), (False, None))
+    self.assertEqual(scheduler.update(10.020, 3, 0), (True, 1))
 
   def test_catch_up_cannot_send_two_commands_inside_18ms(self):
-    scheduler = GMSteeringCommandScheduler()
+    scheduler = GMSteeringCommandScheduler(period=0.010, min_safe_interval=0.018)
     scheduler.update(0.000, 0, 0)
-    scheduler.update(0.010, 1, 0)
-    self.assertEqual(scheduler.update(0.020, 2, 0), (True, 1))
-    scheduler.update(0.021, 3, 1)
+    self.assertEqual(scheduler.update(0.010, 1, 0), (True, 1))
+    scheduler.update(0.011, 2, 1)
 
-    sent, counter = scheduler.update(0.022, 4, 1)
+    sent, counter = scheduler.update(0.020, 3, 1)
     self.assertFalse(sent)
     self.assertIsNone(counter)
     self.assertEqual(scheduler.block_reason, "min_interval")
 
-    scheduler.update(0.030, 5, 1)
-    self.assertEqual(scheduler.update(0.040, 6, 1), (True, 2))
+    self.assertEqual(scheduler.update(0.028, 4, 1), (True, 2))
 
 
 class TestGMSteeringDiagnostics(unittest.TestCase):

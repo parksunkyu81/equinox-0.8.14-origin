@@ -1,6 +1,7 @@
 GM_STEER_STEP = 2
 GM_STEER_COMMAND_PERIOD = 0.020
 GM_STEER_MIN_SAFE_INTERVAL = 0.018
+GM_STEER_DEADLINE_EARLY_TOLERANCE = GM_STEER_COMMAND_PERIOD - GM_STEER_MIN_SAFE_INTERVAL
 GM_STEER_GAP_FAULT_THRESHOLD = 0.035
 GM_STEER_RATE_UP = 7
 GM_STEER_RATE_DOWN = 17
@@ -40,19 +41,26 @@ class GMSteeringLimitTracker:
 
 
 class GMSteeringCommandScheduler:
-  """Official-style 50 Hz GM scheduler synchronized by Panda TX loopback.
+  """50 Hz monotonic GM scheduler synchronized by Panda TX loopback.
 
   GM EPS can fault when steering commands arrive too close together or when the
-  rolling counter is duplicated/skipped. Match the openpilot 0.8.14 behavior:
-  never send in the control cycle where a new Panda TX loopback is observed.
-  Also suppress a due command until the previous command is acknowledged,
-  rather than retransmitting the same rolling counter.
+  rolling counter is duplicated/skipped. Never send in the control cycle where
+  a new Panda TX loopback is observed, and suppress a due command until the
+  previous command is acknowledged.
+
+  Scheduling is based on monotonic time rather than frame parity. On EON the
+  controls loop can run slower than 100 Hz, and a loopback commonly arrives on
+  the nominal even frame. A frame-parity gate then waits two more control cycles
+  and turns a safe acknowledgement into a 40-60 ms command gap. An overdue,
+  acknowledged command instead resumes on the first safe control cycle.
   """
   def __init__(self, step=GM_STEER_STEP, period=GM_STEER_COMMAND_PERIOD,
                min_safe_interval=GM_STEER_MIN_SAFE_INTERVAL):
     self.step = int(step)
     self.period = float(period)
     self.min_safe_interval = float(min_safe_interval)
+    self.early_tolerance = max(self.period - self.min_safe_interval, 0.0)
+    self.next_deadline = None
     self.last_send_time = None
     self.last_interval = 0.0
     self.deadline_lag = 0.0
@@ -76,7 +84,6 @@ class GMSteeringCommandScheduler:
     self.last_loopback_counter = loopback_counter
     self.loopback_acked = self.last_sent_counter is None or \
                           loopback_counter == self.last_sent_counter
-    self.due = (frame % self.step) == 0
 
     if self.last_send_time is None:
       self.time_since_last_send = 0.0
@@ -87,13 +94,20 @@ class GMSteeringCommandScheduler:
       self.deadline_lag = max(self.time_since_last_send - self.period, 0.0)
       self.gap_fault = self.time_since_last_send > GM_STEER_GAP_FAULT_THRESHOLD
 
-    self.unacked_fault = self.due and not self.loopback_acked
-
     # The first loopback value only establishes the camera/Panda counter. This
     # is the same initial synchronization performed by the official controller.
     if first_loopback:
+      self.next_deadline = now + self.period
+      self.due = False
+      self.unacked_fault = False
       self.block_reason = "initial_sync"
       return False, None
+
+    separated = self.last_send_time is None or \
+                self.time_since_last_send + 1e-9 >= self.min_safe_interval
+    self.due = self.next_deadline is not None and \
+               now + self.early_tolerance + 1e-9 >= self.next_deadline
+    self.unacked_fault = self.due and not self.loopback_acked
 
     if not self.due:
       self.block_reason = "not_due"
@@ -111,10 +125,7 @@ class GMSteeringCommandScheduler:
       self.block_reason = "unacked"
       return False, None
 
-    # This is a safety backstop, not a second scheduler. The fixed frame gate
-    # above owns timing; this guard only prevents a control-loop catch-up from
-    # placing two valid, acknowledged commands less than 18ms apart.
-    if self.last_send_time is not None and self.time_since_last_send < self.min_safe_interval:
+    if not separated:
       self.block_reason = "min_interval"
       return False, None
 
@@ -127,6 +138,7 @@ class GMSteeringCommandScheduler:
     counter = (loopback_counter + 1) % 4
     self.last_sent_counter = counter
     self.last_send_time = now
+    self.next_deadline = now + self.period
     self.time_since_last_send = 0.0
     self.loopback_acked = False
     self.block_reason = "sent"
