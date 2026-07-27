@@ -54,6 +54,22 @@ class TestGMSteeringCommandScheduler(unittest.TestCase):
     self.assertTrue(sent)
     self.assertEqual(counter, 2)
 
+  def test_initial_resync_waits_after_a_late_loopback(self):
+    scheduler = GMSteeringCommandScheduler()
+    scheduler.update(0.00, 0, 2)
+
+    sent, counter = scheduler.update(0.02, 2, 3)
+    self.assertFalse(sent)
+    self.assertIsNone(counter)
+    self.assertEqual(scheduler.block_reason, "loopback_changed")
+
+    sent, counter = scheduler.update(0.03, 3, 3)
+    self.assertFalse(sent)
+    self.assertIsNone(counter)
+    self.assertEqual(scheduler.block_reason, "min_interval")
+
+    self.assertEqual(scheduler.update(0.04, 4, 3), (True, 0))
+
   def test_missing_ack_never_retransmits_same_counter(self):
     scheduler = GMSteeringCommandScheduler()
     scheduler.update(0.00, 0, 0)
@@ -79,15 +95,15 @@ class TestGMSteeringCommandScheduler(unittest.TestCase):
   def test_catch_up_cannot_send_two_commands_inside_18ms(self):
     scheduler = GMSteeringCommandScheduler(period=0.010, min_safe_interval=0.018)
     scheduler.update(0.000, 0, 0)
-    self.assertEqual(scheduler.update(0.010, 1, 0), (True, 1))
-    scheduler.update(0.011, 2, 1)
+    self.assertEqual(scheduler.update(0.018, 1, 0), (True, 1))
+    scheduler.update(0.019, 2, 1)
 
-    sent, counter = scheduler.update(0.020, 3, 1)
+    sent, counter = scheduler.update(0.028, 3, 1)
     self.assertFalse(sent)
     self.assertIsNone(counter)
     self.assertEqual(scheduler.block_reason, "min_interval")
 
-    self.assertEqual(scheduler.update(0.028, 4, 1), (True, 2))
+    self.assertEqual(scheduler.update(0.036, 4, 1), (True, 2))
 
 
 class TestGMSteeringDiagnostics(unittest.TestCase):
