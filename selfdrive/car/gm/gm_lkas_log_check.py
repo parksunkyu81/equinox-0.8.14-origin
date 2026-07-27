@@ -17,7 +17,10 @@ MIN_COMMAND_INTERVAL_MS = 18.0
 MAX_COMMAND_INTERVAL_MS = 35.0
 MIN_OBSERVED_LOOPBACK_INTERVAL_MS = 8.0
 IDEAL_LOOPBACK_INTERVAL_MS = 18.0
-MAX_OBSERVED_LOOPBACK_INTERVAL_MS = 35.0
+# Loopbacks are timestamped when controlsd drains the next CAN batch, not at
+# the actual Panda TX instant. Allow one additional EON control cycle of
+# observation latency while keeping the real command enqueue limit at 35 ms.
+MAX_OBSERVED_LOOPBACK_INTERVAL_MS = 45.0
 MIN_VALIDATION_SAMPLES = 20
 SESSION_BREAK_S = 1.0
 
@@ -98,6 +101,7 @@ def analyze_rows(rows, min_samples=MIN_VALIDATION_SAMPLES):
   command_count = 0
   loopback_count = 0
   paired_loopback_count = 0
+  active_command_count = 0
   unacked_blocks = 0
   gap_rows = 0
   pscm_temporary_rows = 0
@@ -221,6 +225,8 @@ def analyze_rows(rows, min_samples=MIN_VALIDATION_SAMPLES):
       command_counters_seen.add(counter)
       torque = parse_int(row.get("command_torque"))
       active = parse_bool(row.get("command_active"))
+      if active:
+        active_command_count += 1
       checksum = parse_int(row.get("command_checksum")) & 0xfff
       expected_checksum = gm_lkas_checksum(active, torque, counter)
 
@@ -289,7 +295,11 @@ def analyze_rows(rows, min_samples=MIN_VALIDATION_SAMPLES):
   if max_queue_drops:
     errors.append("diagnostic logger dropped at least {} rows".format(max_queue_drops))
   if pscm_temporary_rows:
-    errors.append("PSCM temporary LKAS status appeared in {} rows".format(pscm_temporary_rows))
+    message = "PSCM temporary LKAS status appeared in {} rows".format(pscm_temporary_rows)
+    if active_command_count:
+      errors.append(message)
+    else:
+      warnings.append("{} while all steering commands were inactive".format(message))
   if pscm_permanent_rows:
     errors.append("PSCM permanent LKAS fault appeared in {} rows".format(pscm_permanent_rows))
   if command_count < min_samples:

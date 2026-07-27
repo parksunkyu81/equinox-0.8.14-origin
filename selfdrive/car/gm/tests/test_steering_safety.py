@@ -206,11 +206,21 @@ class TestGMSteeringDiagnostics(unittest.TestCase):
   def test_bad_checksum_and_pscm_fault_fail(self):
     rows = self._valid_rows()
     rows[4]["command_checksum"] = "123"
+    rows[4]["command_active"] = "True"
     rows[7]["pscm_lkas_status"] = "2"
 
     result = analyze_rows(rows)
     self.assertTrue(any("command checksum" in error for error in result["errors"]))
     self.assertTrue(any("PSCM temporary" in error for error in result["errors"]))
+
+  def test_stationary_temporary_pscm_status_is_a_warning(self):
+    rows = self._valid_rows()
+    for row in rows:
+      row["pscm_lkas_status"] = "2"
+
+    result = analyze_rows(rows)
+    self.assertFalse(any("PSCM temporary" in error for error in result["errors"]))
+    self.assertTrue(any("PSCM temporary" in warning for warning in result["warnings"]))
 
   def test_rotating_logger_writes_bounded_files_without_blocking_caller(self):
     with tempfile.TemporaryDirectory() as log_dir:
