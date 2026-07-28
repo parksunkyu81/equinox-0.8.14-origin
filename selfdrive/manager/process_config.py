@@ -25,6 +25,8 @@ procs = [
   PythonProcess("calibrationd", "selfdrive.locationd.calibrationd"),
   PythonProcess("torqued", "selfdrive.locationd.torqued"),
   PythonProcess("controlsd", "selfdrive.controls.controlsd"),
+  PythonProcess("gmlkasblackboxd", "selfdrive.car.gm.gm_lkas_blackboxd",
+                enabled=not PC),
   PythonProcess("deleter", "selfdrive.loggerd.deleter", persistent=True),
   PythonProcess("dmonitoringd", "selfdrive.monitoring.dmonitoringd", enabled=(not PC or WEBCAM), driverview=True),
   #PythonProcess("logmessaged", "selfdrive.logmessaged", persistent=True),
