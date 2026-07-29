@@ -426,7 +426,7 @@ class Controls:
         else:
             self.curve_speed_ms = 255."""
 
-    def cal_curve_speed(self, sm, v_ego, frame, update_dt=DT_CTRL):
+    def cal_curve_speed(self, sm, v_ego, frame):
         lateralPlan = sm['lateralPlan']
         if len(lateralPlan.curvatures) != CONTROL_N:
             self.curve_speed_ms = 255.
@@ -440,10 +440,7 @@ class Controls:
 
         # ===== 1) 모델 샘플 간격/제어 주기(없으면 안전한 기본값) =====
         DT_MDL = getattr(self, "DT_MDL", 0.2)  # curvatures 시간 간격(초). 보통 0.2s 근처
-        # This calculation runs only when lateralPlan publishes a new plan.
-        # Use the actual elapsed time so output slew is independent of the
-        # planner publication rate.
-        curve_update_dt = max(float(update_dt), globals().get("DT_CTRL", 0.01))
+        DT_CTRL = getattr(self, "DT_CTRL", globals().get("DT_CTRL", 0.01))  # 이 함수가 도는 주기(초)
 
         horizon_s = (n - 1) * DT_MDL
 
@@ -611,9 +608,9 @@ class Controls:
 
             # 원하는 값(desired)으로 서서히 수렴
             if desired < prev:
-                new_speed = max(desired, prev - decel_limit * curve_update_dt)
+                new_speed = max(desired, prev - decel_limit * DT_CTRL)
             else:
-                new_speed = min(desired, prev + accel_limit * curve_update_dt)
+                new_speed = min(desired, prev + accel_limit * DT_CTRL)
 
             # 현재 속도보다 위로 튀지 않게(제한값이므로)
             self.curve_speed_ms = float(min(new_speed, v))
@@ -645,18 +642,7 @@ class Controls:
         # print("max_speed_log : ", max_speed_log)
 
         curv_limit = 0
-        # lateralPlan normally updates at 20 Hz. Re-sorting the unchanged
-        # curvature array at the 100 Hz controls rate costs about 4.5 ms per
-        # loop on EON and starves the steering scheduler. Cache the result
-        # between plan updates while preserving time-based output smoothing.
-        lateral_plan_updated = not hasattr(sm, "updated") or bool(sm.updated.get("lateralPlan", False))
-        if lateral_plan_updated or not hasattr(self, "_curve_calc_mono_time"):
-            curve_calc_now = sec_since_boot()
-            curve_update_dt = globals().get("DT_CTRL", 0.01) if not hasattr(self, "_curve_calc_mono_time") else \
-                              clip(curve_calc_now - self._curve_calc_mono_time,
-                                   globals().get("DT_CTRL", 0.01), 0.2)
-            self._curve_calc_mono_time = curve_calc_now
-            self.cal_curve_speed(sm, vEgo, frame, update_dt=curve_update_dt)
+        self.cal_curve_speed(sm, vEgo, frame)
         if self.slow_on_curves and SLOW_ON_CURVES and \
                 (self.curve_speed_ms >= MIN_CURVE_SPEED or bool(getattr(self, "low_speed_curv_slowdown", False))):
             max_speed_clu = min(self.v_cruise_kph * CV.KPH_TO_MS, self.curve_speed_ms) * self.speed_conv_to_clu
