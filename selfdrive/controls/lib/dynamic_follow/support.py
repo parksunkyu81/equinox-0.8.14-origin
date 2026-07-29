@@ -13,6 +13,7 @@ class CarData:
   left_blinker = False
   right_blinker = False
   cruise_enabled = True
+  brake_pressed = False
 
 
 class dfData:

@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import cereal.messaging as messaging
 from common.realtime import sec_since_boot, DT_MDL
@@ -13,6 +14,31 @@ from common.data_collector import DataCollector
 
 travis = False
 DEFAULT_TR = 1.3   #1.45
+
+# Stop-and-go lead launch assist. This only lowers the MPC time gap; it does not
+# bypass the longitudinal acceleration, jerk, or safety limits.
+LEAD_LAUNCH_IDLE = 0
+LEAD_LAUNCH_ARMED = 1
+LEAD_LAUNCH_ACTIVE = 2
+LEAD_LAUNCH_RELEASING = 3
+
+LEAD_LAUNCH_TR = 1.0
+LEAD_LAUNCH_MIN_EGO_KPH = 1.0
+LEAD_LAUNCH_MAX_EGO_KPH = 20.0
+LEAD_LAUNCH_ARM_MAX_EGO_KPH = 5.0
+LEAD_STOP_SPEED_MS = 0.3
+LEAD_START_SPEED_MS = 0.8
+LEAD_START_REL_SPEED_MS = 0.3
+LEAD_LAUNCH_CLOSING_REL_SPEED_MS = -0.3
+LEAD_LAUNCH_MIN_DISTANCE_M = 3.0
+LEAD_LAUNCH_MAX_ARM_DISTANCE_M = 30.0
+LEAD_LAUNCH_DISTANCE_JUMP_M = 8.0
+LEAD_STOP_CONFIRM_S = 0.8
+LEAD_START_CONFIRM_S = 0.15
+LEAD_LAUNCH_MAX_ACTIVE_S = 6.0
+LEAD_LAUNCH_BLEND_IN_S = 0.4
+LEAD_LAUNCH_BLEND_OUT_S = 1.5
+
 
 class DistanceModController:
   def __init__(self, k_i, k_d, x_clip, mods):
@@ -103,6 +129,15 @@ class DynamicFollow:
     self.car_data = CarData()
     self.lead_data = LeadData()
     self.df_data = dfData()  # dynamic follow data
+    self.base_TR = DEFAULT_TR
+
+    self.lead_launch_state = LEAD_LAUNCH_IDLE
+    self.lead_launch_blend = 0.0
+    self.lead_launch_stopped_since = None
+    self.lead_launch_start_since = None
+    self.lead_launch_started_at = None
+    self.last_launch_lead_status = False
+    self.last_launch_lead_distance = None
 
     self.last_cost = 0.0
     self.last_predict_time = 0.0
@@ -118,12 +153,14 @@ class DynamicFollow:
       self._gather_data()
 
     if not self.lead_data.status:
-      self.TR = DEFAULT_TR
+      self.base_TR = DEFAULT_TR
       #print("if not self.lead_data.status: ======================================== : ", self.TR)
     else:
       self._store_df_data()
-      self.TR = self._get_TR()
+      self.base_TR = self._get_TR()
       #print("if self.lead_data.status: ======================================== : ", self.TR)
+
+    self.TR = self._update_lead_launch_TR(self.base_TR)
 
     if not travis:
       self._send_cur_state()
@@ -165,6 +202,9 @@ class DynamicFollow:
       dat = messaging.new_message('dynamicFollowData')
       dat.dynamicFollowData.mpcTR = self.TR
       dat.dynamicFollowData.profilePred = self.model_profile
+      dat.dynamicFollowData.leadCatchupActive = self.lead_launch_state == LEAD_LAUNCH_ACTIVE and self.lead_launch_blend > 0.0
+      dat.dynamicFollowData.catchupFactor = self.lead_launch_blend
+      dat.dynamicFollowData.baseTR = self.base_TR
       #print("dat.dynamicFollowData.mpcTR ======================================== : ", dat.dynamicFollowData.mpcTR)
       #print("dat.dynamicFollowData.profilePred ======================================== : ", dat.dynamicFollowData.profilePred)
       self.pm.send('dynamicFollowData', dat)
@@ -204,6 +244,95 @@ class DynamicFollow:
   @staticmethod
   def _remove_old_entries(lst, cur_time, retention):
     return [sample for sample in lst if cur_time - sample['time'] <= retention]
+
+  def _reset_lead_launch(self, immediate=True):
+    self.lead_launch_state = LEAD_LAUNCH_IDLE if immediate else LEAD_LAUNCH_RELEASING
+    self.lead_launch_stopped_since = None
+    self.lead_launch_start_since = None
+    self.lead_launch_started_at = None
+    if immediate:
+      self.lead_launch_blend = 0.0
+
+  def _update_lead_launch_TR(self, base_TR):
+    """Temporarily blend TR toward 1.0 when a confirmed stopped lead starts moving."""
+    now = sec_since_boot()
+    lead_status = bool(self.lead_data.status)
+    v_ego = float(self.car_data.v_ego)
+    v_ego_kph = v_ego * CV.MS_TO_KPH
+    v_lead = float(self.lead_data.v_lead) if self.lead_data.v_lead is not None else 0.0
+    x_lead = float(self.lead_data.x_lead) if self.lead_data.x_lead is not None else 0.0
+
+    lead_values_valid = math.isfinite(v_lead) and math.isfinite(x_lead)
+    lead_changed = bool(self.lead_data.new_lead)
+    if lead_status and self.last_launch_lead_status and self.last_launch_lead_distance is not None:
+      lead_changed |= abs(x_lead - self.last_launch_lead_distance) > LEAD_LAUNCH_DISTANCE_JUMP_M
+
+    v_rel = v_lead - v_ego
+    hard_cancel = (not lead_status or not lead_values_valid or
+                   not self.car_data.cruise_enabled or self.car_data.brake_pressed or
+                   x_lead <= LEAD_LAUNCH_MIN_DISTANCE_M or
+                   v_rel <= LEAD_LAUNCH_CLOSING_REL_SPEED_MS)
+
+    if hard_cancel or lead_changed:
+      self._reset_lead_launch(immediate=True)
+    else:
+      lead_stopped = v_lead <= LEAD_STOP_SPEED_MS
+      arm_conditions = (lead_stopped and
+                        v_ego_kph <= LEAD_LAUNCH_ARM_MAX_EGO_KPH and
+                        LEAD_LAUNCH_MIN_DISTANCE_M < x_lead <= LEAD_LAUNCH_MAX_ARM_DISTANCE_M)
+
+      # A lead stopping again is a safety-critical cancellation. It may arm a
+      # fresh launch only after another complete stop confirmation.
+      if self.lead_launch_state == LEAD_LAUNCH_ACTIVE and lead_stopped:
+        self._reset_lead_launch(immediate=True)
+
+      if arm_conditions:
+        if self.lead_launch_stopped_since is None:
+          self.lead_launch_stopped_since = now
+        elif (now - self.lead_launch_stopped_since >= LEAD_STOP_CONFIRM_S and
+              self.lead_launch_state in (LEAD_LAUNCH_IDLE, LEAD_LAUNCH_RELEASING)):
+          self.lead_launch_state = LEAD_LAUNCH_ARMED
+          self.lead_launch_start_since = None
+          self.lead_launch_blend = 0.0
+      else:
+        self.lead_launch_stopped_since = None
+
+      if self.lead_launch_state == LEAD_LAUNCH_ARMED:
+        launch_detected = v_lead >= LEAD_START_SPEED_MS and v_rel >= LEAD_START_REL_SPEED_MS
+        if launch_detected:
+          if self.lead_launch_start_since is None:
+            self.lead_launch_start_since = now
+          elif now - self.lead_launch_start_since >= LEAD_START_CONFIRM_S:
+            self.lead_launch_state = LEAD_LAUNCH_ACTIVE
+            self.lead_launch_started_at = now
+            self.lead_launch_start_since = None
+        else:
+          self.lead_launch_start_since = None
+
+      elif self.lead_launch_state == LEAD_LAUNCH_ACTIVE:
+        active_timed_out = (self.lead_launch_started_at is not None and
+                            now - self.lead_launch_started_at >= LEAD_LAUNCH_MAX_ACTIVE_S)
+        if v_ego_kph > LEAD_LAUNCH_MAX_EGO_KPH or active_timed_out:
+          self._reset_lead_launch(immediate=False)
+
+    blend_target = float(self.lead_launch_state == LEAD_LAUNCH_ACTIVE and
+                         LEAD_LAUNCH_MIN_EGO_KPH <= v_ego_kph <= LEAD_LAUNCH_MAX_EGO_KPH)
+    if blend_target > self.lead_launch_blend:
+      self.lead_launch_blend = min(blend_target,
+                                   self.lead_launch_blend + DT_MDL / LEAD_LAUNCH_BLEND_IN_S)
+    else:
+      self.lead_launch_blend = max(blend_target,
+                                   self.lead_launch_blend - DT_MDL / LEAD_LAUNCH_BLEND_OUT_S)
+
+    if self.lead_launch_state == LEAD_LAUNCH_RELEASING and self.lead_launch_blend <= 0.0:
+      self.lead_launch_state = LEAD_LAUNCH_IDLE
+
+    self.last_launch_lead_status = lead_status
+    self.last_launch_lead_distance = x_lead if lead_status and lead_values_valid else None
+
+    base_TR = float(base_TR)
+    launch_TR = min(base_TR, max(LEAD_LAUNCH_TR, float(self.min_TR)))
+    return base_TR + self.lead_launch_blend * (launch_TR - base_TR)
 
   def _relative_accel_mod(self):
     """
@@ -347,6 +476,7 @@ class DynamicFollow:
     self.car_data.left_blinker = CS.leftBlinker
     self.car_data.right_blinker = CS.rightBlinker
     self.car_data.cruise_enabled = CS.cruiseState.enabled
+    self.car_data.brake_pressed = CS.brakePressed
     #self.car_data.cruise_enabled = CS.adaptive_Cruise
 
   def _get_live_params(self):

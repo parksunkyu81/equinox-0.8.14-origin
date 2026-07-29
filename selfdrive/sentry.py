@@ -31,14 +31,7 @@ def report_tombstone(fn: str, message: str, contents: str) -> None:
 
 
 def capture_exception(*args, **kwargs) -> None:
-  process_name = kwargs.pop("process_name", None)
   cloudlog.error("crash", exc_info=kwargs.get('exc_info', 1))
-
-  try:
-    from selfdrive.crashlog import record_python_exception
-    record_python_exception(process_name=process_name, exc_info=kwargs.get('exc_info'))
-  except Exception:
-    pass
 
   try:
     with open('/data/log/last_exception', 'w') as f:

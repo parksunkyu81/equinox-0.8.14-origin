@@ -12,10 +12,6 @@ class CarState(CarStateBase):
     can_define = CANDefine(DBC[CP.carFingerprint]["pt"])
     self.shifter_values = can_define.dv["ECMPRDNL2"]["PRNDL2"]
     self.lka_steering_cmd_counter = 0
-    self.lka_steering_cmd_torque = 0
-    self.lka_steering_cmd_active = False
-    self.lka_steering_cmd_checksum = 0
-    self.lka_steering_cmd_loopbacks = []
     self.park_brake = 0
 
     self.adaptive_Cruise = False
@@ -72,23 +68,7 @@ class CarState(CarStateBase):
     ret.steeringTorque = pt_cp.vl["PSCMStatus"]["LKADriverAppldTrq"]
     ret.steeringTorqueEps = pt_cp.vl["PSCMStatus"]["LKATorqueDelivered"]
     ret.steeringPressed = abs(ret.steeringTorque) > STEER_THRESHOLD
-    self.lka_steering_cmd_counter = int(loopback_cp.vl["ASCMLKASteeringCmd"]["RollingCounter"])
-    self.lka_steering_cmd_torque = int(loopback_cp.vl["ASCMLKASteeringCmd"]["LKASteeringCmd"])
-    self.lka_steering_cmd_active = bool(loopback_cp.vl["ASCMLKASteeringCmd"]["LKASteeringCmdActive"])
-    self.lka_steering_cmd_checksum = int(loopback_cp.vl["ASCMLKASteeringCmd"]["LKASteeringCmdChecksum"])
-
-    # Preserve every actual Panda TX loopback received in this control cycle.
-    # vl only exposes the latest value, while vl_all also reveals duplicates.
-    loopback_values = loopback_cp.vl_all["ASCMLKASteeringCmd"]
-    counters = loopback_values["RollingCounter"]
-    torques = loopback_values["LKASteeringCmd"]
-    actives = loopback_values["LKASteeringCmdActive"]
-    checksums = loopback_values["LKASteeringCmdChecksum"]
-    sample_count = min(len(counters), len(torques), len(actives), len(checksums))
-    self.lka_steering_cmd_loopbacks = [
-      (int(counters[i]), int(torques[i]), bool(actives[i]), int(checksums[i]))
-      for i in range(sample_count)
-    ]
+    self.lka_steering_cmd_counter = loopback_cp.vl["ASCMLKASteeringCmd"]["RollingCounter"]
 
     # 0 inactive, 1 active, 2 temporarily limited, 3 failed
     self.lkas_status = pt_cp.vl["PSCMStatus"]["LKATorqueDeliveredStatus"]
@@ -197,9 +177,6 @@ class CarState(CarStateBase):
   def get_loopback_can_parser(CP):
     signals = [
       ("RollingCounter", "ASCMLKASteeringCmd"),
-      ("LKASteeringCmd", "ASCMLKASteeringCmd"),
-      ("LKASteeringCmdActive", "ASCMLKASteeringCmd"),
-      ("LKASteeringCmdChecksum", "ASCMLKASteeringCmd"),
     ]
 
     checks = [

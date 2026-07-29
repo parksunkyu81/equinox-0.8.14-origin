@@ -848,7 +848,7 @@ class TorqueEstimator:
         self.hist_len = int(HISTORY / DT_MDL)
         self.lag = CP.steerActuatorDelay + 0.2
 
-        self._car_fingerprint = CP.carFingerprint
+        self._car_fingerprint = getattr(CP, 'carFingerprint', None)
         self._is_equinox_torque_profile = str(self._car_fingerprint) == EQUINOX_TORQUE_FINGERPRINT
         self._offset_learning_enabled = bool(
             self._is_equinox_torque_profile and not DISABLE_LATACCEL_OFFSET_LEARNING)
@@ -915,6 +915,12 @@ class TorqueEstimator:
         self.last_time = None
         self._ltp_prev_t = None
         self._ltp_eps_damp_until = 0.0
+        # controlsState (latcontrol) debug mirror
+        self._lc_prev_t = None
+        self._lc_dt = None
+        self._lc_eps_evt = False
+        self._lc_eps_damp = False
+        self._lc_eps_damp_until = 0.0
         self.last_is_frozen = False
         self.stop_freeze_until = 0.0
 
@@ -1417,11 +1423,11 @@ class TorqueEstimator:
                 return False, {}, self.decay
 
             fp = st.get("carFingerprint", None)
-            if fp is not None and str(fp) != str(CP.carFingerprint):
+            if fp is not None and str(fp) != str(getattr(CP, "carFingerprint", None)):
                 return False, {}, self.decay
 
             tune = st.get("tuneType", None)
-            cur_tune = CP.lateralTuning.which()
+            cur_tune = CP.lateralTuning.which() if hasattr(CP, "lateralTuning") else None
             if tune is not None and str(tune) != str(cur_tune):
                 return False, {}, self.decay
 
@@ -1952,8 +1958,8 @@ class TorqueEstimator:
 
             eps_or_max_guard = bool(
                 getattr(self, "last_max_limited", False) or
-                getattr(self, "_ltp_eps_evt_proxy", False) or
-                getattr(self, "_ltp_eps_damp_proxy", False)
+                getattr(self, "_lc_eps_evt", False) or
+                getattr(self, "_lc_eps_damp", False)
             )
             rate_strong_ratio = float(getattr(self, "_qual_rate_strong_ratio", 0.0) or 0.0)
             now = time.monotonic()
@@ -2128,8 +2134,13 @@ class TorqueEstimator:
             self._last_lat_active_cc = bool(msg.latActive)
             self._last_lat_active_cc_t = float(t)
 
-            self._last_enabled_cc = bool(msg.enabled)
-            self._last_enabled_cc_t = float(t)
+            try:
+                en = getattr(msg, 'enabled', None)
+                if en is not None:
+                    self._last_enabled_cc = bool(en)
+                    self._last_enabled_cc_t = float(t)
+            except Exception:
+                pass
 
             self.last_lat_active = bool(msg.latActive)
 
@@ -2151,8 +2162,35 @@ class TorqueEstimator:
             self.last_steer_desired = desired
             self.last_steer_applied = applied
 
-            # This schema only exposes normalized actuator steering. Derive the
-            # diagnostic CAN-scale values instead of probing nonexistent fields.
+            # (optional) steer output CAN / steerMax / torque-limit debug fields (fork별 필드명이 다를 수 있음)
+            try:
+                ao = getattr(msg, 'actuatorsOutput', None)
+                if ao is not None:
+                    for nm in ['steerOutputCan', 'steerCan', 'steerCanOutput', 'steerOutput']:
+                        v_can = getattr(ao, nm, None)
+                        if v_can is not None:
+                            self._last_steer_out_can = float(v_can)
+                            break
+                    for nm in ['steerMax', 'steerMaxOutput', 'steerMaxCan']:
+                        v_m = getattr(ao, nm, None)
+                        if v_m is not None:
+                            self._last_steer_max = float(v_m)
+                            break
+            except Exception:
+                pass
+
+            try:
+                tl = getattr(msg, 'torqueLimits', None)
+                if tl is not None:
+                    for nm in ['steerMax', 'allowedSteer', 'allowedTorque', 'maxSteer']:
+                        v_a = getattr(tl, nm, None)
+                        if v_a is not None:
+                            self._last_allowed_torque = float(v_a)
+                            break
+            except Exception:
+                pass
+
+            # Fallback(derive): if fork doesn't publish torqueLimits/steerCan fields
             try:
                 self._last_steer_max = float(STEER_MAX_DIAG)
                 if applied_used is not None and np.isfinite(applied_used):
@@ -2250,23 +2288,33 @@ class TorqueEstimator:
             self.raw_points["vego"].append(msg.vEgo)
             self.raw_points["steer_override"].append(msg.steeringPressed)
             # driver / EPS torque (가능하면)
-            # These names are fixed by cereal/car.capnp. Dynamic probing of capnp
-            # readers can raise inside pycapnp, so only access confirmed fields.
-            driver_torque = float(msg.steeringTorque)
-            if np.isfinite(driver_torque):
-                self._last_driver_torque = driver_torque
-            self.raw_points.setdefault('driver_torque', deque(maxlen=self.hist_len)).append(
-                float(self._last_driver_torque))
+            try:
+                td = getattr(msg, 'steeringTorqueDriver', None)
+                if td is None:
+                    td = getattr(msg, 'steeringTorque', None)
+                if td is not None and np.isfinite(td):
+                    self._last_driver_torque = float(td)
+                self.raw_points.setdefault('driver_torque', deque(maxlen=self.hist_len)).append(
+                    float(self._last_driver_torque) if hasattr(self, '_last_driver_torque') else 0.0)
+            except Exception:
+                self.raw_points.setdefault('driver_torque', deque(maxlen=self.hist_len)).append(
+                    float(getattr(self, '_last_driver_torque', 0.0) or 0.0))
 
-            eps_torque = float(msg.steeringTorqueEps)
-            if np.isfinite(eps_torque):
-                self._last_eps_torque = eps_torque
-            self.raw_points.setdefault('eps_torque', deque(maxlen=self.hist_len)).append(
-                float(self._last_eps_torque))
+            try:
+                te = getattr(msg, 'steeringTorqueEps', None)
+                if te is None:
+                    te = getattr(msg, 'steeringTorqueEPS', None)
+                if te is not None and np.isfinite(te):
+                    self._last_eps_torque = float(te)
+                self.raw_points.setdefault('eps_torque', deque(maxlen=self.hist_len)).append(
+                    float(getattr(self, '_last_eps_torque', 0.0) or 0.0))
+            except Exception:
+                self.raw_points.setdefault('eps_torque', deque(maxlen=self.hist_len)).append(
+                    float(getattr(self, '_last_eps_torque', 0.0) or 0.0))
 
             # raw steeringPressed + debounce(스파이크 완화)
 
-            sp_raw = bool(msg.steeringPressed)
+            sp_raw = bool(getattr(msg, "steeringPressed", False))
 
             self._last_steer_override = bool(sp_raw)
 
@@ -2292,10 +2340,36 @@ class TorqueEstimator:
 
             self._last_steer_override_db = bool(sp_db)
 
-            lkas_en = bool(msg.lkasEnable)
-            self._last_lkas_enable = lkas_en
-            self._last_lkas_enable_t = float(t)
-            self.raw_points['lkas_enable'].append(lkas_en)
+            try:
+                lkas_en = getattr(msg, 'lkasEnable', None)
+                if lkas_en is None:
+                    lkas_en = getattr(msg, 'lkasEnabled', None)
+                if lkas_en is not None:
+                    self._last_lkas_enable = bool(lkas_en)
+                    self._last_lkas_enable_t = float(t)
+                    self.raw_points['lkas_enable'].append(bool(lkas_en))
+                else:
+                    self.raw_points['lkas_enable'].append(False)
+            except Exception:
+                self.raw_points['lkas_enable'].append(False)
+
+        elif which == "controlsState":
+            # Read latcontrol-decided epsEvt/epsDamp from ControlsState.lateralTorqueState (capnp fields @14/@15)
+            try:
+                lts = getattr(msg, "lateralTorqueState", None)
+                if lts is None:
+                    return
+                # dt from logMonoTime spacing
+                if self._lc_prev_t is not None and np.isfinite(self._lc_prev_t):
+                    self._lc_dt = float(t - float(self._lc_prev_t))
+                else:
+                    self._lc_dt = None
+                self._lc_prev_t = float(t)
+
+                self._lc_eps_evt = bool(getattr(lts, "epsEvt", False))
+                self._lc_eps_damp = bool(getattr(lts, "epsDamp", False))
+            except Exception:
+                return
 
         elif which == "liveLocationKalman":
             if len(self.raw_points['steer_torque']) == self.hist_len:
@@ -2617,7 +2691,7 @@ class TorqueEstimator:
             sample_clip_raw and (
                 bool(getattr(self, "last_max_limited", False)) or
                 bool(getattr(self, "last_rate_limited_strong", False)) or
-                bool(eps_evt_proxy) or
+                bool(getattr(self, "_lc_eps_evt", False) or eps_evt_proxy) or
                 (float(sample_des_abs) >= float(QUALITY_CLIP_MIN_DES)) or
                 (float(sample_delta_err) >= float(QUALITY_CLIP_MIN_DELTA_ERR))
             )
@@ -2659,6 +2733,8 @@ class TorqueEstimator:
             "qual_freeze_ext_primary": (None if not getattr(self, "_qual_freeze_ext_evt", None) else str(getattr(self, "_qual_freeze_ext_evt", {}).get("primary", None))),
             "eps_evt_proxy": bool(eps_evt_proxy),
             "eps_damp_proxy": bool(eps_damp_proxy),
+            "lc_eps_evt": bool(getattr(self, "_lc_eps_evt", False)),
+            "lc_eps_damp": bool(getattr(self, "_lc_eps_damp", False)),
             "driver_torque": round(float(getattr(self, "_last_driver_torque", 0.0) or 0.0), 6),
             "eps_torque": round(float(getattr(self, "_last_eps_torque", 0.0) or 0.0), 6),
             "allowed_torque": round(float(getattr(self, "_last_allowed_torque", 0.0) or 0.0), 6),
@@ -2774,7 +2850,7 @@ class TorqueEstimator:
             burst_clip_raw and (
                 bool(getattr(self, "last_max_limited", False)) or
                 bool(getattr(self, "last_rate_limited_strong", False)) or
-                bool(eps_evt_proxy) or
+                bool(getattr(self, "_lc_eps_evt", False) or eps_evt_proxy) or
                 (float(burst_des_abs) >= float(QUALITY_CLIP_MIN_DES)) or
                 (float(burst_delta_err) >= float(QUALITY_CLIP_MIN_DELTA_ERR))
             )
@@ -2783,7 +2859,7 @@ class TorqueEstimator:
             "steer_clip": bool(clip_for_burst),
             "rate_limited_strong": bool(getattr(self, "last_rate_limited_strong", False)),
             "qual_freeze": bool(float(t_now) < float(getattr(self, "_qual_freeze_until", 0.0) or 0.0)),
-            "eps_evt_any": bool(eps_evt_proxy),
+            "eps_evt_any": bool(getattr(self, "_lc_eps_evt", False) or eps_evt_proxy),
             "clip_pressed": bool(clip_for_burst and getattr(self, "_last_steer_override_db", False)),
             "latAO_blk": bool(getattr(self, "_latAO_blk", None) is not None),
             "latAO_evt": bool(getattr(self, "_latAO_evt", None) is not None),
@@ -2798,6 +2874,7 @@ class TorqueEstimator:
             self._start_or_extend_burst(t_now, "qual_freeze_enter", sample=sample)
         if current_flags["eps_evt_any"] and not prev.get("eps_evt_any", False):
             extra = {
+                "lc_eps_evt": bool(getattr(self, "_lc_eps_evt", False)),
                 "eps_evt_proxy": bool(eps_evt_proxy),
             }
             self._start_or_extend_burst(t_now, "eps_evt_rise", sample=sample, extra=extra)
@@ -3031,8 +3108,13 @@ class TorqueEstimator:
             rec = {
                 "ts": now.strftime("%Y-%m-%d %H:%M:%S"),
                 "ltp_dt": (None if ltp_dt is None else round(float(ltp_dt), 4)),
+                "eps_evt": bool(getattr(self, "_lc_eps_evt", False)),
                 "eps_evt_proxy": bool(eps_evt),
+                "eps_damp": bool(getattr(self, "_lc_eps_damp", False)),
                 "eps_damp_proxy": bool(eps_damp),
+                "lc_dt": (None if getattr(self, "_lc_dt", None) is None else round(float(getattr(self, "_lc_dt", 0.0) or 0.0), 4)),
+                "lc_eps_evt": bool(getattr(self, "_lc_eps_evt", False)),
+                "lc_eps_damp": bool(getattr(self, "_lc_eps_damp", False)),
                 "liveValid": bool(ltp.liveValid),
                 "v_kph": v_kph,
                 "yaw_rate": yaw,
@@ -3221,7 +3303,7 @@ class TorqueEstimator:
             delta_err_quality = abs(float(getattr(self, "last_delta_err", 0.0) or 0.0))
         except Exception:
             delta_err_quality = 0.0
-        eps_evt_quality = bool(getattr(self, "_ltp_eps_evt_proxy", False))
+        eps_evt_quality = bool(getattr(self, "_lc_eps_evt", False) or getattr(self, "_ltp_eps_evt_proxy", False))
         clip_quality_now = bool(
             clip_now and (
                 bool(self.last_max_limited) or
@@ -3715,7 +3797,7 @@ def main(sm=None, pm=None):
     config_realtime_process(2, Priority.CTRL_LOW)
 
     if sm is None:
-        sm = messaging.SubMaster(['carControl', 'carState', 'liveLocationKalman'], poll=['liveLocationKalman'])
+        sm = messaging.SubMaster(['carControl', 'carState', 'controlsState', 'liveLocationKalman'], poll=['liveLocationKalman'])
 
     if pm is None:
         pm = messaging.PubMaster(['liveTorqueParameters'])
