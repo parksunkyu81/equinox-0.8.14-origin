@@ -8,10 +8,7 @@ from typing import Optional, List, Union
 from setproctitle import getproctitle  # pylint: disable=no-name-in-module
 
 from common.clock import sec_since_boot  # pylint: disable=no-name-in-module, import-error
-# This branch still supports EON through selfdrive.hardware. system.hardware
-# only detects TICI, so importing PC from there misclassifies an EON as a PC
-# and silently disables SCHED_FIFO and CPU affinity for controlsd.
-from selfdrive.hardware import PC
+from system.hardware import PC
 
 
 # time step for each process
