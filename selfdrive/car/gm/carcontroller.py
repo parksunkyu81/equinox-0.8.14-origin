@@ -257,18 +257,28 @@ class CarController():
       idx = (frame // 4) % 4
       can_sends.append(create_gas_interceptor_command(self.packer_pt, self.comma_pedal, idx))
 
-    # Show green icon when LKA(차로이탈방지보조) torque is applied, and
-    # alarming orange icon when approaching torque limit.
-    # If not sent again, LKA icon disappears in about 5 seconds.
-    # Conveniently, sending camera message periodically also works as a keepalive.
+    # comma2-dev와 동일하게 실제 LKAS 상태가 활성(1)일 때 계기판 LKA 아이콘을 표시한다.
+    # 요구 조향값이 90%를 넘으면 조향 한계에 가까운 critical 상태도 함께 표시한다.
+    lka_active = CS.lkas_status == 1
+    lka_critical = lka_active and abs(actuators.steer) > 0.9
+    lka_icon_status = (lka_active, lka_critical)
 
-    #lka_active = CS.lkas_status == 1
-    #lka_critical = lka_active and abs(actuators.steer) > 0.9
-    #lka_icon_status = (lka_active, lka_critical)
-    #if frame % P.CAMERA_KEEPALIVE_STEP == 0 or lka_icon_status != self.lka_icon_status_last:
-    #  steer_alert = hud_alert in (VisualAlert.steerRequired, VisualAlert.ldw)
-    #  can_sends.append(gmcan.create_lka_icon_command(CanBus.SW_GMLAN, lka_active, lka_critical, steer_alert))
-    #  self.lka_icon_status_last = lka_icon_status
+    # 아이콘 상태가 바뀌면 즉시 보내고, 바뀌지 않아도 약 1초마다 보내 상태를 유지한다.
+    if frame % P.CAMERA_KEEPALIVE_STEP == 0 or \
+       lka_icon_status != self.lka_icon_status_last:
+      steer_alert = hud_alert in (
+        VisualAlert.steerRequired,
+        VisualAlert.ldw,
+      )
+      can_sends.append(
+        gmcan.create_lka_icon_command(
+          CanBus.SW_GMLAN,
+          lka_active,
+          lka_critical,
+          steer_alert,
+        )
+      )
+      self.lka_icon_status_last = lka_icon_status
 
     new_actuators = actuators.copy()
     new_actuators.steer = self.apply_steer_last / P.STEER_MAX
