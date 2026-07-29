@@ -52,6 +52,8 @@ def get_dynamic_steer_delta(v_ego, new_steer, last_steer, steer_max,
   made high-speed steering behavior hard to reason about. Keep the actual CAN
   command path on the same conservative 7/17 limits as CarControllerParams.
   """
+  # opgm comma2-dev와 동일하게 속도와 조향 요구량에 관계없이
+  # 토크 증가 제한은 7, 감소 제한은 17로 고정한다.
   return 7, 17
 class CarController():
   def __init__(self, dbc_name, CP, VM):
@@ -165,9 +167,10 @@ class CarController():
     controls.pedal_deadzone_vehicle_accel = float(CS.out.aEgo)
     controls.pedal_comfort_accel_cap = float(comfort_accel_cap)
 
-    # Steering (50 Hz). Avoid GM EPS faults when transmitting messages too
-    # close together: skip this transmit if a new Panda loopback confirmation
-    # was received in the current control frame.
+    # GM 조향 CAN 송신 주기를 opgm comma2-dev 방식과 동일하게 맞춘 부분이다.
+    # controlsd는 100 Hz로 실행되므로 짝수 frame에서만 보내면 50 Hz(20 ms)가 된다.
+    # 현재 frame에서 Panda loopback counter가 변경되었다면 EPS에 조향 메시지가 너무
+    # 가까운 간격으로 연속 전달되지 않도록 이번 조향 명령은 보내지 않는다.
     loopback_counter = int(CS.lka_steering_cmd_counter) % 4
     loopback_changed = loopback_counter != self.lka_steering_cmd_counter_last
     loopback_acked = self._steer_last_sent_counter is None or \
@@ -175,9 +178,12 @@ class CarController():
     steer_command_sent = False
     idx = None
     if loopback_changed:
+      # 새 loopback 확인만 반영하고 이 frame에서는 조향 CAN을 보내지 않는다.
       self.lka_steering_cmd_counter_last = loopback_counter
     elif (frame % P.STEER_STEP) == 0:
+      # loopback 변경이 없는 짝수 frame에서만 조향 CAN을 전송한다.
       steer_command_sent = True
+      # EPS가 마지막으로 확인한 counter의 다음 값을 새 명령의 counter로 사용한다.
       idx = (loopback_counter + 1) % 4
 
     lkas_enabled = c.active and not (CS.out.steerFaultTemporary or CS.out.steerFaultPermanent) and \
@@ -199,8 +205,8 @@ class CarController():
         )
 
         try:
-          # apply_std_steer_torque_limits()는 P.STEER_DELTA_UP/DOWN을 읽으므로
-          # 이 호출 구간에서만 동적값을 임시 적용하고 즉시 복원한다.
+          # opgm comma2-dev와 동일한 토크 증가/감소 제한값 7/17을
+          # 실제 조향 토크 제한 함수가 실행되는 동안 적용한 뒤 즉시 복원한다.
           P.STEER_DELTA_UP = dyn_delta_up
           P.STEER_DELTA_DOWN = dyn_delta_down
           apply_steer = apply_std_steer_torque_limits(new_steer, self.apply_steer_last, CS.out.steeringTorque, P)
