@@ -191,15 +191,16 @@ static int gm_tx_hook(CANPacket_t *to_send, bool longitudinal_allowed) {
       // used next time
       desired_torque_last = desired_torque;
 
-      // *** torque real time rate limit check ***
-      violation |= rt_rate_limit_check(desired_torque, rt_torque_last, GM_MAX_RT_DELTA);
+      // TODO: Re-enable after validating limits that are compatible with
+      // GM_MAX_RATE_DOWN. The previous 128/250 ms check can reject a valid
+      // 17-count/20 ms torque unwind.
+      // violation |= rt_rate_limit_check(desired_torque, rt_torque_last, GM_MAX_RT_DELTA);
 
-      // every RT_INTERVAL set the new limits
-      uint32_t ts_elapsed = get_ts_elapsed(ts, ts_last);
-      if (ts_elapsed > GM_RT_INTERVAL) {
-        rt_torque_last = desired_torque;
-        ts_last = ts;
-      }
+      // uint32_t ts_elapsed = get_ts_elapsed(ts, ts_last);
+      // if (ts_elapsed > GM_RT_INTERVAL) {
+      //   rt_torque_last = desired_torque;
+      //   ts_last = ts;
+      // }
     }
 
     // no torque if controls is not allowed
