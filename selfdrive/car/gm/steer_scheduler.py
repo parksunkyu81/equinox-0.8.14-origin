@@ -66,7 +66,6 @@ class GMSteeringCommandScheduler:
     self.deadline_lag = 0.0
     self.time_since_last_send = 0.0
     self.last_loopback_counter = None
-    self.last_loopback_change_time = None
     self.last_sent_counter = None
     self.loopback_changed = False
     self.loopback_acked = True
@@ -82,8 +81,6 @@ class GMSteeringCommandScheduler:
 
     first_loopback = self.last_loopback_counter is None
     self.loopback_changed = first_loopback or loopback_counter != self.last_loopback_counter
-    if self.loopback_changed:
-      self.last_loopback_change_time = now
     self.last_loopback_counter = loopback_counter
     self.loopback_acked = self.last_sent_counter is None or \
                           loopback_counter == self.last_sent_counter
@@ -106,14 +103,8 @@ class GMSteeringCommandScheduler:
       self.block_reason = "initial_sync"
       return False, None
 
-    if self.last_send_time is None:
-      # A loopback from the previous controls process can arrive during initial
-      # synchronization. Do not place the first new command only one controls
-      # cycle after that actual Panda transmission.
-      separated = self.last_loopback_change_time is not None and \
-                  now - self.last_loopback_change_time + 1e-9 >= self.min_safe_interval
-    else:
-      separated = self.time_since_last_send + 1e-9 >= self.min_safe_interval
+    separated = self.last_send_time is None or \
+                self.time_since_last_send + 1e-9 >= self.min_safe_interval
     self.due = self.next_deadline is not None and \
                now + self.early_tolerance + 1e-9 >= self.next_deadline
     self.unacked_fault = self.due and not self.loopback_acked
