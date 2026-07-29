@@ -1,15 +1,12 @@
 from cereal import car
 from common.numpy_fast import interp, clip
 from common.conversions import Conversions as CV
-from common.clock import sec_since_boot
+from common.realtime import DT_CTRL
 from selfdrive.car import apply_std_steer_torque_limits, create_gas_interceptor_command
 from selfdrive.car.gm import gmcan
 from selfdrive.car.gm.values import DBC, NO_ASCM, CanBus, CarControllerParams
 from opendbc.can.packer import CANPacker
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
-from selfdrive.car.gm.steer_scheduler import (GMSteeringCommandScheduler, GMSteeringLimitTracker,
-                                              GM_STEER_RATE_DOWN,
-                                              GM_STEER_RATE_UP)
 
 VisualAlert = car.CarControl.HUDControl.VisualAlert
 GearShifter = car.CarState.GearShifter
@@ -55,7 +52,7 @@ def get_dynamic_steer_delta(v_ego, new_steer, last_steer, steer_max,
   made high-speed steering behavior hard to reason about. Keep the actual CAN
   command path on the same conservative 7/17 limits as CarControllerParams.
   """
-  return GM_STEER_RATE_UP, GM_STEER_RATE_DOWN
+  return 7, 17
 class CarController():
   def __init__(self, dbc_name, CP, VM):
     self.apply_steer_last = 0
@@ -68,8 +65,13 @@ class CarController():
 
     self.accel = 0.0
 
-    self.steer_command_scheduler = GMSteeringCommandScheduler()
-    self.steer_limit_tracker = GMSteeringLimitTracker()
+    self.lka_steering_cmd_counter_last = -1
+    self.steer_rate_limited = False
+    self._steer_last_send_frame = None
+    self._steer_last_sent_counter = None
+    self._steer_command_gap_ms = 0.0
+    self._steer_command_gap_fault = False
+    self._steer_requested_torque = 0
     self.lka_icon_status_last = (False, False)
     #self.RestartForceAccel = Params().get_bool('RestartForceAccel')
 
@@ -163,11 +165,21 @@ class CarController():
     controls.pedal_deadzone_vehicle_accel = float(CS.out.aEgo)
     controls.pedal_comfort_accel_cap = float(comfort_accel_cap)
 
-    # Steering (50 Hz). Loopback updates select the next rolling counter but do
-    # not suppress a due command. The monotonic scheduler also prevents rapid
-    # catch-up sends when controlsd resumes after a delayed frame.
-    steer_command_sent, idx = self.steer_command_scheduler.update(
-      sec_since_boot(), CS.lka_steering_cmd_counter)
+    # Steering (50 Hz). Avoid GM EPS faults when transmitting messages too
+    # close together: skip this transmit if a new Panda loopback confirmation
+    # was received in the current control frame.
+    loopback_counter = int(CS.lka_steering_cmd_counter) % 4
+    loopback_changed = loopback_counter != self.lka_steering_cmd_counter_last
+    loopback_acked = self._steer_last_sent_counter is None or \
+                     loopback_counter == self._steer_last_sent_counter
+    steer_command_sent = False
+    idx = None
+    if loopback_changed:
+      self.lka_steering_cmd_counter_last = loopback_counter
+    elif (frame % P.STEER_STEP) == 0:
+      steer_command_sent = True
+      idx = (loopback_counter + 1) % 4
+
     lkas_enabled = c.active and not (CS.out.steerFaultTemporary or CS.out.steerFaultPermanent) and \
                    CS.out.vEgo > P.MIN_STEER_SPEED
     requested_steer = None
@@ -197,36 +209,43 @@ class CarController():
           P.STEER_DELTA_DOWN = base_delta_down
 
         applied_steer = apply_steer
+        self.steer_rate_limited = abs(applied_steer - requested_steer) > 1
         self._dyn_delta_up_last = dyn_delta_up
         self._dyn_delta_down_last = dyn_delta_down
       else:
         apply_steer = 0
+        self.steer_rate_limited = False
         self._dyn_steer_limited_prev = False
 
       self.apply_steer_last = apply_steer
       can_sends.append(gmcan.create_steering_control(self.packer_pt, CanBus.POWERTRAIN, apply_steer, idx, lkas_enabled))
 
-    # A non-send frame is the normal 50 Hz zero-order hold, not a new actuator
-    # limit. Update this state only from a command that was actually transmitted.
-    self.steer_limit_tracker.update(
-      steer_command_sent, lkas_enabled,
-      requested_torque=requested_steer, applied_torque=applied_steer,
-    )
-    self._dyn_steer_limited_prev = self.steer_limit_tracker.limited
+      if self._steer_last_send_frame is not None:
+        self._steer_command_gap_ms = (frame - self._steer_last_send_frame) * DT_CTRL * 1000.0
+        self._steer_command_gap_fault = self._steer_command_gap_ms > 35.0
+      self._steer_last_send_frame = frame
+      self._steer_last_sent_counter = idx
+
+    if not lkas_enabled:
+      self._steer_requested_torque = 0
+      self.steer_rate_limited = False
+    elif steer_command_sent:
+      self._steer_requested_torque = int(requested_steer)
+    self._dyn_steer_limited_prev = self.steer_rate_limited
 
     controls.gm_steer_command_sent = bool(steer_command_sent)
-    controls.gm_steer_command_gap_ms = float(self.steer_command_scheduler.last_interval * 1000.0)
-    controls.gm_steer_command_deadline_lag_ms = float(self.steer_command_scheduler.deadline_lag * 1000.0)
-    controls.gm_steer_command_counter = int(idx if idx is not None else 0)
-    controls.gm_steer_loopback_counter = int(CS.lka_steering_cmd_counter)
-    controls.gm_steer_loopback_changed = bool(self.steer_command_scheduler.loopback_changed)
-    controls.gm_steer_loopback_acked = bool(self.steer_command_scheduler.loopback_acked)
-    controls.gm_steer_command_gap_fault = bool(self.steer_command_scheduler.gap_fault)
+    controls.gm_steer_command_gap_ms = float(self._steer_command_gap_ms)
+    controls.gm_steer_command_deadline_lag_ms = 0.0
+    controls.gm_steer_command_counter = int(idx if idx is not None else (self._steer_last_sent_counter or 0))
+    controls.gm_steer_loopback_counter = int(loopback_counter)
+    controls.gm_steer_loopback_changed = bool(loopback_changed)
+    controls.gm_steer_loopback_acked = bool(loopback_acked)
+    controls.gm_steer_command_gap_fault = bool(self._steer_command_gap_fault)
     controls.gm_lkas_status = int(CS.lkas_status)
     controls.gm_steer_command_active = bool(lkas_enabled)
     controls.gm_steer_command_torque = int(self.apply_steer_last)
-    controls.gm_steer_requested_torque = int(self.steer_limit_tracker.requested_torque)
-    controls.gm_steer_torque_limited = bool(self.steer_limit_tracker.limited)
+    controls.gm_steer_requested_torque = int(self._steer_requested_torque)
+    controls.gm_steer_torque_limited = bool(self.steer_rate_limited)
 
     if CS.CP.enableGasInterceptor and (frame % 4) == 0:
       idx = (frame // 4) % 4

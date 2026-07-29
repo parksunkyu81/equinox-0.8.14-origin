@@ -3,7 +3,6 @@ from selfdrive.car import dbc_dict
 
 Ecu = car.CarParams.Ecu
 from common.conversions import Conversions as CV
-from selfdrive.car.gm.steer_scheduler import GM_STEER_RATE_DOWN, GM_STEER_RATE_UP, GM_STEER_STEP
 
 
 SLOW_ON_CURVES = 1  # 슬로우 커브 사용 유무 (0,1)
@@ -19,9 +18,9 @@ class CarControllerParams():
 
     def __init__(self, CP):
         self.STEER_MAX = 300  # DEF : 300, Safety limit, not LKA max. Trucks use 600.
-        self.STEER_STEP = GM_STEER_STEP  # 50 Hz at the 100 Hz control loop
-        self.STEER_DELTA_UP = GM_STEER_RATE_UP
-        self.STEER_DELTA_DOWN = GM_STEER_RATE_DOWN
+        self.STEER_STEP = 2  # 50 Hz at the 100 Hz control loop
+        self.STEER_DELTA_UP = 7
+        self.STEER_DELTA_DOWN = 17
         self.MIN_STEER_SPEED = 10.0 * CV.KPH_TO_MS
         self.STEER_DRIVER_ALLOWANCE = 50
         self.STEER_DRIVER_MULTIPLIER = 4
