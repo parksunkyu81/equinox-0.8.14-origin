@@ -225,7 +225,7 @@ def analyze_rows(rows, min_samples=MIN_VALIDATION_SAMPLES):
       expected_checksum = gm_lkas_checksum(active, torque, counter)
 
       if not command_due:
-        errors.append("{} command was sent outside the 50Hz monotonic time gate".format(location))
+        errors.append("{} command was sent outside the fixed 50Hz frame gate".format(location))
       if loopback_changed:
         errors.append("{} command was sent in the same cycle as a changed loopback".format(location))
       if block_reason != "sent":
