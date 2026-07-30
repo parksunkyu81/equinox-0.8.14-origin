@@ -11,50 +11,6 @@ from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
 VisualAlert = car.CarControl.HUDControl.VisualAlert
 GearShifter = car.CarState.GearShifter
 
-CREEP_SPEED = 2.5   # 4km
-
-
-# =====================================================================
-# Dynamic GM steering torque delta map
-# ---------------------------------------------------------------------
-# 목적:
-#   - 10~35km/h 저속/저중속 코너: DELTA_UP 14 / DELTA_DOWN 17 고정으로 조향 응답 최대 강화
-#   - 35~45km/h bridge 코너: DELTA_UP 14→12 / DELTA_DOWN 17→16으로 추종력 유지
-#   - 80~110km/h 고속: DELTA_UP 7~8 / DELTA_DOWN 14~15로 와리가리 억제
-#   - 작은 조향 요구/운전자 개입/직전 limit 상황에서는 자동으로 보수화
-#
-# 주의:
-#   이 값은 apply_std_steer_torque_limits() 호출 직전에만 P에 임시 적용하고,
-#   호출 후 반드시 원래 P.STEER_DELTA_UP/DOWN으로 복원한다.
-# =====================================================================
-DYN_DELTA_UP_BP = [0.0, 8.0, 10.0, 30.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
-DYN_DELTA_UP_V  = [7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0]
-
-DYN_DELTA_DOWN_BP = [0.0, 8.0, 10.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
-DYN_DELTA_DOWN_V  = [17.0, 17.0, 17.0, 17.0, 17.0, 17.0, 17.0, 17.0, 17.0, 17.0]
-
-# 저속에서 작은 조향 요구일 때 UP=14가 불필요하게 열리지 않도록 demand로 블렌딩한다.
-DYN_DEMAND_BP = [0.04, 0.12, 0.24, 0.40]
-DYN_DEMAND_V  = [0.00, 0.35, 0.75, 1.00]
-
-DYN_LOW_BASE_UP_BP = [0.0, 10.0, 30.0, 45.0, 60.0, 80.0, 110.0]
-DYN_LOW_BASE_UP_V  = [7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0]
-
-DYN_LOW_BASE_DOWN_BP = [0.0, 10.0, 30.0, 45.0, 60.0, 80.0, 110.0]
-DYN_LOW_BASE_DOWN_V  = [17.0, 17.0, 17.0, 17.0, 17.0, 17.0, 17.0]
-
-
-def get_dynamic_steer_delta(v_ego, new_steer, last_steer, steer_max,
-                            steering_pressed=False, steer_limited_prev=False):
-  """Return fixed GM steering rate limits.
-
-  The previous speed/demand based map changed LKAS torque slew while driving and
-  made high-speed steering behavior hard to reason about. Keep the actual CAN
-  command path on the same conservative 7/17 limits as CarControllerParams.
-  """
-  # opgm comma2-dev와 동일하게 속도와 조향 요구량에 관계없이
-  # 토크 증가 제한은 7, 감소 제한은 17로 고정한다.
-  return 7, 17
 class CarController():
   def __init__(self, dbc_name, CP, VM):
     self.apply_steer_last = 0
@@ -68,19 +24,8 @@ class CarController():
     self.accel = 0.0
 
     self.lka_steering_cmd_counter_last = -1
-    self.steer_rate_limited = False
-    self._steer_last_send_frame = None
-    self._steer_last_sent_counter = None
-    self._steer_command_gap_ms = 0.0
-    self._steer_command_gap_fault = False
-    self._steer_requested_torque = 0
     self.lka_icon_status_last = (False, False)
-    #self.RestartForceAccel = Params().get_bool('RestartForceAccel')
-
-    # 종방향 캐시값은 update() 호출마다 현재 프레임 기준으로 갱신하고,
-    # 여기서는 단순 초기값만 둔다.
-    self.pedal_prev = 0.0
-    self.accel_start_time = None
+    self.steer_rate_limited = False
 
     self.params = CarControllerParams(CP)
 
@@ -96,28 +41,33 @@ class CarController():
     # Send CAN commands.
     can_sends = []
 
-    # ---------------------------------------------------------------
-    # Longitudinal path must be updated on every update() call.
-    #
-    # 이전 버전은 self.accel / self.comma_pedal 갱신이 steering send gate
-    # 내부에만 있어서, 조향 메시지를 건너뛴 프레임에서는 현재 요청값이 아니라
-    # 직전 캐시값이 new_actuators에 남았다.
-    # 그 결과 req_accel>0 인데 applied_accel=0(또는 그 반대) 같은
-    # stale mismatch가 생겨 멍때림/오탐 freeze를 유발했다.
-    #
-    # 따라서 종방향 계산은 매 프레임 먼저 갱신하고, CAN 전송 주기만 별도로 유지한다.
-    # ---------------------------------------------------------------
     brake_pressed = bool(CS.out.brakePressed)
-    raw_requested_accel = float(clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-    requested_accel = raw_requested_accel
-    comfort_accel_cap = 0.0
-    if CS.CP.enableGasInterceptor:
-      # max(0.0, 값)은 상한이 음수가 되지 않도록 합니다.
-      comfort_accel_cap = max(0.0, float(controls.sm['longitudinalPlan'].accelLimitMax))
-      if requested_accel > 0.0:
-        requested_accel = min(requested_accel, comfort_accel_cap)
-    standstill_blocked = CS.out.standstill or CS.out.vEgo <= V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS
-    self.accel = min(requested_accel, 0.0) if brake_pressed or standstill_blocked else requested_accel
+
+    # Steering (50Hz)
+    # 메시지를 너무 짧은 간격으로 전송할 때 발생하는 GM EPS 오류를 방지하십시오.
+    # 현재 CS 프레임 내에서 다음 Panda 루프백 확인(loopback confirmation)을 방금 수신했다면 해당 전송을 건너뛰어야 합니다.
+    if CS.lka_steering_cmd_counter != self.lka_steering_cmd_counter_last:
+      self.lka_steering_cmd_counter_last = CS.lka_steering_cmd_counter
+    elif (frame % P.STEER_STEP) == 0:
+      lkas_enabled = c.active and not (
+                CS.out.steerFaultTemporary or CS.out.steerFaultPermanent) and CS.out.vEgo > P.MIN_STEER_SPEED
+      if lkas_enabled:
+        new_steer = int(round(actuators.steer * P.STEER_MAX))
+        apply_steer = apply_std_steer_torque_limits(new_steer, self.apply_steer_last, CS.out.steeringTorque, P)
+        self.steer_rate_limited = new_steer != apply_steer
+      else:
+        apply_steer = 0
+
+      self.apply_steer_last = apply_steer
+
+      # GM EPS는 수신 메시지 카운터에 간극(gap)이 발생하면 결함(fault)을 보고합니다.
+      # 시스템 해제 시점에 일시적으로 발생하는 OP/Panda 안전 동기화 문제를 처리하기 위해,
+      # Panda 안전성 검사를 통과한 것으로 확인된 마지막 메시지를 기준으로 카운터를 증가시킵니다.
+      idx = (CS.lka_steering_cmd_counter + 1) % 4
+
+      can_sends.append(gmcan.create_steering_control(self.packer_pt, CanBus.POWERTRAIN, apply_steer, idx, lkas_enabled))
+
+    # ================================================================================================================== #
 
     if CS.CP.enableGasInterceptor:
       # 이것이 없으면 저속에서 너무 공격적입니다.
@@ -149,135 +99,27 @@ class CarController():
 
         # self.comma_pedal = pedal_command
       else:
-        pedal_command = 0.0
         self.comma_pedal = 0.0
     else:
-      pedal_command = 0.0
       self.comma_pedal = 0.0
 
-    # Keep legacy diagnostics populated for log/schema compatibility.
-    controls.pedal_deadzone_boost_candidate = False
-    controls.pedal_deadzone_boost_active = False
-    controls.pedal_deadzone_raw_command = float(pedal_command)
-    controls.pedal_deadzone_applied_command = float(self.comma_pedal)
-    controls.pedal_deadzone_floor = 0.0
-    # Preserve the pre-cap request for road-log PID/pedal-map tuning. Applied
-    # acceleration remains available in carControl.actuatorsOutput.accel.
-    controls.pedal_deadzone_accel_request = raw_requested_accel
-    controls.pedal_deadzone_vehicle_accel = float(CS.out.aEgo)
-    controls.pedal_comfort_accel_cap = float(comfort_accel_cap)
 
-    # GM 조향 CAN 송신 주기를 opgm comma2-dev 방식과 동일하게 맞춘 부분이다.
-    # controlsd는 100 Hz로 실행되므로 짝수 frame에서만 보내면 50 Hz(20 ms)가 된다.
-    # 현재 frame에서 Panda loopback counter가 변경되었다면 EPS에 조향 메시지가 너무
-    # 가까운 간격으로 연속 전달되지 않도록 이번 조향 명령은 보내지 않는다.
-    loopback_counter = int(CS.lka_steering_cmd_counter) % 4
-    loopback_changed = loopback_counter != self.lka_steering_cmd_counter_last
-    loopback_acked = self._steer_last_sent_counter is None or \
-                     loopback_counter == self._steer_last_sent_counter
-    steer_command_sent = False
-    idx = None
-    if loopback_changed:
-      # 새 loopback 확인만 반영하고 이 frame에서는 조향 CAN을 보내지 않는다.
-      self.lka_steering_cmd_counter_last = loopback_counter
-    elif (frame % P.STEER_STEP) == 0:
-      # loopback 변경이 없는 짝수 frame에서만 조향 CAN을 전송한다.
-      steer_command_sent = True
-      # EPS가 마지막으로 확인한 counter의 다음 값을 새 명령의 counter로 사용한다.
-      idx = (loopback_counter + 1) % 4
 
-    lkas_enabled = c.active and not (CS.out.steerFaultTemporary or CS.out.steerFaultPermanent) and \
-                   CS.out.vEgo > P.MIN_STEER_SPEED
-    requested_steer = None
-    applied_steer = None
-    if steer_command_sent:
-      if lkas_enabled:
-        new_steer = int(round(actuators.steer * P.STEER_MAX))
-        requested_steer = new_steer
-        base_delta_up = int(P.STEER_DELTA_UP)
-        base_delta_down = int(P.STEER_DELTA_DOWN)
-
-        steering_pressed = bool(getattr(CS.out, 'steeringPressed', False))
-        dyn_delta_up, dyn_delta_down = get_dynamic_steer_delta(
-          CS.out.vEgo, new_steer, self.apply_steer_last, P.STEER_MAX,
-          steering_pressed=steering_pressed,
-          steer_limited_prev=self._dyn_steer_limited_prev,
-        )
-
-        try:
-          # opgm comma2-dev와 동일한 토크 증가/감소 제한값 7/17을
-          # 실제 조향 토크 제한 함수가 실행되는 동안 적용한 뒤 즉시 복원한다.
-          P.STEER_DELTA_UP = dyn_delta_up
-          P.STEER_DELTA_DOWN = dyn_delta_down
-          apply_steer = apply_std_steer_torque_limits(new_steer, self.apply_steer_last, CS.out.steeringTorque, P)
-        finally:
-          P.STEER_DELTA_UP = base_delta_up
-          P.STEER_DELTA_DOWN = base_delta_down
-
-        applied_steer = apply_steer
-        self.steer_rate_limited = abs(applied_steer - requested_steer) > 1
-        self._dyn_delta_up_last = dyn_delta_up
-        self._dyn_delta_down_last = dyn_delta_down
-      else:
-        apply_steer = 0
-        self.steer_rate_limited = False
-        self._dyn_steer_limited_prev = False
-
-      self.apply_steer_last = apply_steer
-      can_sends.append(gmcan.create_steering_control(self.packer_pt, CanBus.POWERTRAIN, apply_steer, idx, lkas_enabled))
-
-      if self._steer_last_send_frame is not None:
-        self._steer_command_gap_ms = (frame - self._steer_last_send_frame) * DT_CTRL * 1000.0
-        self._steer_command_gap_fault = self._steer_command_gap_ms > 35.0
-      self._steer_last_send_frame = frame
-      self._steer_last_sent_counter = idx
-
-    if not lkas_enabled:
-      self._steer_requested_torque = 0
-      self.steer_rate_limited = False
-    elif steer_command_sent:
-      self._steer_requested_torque = int(requested_steer)
-    self._dyn_steer_limited_prev = self.steer_rate_limited
-
-    controls.gm_steer_command_sent = bool(steer_command_sent)
-    controls.gm_steer_command_gap_ms = float(self._steer_command_gap_ms)
-    controls.gm_steer_command_deadline_lag_ms = 0.0
-    controls.gm_steer_command_counter = int(idx if idx is not None else (self._steer_last_sent_counter or 0))
-    controls.gm_steer_loopback_counter = int(loopback_counter)
-    controls.gm_steer_loopback_changed = bool(loopback_changed)
-    controls.gm_steer_loopback_acked = bool(loopback_acked)
-    controls.gm_steer_command_gap_fault = bool(self._steer_command_gap_fault)
-    controls.gm_lkas_status = int(CS.lkas_status)
-    controls.gm_steer_command_active = bool(lkas_enabled)
-    controls.gm_steer_command_torque = int(self.apply_steer_last)
-    controls.gm_steer_requested_torque = int(self._steer_requested_torque)
-    controls.gm_steer_torque_limited = bool(self.steer_rate_limited)
-
+    # 4프레임마다, 0~3으로 반복되는 순번을 붙여 가속페달 제어 명령을 전송
     if CS.CP.enableGasInterceptor and (frame % 4) == 0:
       idx = (frame // 4) % 4
       can_sends.append(create_gas_interceptor_command(self.packer_pt, self.comma_pedal, idx))
 
-    # comma2-dev와 동일하게 실제 LKAS 상태가 활성(1)일 때 계기판 LKA 아이콘을 표시한다.
-    # 요구 조향값이 90%를 넘으면 조향 한계에 가까운 critical 상태도 함께 표시한다.
+    # ================================================================================================================ #
+    # LKA 토크가 인가되면 녹색 아이콘을 표시하고, 토크 한계에 근접하면 경고성 주황색 아이콘을 표시합니다.
+    # 추가 신호가 없으면 LKA 아이콘은 약 5초 후에 사라집니다.
+    # 편리하게도, 카메라 메시지를 주기적으로 전송하는 것은 킵얼라이브(keepalive) 역할도 겸합니다.
     lka_active = CS.lkas_status == 1
     lka_critical = lka_active and abs(actuators.steer) > 0.9
     lka_icon_status = (lka_active, lka_critical)
-
-    # 아이콘 상태가 바뀌면 즉시 보내고, 바뀌지 않아도 약 1초마다 보내 상태를 유지한다.
-    if frame % P.CAMERA_KEEPALIVE_STEP == 0 or \
-       lka_icon_status != self.lka_icon_status_last:
-      steer_alert = hud_alert in (
-        VisualAlert.steerRequired,
-        VisualAlert.ldw,
-      )
-      can_sends.append(
-        gmcan.create_lka_icon_command(
-          CanBus.SW_GMLAN,
-          lka_active,
-          lka_critical,
-          steer_alert,
-        )
-      )
+    if frame % P.CAMERA_KEEPALIVE_STEP == 0 or lka_icon_status != self.lka_icon_status_last:
+      steer_alert = hud_alert in (VisualAlert.steerRequired, VisualAlert.ldw)
+      can_sends.append(gmcan.create_lka_icon_command(CanBus.SW_GMLAN, lka_active, lka_critical, steer_alert))
       self.lka_icon_status_last = lka_icon_status
 
     new_actuators = actuators.copy()
