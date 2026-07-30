@@ -122,6 +122,7 @@ class CarController():
     # LKA 토크가 인가되면 녹색 아이콘을 표시하고, 토크 한계에 근접하면 경고성 주황색 아이콘을 표시합니다.
     # 추가 신호가 없으면 LKA 아이콘은 약 5초 후에 사라집니다.
     # 편리하게도, 카메라 메시지를 주기적으로 전송하는 것은 킵얼라이브(keepalive) 역할도 겸합니다.
+    # 킵얼라이브(keepalive) : 디바이스간의 데이터 링크가 잘 동작하고 있는지 확인하거나 데이터 링크가 끊어지는 것을 방지하기 위해서 디바이스 간에 서로 주고받는 메시지를 말한다.
     lka_active = CS.lkas_status == 1
     lka_critical = lka_active and abs(actuators.steer) > 0.9
     lka_icon_status = (lka_active, lka_critical)
