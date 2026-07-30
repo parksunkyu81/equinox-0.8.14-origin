@@ -78,6 +78,7 @@ class CarController():
     # 현재 제한 상태를 조향 PID에 전달
     controls.gm_steer_torque_limited = bool(self.steer_rate_limited)
 
+    # GM EPS의 메시지 카운터 규칙을 지키면서 OpenPilot의 조향 요청을 안전한 토크로 제한하여 전송하는 기능
     # ================================================================================================================== #
 
     if CS.CP.enableGasInterceptor:
