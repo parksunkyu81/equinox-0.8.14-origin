@@ -46,11 +46,16 @@ class CarController():
     # Steering (50Hz)
     # 메시지를 너무 짧은 간격으로 전송할 때 발생하는 GM EPS 오류를 방지하십시오.
     # 현재 CS 프레임 내에서 다음 Panda 루프백 확인(loopback confirmation)을 방금 수신했다면 해당 전송을 건너뛰어야 합니다.
+    lkas_enabled = c.active and not (
+      CS.out.steerFaultTemporary or CS.out.steerFaultPermanent
+    ) and CS.out.vEgo > P.MIN_STEER_SPEED
+
+    if not lkas_enabled:
+      self.steer_rate_limited = False
+
     if CS.lka_steering_cmd_counter != self.lka_steering_cmd_counter_last:
       self.lka_steering_cmd_counter_last = CS.lka_steering_cmd_counter
     elif (frame % P.STEER_STEP) == 0:
-      lkas_enabled = c.active and not (
-                CS.out.steerFaultTemporary or CS.out.steerFaultPermanent) and CS.out.vEgo > P.MIN_STEER_SPEED
       if lkas_enabled:
         new_steer = int(round(actuators.steer * P.STEER_MAX))
         apply_steer = apply_std_steer_torque_limits(new_steer, self.apply_steer_last, CS.out.steeringTorque, P)
@@ -66,6 +71,9 @@ class CarController():
       idx = (CS.lka_steering_cmd_counter + 1) % 4
 
       can_sends.append(gmcan.create_steering_control(self.packer_pt, CanBus.POWERTRAIN, apply_steer, idx, lkas_enabled))
+
+    # 현재 제한 상태를 조향 PID에 전달
+    controls.gm_steer_torque_limited = bool(self.steer_rate_limited)
 
     # ================================================================================================================== #
 
