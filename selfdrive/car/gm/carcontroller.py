@@ -53,25 +53,28 @@ class CarController():
     if not lkas_enabled:
       self.steer_rate_limited = False
 
-    if CS.lka_steering_cmd_counter != self.lka_steering_cmd_counter_last:
-      self.lka_steering_cmd_counter_last = CS.lka_steering_cmd_counter
-    elif (frame % P.STEER_STEP) == 0:
+    if CS.lka_steering_cmd_counter != self.lka_steering_cmd_counter_last: # 차량에서 수신한 LKA 조향 메시지 카운터가 이전 값과 달라졌는지 확인
+      self.lka_steering_cmd_counter_last = CS.lka_steering_cmd_counter   # 카운터가 변경됐다면 차량의 새로운 조향 메시지가 수신된 것이므로, 마지막 카운터를 갱신
+    elif (frame % P.STEER_STEP) == 0:  # 수신 카운터가 변경되지 않았고, 현재 프레임이 조향 명령 전송 주기일 때만 (2프레임마다 조향 명령을 계산하고 전송)
       if lkas_enabled:
         new_steer = int(round(actuators.steer * P.STEER_MAX))
         apply_steer = apply_std_steer_torque_limits(new_steer, self.apply_steer_last, CS.out.steeringTorque, P)
         self.steer_rate_limited = new_steer != apply_steer
       else:
-        apply_steer = 0
+        apply_steer = 0  # LKAS가 비활성화된 경우에는 EPS에 조향 토크를 요청하지 않도록 0을 사용
 
-      self.apply_steer_last = apply_steer
+      self.apply_steer_last = apply_steer  # 적용한 조향 토크를 저장합니다. 다음 주기의 토크 변화량 제한을 계산할 때 기준값으로 사용
 
       # GM EPS는 수신 메시지 카운터에 간극(gap)이 발생하면 결함(fault)을 보고합니다.
       # 시스템 해제 시점에 일시적으로 발생하는 OP/Panda 안전 동기화 문제를 처리하기 위해,
       # Panda 안전성 검사를 통과한 것으로 확인된 마지막 메시지를 기준으로 카운터를 증가시킵니다.
+      # 차량에서 마지막으로 수신한 카운터에 1을 더해 다음 값을 만듭니다. (0 → 1 → 2 → 3)
       idx = (CS.lka_steering_cmd_counter + 1) % 4
 
       can_sends.append(gmcan.create_steering_control(self.packer_pt, CanBus.POWERTRAIN, apply_steer, idx, lkas_enabled))
 
+    # 현재 조향 토크가 제한됐는지를 상위 제어기인 controls에 전달
+    # 조향 PID 제어기는 이 정보를 이용해 토크 제한 중 적분값이 과도하게 누적되는 현상 등을 방지
     # 현재 제한 상태를 조향 PID에 전달
     controls.gm_steer_torque_limited = bool(self.steer_rate_limited)
 
