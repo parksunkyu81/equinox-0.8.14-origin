@@ -30,6 +30,7 @@ from selfdrive.controls.lib.vehicle_model import VehicleModel
 from selfdrive.locationd.calibrationd import Calibration
 from selfdrive.hardware import HARDWARE, TICI, EON
 from selfdrive.manager.process_config import managed_processes
+from selfdrive.process_diagnostics import append_process_diagnostic
 
 from selfdrive.ntune import ntune_common_get, ntune_common_enabled, ntune_scc_get, ntune_torque_get
 from selfdrive.road_speed_limiter import road_speed_limiter_get_max_speed, road_speed_limiter_get_active, \
@@ -252,6 +253,7 @@ class Controls:
         self.events_prev = []
         self.current_alert_types = [ET.PERMANENT]
         self.logged_comm_issue = False
+        self.logged_process_not_running = False
         self.button_timers = {ButtonEvent.Type.decelCruise: 0, ButtonEvent.Type.accelCruise: 0}
         self.last_actuators = car.CarControl.Actuators.new_message()
 
@@ -837,6 +839,43 @@ class Controls:
                 self.last_controls_allowed_mismatch_log_frame = self.sm.frame
             self.events.add(EventName.controlsMismatch)
 
+        # Persist the first frame of every communication failure. Reset after
+        # recovery so a later recurrence is recorded as a separate event.
+        checks_failed = not self.sm.all_checks()
+        comm_diagnostic_active = checks_failed or self.can_rcv_error
+        if comm_diagnostic_active and not self.logged_comm_issue:
+            invalid = [s for s, valid in self.sm.valid.items() if not valid]
+            not_alive = [s for s, alive in self.sm.alive.items() if not alive]
+            not_freq_ok = [s for s, freq_ok in self.sm.freq_ok.items() if not freq_ok]
+            manager_processes = [{
+                "name": p.name,
+                "running": bool(p.running),
+                "should_be_running": bool(p.shouldBeRunning),
+                "pid": int(p.pid),
+                "exit_code": int(p.exitCode),
+            } for p in self.sm['managerState'].processes]
+
+            append_process_diagnostic(
+                "communication_issue",
+                frame=int(self.sm.frame),
+                initialized=bool(self.initialized),
+                enabled=bool(self.enabled),
+                active=bool(self.active),
+                invalid=invalid,
+                not_alive=not_alive,
+                not_freq_ok=not_freq_ok,
+                can_rcv_error=bool(self.can_rcv_error),
+                can_rcv_error_counter=int(self.can_rcv_error_counter),
+                manager_state_alive=bool(self.sm.alive['managerState']),
+                manager_state_valid=bool(self.sm.valid['managerState']),
+                manager_processes=manager_processes,
+            )
+            cloudlog.event("commIssue", invalid=invalid, not_alive=not_alive,
+                           not_freq_ok=not_freq_ok, can_error=self.can_rcv_error, error=True)
+            self.logged_comm_issue = True
+        elif not comm_diagnostic_active:
+            self.logged_comm_issue = False
+
         # Check for HW or system issues
         if len(self.sm['radarState'].radarErrors):
             self.events.add(EventName.radarFault)
@@ -844,16 +883,8 @@ class Controls:
             self.events.add(EventName.usbError)
         # self.sm.all_checks()
         # self.sm.all_alive_and_valid()
-        elif not self.sm.all_checks() or self.can_rcv_error:
+        elif checks_failed or self.can_rcv_error:
             self.events.add(EventName.commIssue)
-            if not self.logged_comm_issue:
-                invalid = [s for s, valid in self.sm.valid.items() if not valid]
-                not_alive = [s for s, alive in self.sm.alive.items() if not alive]
-                cloudlog.event("commIssue", invalid=invalid, not_alive=not_alive, can_error=self.can_rcv_error,
-                               error=True)
-                self.logged_comm_issue = True
-        else:
-            self.logged_comm_issue = False
 
         if not self.sm['liveParameters'].valid:
             self.events.add(EventName.vehicleModelInvalid)
@@ -910,8 +941,26 @@ class Controls:
 
             # Check if all manager processes are running
             not_running = {p.name for p in self.sm['managerState'].processes if not p.running}
-            if self.sm.rcv_frame['managerState'] and (not_running - IGNORE_PROCESSES):
+            unexpected_not_running = not_running - IGNORE_PROCESSES
+            if self.sm.rcv_frame['managerState'] and unexpected_not_running:
                 self.events.add(EventName.processNotRunning)
+                if not self.logged_process_not_running:
+                    manager_processes = [{
+                        "name": p.name,
+                        "running": bool(p.running),
+                        "should_be_running": bool(p.shouldBeRunning),
+                        "pid": int(p.pid),
+                        "exit_code": int(p.exitCode),
+                    } for p in self.sm['managerState'].processes]
+                    append_process_diagnostic(
+                        "process_not_running",
+                        frame=int(self.sm.frame),
+                        processes=sorted(unexpected_not_running),
+                        manager_processes=manager_processes,
+                    )
+                    self.logged_process_not_running = True
+            else:
+                self.logged_process_not_running = False
 
         # Only allow engagement with brake pressed when stopped behind another stopped car
         speeds = self.sm['longitudinalPlan'].speeds
