@@ -24,7 +24,7 @@ _A_CRUISE_MIN_V = [-0.8, -1.0, -0.8, -0.5, -0.3]
 _A_CRUISE_MIN_BP = [0., 30 * CV.KPH_TO_MS, 60 * CV.KPH_TO_MS, 80 * CV.KPH_TO_MS, 100.0 * CV.KPH_TO_MS]
 
 _A_CRUISE_MAX_V = [0.8, 0.7, 0.6, 0.5, 0.4]  # 최대 가속도를 낮추어 연비를 개선
-_A_CRUISE_MAX_V_FOLLOWING = [1.1, 1.0, 0.8, 0.5, 0.4]
+_A_CRUISE_MAX_V_FOLLOWING = [1.2, 1.0, 0.8, 0.5, 0.4]
 _A_CRUISE_MAX_BP = _A_CRUISE_MIN_BP
 
 _A_TOTAL_MAX_V = [2.5, 3.0, 4.0]  # 회전 시 가속 제한을 낮춤
