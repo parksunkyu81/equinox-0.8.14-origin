@@ -73,12 +73,16 @@ class EquinoxVirtualPanda:
     self.pedal_command = 0.0
     self.steer_command = 0.0
     self.loopback_counter = 0
+    self.gas_sensor_counter = 0
     self.gas_can_frames = 0
     self.steer_can_frames = 0
     self.button_queue = []
     self.last_engage_attempt_frame = -1000
     self.last_resume_frame = -1000
     self.last_status_frame = -100
+    self.last_status_time = self.started_at
+    self.measured_loop_hz = 0.0
+    self.last_vehicle_update_time = sec_since_boot()
 
   def _put_default(self, key, value):
     if self.params.get(key) is None:
@@ -99,6 +103,7 @@ class EquinoxVirtualPanda:
       self.vehicle.reset()
       self.pedal_command = 0.0
       self.steer_command = 0.0
+      self.gas_sensor_counter = 0
       self.button_queue.clear()
       self.params.put_bool(PARAM_RESET, False)
       self.params.put_bool(PARAM_ENGAGE, True)
@@ -156,54 +161,76 @@ class EquinoxVirtualPanda:
     driver_gas = 0.12 if gas_pressed else 0.0
     steering_torque = self.steer_command * 2.0
 
+    # Keep one CAN packet arriving every 10 ms so controlsd continues to run at
+    # 100 Hz. Individual vehicle messages are distributed across their required
+    # parser timeouts; packing all 15 messages at 100 Hz overloads EON hardware.
     frames = [
-      self.packer.make_can_msg("EBCMWheelSpdFront", CanBus.POWERTRAIN, {
-        "FLWheelSpd": speed_kph, "FRWheelSpd": speed_kph,
-      }),
-      self.packer.make_can_msg("EBCMWheelSpdRear", CanBus.POWERTRAIN, {
-        "RLWheelSpd": speed_kph, "RRWheelSpd": speed_kph,
-      }),
-      self.packer.make_can_msg("ECMPRDNL2", CanBus.POWERTRAIN, {
-        "PRNDL2": 4, "ManualMode": 0, "TransmissionState": 9,
-      }),
       self.packer.make_can_msg("ECMEngineStatus", CanBus.POWERTRAIN, {
         "CruiseMainOn": 0, "Brake_Pressed": int(brake_pressed),
         "Standstill": int(self.vehicle.speed_mps < 0.01), "EngineRPM": 1500,
       }),
-      self.packer.make_can_msg("AcceleratorPedal2", CanBus.POWERTRAIN, {
-        "CruiseState": 1, "AcceleratorPedal2": driver_gas * 254.0,
-      }),
       self.packer.make_can_msg("ASCMSteeringButton", CanBus.POWERTRAIN, {
         "ACCButtons": button, "DistanceButton": 0, "LKAButton": 0,
       }),
-      self.packer.make_can_msg("PSCMSteeringAngle", CanBus.POWERTRAIN, {
-        "SteeringWheelAngle": self.vehicle.steering_angle_deg,
-        "SteeringWheelRate": self.vehicle.steering_rate_deg_s,
-      }),
-      self.packer.make_can_msg("PSCMStatus", CanBus.POWERTRAIN, {
-        "LKADriverAppldTrq": 0.0,
-        "LKATorqueDelivered": steering_torque,
-        "LKATorqueDeliveredStatus": 1,
-      }),
-      self.packer.make_can_msg("BCMDoorBeltStatus", CanBus.POWERTRAIN, {
-        "FrontLeftDoor": 0, "FrontRightDoor": 0,
-        "RearLeftDoor": 0, "RearRightDoor": 0,
-        "LeftSeatBelt": 1, "RightSeatBelt": 1,
-      }),
-      self.packer.make_can_msg("BCMTurnSignals", CanBus.POWERTRAIN, {"TurnSignals": 0}),
-      self.packer.make_can_msg("ESPStatus", CanBus.POWERTRAIN, {"TractionControlOn": 1}),
-      self.packer.make_can_msg("EBCMBrakePedalPosition", CanBus.POWERTRAIN, {
-        "BrakePedalPosition": 80 if brake_pressed else 0,
-      }),
-      self.packer.make_can_msg("EPBStatus", CanBus.POWERTRAIN, {"EPBClosed": 0}),
-      self._make_gas_sensor(driver_gas),
-      self.packer.make_can_msg("ASCMLKASteeringCmd", CanBus.LOOPBACK, {
-        "RollingCounter": self.loopback_counter,
-        "LKASteeringCmd": int(round(self.steer_command * 300.0)),
-        "LKASteeringCmdActive": int(self._controls_enabled()),
-        "LKASteeringCmdChecksum": 0,
-      }),
     ]
+
+    if self.frame % 2 == 0:  # 50 Hz
+      frames.extend([
+        self.packer.make_can_msg("PSCMSteeringAngle", CanBus.POWERTRAIN, {
+          "SteeringWheelAngle": self.vehicle.steering_angle_deg,
+          "SteeringWheelRate": self.vehicle.steering_rate_deg_s,
+        }),
+        self.packer.make_can_msg("EBCMBrakePedalPosition", CanBus.POWERTRAIN, {
+          "BrakePedalPosition": 80 if brake_pressed else 0,
+        }),
+        self._make_gas_sensor(driver_gas),
+        self.packer.make_can_msg("ASCMLKASteeringCmd", CanBus.LOOPBACK, {
+          "RollingCounter": self.loopback_counter,
+          "LKASteeringCmd": int(round(self.steer_command * 300.0)),
+          "LKASteeringCmdActive": int(self._controls_enabled()),
+          "LKASteeringCmdChecksum": 0,
+        }),
+      ])
+
+    if self.frame % 3 == 0:  # about 33 Hz
+      frames.append(self.packer.make_can_msg("AcceleratorPedal2", CanBus.POWERTRAIN, {
+        "CruiseState": 1, "AcceleratorPedal2": driver_gas * 254.0,
+      }))
+
+    if self.frame % 5 == 0:  # 20 Hz
+      frames.extend([
+        self.packer.make_can_msg("EBCMWheelSpdFront", CanBus.POWERTRAIN, {
+          "FLWheelSpd": speed_kph, "FRWheelSpd": speed_kph,
+        }),
+        self.packer.make_can_msg("EBCMWheelSpdRear", CanBus.POWERTRAIN, {
+          "RLWheelSpd": speed_kph, "RRWheelSpd": speed_kph,
+        }),
+        self.packer.make_can_msg("EPBStatus", CanBus.POWERTRAIN, {"EPBClosed": 0}),
+      ])
+
+    if self.frame % 10 == 0:  # 10 Hz
+      frames.extend([
+        self.packer.make_can_msg("ECMPRDNL2", CanBus.POWERTRAIN, {
+          "PRNDL2": 4, "ManualMode": 0, "TransmissionState": 9,
+        }),
+        self.packer.make_can_msg("PSCMStatus", CanBus.POWERTRAIN, {
+          "LKADriverAppldTrq": 0.0,
+          "LKATorqueDelivered": steering_torque,
+          "LKATorqueDeliveredStatus": 1,
+        }),
+        self.packer.make_can_msg("BCMDoorBeltStatus", CanBus.POWERTRAIN, {
+          "FrontLeftDoor": 0, "FrontRightDoor": 0,
+          "RearLeftDoor": 0, "RearRightDoor": 0,
+          "LeftSeatBelt": 1, "RightSeatBelt": 1,
+        }),
+        self.packer.make_can_msg("ESPStatus", CanBus.POWERTRAIN, {"TractionControlOn": 1}),
+      ])
+
+    if self.frame % 100 == 0:  # 1 Hz
+      frames.append(self.packer.make_can_msg(
+        "BCMTurnSignals", CanBus.POWERTRAIN, {"TurnSignals": 0}
+      ))
+
     return frames
 
   def _make_gas_sensor(self, driver_gas):
@@ -211,7 +238,7 @@ class EquinoxVirtualPanda:
       "INTERCEPTOR_GAS": driver_gas * 255.0,
       "INTERCEPTOR_GAS2": driver_gas * 255.0,
       "STATE": 0,
-      "COUNTER_PEDAL": self.frame & 0x0F,
+      "COUNTER_PEDAL": self.gas_sensor_counter,
       "CHECKSUM_PEDAL": 0,
     }
 
@@ -220,7 +247,9 @@ class EquinoxVirtualPanda:
     # over bytes 0..4, in reverse byte order.
     unsigned_message = self.packer.make_can_msg("GAS_SENSOR", CanBus.POWERTRAIN, values)
     values["CHECKSUM_PEDAL"] = crc8_pedal(unsigned_message[2][:-1])
-    return self.packer.make_can_msg("GAS_SENSOR", CanBus.POWERTRAIN, values)
+    message = self.packer.make_can_msg("GAS_SENSOR", CanBus.POWERTRAIN, values)
+    self.gas_sensor_counter = (self.gas_sensor_counter + 1) & 0x0F
+    return message
 
   def _publish_panda(self, ignition):
     panda_msg = messaging.new_message("pandaStates", 1)
@@ -332,6 +361,7 @@ class EquinoxVirtualPanda:
       "gasCanFrames": self.gas_can_frames,
       "steerCanFrames": self.steer_can_frames,
       "distanceM": round(self.vehicle.distance_m, 1),
+      "loopHz": round(self.measured_loop_hz, 1),
     }
     os.makedirs(STATUS_DIR, exist_ok=True)
     temp_file = STATUS_FILE + ".tmp"
@@ -347,7 +377,7 @@ class EquinoxVirtualPanda:
 
   def run(self):
     cloudlog.warning("Starting Equinox virtual Panda bench simulator (NOBOARD)")
-    ratekeeper = Ratekeeper(1.0 / DT_CTRL, print_delay_threshold=0.1)
+    ratekeeper = Ratekeeper(1.0 / DT_CTRL, print_delay_threshold=None)
 
     while True:
       self.sm.update(0)
@@ -355,8 +385,11 @@ class EquinoxVirtualPanda:
       self._consume_sendcan()
 
       if commands["ignition"]:
+        now = sec_since_boot()
+        vehicle_dt = max(0.001, min(0.05, now - self.last_vehicle_update_time))
+        self.last_vehicle_update_time = now
         self.vehicle.step(
-          DT_CTRL,
+          vehicle_dt,
           self.pedal_command,
           self.steer_command,
           brake_pressed=commands["brake_pressed"],
@@ -372,8 +405,14 @@ class EquinoxVirtualPanda:
         self._publish_plans(commands["target_speed_kph"])
 
       if self.frame - self.last_status_frame >= 100:
+        status_time = sec_since_boot()
+        status_frames = self.frame - max(0, self.last_status_frame)
+        status_elapsed = status_time - self.last_status_time
+        if self.last_status_frame >= 0 and status_elapsed > 0.0:
+          self.measured_loop_hz = status_frames / status_elapsed
         self._write_status(commands)
         self.last_status_frame = self.frame
+        self.last_status_time = status_time
 
       self.frame += 1
       ratekeeper.keep_time()

@@ -83,6 +83,7 @@ python3 -m tools.equinox_sim.control reset
 
 - `control status` 출력의 `recoveryActive: true`
 - `pedalCommand`가 0.060 이상
+- `loopHz`가 지속적으로 약 90 이상
 - 가상 차량 속도 증가
 - PEDAL 게이지 바로 위에 황색 복구 경고 표시
 
