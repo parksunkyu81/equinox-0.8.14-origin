@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+import json
+import os
+
+from cereal import car, log, messaging
+from common.params import Params
+from common.realtime import DT_CTRL, Ratekeeper, sec_since_boot
+from opendbc.can.packer import CANPacker
+from opendbc.can.parser import CANParser
+from selfdrive.boardd.boardd import can_list_to_can_capnp
+from selfdrive.car.gm.values import CAR, DBC, CanBus, CruiseButtons
+from selfdrive.controls.lib.drive_helpers import CONTROL_N
+from selfdrive.swaglog import cloudlog
+from tools.equinox_sim.vehicle import EquinoxVehicle
+
+
+SIM_ENV = "EQUINOX_SIMULATOR"
+STATUS_DIR = "/tmp/equinox_sim"
+STATUS_FILE = os.path.join(STATUS_DIR, "status.json")
+
+PARAM_TARGET_SPEED = "EquinoxSimTargetSpeedKph"
+PARAM_IGNITION = "EquinoxSimIgnition"
+PARAM_ACCEL_ZERO = "EquinoxSimAccelZero"
+PARAM_BRAKE = "EquinoxSimBrakePressed"
+PARAM_GAS = "EquinoxSimGasPressed"
+PARAM_RESET = "EquinoxSimReset"
+PARAM_ENGAGE = "EquinoxSimEngage"
+
+
+class EquinoxVirtualPanda:
+  def __init__(self):
+    if os.getenv(SIM_ENV) != "1" or os.getenv("SIMULATION") is None or os.getenv("NOBOARD") is None:
+      raise RuntimeError(
+        "Equinox simulator requires EQUINOX_SIMULATOR=1, SIMULATION=1 and NOBOARD=1"
+      )
+
+    self.params = Params()
+    self._put_default(PARAM_TARGET_SPEED, "100")
+    self._put_default(PARAM_IGNITION, "1")
+    self._put_default(PARAM_ACCEL_ZERO, "0")
+    self._put_default(PARAM_BRAKE, "0")
+    self._put_default(PARAM_GAS, "0")
+    self._put_default(PARAM_RESET, "0")
+    self._put_default(PARAM_ENGAGE, "1")
+
+    initial_speed_kph = float(os.getenv("EQUINOX_SIM_INITIAL_SPEED_KPH", "80"))
+    self.vehicle = EquinoxVehicle(initial_speed_kph=initial_speed_kph)
+
+    self.pm = messaging.PubMaster([
+      "can", "pandaStates", "peripheralState", "longitudinalPlan", "lateralPlan",
+      "driverMonitoringState",
+    ])
+    self.sm = messaging.SubMaster(["carControl", "controlsState"])
+    self.sendcan_sock = messaging.sub_sock("sendcan")
+
+    dbc_name = DBC[CAR.EQUINOX_NR]["pt"]
+    self.packer = CANPacker(dbc_name)
+    self.output_parser = CANParser(
+      dbc_name,
+      [
+        ("GAS_COMMAND", "GAS_COMMAND"),
+        ("ENABLE", "GAS_COMMAND"),
+        ("RollingCounter", "ASCMLKASteeringCmd"),
+        ("LKASteeringCmd", "ASCMLKASteeringCmd"),
+      ],
+      [("GAS_COMMAND", 0), ("ASCMLKASteeringCmd", 0)],
+      CanBus.POWERTRAIN,
+    )
+
+    self.frame = 0
+    self.started_at = sec_since_boot()
+    self.pedal_command = 0.0
+    self.steer_command = 0.0
+    self.loopback_counter = 0
+    self.gas_can_frames = 0
+    self.steer_can_frames = 0
+    self.button_queue = []
+    self.last_engage_attempt_frame = -1000
+    self.last_resume_frame = -1000
+    self.last_status_frame = -100
+
+  def _put_default(self, key, value):
+    if self.params.get(key) is None:
+      self.params.put(key, value)
+
+  def _get_bool(self, key):
+    return self.params.get_bool(key)
+
+  def _get_float(self, key, default):
+    raw = self.params.get(key, encoding="utf8")
+    try:
+      return float(raw) if raw is not None else float(default)
+    except ValueError:
+      return float(default)
+
+  def _read_commands(self):
+    if self._get_bool(PARAM_RESET):
+      self.vehicle.reset()
+      self.pedal_command = 0.0
+      self.steer_command = 0.0
+      self.button_queue.clear()
+      self.params.put_bool(PARAM_RESET, False)
+      self.params.put_bool(PARAM_ENGAGE, True)
+
+    return {
+      "target_speed_kph": min(145.0, max(20.0, self._get_float(PARAM_TARGET_SPEED, 100.0))),
+      "ignition": self._get_bool(PARAM_IGNITION),
+      "fault_accel_zero": self._get_bool(PARAM_ACCEL_ZERO),
+      "brake_pressed": self._get_bool(PARAM_BRAKE),
+      "gas_pressed": self._get_bool(PARAM_GAS),
+    }
+
+  def _consume_sendcan(self):
+    for raw in messaging.drain_sock_raw(self.sendcan_sock):
+      updated = self.output_parser.update_string(raw, sendcan=True)
+      if 512 in updated:
+        gas_values = self.output_parser.vl["GAS_COMMAND"]
+        self.pedal_command = max(0.0, float(gas_values["GAS_COMMAND"]) / 255.0) \
+          if gas_values["ENABLE"] else 0.0
+        self.gas_can_frames += 1
+      if 384 in updated:
+        steer_values = self.output_parser.vl["ASCMLKASteeringCmd"]
+        self.loopback_counter = int(steer_values["RollingCounter"])
+        self.steer_command = max(-1.0, min(1.0, float(steer_values["LKASteeringCmd"]) / 300.0))
+        self.steer_can_frames += 1
+
+  def _controls_enabled(self):
+    return bool(self.sm["controlsState"].enabled) if self.sm.rcv_frame["controlsState"] > 0 else False
+
+  def _update_buttons(self, target_speed_kph, brake_pressed):
+    controls_enabled = self._controls_enabled()
+
+    if self._get_bool(PARAM_ENGAGE):
+      self.params.put_bool(PARAM_ENGAGE, False)
+      self.last_engage_attempt_frame = -1000
+
+    if not controls_enabled and not brake_pressed and not self.button_queue and \
+       self.frame - self.last_engage_attempt_frame >= 100:
+      self.button_queue.extend([CruiseButtons.DECEL_SET, CruiseButtons.DECEL_SET,
+                                CruiseButtons.UNPRESS, CruiseButtons.UNPRESS])
+      self.last_engage_attempt_frame = self.frame
+
+    current_v_cruise = float(self.sm["controlsState"].vCruise) \
+      if self.sm.rcv_frame["controlsState"] > 0 else 0.0
+    if controls_enabled and current_v_cruise < target_speed_kph - 1.0 and \
+       not self.button_queue and self.frame - self.last_resume_frame >= 30:
+      self.button_queue.extend([CruiseButtons.RES_ACCEL, CruiseButtons.RES_ACCEL,
+                                CruiseButtons.UNPRESS, CruiseButtons.UNPRESS])
+      self.last_resume_frame = self.frame
+
+    return self.button_queue.pop(0) if self.button_queue else CruiseButtons.UNPRESS
+
+  def _build_can(self, button, brake_pressed, gas_pressed):
+    speed_kph = self.vehicle.speed_mps * 3.6
+    driver_gas = 0.12 if gas_pressed else 0.0
+    steering_torque = self.steer_command * 2.0
+
+    frames = [
+      self.packer.make_can_msg("EBCMWheelSpdFront", CanBus.POWERTRAIN, {
+        "FLWheelSpd": speed_kph, "FRWheelSpd": speed_kph,
+      }),
+      self.packer.make_can_msg("EBCMWheelSpdRear", CanBus.POWERTRAIN, {
+        "RLWheelSpd": speed_kph, "RRWheelSpd": speed_kph,
+      }),
+      self.packer.make_can_msg("ECMPRDNL2", CanBus.POWERTRAIN, {
+        "PRNDL2": 4, "ManualMode": 0, "TransmissionState": 9,
+      }),
+      self.packer.make_can_msg("ECMEngineStatus", CanBus.POWERTRAIN, {
+        "CruiseMainOn": 0, "Brake_Pressed": int(brake_pressed),
+        "Standstill": int(self.vehicle.speed_mps < 0.01), "EngineRPM": 1500,
+      }),
+      self.packer.make_can_msg("AcceleratorPedal2", CanBus.POWERTRAIN, {
+        "CruiseState": 1, "AcceleratorPedal2": driver_gas * 254.0,
+      }),
+      self.packer.make_can_msg("ASCMSteeringButton", CanBus.POWERTRAIN, {
+        "ACCButtons": button, "DistanceButton": 0, "LKAButton": 0,
+      }),
+      self.packer.make_can_msg("PSCMSteeringAngle", CanBus.POWERTRAIN, {
+        "SteeringWheelAngle": self.vehicle.steering_angle_deg,
+        "SteeringWheelRate": self.vehicle.steering_rate_deg_s,
+      }),
+      self.packer.make_can_msg("PSCMStatus", CanBus.POWERTRAIN, {
+        "LKADriverAppldTrq": 0.0,
+        "LKATorqueDelivered": steering_torque,
+        "LKATorqueDeliveredStatus": 1,
+      }),
+      self.packer.make_can_msg("BCMDoorBeltStatus", CanBus.POWERTRAIN, {
+        "FrontLeftDoor": 0, "FrontRightDoor": 0,
+        "RearLeftDoor": 0, "RearRightDoor": 0,
+        "LeftSeatBelt": 1, "RightSeatBelt": 1,
+      }),
+      self.packer.make_can_msg("BCMTurnSignals", CanBus.POWERTRAIN, {"TurnSignals": 0}),
+      self.packer.make_can_msg("ESPStatus", CanBus.POWERTRAIN, {"TractionControlOn": 1}),
+      self.packer.make_can_msg("EBCMBrakePedalPosition", CanBus.POWERTRAIN, {
+        "BrakePedalPosition": 80 if brake_pressed else 0,
+      }),
+      self.packer.make_can_msg("EPBStatus", CanBus.POWERTRAIN, {"EPBClosed": 0}),
+      self.packer.make_can_msg("GAS_SENSOR", CanBus.POWERTRAIN, {
+        "INTERCEPTOR_GAS": driver_gas * 255.0,
+        "INTERCEPTOR_GAS2": driver_gas * 255.0,
+        "STATE": 0,
+        "COUNTER_PEDAL": self.frame & 0x0F,
+        "CHECKSUM_PEDAL": 0,
+      }),
+      self.packer.make_can_msg("ASCMLKASteeringCmd", CanBus.LOOPBACK, {
+        "RollingCounter": self.loopback_counter,
+        "LKASteeringCmd": int(round(self.steer_command * 300.0)),
+        "LKASteeringCmdActive": int(self._controls_enabled()),
+        "LKASteeringCmdChecksum": 0,
+      }),
+    ]
+    return frames
+
+  def _publish_panda(self, ignition):
+    panda_msg = messaging.new_message("pandaStates", 1)
+    panda = panda_msg.pandaStates[0]
+    panda.ignitionLine = bool(ignition)
+    panda.ignitionCan = bool(ignition)
+    panda.controlsAllowed = True
+    panda.gasInterceptorDetected = True
+    panda.pandaType = log.PandaState.PandaType.uno
+    panda.safetyModel = car.CarParams.SafetyModel.gm
+    panda.safetyParam = 0
+    panda.alternativeExperience = 1
+    panda.harnessStatus = log.PandaState.HarnessStatus.normal
+    panda.uptime = int(max(0.0, sec_since_boot() - self.started_at))
+    self.pm.send("pandaStates", panda_msg)
+
+    peripheral_msg = messaging.new_message("peripheralState")
+    peripheral = peripheral_msg.peripheralState
+    peripheral.pandaType = log.PandaState.PandaType.uno
+    peripheral.voltage = 12500
+    peripheral.current = 0
+    peripheral.fanSpeedRpm = 3000
+    peripheral.usbPowerMode = log.PeripheralState.UsbPowerMode.cdp
+    self.pm.send("peripheralState", peripheral_msg)
+
+  def _publish_plans(self, target_speed_kph):
+    speed = self.vehicle.speed_mps
+    target = target_speed_kph / 3.6
+    if target > speed:
+      first_speed = min(target, speed + 1.0)
+      plan_accel = 0.5
+    else:
+      first_speed = target
+      plan_accel = -0.3 if target < speed else 0.0
+
+    speeds = [first_speed + (target - first_speed) * i / (CONTROL_N - 1)
+              for i in range(CONTROL_N)]
+    accels = [plan_accel] * CONTROL_N
+
+    long_msg = messaging.new_message("longitudinalPlan")
+    long_plan = long_msg.longitudinalPlan
+    long_plan.speeds = speeds
+    long_plan.accels = accels
+    long_plan.jerks = [0.0] * CONTROL_N
+    long_plan.hasLead = False
+    long_plan.fcw = False
+    long_plan.longitudinalPlanSource = log.LongitudinalPlan.LongitudinalPlanSource.cruise
+    long_plan.accelLimitMax = 0.8
+    self.pm.send("longitudinalPlan", long_msg)
+
+    lateral_msg = messaging.new_message("lateralPlan")
+    lateral = lateral_msg.lateralPlan
+    lateral.laneWidth = 3.7
+    lateral.lProb = 1.0
+    lateral.rProb = 1.0
+    lateral.dProb = 1.0
+    lateral.dPathPoints = [0.0] * CONTROL_N
+    lateral.psis = [0.0] * CONTROL_N
+    lateral.curvatures = [0.0] * CONTROL_N
+    lateral.curvatureRates = [0.0] * CONTROL_N
+    lateral.mpcSolutionValid = True
+    lateral.useLaneLines = True
+    lateral.laneChangeState = log.LateralPlan.LaneChangeState.off
+    lateral.laneChangeDirection = log.LateralPlan.LaneChangeDirection.none
+    self.pm.send("lateralPlan", lateral_msg)
+
+    monitoring_msg = messaging.new_message("driverMonitoringState")
+    monitoring = monitoring_msg.driverMonitoringState
+    monitoring.faceDetected = True
+    monitoring.isDistracted = False
+    monitoring.awarenessStatus = 1.0
+    monitoring.awarenessActive = 1.0
+    monitoring.awarenessPassive = 1.0
+    monitoring.isActiveMode = True
+    self.pm.send("driverMonitoringState", monitoring_msg)
+
+  def _write_status(self, commands):
+    controls = self.sm["controlsState"]
+    controls_seen = self.sm.rcv_frame["controlsState"] > 0
+    status = {
+      "mode": "EQUINOX VIRTUAL PANDA",
+      "speedKph": round(self.vehicle.speed_mps * 3.6, 2),
+      "accelMps2": round(self.vehicle.accel_mps2, 3),
+      "targetSpeedKph": round(commands["target_speed_kph"], 1),
+      "pedalCommand": round(self.pedal_command, 4),
+      "steerCommand": round(self.steer_command, 4),
+      "controlsEnabled": bool(controls.enabled) if controls_seen else False,
+      "vCruiseKph": round(float(controls.vCruise), 1) if controls_seen else 0.0,
+      "faultAccelZero": commands["fault_accel_zero"],
+      "brakePressed": commands["brake_pressed"],
+      "ignition": commands["ignition"],
+      "recoveryActive": bool(controls.pedalForceRecoveryActive) if controls_seen else False,
+      "recoveryDuration": round(float(controls.pedalForceRecoveryDuration), 2) if controls_seen else 0.0,
+      "recoveryCount": int(controls.pedalForceRecoveryCount) if controls_seen else 0,
+      "gasCanFrames": self.gas_can_frames,
+      "steerCanFrames": self.steer_can_frames,
+      "distanceM": round(self.vehicle.distance_m, 1),
+    }
+    os.makedirs(STATUS_DIR, exist_ok=True)
+    temp_file = STATUS_FILE + ".tmp"
+    with open(temp_file, "w", encoding="utf8") as status_file:
+      json.dump(status, status_file, ensure_ascii=False, indent=2)
+    os.replace(temp_file, STATUS_FILE)
+    print(
+      "EquinoxSim "
+      f"v={status['speedKph']:6.2f}km/h target={status['targetSpeedKph']:5.1f} "
+      f"pedal={status['pedalCommand']:.4f} enabled={status['controlsEnabled']} "
+      f"fault={status['faultAccelZero']} recovery={status['recoveryActive']}"
+    )
+
+  def run(self):
+    cloudlog.warning("Starting Equinox virtual Panda bench simulator (NOBOARD)")
+    ratekeeper = Ratekeeper(1.0 / DT_CTRL, print_delay_threshold=0.1)
+
+    while True:
+      self.sm.update(0)
+      commands = self._read_commands()
+      self._consume_sendcan()
+
+      if commands["ignition"]:
+        self.vehicle.step(
+          DT_CTRL,
+          self.pedal_command,
+          self.steer_command,
+          brake_pressed=commands["brake_pressed"],
+          driver_gas_pressed=commands["gas_pressed"],
+        )
+
+      button = self._update_buttons(commands["target_speed_kph"], commands["brake_pressed"])
+      frames = self._build_can(button, commands["brake_pressed"], commands["gas_pressed"])
+      self.pm.send("can", can_list_to_can_capnp(frames))
+
+      if self.frame % 5 == 0:
+        self._publish_panda(commands["ignition"])
+        self._publish_plans(commands["target_speed_kph"])
+
+      if self.frame - self.last_status_frame >= 100:
+        self._write_status(commands)
+        self.last_status_frame = self.frame
+
+      self.frame += 1
+      ratekeeper.keep_time()
+
+
+def main():
+  EquinoxVirtualPanda().run()
+
+
+if __name__ == "__main__":
+  main()

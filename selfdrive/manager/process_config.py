@@ -4,13 +4,15 @@ from selfdrive.hardware import EON, TICI, PC
 from selfdrive.manager.process import PythonProcess, NativeProcess, DaemonProcess
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
+EQUINOX_SIMULATOR = os.getenv("EQUINOX_SIMULATOR") == "1"
 
 procs = [
   #DaemonProcess("manage_athenad", "selfdrive.athena.manage_athenad", "AthenadPid"),
   # due to qualcomm kernel bugs SIGKILLing camerad sometimes causes page table corruption
   NativeProcess("camerad", "selfdrive/camerad", ["./camerad"], unkillable=True, driverview=True),
   NativeProcess("clocksd", "selfdrive/clocksd", ["./clocksd"]),
-  NativeProcess("dmonitoringmodeld", "selfdrive/modeld", ["./dmonitoringmodeld"], enabled=(not PC or WEBCAM), driverview=True),
+  NativeProcess("dmonitoringmodeld", "selfdrive/modeld", ["./dmonitoringmodeld"],
+                enabled=(not EQUINOX_SIMULATOR and (not PC or WEBCAM)), driverview=True),
   #NativeProcess("logcatd", "selfdrive/logcatd", ["./logcatd"]),
   #NativeProcess("loggerd", "selfdrive/loggerd", ["./loggerd"]),
   NativeProcess("modeld", "selfdrive/modeld", ["./modeld"]),
@@ -26,12 +28,14 @@ procs = [
   PythonProcess("torqued", "selfdrive.locationd.torqued"),
   PythonProcess("controlsd", "selfdrive.controls.controlsd"),
   PythonProcess("deleter", "selfdrive.loggerd.deleter", persistent=True),
-  PythonProcess("dmonitoringd", "selfdrive.monitoring.dmonitoringd", enabled=(not PC or WEBCAM), driverview=True),
+  PythonProcess("dmonitoringd", "selfdrive.monitoring.dmonitoringd",
+                enabled=(not EQUINOX_SIMULATOR and (not PC or WEBCAM)), driverview=True),
   #PythonProcess("logmessaged", "selfdrive.logmessaged", persistent=True),
   PythonProcess("pandad", "selfdrive.boardd.pandad", persistent=True),
   PythonProcess("paramsd", "selfdrive.locationd.paramsd"),
-  PythonProcess("plannerd", "selfdrive.controls.plannerd"),
+  PythonProcess("plannerd", "selfdrive.controls.plannerd", enabled=not EQUINOX_SIMULATOR),
   PythonProcess("radard", "selfdrive.controls.radard"),
+  PythonProcess("equinoxsim", "tools.equinox_sim.virtual_panda", enabled=EQUINOX_SIMULATOR, persistent=True),
   PythonProcess("thermald", "selfdrive.thermald.thermald", persistent=True),
   PythonProcess("timezoned", "selfdrive.timezoned", enabled=TICI, persistent=True),
   #PythonProcess("tombstoned", "selfdrive.tombstoned", enabled=not PC, persistent=True),

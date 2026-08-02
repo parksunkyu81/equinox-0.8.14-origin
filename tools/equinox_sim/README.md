@@ -1,0 +1,94 @@
+# 이쿼녹스 Virtual Panda 벤치 시뮬레이터
+
+이 시뮬레이터는 차량이나 물리적인 Panda 데이터 경로 없이 실제 GM
+이쿼녹스용 `CarState`, `controlsd`, `CarController`, CAN 패커 및 온로드 UI를
+실행합니다. 콤마 장치를 차량과 분리한 벤치 환경에서 사용하는 도구입니다.
+
+가상 Panda 상태, 시동 상태 및 이쿼녹스 CAN 메시지를 100Hz로 발행합니다.
+openpilot이 실제로 생성한 `sendcan` 페달·조향 명령을 디코딩하여 결정론적
+차량 모델에 입력합니다. 시뮬레이터 모드에서만 `plannerd`를 직선 도로용
+크루즈 주행계획으로 대체합니다.
+
+## 안전 범위
+
+- 시작하기 전에 콤마 장치를 차량에서 완전히 분리하십시오.
+- 실행 스크립트는 `--bench` 인자를 요구하며 `NOBOARD=1`을 설정합니다.
+- 시뮬레이터 환경변수를 일반 부팅 서비스에 절대로 등록하지 마십시오.
+- 이 시뮬레이터로는 Panda 펌웨어, 하네스 배선, ECU 명령 수용 여부 또는
+  실제 엔진·변속기의 반응을 검증할 수 없습니다.
+
+## 빌드
+
+이 시뮬레이터는 일반 cereal 및 DBC 네이티브 확장 모듈을 사용하므로 먼저
+저장소를 빌드해야 합니다.
+
+```bash
+cd /data/openpilot
+rm -f prebuilt
+scons -j$(nproc)
+```
+
+## 콤마 장치에서 실행
+
+콤마 장치와 PC를 같은 Wi-Fi 네트워크에 연결합니다. 첫 번째 PC 터미널에서
+콤마 장치에 SSH로 접속한 다음, 두 번째 manager가 실행되지 않도록 기존
+콤마 서비스를 중지하고 시뮬레이터를 실행합니다.
+
+```bash
+ssh comma@<콤마-장치-IP>
+sudo systemctl stop comma
+cd /data/openpilot
+bash tools/equinox_sim/launch.sh --bench
+```
+
+openpilot을 tmux 안에서 실행하는 EON/comma two 환경이라면 기존 tmux 세션을
+먼저 중지한 후 새 SSH/tmux 세션에서 실행 스크립트를 시작하십시오.
+
+첫 번째 터미널은 실행 상태로 둡니다. PC에서 두 번째 터미널을 열어 다시
+SSH로 접속한 다음, 콤마 장치의 온로드 화면을 보면서 가상 주행을 제어합니다.
+
+```bash
+ssh comma@<콤마-장치-IP>
+cd /data/openpilot
+python3 -m tools.equinox_sim.control status
+python3 -m tools.equinox_sim.control target 100
+python3 -m tools.equinox_sim.control fault on
+python3 -m tools.equinox_sim.control fault off
+python3 -m tools.equinox_sim.control brake on
+python3 -m tools.equinox_sim.control brake off
+python3 -m tools.equinox_sim.control reset
+```
+
+각 명령의 의미는 다음과 같습니다.
+
+- `status`: 현재 속도, 목표속도, 페달 명령 및 복구 상태를 확인합니다.
+- `target 100`: 가상 차량의 목표속도를 100km/h로 설정합니다.
+- `fault on`: 시뮬레이션 지점에서 PID 가속 요구를 0으로 강제하여
+  `accel = 0` 멍때림 상태를 발생시킵니다.
+- `fault off`: `accel = 0` 장애 주입을 해제합니다.
+- `brake on` / `brake off`: 가상 브레이크 입력을 켜거나 끕니다.
+- `reset`: 차량 속도, 이동거리 및 제어 상태를 초기화합니다.
+
+목표속도가 가상 차량의 현재 속도보다 높은 상태에서 `fault on`을 실행하면
+시뮬레이션 지점이 PID 가속 요구를 0으로 바꿉니다. 이후 실제 운행용 복구
+조건과 복구 알고리즘은 변경 없이 그대로 실행됩니다. 복구에 성공하면 다음
+상태를 모두 확인할 수 있습니다.
+
+- `control status` 출력의 `recoveryActive: true`
+- `pedalCommand`가 0.060 이상
+- 가상 차량 속도 증가
+- PEDAL 게이지 바로 위에 황색 복구 경고 표시
+
+시뮬레이터를 종료하려면 실행 중인 첫 번째 터미널에서 `Ctrl+C`를 누릅니다.
+시뮬레이터 환경변수 없이 일반 openpilot 동작을 다시 시작합니다.
+
+```bash
+sudo systemctl start comma
+```
+
+## 지원 범위와 제한사항
+
+온로드 화면의 카메라 배경은 콤마 장치의 실제 카메라 영상입니다. 이
+시뮬레이터는 직선 형태의 가상 주행계획과 차량/CAN 피드백을 제공하지만 3D
+도로를 렌더링하지 않습니다. 3D 환경과 합성 카메라 영상이 필요하면 공식
+openpilot CARLA/MetaDrive 브리지를 사용해야 합니다.

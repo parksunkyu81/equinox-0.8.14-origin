@@ -227,6 +227,10 @@ class Controls:
         self.pedal_deadzone_accel_request = 0.0
         self.pedal_deadzone_vehicle_accel = 0.0
         self.pedal_force_recovery = PedalForceRecovery(DT_CTRL)
+        self.equinox_simulator = SIMULATION and os.getenv("EQUINOX_SIMULATOR") == "1" and \
+                                 os.getenv("NOBOARD") is not None
+        self.equinox_sim_force_accel_zero = False
+        self.equinox_sim_params = Params() if self.equinox_simulator else None
         self.gm_steer_command_sent = False
         self.gm_steer_command_gap_ms = 0.0
         self.gm_steer_command_deadline_lag_ms = 0.0
@@ -903,7 +907,7 @@ class Controls:
         if not self.sm['liveLocationKalman'].deviceStable:
             self.events.add(EventName.deviceFalling)
 
-        if not REPLAY:
+        if not REPLAY and not self.equinox_simulator:
             # Check for mismatch between openpilot and car's PCM
             cruise_mismatch = CS.cruiseState.enabled and (not self.enabled or not self.CP.pcmCruise)
             self.cruise_mismatch_counter = self.cruise_mismatch_counter + 1 if cruise_mismatch else 0
@@ -1246,6 +1250,16 @@ class Controls:
         # cruise plan is explicitly asking to regain speed. Once that normal-
         # driving predicate is true, force recovery starts on the same 100 Hz
         # control frame without waiting to classify PID P/I/F internals.
+        # This hook exists only for the NOBOARD Equinox bench simulator. It
+        # injects the reported failure immediately before the production
+        # recovery predicate, so every real recovery gate remains in force.
+        if self.equinox_simulator:
+            if self.sm.frame % 10 == 0:
+                self.equinox_sim_force_accel_zero = \
+                    self.equinox_sim_params.get_bool("EquinoxSimAccelZero")
+            if self.equinox_sim_force_accel_zero:
+                actuators.accel = 0.0
+
         recovery_plan_age = (self.sm.frame - self.sm.rcv_frame['longitudinalPlan']) * DT_CTRL
         recovery_eligible = not self.joystick_mode and \
                             self.pedal_force_recovery_eligible(CS, long_plan, recovery_plan_age)
