@@ -3,7 +3,9 @@
 #include <unistd.h>
 
 #include <cassert>
+#include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <thread>
 
 #include "libyuv.h"
@@ -45,11 +47,16 @@ void party(cl_device_id device_id, cl_context context) {
 
 int main(int argc, char *argv[]) {
   if (!Hardware::PC()) {
+    const char *sim_env = std::getenv("EQUINOX_SIMULATOR");
+    const bool equinox_simulator = sim_env != nullptr && std::strcmp(sim_env, "1") == 0;
     int ret;
     ret = util::set_realtime_priority(53);
     assert(ret == 0);
     ret = util::set_core_affinity({Hardware::EON() ? 2 : 6});
-    assert(ret == 0 || Params().getBool("IsOffroad")); // failure ok while offroad due to offlining cores
+    if (ret != 0 && equinox_simulator) {
+      LOGW("Equinox bench simulator: camerad core affinity unavailable, continuing unpinned");
+    }
+    assert(ret == 0 || Params().getBool("IsOffroad") || equinox_simulator); // core can be unavailable on an EON bench
   }
 
   cl_device_id device_id = cl_get_device_id(CL_DEVICE_TYPE_DEFAULT);
