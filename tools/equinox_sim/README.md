@@ -75,8 +75,8 @@ python3 -m tools.equinox_sim.control reset
 - `target 100`: 가상 차량의 목표속도를 100km/h로 설정합니다.
 - `fault on`: PID 가속 요구를 0으로 계속 강제하고 자동 복구를 잠시 막습니다.
   `pedalCommand: 0.0`과 가상 차량의 속도 하락을 먼저 확인할 수 있습니다.
-- `recovery on`: `accel = 0` 장애는 유지하면서 강제 복구를 허용합니다.
-  `recoveryActive: true`, `pedalCommand >= 0.060`, 속도 회복을 확인합니다.
+- `recovery on`: 강제 복구를 한 번 실행한 뒤 장애 주입을 자동 해제하고 정상
+  PID로 돌아갑니다. 복구 직후 `recoveryCount`는 한 번만 증가해야 합니다.
 - `recovery off`: 장애를 유지한 채 복구를 다시 막습니다.
 - `fault off`: `accel = 0` 장애 주입을 해제합니다.
 - `brake on` / `brake off`: 가상 브레이크 입력을 켜거나 끕니다.

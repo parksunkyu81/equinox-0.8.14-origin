@@ -16,6 +16,20 @@ def recovery_speed_demand(speed_error, future_speed_error, injected_fault=False)
   return normal_demand or injected_demand
 
 
+def bench_fault_state(previous_mode, recovery_completed, requested_mode):
+  """Return normalized one-shot bench fault state.
+
+  Mode 1 holds accel at zero. Mode 2 permits exactly one recovery activation;
+  after completion the injector stays off even if the asynchronous Params write
+  has not reached readers yet.
+  """
+  mode = min(2, max(0, int(requested_mode)))
+  completed = bool(recovery_completed) if mode == int(previous_mode) else False
+  force_accel_zero = mode in (1, 2) and not (mode == 2 and completed)
+  recovery_enabled = mode != 1
+  return mode, completed, force_accel_zero, recovery_enabled
+
+
 class PedalForceRecovery:
   """Immediately replace an abnormal zero request with a positive request.
 

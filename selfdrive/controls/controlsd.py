@@ -22,6 +22,7 @@ from selfdrive.controls.lib.longcontrol import LongControl, LongCtrlState
 from selfdrive.controls.lib.pedal_force_recovery import (
   PEDAL_FORCE_RECOVERY_PEDAL_FLOOR,
   PedalForceRecovery,
+  bench_fault_state,
   recovery_speed_demand,
 )
 from selfdrive.controls.lib.latcontrol_pid import LatControlPID
@@ -232,6 +233,8 @@ class Controls:
                                  os.getenv("NOBOARD") is not None
         self.equinox_sim_force_accel_zero = False
         self.equinox_sim_recovery_enabled = True
+        self.equinox_sim_fault_mode = 0
+        self.equinox_sim_recovery_completed = False
         self.equinox_sim_params = Params() if self.equinox_simulator else None
         self.gm_steer_command_sent = False
         self.gm_steer_command_gap_ms = 0.0
@@ -1266,8 +1269,11 @@ class Controls:
                     fault_mode = int(raw_fault_mode) if raw_fault_mode is not None else 0
                 except ValueError:
                     fault_mode = 0
-                self.equinox_sim_force_accel_zero = fault_mode in (1, 2)
-                self.equinox_sim_recovery_enabled = fault_mode != 1
+                self.equinox_sim_fault_mode, self.equinox_sim_recovery_completed, \
+                    self.equinox_sim_force_accel_zero, self.equinox_sim_recovery_enabled = \
+                    bench_fault_state(self.equinox_sim_fault_mode,
+                                      self.equinox_sim_recovery_completed,
+                                      fault_mode)
             if self.equinox_sim_force_accel_zero:
                 actuators.accel = 0.0
 
@@ -1279,6 +1285,16 @@ class Controls:
                             self.pedal_force_recovery_eligible(CS, long_plan, recovery_plan_age,
                                                                injected_fault=injected_recovery_fault)
         actuators.accel = self.pedal_force_recovery.update(recovery_eligible, actuators.accel)
+
+        # Fault mode 2 is a one-shot bench test. The first forced output proves
+        # that recovery took control, so stop injecting accel=0 immediately and
+        # return the following frame to the normal PID. Keeping the fault
+        # latched would create an artificial coast/recover cycle and repeatedly
+        # increment activation_count near the target speed.
+        if injected_recovery_fault and self.pedal_force_recovery.active:
+            self.equinox_sim_recovery_completed = True
+            self.equinox_sim_force_accel_zero = False
+            put_nonblocking("EquinoxSimAccelZero", "0")
 
         if lac_log.active and lac_log.saturated and not CS.steeringPressed:
             dpath_points = lat_plan.dPathPoints

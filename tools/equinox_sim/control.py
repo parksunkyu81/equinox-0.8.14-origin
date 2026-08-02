@@ -42,7 +42,7 @@ def main():
     bool_parser.add_argument("state", type=parse_on_off)
 
   recovery_parser = subparsers.add_parser(
-    "recovery", help="allow or block force recovery while accel-zero fault is injected"
+    "recovery", help="run one force-recovery cycle for the injected accel-zero fault"
   )
   recovery_parser.add_argument("state", type=parse_on_off)
 
@@ -66,7 +66,7 @@ def main():
     # EquinoxSimAccelZero is intentionally a three-state test control:
     #   0: no injected fault (normal production recovery behavior)
     #   1: accel=0 fault held, recovery blocked
-    #   2: accel=0 fault held, recovery allowed
+    #   2: one-shot recovery requested; controlsd clears the fault after success
     raw_mode = params.get("EquinoxSimAccelZero", encoding="utf8")
     try:
       current_mode = int(raw_mode) if raw_mode is not None else 0
