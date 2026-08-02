@@ -86,6 +86,23 @@ python3 -m tools.equinox_sim.control reset
 sudo systemctl start comma
 ```
 
+## 오류 확인
+
+`오픈파일럿 사용불가 - 장치 프로세스 동작 오류`가 표시되면 다음 명령으로
+가장 최근 통신 진단을 확인합니다.
+
+```bash
+tail -n 3 /data/log/process_diagnostics.jsonl
+```
+
+출력의 `not_alive`, `invalid`, `not_freq_ok` 항목에 문제가 된 서비스 이름이
+기록됩니다. 시뮬레이터 실행 터미널에 Python 예외가 출력되었다면 그 예외도
+함께 확인해야 합니다.
+
+`0x201 message checks failed` 또는 `virtual_panda lagging`이 반복된 이전 실행은
+반드시 `Ctrl+C`로 완전히 종료한 뒤 수정된 코드로 다시 시작해야 합니다.
+Ratekeeper의 누적 지연은 실행 중 자동으로 초기화되지 않습니다.
+
 ## 지원 범위와 제한사항
 
 온로드 화면의 카메라 배경은 콤마 장치의 실제 카메라 영상입니다. 이

@@ -8,6 +8,7 @@ from common.realtime import DT_CTRL, Ratekeeper, sec_since_boot
 from opendbc.can.packer import CANPacker
 from opendbc.can.parser import CANParser
 from selfdrive.boardd.boardd import can_list_to_can_capnp
+from selfdrive.car import crc8_pedal
 from selfdrive.car.gm.values import CAR, DBC, CanBus, CruiseButtons
 from selfdrive.controls.lib.drive_helpers import CONTROL_N
 from selfdrive.swaglog import cloudlog
@@ -48,7 +49,7 @@ class EquinoxVirtualPanda:
 
     self.pm = messaging.PubMaster([
       "can", "pandaStates", "peripheralState", "longitudinalPlan", "lateralPlan",
-      "driverMonitoringState",
+      "driverMonitoringState", "dynamicFollowData",
     ])
     self.sm = messaging.SubMaster(["carControl", "controlsState"])
     self.sendcan_sock = messaging.sub_sock("sendcan")
@@ -195,13 +196,7 @@ class EquinoxVirtualPanda:
         "BrakePedalPosition": 80 if brake_pressed else 0,
       }),
       self.packer.make_can_msg("EPBStatus", CanBus.POWERTRAIN, {"EPBClosed": 0}),
-      self.packer.make_can_msg("GAS_SENSOR", CanBus.POWERTRAIN, {
-        "INTERCEPTOR_GAS": driver_gas * 255.0,
-        "INTERCEPTOR_GAS2": driver_gas * 255.0,
-        "STATE": 0,
-        "COUNTER_PEDAL": self.frame & 0x0F,
-        "CHECKSUM_PEDAL": 0,
-      }),
+      self._make_gas_sensor(driver_gas),
       self.packer.make_can_msg("ASCMLKASteeringCmd", CanBus.LOOPBACK, {
         "RollingCounter": self.loopback_counter,
         "LKASteeringCmd": int(round(self.steer_command * 300.0)),
@@ -210,6 +205,22 @@ class EquinoxVirtualPanda:
       }),
     ]
     return frames
+
+  def _make_gas_sensor(self, driver_gas):
+    values = {
+      "INTERCEPTOR_GAS": driver_gas * 255.0,
+      "INTERCEPTOR_GAS2": driver_gas * 255.0,
+      "STATE": 0,
+      "COUNTER_PEDAL": self.frame & 0x0F,
+      "CHECKSUM_PEDAL": 0,
+    }
+
+    # CHECKSUM_PEDAL is not auto-filled by this openpilot version's packer.
+    # Match pedal_checksum() in opendbc: CRC-8 (poly 0xD5, init 0xFF)
+    # over bytes 0..4, in reverse byte order.
+    unsigned_message = self.packer.make_can_msg("GAS_SENSOR", CanBus.POWERTRAIN, values)
+    values["CHECKSUM_PEDAL"] = crc8_pedal(unsigned_message[2][:-1])
+    return self.packer.make_can_msg("GAS_SENSOR", CanBus.POWERTRAIN, values)
 
   def _publish_panda(self, ignition):
     panda_msg = messaging.new_message("pandaStates", 1)
@@ -285,6 +296,20 @@ class EquinoxVirtualPanda:
     monitoring.awarenessPassive = 1.0
     monitoring.isActiveMode = True
     self.pm.send("driverMonitoringState", monitoring_msg)
+
+    # plannerd is disabled in bench mode. Its DynamicFollow instance normally
+    # publishes this service, while controlsd still consumes it for the UI and
+    # communication-health checks.
+    follow_msg = messaging.new_message("dynamicFollowData")
+    follow = follow_msg.dynamicFollowData
+    follow.mpcTR = 1.3
+    follow.profilePred = 1
+    follow.leadCatchupActive = False
+    follow.catchupFactor = 0.0
+    follow.targetFollowDistance = 0.0
+    follow.predictedFollowDistance = 0.0
+    follow.baseTR = 1.3
+    self.pm.send("dynamicFollowData", follow_msg)
 
   def _write_status(self, commands):
     controls = self.sm["controlsState"]
