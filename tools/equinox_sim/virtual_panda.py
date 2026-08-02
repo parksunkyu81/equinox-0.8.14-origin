@@ -50,7 +50,8 @@ class EquinoxVirtualPanda:
 
     self.pm = messaging.PubMaster([
       "can", "pandaStates", "peripheralState", "longitudinalPlan", "lateralPlan",
-      "driverMonitoringState", "dynamicFollowData",
+      "driverMonitoringState", "dynamicFollowData", "modelV2", "liveCalibration",
+      "liveLocationKalman", "liveParameters", "radarState", "liveTorqueParameters",
     ])
     self.sm = messaging.SubMaster(["carControl", "controlsState"])
     self.sendcan_sock = messaging.sub_sock("sendcan")
@@ -341,6 +342,154 @@ class EquinoxVirtualPanda:
     follow.baseTR = 1.3
     self.pm.send("dynamicFollowData", follow_msg)
 
+  @staticmethod
+  def _set_measurement(measurement, value, std):
+    measurement.value = value
+    measurement.std = std
+    measurement.valid = True
+
+  def _publish_bench_state(self):
+    """Publish light-weight substitutes for the heavy perception/localization stack.
+
+    The real road camera remains owned by camerad and is still drawn by the UI.
+    These messages describe a deterministic straight, clear road so the EON can
+    exercise controls without running modeld, locationd, radard, or learners.
+    """
+    point_count = 33
+    xs = [float(i) * 4.0 for i in range(point_count)]
+    ts = [float(i) * 0.2 for i in range(point_count)]
+    zeros = [0.0] * point_count
+
+    model_msg = messaging.new_message("modelV2")
+    model = model_msg.modelV2
+    model.frameId = self.frame // 5
+    model.frameIdExtra = self.frame // 5
+    model.frameAge = 0
+    model.frameDropPerc = 0.0
+    model.timestampEof = int(sec_since_boot() * 1e9)
+    model.modelExecutionTime = 0.0
+    model.gpuExecutionTime = 0.0
+
+    trajectories = (
+      (model.position, xs),
+      (model.orientation, zeros),
+      (model.velocity, zeros),
+      (model.orientationRate, zeros),
+      (model.acceleration, zeros),
+    )
+    for trajectory, x_values in trajectories:
+      trajectory.x = x_values
+      trajectory.y = zeros
+      trajectory.z = zeros
+      trajectory.t = ts
+
+    model.init("laneLines", 4)
+    for lane, y_offset in zip(model.laneLines, (5.55, 1.85, -1.85, -5.55)):
+      lane.x = xs
+      lane.y = [y_offset] * point_count
+      lane.z = zeros
+      lane.t = ts
+    model.laneLineProbs = [0.05, 0.95, 0.95, 0.05]
+    model.laneLineStds = [0.3, 0.1, 0.1, 0.3]
+
+    model.init("roadEdges", 2)
+    for edge, y_offset in zip(model.roadEdges, (5.8, -5.8)):
+      edge.x = xs
+      edge.y = [y_offset] * point_count
+      edge.z = zeros
+      edge.t = ts
+    model.roadEdgeStds = [1.0, 1.0]
+
+    # This fork's onroad.cc indexes both leads unconditionally, even when no
+    # lead is present. Supply two zero-probability records to keep that safe.
+    model.init("leadsV3", 2)
+    for lead in model.leadsV3:
+      lead.prob = 0.0
+      lead.probTime = 0.0
+      lead.t = [0.0]
+      lead.x = [100.0]
+      lead.xStd = [1.0]
+      lead.y = [0.0]
+      lead.yStd = [1.0]
+      lead.v = [self.vehicle.speed_mps]
+      lead.vStd = [1.0]
+      lead.a = [0.0]
+      lead.aStd = [1.0]
+    model.meta.engagedProb = 1.0
+    model.meta.desirePrediction = []
+    model.meta.desireState = []
+    model.meta.hardBrakePredicted = False
+    self.pm.send("modelV2", model_msg)
+
+    location_msg = messaging.new_message("liveLocationKalman")
+    location = location_msg.liveLocationKalman
+    location.status = log.LiveLocationKalman.Status.valid
+    location.inputsOK = True
+    location.posenetOK = True
+    location.gpsOK = True
+    location.sensorsOK = True
+    location.deviceStable = True
+    location.excessiveResets = False
+    location.timeSinceReset = max(0.0, sec_since_boot() - self.started_at)
+    self._set_measurement(location.orientationNED, [0.0, 0.0, 0.0], [0.01, 0.01, 0.01])
+    self._set_measurement(location.calibratedOrientationNED, [0.0, 0.0, 0.0], [0.01, 0.01, 0.01])
+    self._set_measurement(location.angularVelocityCalibrated, [0.0, 0.0, 0.0], [0.01, 0.01, 0.01])
+    self._set_measurement(location.velocityCalibrated,
+                          [self.vehicle.speed_mps, 0.0, 0.0], [0.1, 0.1, 0.1])
+    self._set_measurement(location.accelerationCalibrated,
+                          [self.vehicle.accel_mps2, 0.0, 0.0], [0.1, 0.1, 0.1])
+    self.pm.send("liveLocationKalman", location_msg)
+
+    params_msg = messaging.new_message("liveParameters")
+    live_params = params_msg.liveParameters
+    live_params.valid = True
+    live_params.sensorValid = True
+    live_params.posenetValid = True
+    live_params.stiffnessFactor = 1.0
+    live_params.steerRatio = 16.8
+    live_params.angleOffsetDeg = 0.0
+    live_params.angleOffsetAverageDeg = 0.0
+    live_params.angleOffsetFastStd = 0.0
+    live_params.angleOffsetAverageStd = 0.0
+    live_params.stiffnessFactorStd = 0.0
+    live_params.steerRatioStd = 0.0
+    live_params.yawRate = 0.0
+    live_params.roll = 0.0
+    live_params.posenetSpeed = self.vehicle.speed_mps
+    self.pm.send("liveParameters", params_msg)
+
+    radar_msg = messaging.new_message("radarState")
+    radar = radar_msg.radarState
+    radar.leadOne.status = False
+    radar.leadTwo.status = False
+    radar.radarErrors = []
+    radar.cumLagMs = 0.0
+    self.pm.send("radarState", radar_msg)
+
+    # Both of these services are specified at 4 Hz (one message per 25 loops).
+    if self.frame % 25 == 0:
+      calibration_msg = messaging.new_message("liveCalibration")
+      calibration = calibration_msg.liveCalibration
+      calibration.calStatus = 1
+      calibration.calPerc = 100
+      calibration.validBlocks = 5
+      calibration.rpyCalib = [0.0, 0.0, 0.0]
+      calibration.rpyCalibSpread = [0.0, 0.0, 0.0]
+      self.pm.send("liveCalibration", calibration_msg)
+
+      torque_msg = messaging.new_message("liveTorqueParameters")
+      torque = torque_msg.liveTorqueParameters
+      torque.liveValid = False
+      torque.useParams = False
+      torque.version = 0
+      torque.latAccelFactorFiltered = 0.0
+      torque.latAccelOffsetFiltered = 0.0
+      torque.frictionCoefficientFiltered = 0.0
+      torque.totalBucketPoints = 0.0
+      torque.points = []
+      torque.bucketPoints = "Equinox bench simulator"
+      self.pm.send("liveTorqueParameters", torque_msg)
+
   def _write_status(self, commands):
     controls = self.sm["controlsState"]
     controls_seen = self.sm.rcv_frame["controlsState"] > 0
@@ -405,6 +554,7 @@ class EquinoxVirtualPanda:
       if self.frame % 5 == 0:
         self._publish_panda(commands["ignition"])
         self._publish_plans(commands["target_speed_kph"])
+        self._publish_bench_state()
 
       if self.frame - self.last_status_frame >= 100:
         status_time = sec_since_boot()
