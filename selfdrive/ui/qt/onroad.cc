@@ -779,14 +779,14 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     p.setBrush(alert_bg);
     p.drawRoundedRect(QRect(alert_x, alert_y, alert_w, alert_h), 18, 18);
 
-    QPointF pointer[] = {
-      {pedal_x - 25.0, alert_y + alert_h},
-      {pedal_x + 25.0, alert_y + alert_h},
-      {pedal_x, alert_y + alert_h + 25.0},
+    const QPoint pointer[] = {
+      QPoint(pedal_x - 25, alert_y + alert_h),
+      QPoint(pedal_x + 25, alert_y + alert_h),
+      QPoint(pedal_x, alert_y + alert_h + 25),
     };
     p.setPen(Qt::NoPen);
     p.setBrush(alert_border);
-    p.drawPolygon(pointer, std::size(pointer));
+    p.drawPolygon(pointer, 3);
 
     QString recovery_title = "강제 가속 복구";
     QColor recovery_title_color(255, 242, 211, 255);
