@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 import json
 import os
+import time
 
 from cereal import car, log, messaging
 from common.params import Params
-from common.realtime import DT_CTRL, Ratekeeper, sec_since_boot
+from common.realtime import DT_CTRL, sec_since_boot
 from opendbc.can.packer import CANPacker
 from opendbc.can.parser import CANParser
 from selfdrive.boardd.boardd import can_list_to_can_capnp
@@ -378,9 +379,9 @@ class EquinoxVirtualPanda:
 
   def run(self):
     cloudlog.warning("Starting Equinox virtual Panda bench simulator (NOBOARD)")
-    ratekeeper = Ratekeeper(1.0 / DT_CTRL, print_delay_threshold=None)
 
     while True:
+      loop_started_at = sec_since_boot()
       self.sm.update(0)
       commands = self._read_commands()
       self._consume_sendcan()
@@ -416,7 +417,12 @@ class EquinoxVirtualPanda:
         self.last_status_time = status_time
 
       self.frame += 1
-      ratekeeper.keep_time()
+      # Do not run missed frames faster than real time. Ratekeeper's cumulative
+      # schedule catches up after startup stalls and can flood EON at 200-300
+      # Hz, evicting other messaging readers. This limiter drops missed ticks.
+      loop_elapsed = sec_since_boot() - loop_started_at
+      if loop_elapsed < DT_CTRL:
+        time.sleep(DT_CTRL - loop_elapsed)
 
 
 def main():
