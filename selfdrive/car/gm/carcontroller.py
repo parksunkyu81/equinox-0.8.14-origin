@@ -7,6 +7,7 @@ from selfdrive.car.gm import gmcan
 from selfdrive.car.gm.values import DBC, NO_ASCM, CanBus, CarControllerParams
 from opendbc.can.packer import CANPacker
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
+from selfdrive.controls.lib.pedal_force_recovery import PEDAL_FORCE_RECOVERY_PEDAL_FLOOR
 
 VisualAlert = car.CarControl.HUDControl.VisualAlert
 GearShifter = car.CarState.GearShifter
@@ -42,6 +43,7 @@ class CarController():
     can_sends = []
 
     brake_pressed = bool(CS.out.brakePressed)
+    self.accel = float(actuators.accel)
 
     # Steering (50Hz)
     # 메시지를 너무 짧은 간격으로 전송할 때 발생하는 GM EPS 오류를 방지하십시오.
@@ -105,7 +107,9 @@ class CarController():
                           #[0.18, 0.21, 0.23, 0.25]
                           )
         # 원래 가속 명령 계산
-        pedal_command = acc_mult * actuators.accel
+        pedal_command = acc_mult * self.accel
+        if controls.pedal_force_recovery.active:
+          pedal_command = max(pedal_command, PEDAL_FORCE_RECOVERY_PEDAL_FLOOR)
         # 연비 향상을 위해 클리핑
         self.comma_pedal = clip(pedal_command, 0., 0.85)  # 최대 0.8까지만 허용하여 연비 개선
 

@@ -666,6 +666,12 @@ struct ControlsState @0x97ff69c53601abf1 {
   pedalManualLaunchAutoAllowed @123 :Bool;
   pedalComfortAccelCap @124 :Float32;
   pedalManualLaunchAssistActive @125 :Bool;
+  pedalForceRecoveryActive @126 :Bool;
+  pedalForceRecoveryDuration @127 :Float32;
+  pedalForceRecoveryCount @128 :UInt32;
+  pedalForceRecoveryRawAccel @129 :Float32;
+  pedalForceRecoveryAccel @130 :Float32;
+  pedalForceRecoveryPedalFloor @131 :Float32;
 
 
 

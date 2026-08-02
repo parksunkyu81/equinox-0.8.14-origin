@@ -763,6 +763,46 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   const int y2 = rect().bottom() - (footer_h / 2) - (radius + 50) - 10;
   x = icon_start_x;
 
+  // Immediate forced-acceleration recovery warning. Keep it attached to the
+  // PEDAL gauge so it does not look like an unrelated system-wide alert.
+  const bool pedal_force_recovery_active = controls_state.getPedalForceRecoveryActive();
+  if (pedal_force_recovery_active) {
+    const int pedal_x = icon_start_x + icon_step;
+    const int alert_w = 600;
+    const int alert_h = 120;
+    const int alert_x = pedal_x - alert_w / 2;
+    const int alert_y = y2 - radius / 2 - alert_h - 18;
+    const QColor alert_border(255, 194, 71, 255);
+    const QColor alert_bg(23, 18, 8, 237);
+
+    p.setPen(QPen(alert_border, 6));
+    p.setBrush(alert_bg);
+    p.drawRoundedRect(QRect(alert_x, alert_y, alert_w, alert_h), 18, 18);
+
+    QPointF pointer[] = {
+      {pedal_x - 25.0, alert_y + alert_h},
+      {pedal_x + 25.0, alert_y + alert_h},
+      {pedal_x, alert_y + alert_h + 25.0},
+    };
+    p.setPen(Qt::NoPen);
+    p.setBrush(alert_border);
+    p.drawPolygon(pointer, std::size(pointer));
+
+    QString recovery_title = "강제 가속 복구";
+    QColor recovery_title_color(255, 242, 211, 255);
+    configFont(p, "Open Sans", 42, "Bold");
+    drawTextWithColor(p, pedal_x, alert_y + 43, recovery_title, recovery_title_color);
+
+    QString recovery_detail;
+    recovery_detail.sprintf("ACCEL 0→%.2f  PEDAL≥%.3f  %.1fs",
+                            controls_state.getPedalForceRecoveryAccel(),
+                            controls_state.getPedalForceRecoveryPedalFloor(),
+                            controls_state.getPedalForceRecoveryDuration());
+    QColor recovery_detail_color(231, 211, 169, 255);
+    configFont(p, "Open Sans", 25, "Regular");
+    drawTextWithColor(p, pedal_x, alert_y + 88, recovery_detail, recovery_detail_color);
+  }
+
   // 1.TR Value
   float tr_value = controls_state.getDynamicTRValue();
   auto tr_mode = controls_state.getDynamicTRMode();
@@ -822,12 +862,16 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   float accel = car_control.getActuators().getAccel();
 
   p.setPen(Qt::NoPen);
-  p.setBrush(blackColor(200));
+  p.setBrush(pedal_force_recovery_active ? QColor(255, 127, 0, 235) : blackColor(200));
   p.drawEllipse(x - radius / 2, y2 - radius / 2, radius, radius);
 
   textColor = QColor(255, 255, 255, 200);
 
-  if(accel > 0) {
+  if(pedal_force_recovery_active) {
+    str = "복구중";
+    textColor = QColor(255, 255, 255, 235);
+  }
+  else if(accel > 0) {
     //str = "ACCEL";
     str = "가속";
     textColor = QColor(120, 255, 120, 200);

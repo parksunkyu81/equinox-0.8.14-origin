@@ -18,7 +18,11 @@ from selfdrive.car.car_helpers import get_car, get_startup_event, get_one_can
 from selfdrive.controls.lib.lane_planner import CAMERA_OFFSET
 from selfdrive.controls.lib.drive_helpers import update_v_cruise, initialize_v_cruise
 from selfdrive.controls.lib.drive_helpers import get_lag_adjusted_curvature
-from selfdrive.controls.lib.longcontrol import LongControl
+from selfdrive.controls.lib.longcontrol import LongControl, LongCtrlState
+from selfdrive.controls.lib.pedal_force_recovery import (
+  PEDAL_FORCE_RECOVERY_PEDAL_FLOOR,
+  PedalForceRecovery,
+)
 from selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from selfdrive.controls.lib.latcontrol_indi import LatControlINDI
 from selfdrive.controls.lib.latcontrol_lqr import LatControlLQR
@@ -35,7 +39,7 @@ from selfdrive.process_diagnostics import append_process_diagnostic
 from selfdrive.ntune import ntune_common_get, ntune_common_enabled, ntune_scc_get, ntune_torque_get
 from selfdrive.road_speed_limiter import road_speed_limiter_get_max_speed, road_speed_limiter_get_active, \
   get_road_speed_limiter
-from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, CONTROL_N
+from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, V_CRUISE_ENABLE_MIN, CONTROL_N
 from selfdrive.car.gm.values import SLOW_ON_CURVES, MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
@@ -222,6 +226,7 @@ class Controls:
         self.pedal_deadzone_floor = 0.0
         self.pedal_deadzone_accel_request = 0.0
         self.pedal_deadzone_vehicle_accel = 0.0
+        self.pedal_force_recovery = PedalForceRecovery(DT_CTRL)
         self.gm_steer_command_sent = False
         self.gm_steer_command_gap_ms = 0.0
         self.gm_steer_command_deadline_lag_ms = 0.0
@@ -1105,6 +1110,26 @@ class Controls:
         # Check if openpilot is engaged
         self.enabled = self.active or self.state == State.preEnabled
 
+    def pedal_force_recovery_eligible(self, CS, long_plan, t_since_plan):
+        speeds = long_plan.speeds
+        plan_valid = self.sm.valid['longitudinalPlan'] and len(speeds) == CONTROL_N and t_since_plan <= 0.25
+        if not plan_valid:
+            return False
+
+        force_slow_decel = self.sm['driverMonitoringState'].awarenessStatus < 0.0 or \
+                           self.state == State.softDisabling
+        speed_error = float(self.LoC.v_pid - CS.vEgo)
+        future_speed_error = float(speeds[-1] - CS.vEgo)
+        clear_road_plan = long_plan.longitudinalPlanSource == \
+                          log.LongitudinalPlan.LongitudinalPlanSource.cruise
+
+        return self.CP.enableGasInterceptor and self.active and CS.adaptiveCruise and \
+               self.LoC.long_control_state == LongCtrlState.pid and \
+               not CS.brakePressed and not CS.gasPressed and not CS.standstill and \
+               CS.vEgo > V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS and \
+               not force_slow_decel and not self.is_curv_driving and clear_road_plan and \
+               speed_error >= 0.30 and future_speed_error >= 0.30
+
     def state_control(self, CS):
         """Given the state, this function returns an actuators packet"""
 
@@ -1216,6 +1241,15 @@ class Controls:
         # Driver brake is the final authority over every longitudinal path.
         if CS.brakePressed:
             actuators.accel = min(actuators.accel, 0.0)
+
+        # A pedal-only GM car must not remain at zero throttle while the valid
+        # cruise plan is explicitly asking to regain speed. Once that normal-
+        # driving predicate is true, force recovery starts on the same 100 Hz
+        # control frame without waiting to classify PID P/I/F internals.
+        recovery_plan_age = (self.sm.frame - self.sm.rcv_frame['longitudinalPlan']) * DT_CTRL
+        recovery_eligible = not self.joystick_mode and \
+                            self.pedal_force_recovery_eligible(CS, long_plan, recovery_plan_age)
+        actuators.accel = self.pedal_force_recovery.update(recovery_eligible, actuators.accel)
 
         if lac_log.active and lac_log.saturated and not CS.steeringPressed:
             dpath_points = lat_plan.dPathPoints
@@ -1455,6 +1489,12 @@ class Controls:
         controlsState.pedalManualLaunchRequired = False
         controlsState.pedalManualLaunchSeen = False
         controlsState.pedalManualLaunchAssistActive = False
+        controlsState.pedalForceRecoveryActive = bool(self.pedal_force_recovery.active)
+        controlsState.pedalForceRecoveryDuration = float(self.pedal_force_recovery.duration)
+        controlsState.pedalForceRecoveryCount = int(self.pedal_force_recovery.activation_count)
+        controlsState.pedalForceRecoveryRawAccel = float(self.pedal_force_recovery.raw_accel)
+        controlsState.pedalForceRecoveryAccel = float(self.pedal_force_recovery.forced_accel)
+        controlsState.pedalForceRecoveryPedalFloor = float(PEDAL_FORCE_RECOVERY_PEDAL_FLOOR)
         controlsState.pedalManualLaunchAutoAllowed = False
         controlsState.pedalComfortAccelCap = float(self.pedal_comfort_accel_cap)
 
