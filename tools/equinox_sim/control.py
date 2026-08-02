@@ -41,6 +41,11 @@ def main():
     bool_parser = subparsers.add_parser(name, help=f"turn simulated {name} on or off")
     bool_parser.add_argument("state", type=parse_on_off)
 
+  recovery_parser = subparsers.add_parser(
+    "recovery", help="allow or block force recovery while accel-zero fault is injected"
+  )
+  recovery_parser.add_argument("state", type=parse_on_off)
+
   subparsers.add_parser("reset", help="reset speed, distance and controls")
   subparsers.add_parser("engage", help="request a virtual SET button pulse")
   args = parser.parse_args()
@@ -57,6 +62,22 @@ def main():
   elif args.command in BOOL_PARAMS:
     params.put_bool(BOOL_PARAMS[args.command], args.state)
     print(f"{args.command}: {'on' if args.state else 'off'}")
+  elif args.command == "recovery":
+    # EquinoxSimAccelZero is intentionally a three-state test control:
+    #   0: no injected fault (normal production recovery behavior)
+    #   1: accel=0 fault held, recovery blocked
+    #   2: accel=0 fault held, recovery allowed
+    raw_mode = params.get("EquinoxSimAccelZero", encoding="utf8")
+    try:
+      current_mode = int(raw_mode) if raw_mode is not None else 0
+    except ValueError:
+      current_mode = 0
+    next_mode = 2 if args.state else (1 if current_mode in (1, 2) else 0)
+    params.put("EquinoxSimAccelZero", str(next_mode))
+    print(
+      "fault: on, recovery: " + ("on" if args.state else "off")
+      if next_mode else "fault: off, recovery: normal"
+    )
   elif args.command == "reset":
     params.put_bool("EquinoxSimReset", True)
     print("simulator reset requested")
@@ -67,4 +88,3 @@ def main():
 
 if __name__ == "__main__":
   main()
-

@@ -61,6 +61,8 @@ cd /data/openpilot
 python3 -m tools.equinox_sim.control status
 python3 -m tools.equinox_sim.control target 100
 python3 -m tools.equinox_sim.control fault on
+python3 -m tools.equinox_sim.control recovery on
+python3 -m tools.equinox_sim.control recovery off
 python3 -m tools.equinox_sim.control fault off
 python3 -m tools.equinox_sim.control brake on
 python3 -m tools.equinox_sim.control brake off
@@ -71,16 +73,19 @@ python3 -m tools.equinox_sim.control reset
 
 - `status`: 현재 속도, 목표속도, 페달 명령 및 복구 상태를 확인합니다.
 - `target 100`: 가상 차량의 목표속도를 100km/h로 설정합니다.
-- `fault on`: 시뮬레이션 지점에서 PID 가속 요구를 0으로 강제하여
-  `accel = 0` 멍때림 상태를 발생시킵니다.
+- `fault on`: PID 가속 요구를 0으로 계속 강제하고 자동 복구를 잠시 막습니다.
+  `pedalCommand: 0.0`과 가상 차량의 속도 하락을 먼저 확인할 수 있습니다.
+- `recovery on`: `accel = 0` 장애는 유지하면서 강제 복구를 허용합니다.
+  `recoveryActive: true`, `pedalCommand >= 0.060`, 속도 회복을 확인합니다.
+- `recovery off`: 장애를 유지한 채 복구를 다시 막습니다.
 - `fault off`: `accel = 0` 장애 주입을 해제합니다.
 - `brake on` / `brake off`: 가상 브레이크 입력을 켜거나 끕니다.
 - `reset`: 차량 속도, 이동거리 및 제어 상태를 초기화합니다.
 
-목표속도가 가상 차량의 현재 속도보다 높은 상태에서 `fault on`을 실행하면
-시뮬레이션 지점이 PID 가속 요구를 0으로 바꿉니다. 이후 실제 운행용 복구
-조건과 복구 알고리즘은 변경 없이 그대로 실행됩니다. 복구에 성공하면 다음
-상태를 모두 확인할 수 있습니다.
+목표속도가 가상 차량의 현재 속도보다 높은 상태에서 먼저 `fault on`을 실행하면
+가속 요구가 0으로 유지되어 속도가 내려갑니다. 그 상태에서 `recovery on`을
+실행하면 실제 운행용 복구 조건과 복구 알고리즘이 그대로 실행됩니다. 복구에
+성공하면 다음 상태를 모두 확인할 수 있습니다.
 
 - `control status` 출력의 `recoveryActive: true`
 - `pedalCommand`가 0.060 이상

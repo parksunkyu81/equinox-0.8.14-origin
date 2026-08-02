@@ -100,6 +100,13 @@ class EquinoxVirtualPanda:
     except ValueError:
       return float(default)
 
+  def _get_int(self, key, default):
+    raw = self.params.get(key, encoding="utf8")
+    try:
+      return int(raw) if raw is not None else int(default)
+    except ValueError:
+      return int(default)
+
   def _read_commands(self):
     if self._get_bool(PARAM_RESET):
       self.vehicle.reset()
@@ -110,10 +117,12 @@ class EquinoxVirtualPanda:
       self.params.put_bool(PARAM_RESET, False)
       self.params.put_bool(PARAM_ENGAGE, True)
 
+    fault_mode = min(2, max(0, self._get_int(PARAM_ACCEL_ZERO, 0)))
     return {
       "target_speed_kph": min(145.0, max(20.0, self._get_float(PARAM_TARGET_SPEED, 100.0))),
       "ignition": self._get_bool(PARAM_IGNITION),
-      "fault_accel_zero": self._get_bool(PARAM_ACCEL_ZERO),
+      "fault_accel_zero": fault_mode in (1, 2),
+      "fault_recovery_enabled": fault_mode == 2,
       "brake_pressed": self._get_bool(PARAM_BRAKE),
       "gas_pressed": self._get_bool(PARAM_GAS),
     }
@@ -503,6 +512,7 @@ class EquinoxVirtualPanda:
       "controlsEnabled": bool(controls.enabled) if controls_seen else False,
       "vCruiseKph": round(float(controls.vCruise), 1) if controls_seen else 0.0,
       "faultAccelZero": commands["fault_accel_zero"],
+      "faultRecoveryEnabled": commands["fault_recovery_enabled"],
       "brakePressed": commands["brake_pressed"],
       "ignition": commands["ignition"],
       "recoveryActive": bool(controls.pedalForceRecoveryActive) if controls_seen else False,

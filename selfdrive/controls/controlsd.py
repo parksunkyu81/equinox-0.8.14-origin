@@ -230,6 +230,7 @@ class Controls:
         self.equinox_simulator = SIMULATION and os.getenv("EQUINOX_SIMULATOR") == "1" and \
                                  os.getenv("NOBOARD") is not None
         self.equinox_sim_force_accel_zero = False
+        self.equinox_sim_recovery_enabled = True
         self.equinox_sim_params = Params() if self.equinox_simulator else None
         self.gm_steer_command_sent = False
         self.gm_steer_command_gap_ms = 0.0
@@ -1255,13 +1256,19 @@ class Controls:
         # recovery predicate, so every real recovery gate remains in force.
         if self.equinox_simulator:
             if self.sm.frame % 10 == 0:
-                self.equinox_sim_force_accel_zero = \
-                    self.equinox_sim_params.get_bool("EquinoxSimAccelZero")
+                raw_fault_mode = self.equinox_sim_params.get("EquinoxSimAccelZero")
+                try:
+                    fault_mode = int(raw_fault_mode) if raw_fault_mode is not None else 0
+                except ValueError:
+                    fault_mode = 0
+                self.equinox_sim_force_accel_zero = fault_mode in (1, 2)
+                self.equinox_sim_recovery_enabled = fault_mode != 1
             if self.equinox_sim_force_accel_zero:
                 actuators.accel = 0.0
 
         recovery_plan_age = (self.sm.frame - self.sm.rcv_frame['longitudinalPlan']) * DT_CTRL
         recovery_eligible = not self.joystick_mode and \
+                            (not self.equinox_simulator or self.equinox_sim_recovery_enabled) and \
                             self.pedal_force_recovery_eligible(CS, long_plan, recovery_plan_age)
         actuators.accel = self.pedal_force_recovery.update(recovery_eligible, actuators.accel)
 
