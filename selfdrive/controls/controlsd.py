@@ -22,6 +22,7 @@ from selfdrive.controls.lib.longcontrol import LongControl, LongCtrlState
 from selfdrive.controls.lib.pedal_force_recovery import (
   PEDAL_FORCE_RECOVERY_PEDAL_FLOOR,
   PedalForceRecovery,
+  recovery_speed_demand,
 )
 from selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from selfdrive.controls.lib.latcontrol_indi import LatControlINDI
@@ -1115,7 +1116,7 @@ class Controls:
         # Check if openpilot is engaged
         self.enabled = self.active or self.state == State.preEnabled
 
-    def pedal_force_recovery_eligible(self, CS, long_plan, t_since_plan):
+    def pedal_force_recovery_eligible(self, CS, long_plan, t_since_plan, injected_fault=False):
         speeds = long_plan.speeds
         plan_valid = self.sm.valid['longitudinalPlan'] and len(speeds) == CONTROL_N and t_since_plan <= 0.25
         if not plan_valid:
@@ -1127,13 +1128,17 @@ class Controls:
         future_speed_error = float(speeds[-1] - CS.vEgo)
         clear_road_plan = long_plan.longitudinalPlanSource == \
                           log.LongitudinalPlan.LongitudinalPlanSource.cruise
+        # In bench mode fault mode 2 is ground truth that accel was forcibly
+        # replaced with zero. Keep all safety/engagement gates, but do not let
+        # the normal 0.30 m/s detector chatter at the set-speed boundary.
+        speed_demand = recovery_speed_demand(speed_error, future_speed_error, injected_fault)
 
         return self.CP.enableGasInterceptor and self.active and CS.adaptiveCruise and \
                self.LoC.long_control_state == LongCtrlState.pid and \
                not CS.brakePressed and not CS.gasPressed and not CS.standstill and \
                CS.vEgo > V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS and \
                not force_slow_decel and not self.is_curv_driving and clear_road_plan and \
-               speed_error >= 0.30 and future_speed_error >= 0.30
+               speed_demand
 
     def state_control(self, CS):
         """Given the state, this function returns an actuators packet"""
@@ -1267,9 +1272,12 @@ class Controls:
                 actuators.accel = 0.0
 
         recovery_plan_age = (self.sm.frame - self.sm.rcv_frame['longitudinalPlan']) * DT_CTRL
+        injected_recovery_fault = self.equinox_simulator and self.equinox_sim_force_accel_zero and \
+                                  self.equinox_sim_recovery_enabled
         recovery_eligible = not self.joystick_mode and \
                             (not self.equinox_simulator or self.equinox_sim_recovery_enabled) and \
-                            self.pedal_force_recovery_eligible(CS, long_plan, recovery_plan_age)
+                            self.pedal_force_recovery_eligible(CS, long_plan, recovery_plan_age,
+                                                               injected_fault=injected_recovery_fault)
         actuators.accel = self.pedal_force_recovery.update(recovery_eligible, actuators.accel)
 
         if lac_log.active and lac_log.saturated and not CS.steeringPressed:

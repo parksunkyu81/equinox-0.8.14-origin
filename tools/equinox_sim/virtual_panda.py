@@ -85,6 +85,12 @@ class EquinoxVirtualPanda:
     self.last_status_time = self.started_at
     self.measured_loop_hz = 0.0
     self.last_vehicle_update_time = sec_since_boot()
+    self.model_point_count = 33
+    self.model_xs = [float(i) * 4.0 for i in range(self.model_point_count)]
+    self.model_zeros = [0.0] * self.model_point_count
+    self.model_lane_ys = [[offset] * self.model_point_count
+                          for offset in (5.55, 1.85, -1.85, -5.55)]
+    self.model_edge_ys = [[offset] * self.model_point_count for offset in (5.8, -5.8)]
 
   def _put_default(self, key, value):
     if self.params.get(key) is None:
@@ -364,10 +370,8 @@ class EquinoxVirtualPanda:
     These messages describe a deterministic straight, clear road so the EON can
     exercise controls without running modeld, locationd, radard, or learners.
     """
-    point_count = 33
-    xs = [float(i) * 4.0 for i in range(point_count)]
-    ts = [float(i) * 0.2 for i in range(point_count)]
-    zeros = [0.0] * point_count
+    xs = self.model_xs
+    zeros = self.model_zeros
 
     model_msg = messaging.new_message("modelV2")
     model = model_msg.modelV2
@@ -379,34 +383,27 @@ class EquinoxVirtualPanda:
     model.modelExecutionTime = 0.0
     model.gpuExecutionTime = 0.0
 
-    trajectories = (
-      (model.position, xs),
-      (model.orientation, zeros),
-      (model.velocity, zeros),
-      (model.orientationRate, zeros),
-      (model.acceleration, zeros),
-    )
-    for trajectory, x_values in trajectories:
-      trajectory.x = x_values
-      trajectory.y = zeros
-      trajectory.z = zeros
-      trajectory.t = ts
+    # Only populate fields consumed by this fork's UI. Keeping unused model
+    # tensors empty materially reduces Python/Cap'n Proto work on EON.
+    model.position.x = xs
+    model.position.y = zeros
+    model.position.z = zeros
+    model.orientation.z = zeros
+    model.acceleration.x = zeros
 
     model.init("laneLines", 4)
-    for lane, y_offset in zip(model.laneLines, (5.55, 1.85, -1.85, -5.55)):
+    for lane, y_values in zip(model.laneLines, self.model_lane_ys):
       lane.x = xs
-      lane.y = [y_offset] * point_count
+      lane.y = y_values
       lane.z = zeros
-      lane.t = ts
     model.laneLineProbs = [0.05, 0.95, 0.95, 0.05]
     model.laneLineStds = [0.3, 0.1, 0.1, 0.3]
 
     model.init("roadEdges", 2)
-    for edge, y_offset in zip(model.roadEdges, (5.8, -5.8)):
+    for edge, y_values in zip(model.roadEdges, self.model_edge_ys):
       edge.x = xs
-      edge.y = [y_offset] * point_count
+      edge.y = y_values
       edge.z = zeros
-      edge.t = ts
     model.roadEdgeStds = [1.0, 1.0]
 
     # This fork's onroad.cc indexes both leads unconditionally, even when no
@@ -518,6 +515,9 @@ class EquinoxVirtualPanda:
       "recoveryActive": bool(controls.pedalForceRecoveryActive) if controls_seen else False,
       "recoveryDuration": round(float(controls.pedalForceRecoveryDuration), 2) if controls_seen else 0.0,
       "recoveryCount": int(controls.pedalForceRecoveryCount) if controls_seen else 0,
+      "recoveryRawAccel": round(float(controls.pedalForceRecoveryRawAccel), 3) if controls_seen else 0.0,
+      "recoveryForcedAccel": round(float(controls.pedalForceRecoveryAccel), 3) if controls_seen else 0.0,
+      "targetErrorMps": round(commands["target_speed_kph"] / 3.6 - self.vehicle.speed_mps, 3),
       "gasCanFrames": self.gas_can_frames,
       "steerCanFrames": self.steer_can_frames,
       "distanceM": round(self.vehicle.distance_m, 1),

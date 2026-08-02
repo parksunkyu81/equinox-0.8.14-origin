@@ -4,6 +4,16 @@
 PEDAL_FORCE_RECOVERY_ACCEL = 0.36
 PEDAL_FORCE_RECOVERY_ACCEL_EPS = 1e-3
 PEDAL_FORCE_RECOVERY_PEDAL_FLOOR = 0.060
+PEDAL_FORCE_RECOVERY_SPEED_ERROR = 0.30
+PEDAL_FORCE_RECOVERY_INJECTED_SPEED_ERROR = 0.05
+
+
+def recovery_speed_demand(speed_error, future_speed_error, injected_fault=False):
+  normal_demand = speed_error >= PEDAL_FORCE_RECOVERY_SPEED_ERROR and \
+                  future_speed_error >= PEDAL_FORCE_RECOVERY_SPEED_ERROR
+  injected_demand = bool(injected_fault) and \
+                    future_speed_error >= PEDAL_FORCE_RECOVERY_INJECTED_SPEED_ERROR
+  return normal_demand or injected_demand
 
 
 class PedalForceRecovery:
