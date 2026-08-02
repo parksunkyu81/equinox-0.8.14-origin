@@ -32,17 +32,24 @@ scons -j$(nproc)
 
 콤마 장치와 PC를 같은 Wi-Fi 네트워크에 연결합니다. 첫 번째 PC 터미널에서
 콤마 장치에 SSH로 접속한 다음, 두 번째 manager가 실행되지 않도록 기존
-콤마 서비스를 중지하고 시뮬레이터를 실행합니다.
+openpilot을 중지하고 시뮬레이터를 실행합니다. EON/comma two처럼
+`root@localhost` 프롬프트와 `comma` tmux 세션을 사용하는 장치는 다음과
+같습니다.
 
 ```bash
-ssh comma@<콤마-장치-IP>
-sudo systemctl stop comma
+ssh root@<콤마-장치-IP>
+tmux kill-session -t comma
+pgrep -af manager.py
 cd /data/openpilot
 bash tools/equinox_sim/launch.sh --bench
 ```
 
-openpilot을 tmux 안에서 실행하는 EON/comma two 환경이라면 기존 tmux 세션을
-먼저 중지한 후 새 SSH/tmux 세션에서 실행 스크립트를 시작하십시오.
+`pgrep` 결과가 비어 있어야 합니다. `manager.py`가 남아 있으면 다른
+터미널에서 실행 중인 시뮬레이터를 `Ctrl+C`로 먼저 종료하십시오. manager를
+두 개 동시에 실행하면 메시지 발행 충돌과 장치 프로세스 오류가 발생합니다.
+
+systemd 서비스를 사용하는 장치만 `systemctl stop comma`를 사용합니다.
+`root@localhost`는 이미 관리자 권한이므로 `sudo`를 사용하지 않습니다.
 
 첫 번째 터미널은 실행 상태로 둡니다. PC에서 두 번째 터미널을 열어 다시
 SSH로 접속한 다음, 콤마 장치의 온로드 화면을 보면서 가상 주행을 제어합니다.
@@ -80,11 +87,14 @@ python3 -m tools.equinox_sim.control reset
 - PEDAL 게이지 바로 위에 황색 복구 경고 표시
 
 시뮬레이터를 종료하려면 실행 중인 첫 번째 터미널에서 `Ctrl+C`를 누릅니다.
-시뮬레이터 환경변수 없이 일반 openpilot 동작을 다시 시작합니다.
+EON/comma two에서 일반 openpilot 동작을 다시 시작하려면 시뮬레이터 종료 후
+장치를 재부팅하는 것이 가장 확실합니다.
 
 ```bash
-sudo systemctl start comma
+reboot
 ```
+
+systemd 방식 장치에서는 대신 `systemctl start comma`를 사용합니다.
 
 ## 오류 확인
 
