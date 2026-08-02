@@ -372,7 +372,8 @@ class EquinoxVirtualPanda:
       "EquinoxSim "
       f"v={status['speedKph']:6.2f}km/h target={status['targetSpeedKph']:5.1f} "
       f"pedal={status['pedalCommand']:.4f} enabled={status['controlsEnabled']} "
-      f"fault={status['faultAccelZero']} recovery={status['recoveryActive']}"
+      f"fault={status['faultAccelZero']} recovery={status['recoveryActive']} "
+      f"loop={status['loopHz']:.1f}Hz"
     )
 
   def run(self):
