@@ -22,7 +22,7 @@ from selfdrive.swaglog import cloudlog
 PRE_EVENT_SECONDS = 5.0
 POST_EVENT_SECONDS = 10.0
 MIN_EVENT_INTERVAL_SECONDS = 60.0
-EXPECTED_CONTROL_HZ = 100
+EXPECTED_CONTROL_HZ = 50
 PRE_EVENT_SAMPLES = int(PRE_EVENT_SECONDS * EXPECTED_CONTROL_HZ) + 50
 DEFAULT_LOG_DIR = "/data/media/0/pedal_recovery_logs"
 FALLBACK_LOG_DIR = "/tmp/pedal_recovery_logs"
@@ -314,6 +314,10 @@ class PedalRecoveryRecorder:
       while True:
         self.sm.update(1000)
         if not self.sm.updated["controlsState"]:
+          continue
+        # Keep 20 ms diagnostic resolution (enough for the 40 ms acceptance
+        # limit) while halving Python/JSON work on resource-constrained EON.
+        if self.sm.frame % 2:
           continue
         self._update_sendcan()
         self._update_panda_can()

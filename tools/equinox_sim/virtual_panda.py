@@ -5,12 +5,13 @@ import time
 
 from cereal import car, log, messaging
 from common.params import Params
-from common.realtime import DT_CTRL, sec_since_boot
+from common.realtime import DT_CTRL, Priority, config_realtime_process, sec_since_boot
 from opendbc.can.packer import CANPacker
 from opendbc.can.parser import CANParser
 from selfdrive.boardd.boardd import can_list_to_can_capnp
 from selfdrive.car import crc8_pedal
 from selfdrive.car.gm.values import CAR, DBC, CanBus, CruiseButtons
+from selfdrive.hardware import TICI
 from selfdrive.swaglog import cloudlog
 from tools.equinox_sim.vehicle import EquinoxVehicle
 
@@ -82,6 +83,12 @@ class EquinoxVirtualPanda:
     self.last_vehicle_update_time = sec_since_boot()
     self.cached_commands = None
     self.returned_pedal_frames = []
+    self.can_frame_cache = {}
+    self.last_published_button = None
+    self.loop_work_total = 0.0
+    self.loop_work_samples = 0
+    self.loop_work_max = 0.0
+    self.deadline_misses = 0
 
   def _put_default(self, key, value):
     if self.params.get(key) is None:
@@ -163,6 +170,11 @@ class EquinoxVirtualPanda:
   def _controls_enabled(self):
     return bool(self.sm["controlsState"].enabled) if self.sm.rcv_frame["controlsState"] > 0 else False
 
+  def _cached_can(self, key, message_name, bus, values):
+    if key not in self.can_frame_cache:
+      self.can_frame_cache[key] = self.packer.make_can_msg(message_name, bus, values)
+    return self.can_frame_cache[key]
+
   def _update_buttons(self, target_speed_kph, brake_pressed):
     controls_enabled = self._controls_enabled()
 
@@ -190,15 +202,18 @@ class EquinoxVirtualPanda:
     # Keep one CAN packet arriving every 10 ms so controlsd continues to run at
     # 100 Hz. Individual vehicle messages are distributed across their required
     # parser timeouts; packing all 15 messages at 100 Hz overloads EON hardware.
+    engine_key = ("engine", bool(brake_pressed), self.vehicle.speed_mps < 0.01)
     frames = [
-      self.packer.make_can_msg("ECMEngineStatus", CanBus.POWERTRAIN, {
+      self._cached_can(engine_key, "ECMEngineStatus", CanBus.POWERTRAIN, {
         "CruiseMainOn": 0, "Brake_Pressed": int(brake_pressed),
         "Standstill": int(self.vehicle.speed_mps < 0.01), "EngineRPM": 1500,
       }),
-      self.packer.make_can_msg("ASCMSteeringButton", CanBus.POWERTRAIN, {
-        "ACCButtons": button, "DistanceButton": 0, "LKAButton": 0,
-      }),
     ]
+    if self.frame % 3 == 0 or button != self.last_published_button:
+      frames.append(self._cached_can(("button", int(button)), "ASCMSteeringButton", CanBus.POWERTRAIN, {
+        "ACCButtons": button, "DistanceButton": 0, "LKAButton": 0,
+      }))
+      self.last_published_button = button
     if self.returned_pedal_frames:
       frames.extend(self.returned_pedal_frames)
       self.returned_pedal_frames = []
@@ -332,6 +347,11 @@ class EquinoxVirtualPanda:
       "steerCanFrames": self.steer_can_frames,
       "distanceM": round(self.vehicle.distance_m, 1),
       "loopHz": round(self.measured_loop_hz, 1),
+      "loopWorkMsAvg": round(
+        1000.0 * self.loop_work_total / self.loop_work_samples, 3
+      ) if self.loop_work_samples else 0.0,
+      "loopWorkMsMax": round(1000.0 * self.loop_work_max, 3),
+      "deadlineMisses": self.deadline_misses,
     }
     os.makedirs(STATUS_DIR, exist_ok=True)
     temp_file = STATUS_FILE + ".tmp"
@@ -345,12 +365,20 @@ class EquinoxVirtualPanda:
       f"fault={status['faultAccelZero']} recovery={status['recoveryActive']} "
       f"loop={status['loopHz']:.1f}Hz"
     )
+    self.loop_work_total = 0.0
+    self.loop_work_samples = 0
+    self.loop_work_max = 0.0
+    self.deadline_misses = 0
 
   def run(self):
+    # This process replaces boardd's timing-critical CAN receive thread. Keep
+    # it on the same EON/TICI control core and one priority above controlsd.
+    config_realtime_process(4 if TICI else 3, Priority.CTRL_HIGH + 1)
     cloudlog.warning("Starting Equinox virtual Panda bench simulator (NOBOARD)")
     next_frame_time = sec_since_boot()
 
     while True:
+      loop_started_at = sec_since_boot()
       self.sm.update(0)
       commands = self._read_commands()
       self._consume_sendcan()
@@ -385,6 +413,10 @@ class EquinoxVirtualPanda:
         self.last_status_time = status_time
 
       self.frame += 1
+      loop_work = sec_since_boot() - loop_started_at
+      self.loop_work_total += loop_work
+      self.loop_work_samples += 1
+      self.loop_work_max = max(self.loop_work_max, loop_work)
       # Schedule against an absolute deadline. This compensates for normal
       # Android sleep overshoot without the unbounded catch-up bursts that
       # previously flooded messaging readers after a long startup stall.
@@ -393,6 +425,7 @@ class EquinoxVirtualPanda:
       if now < next_frame_time:
         time.sleep(next_frame_time - now)
       elif now - next_frame_time > DT_CTRL:
+        self.deadline_misses += 1
         next_frame_time = now
 
 

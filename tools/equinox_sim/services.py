@@ -4,7 +4,8 @@ import time
 
 from cereal import log, messaging
 from common.params import Params
-from common.realtime import sec_since_boot
+from common.realtime import Priority, config_realtime_process, sec_since_boot
+from selfdrive.hardware import TICI
 from selfdrive.controls.lib.drive_helpers import CONTROL_N
 from selfdrive.swaglog import cloudlog
 
@@ -248,6 +249,7 @@ class EquinoxBenchServices:
     self.pm.send("liveTorqueParameters", torque_msg)
 
   def run(self):
+    config_realtime_process(5 if TICI else 2, Priority.CTRL_LOW)
     cloudlog.warning("Starting Equinox synthetic bench services at 20 Hz")
     next_frame_time = sec_since_boot()
     while True:
