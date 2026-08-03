@@ -13,6 +13,7 @@ from selfdrive.car import crc8_pedal
 from selfdrive.car.gm.values import CAR, DBC, CanBus, CruiseButtons
 from selfdrive.hardware import TICI
 from selfdrive.swaglog import cloudlog
+from tools.equinox_sim.command_state import CommandStateReader, COMMAND_FILE, save_command_state
 from tools.equinox_sim.vehicle import EquinoxVehicle
 
 
@@ -44,6 +45,21 @@ class EquinoxVirtualPanda:
     self._put_default(PARAM_GAS, "0")
     self._put_default(PARAM_RESET, "0")
     self._put_default(PARAM_ENGAGE, "1")
+    initial_commands = {
+      "targetSpeedKph": self._get_float(PARAM_TARGET_SPEED, 100.0),
+      "ignition": self._get_bool(PARAM_IGNITION),
+      "faultMode": self._get_int(PARAM_ACCEL_ZERO, 0),
+      "brakePressed": self._get_bool(PARAM_BRAKE),
+      "gasPressed": self._get_bool(PARAM_GAS),
+      "resetToken": 0,
+      "engageToken": 1,
+    }
+    if not os.path.exists(COMMAND_FILE):
+      save_command_state(initial_commands)
+    self.command_reader = CommandStateReader()
+    initial_state = self.command_reader.read()
+    self.last_reset_token = int(initial_state["resetToken"])
+    self.last_engage_token = max(0, int(initial_state["engageToken"]) - 1)
 
     initial_speed_kph = float(os.getenv("EQUINOX_SIM_INITIAL_SPEED_KPH", "80"))
     self.vehicle = EquinoxVehicle(initial_speed_kph=initial_speed_kph)
@@ -89,6 +105,7 @@ class EquinoxVirtualPanda:
     self.loop_work_samples = 0
     self.loop_work_max = 0.0
     self.deadline_misses = 0
+    self.status_write_count = 0
 
   def _put_default(self, key, value):
     if self.params.get(key) is None:
@@ -112,35 +129,35 @@ class EquinoxVirtualPanda:
       return int(default)
 
   def _read_commands(self):
-    # Params are file-backed on EON. Polling seven keys at 100 Hz consumed a
-    # substantial part of the CAN loop budget; 10 Hz still gives controls a
-    # maximum command latency of only 100 ms.
-    if self.cached_commands is not None and self.frame % 10 != 0:
-      return self.cached_commands
+    # Commands are a single atomic tmpfs file. Do not poll multiple
+    # file-backed Params from this timing-critical loop.
+    state = self.command_reader.read()
+    reset_token = int(state["resetToken"])
+    engage_token = int(state["engageToken"])
 
-    if self._get_bool(PARAM_RESET):
+    if reset_token != self.last_reset_token:
       self.vehicle.reset()
       self.pedal_command = 0.0
       self.steer_command = 0.0
       self.gas_sensor_counter = 0
       self.button_queue.clear()
-      self.params.put_bool(PARAM_RESET, False)
-      self.params.put_bool(PARAM_ENGAGE, True)
+      self.last_reset_token = reset_token
+      self.last_engage_token = max(0, engage_token - 1)
 
-    if self._get_bool(PARAM_ENGAGE):
-      self.params.put_bool(PARAM_ENGAGE, False)
+    if engage_token != self.last_engage_token:
       self.last_engage_attempt_frame = -1000
+      self.last_engage_token = engage_token
 
-    fault_mode = min(3, max(0, self._get_int(PARAM_ACCEL_ZERO, 0)))
+    fault_mode = int(state["faultMode"])
     self.cached_commands = {
-      "target_speed_kph": min(145.0, max(20.0, self._get_float(PARAM_TARGET_SPEED, 100.0))),
-      "ignition": self._get_bool(PARAM_IGNITION),
+      "target_speed_kph": float(state["targetSpeedKph"]),
+      "ignition": bool(state["ignition"]),
       "fault_mode": fault_mode,
       "fault_accel_zero": fault_mode in (1, 2, 3),
       "fault_recovery_enabled": fault_mode in (2, 3),
       "production_fidelity": fault_mode == 3,
-      "brake_pressed": self._get_bool(PARAM_BRAKE),
-      "gas_pressed": self._get_bool(PARAM_GAS),
+      "brake_pressed": bool(state["brakePressed"]),
+      "gas_pressed": bool(state["gasPressed"]),
     }
     return self.cached_commands
 
@@ -356,15 +373,17 @@ class EquinoxVirtualPanda:
     os.makedirs(STATUS_DIR, exist_ok=True)
     temp_file = STATUS_FILE + ".tmp"
     with open(temp_file, "w", encoding="utf8") as status_file:
-      json.dump(status, status_file, ensure_ascii=False, indent=2)
+      json.dump(status, status_file, ensure_ascii=False, separators=(",", ":"))
     os.replace(temp_file, STATUS_FILE)
-    print(
-      "EquinoxSim "
-      f"v={status['speedKph']:6.2f}km/h target={status['targetSpeedKph']:5.1f} "
-      f"pedal={status['pedalCommand']:.4f} enabled={status['controlsEnabled']} "
-      f"fault={status['faultAccelZero']} recovery={status['recoveryActive']} "
-      f"loop={status['loopHz']:.1f}Hz"
-    )
+    self.status_write_count += 1
+    if self.status_write_count % 5 == 0:
+      print(
+        "EquinoxSim "
+        f"v={status['speedKph']:6.2f}km/h target={status['targetSpeedKph']:5.1f} "
+        f"pedal={status['pedalCommand']:.4f} enabled={status['controlsEnabled']} "
+        f"fault={status['faultAccelZero']} recovery={status['recoveryActive']} "
+        f"loop={status['loopHz']:.1f}Hz"
+      )
     self.loop_work_total = 0.0
     self.loop_work_samples = 0
     self.loop_work_max = 0.0

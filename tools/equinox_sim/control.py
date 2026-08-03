@@ -4,6 +4,7 @@ import json
 import os
 
 from common.params import Params
+from tools.equinox_sim.command_state import load_command_state, save_command_state
 
 
 STATUS_FILE = "/tmp/equinox_sim/status.json"
@@ -60,12 +61,23 @@ def main():
     return
 
   params = Params()
+  command_state = load_command_state()
   if args.command == "target":
     target = min(145.0, max(20.0, args.kph))
     params.put("EquinoxSimTargetSpeedKph", f"{target:.1f}")
+    command_state["targetSpeedKph"] = target
+    save_command_state(command_state)
     print(f"target speed: {target:.1f} km/h")
   elif args.command in BOOL_PARAMS:
     params.put_bool(BOOL_PARAMS[args.command], args.state)
+    state_keys = {
+      "fault": "faultMode",
+      "brake": "brakePressed",
+      "gas": "gasPressed",
+      "ignition": "ignition",
+    }
+    command_state[state_keys[args.command]] = int(args.state) if args.command == "fault" else args.state
+    save_command_state(command_state)
     print(f"{args.command}: {'on' if args.state else 'off'}")
   elif args.command == "recovery":
     # EquinoxSimAccelZero is intentionally a four-state test control:
@@ -80,6 +92,8 @@ def main():
       current_mode = 0
     next_mode = 2 if args.state else (1 if current_mode in (1, 2) else 0)
     params.put("EquinoxSimAccelZero", str(next_mode))
+    command_state["faultMode"] = next_mode
+    save_command_state(command_state)
     print(
       "fault: on, recovery: " + ("on" if args.state else "off")
       if next_mode else "fault: off, recovery: normal"
@@ -87,12 +101,16 @@ def main():
   elif args.command == "production":
     next_mode = 3 if args.state else 0
     params.put("EquinoxSimAccelZero", str(next_mode))
+    command_state["faultMode"] = next_mode
+    save_command_state(command_state)
     print("production-fidelity fault: " + ("on" if args.state else "off"))
   elif args.command == "reset":
-    params.put_bool("EquinoxSimReset", True)
+    command_state["resetToken"] = int(command_state.get("resetToken", 0)) + 1
+    save_command_state(command_state)
     print("simulator reset requested")
   elif args.command == "engage":
-    params.put_bool("EquinoxSimEngage", True)
+    command_state["engageToken"] = int(command_state.get("engageToken", 0)) + 1
+    save_command_state(command_state)
     print("virtual cruise engagement requested")
 
 

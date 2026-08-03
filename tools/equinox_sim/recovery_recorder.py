@@ -309,6 +309,10 @@ class PedalRecoveryRecorder:
     self.recording = False
 
   def run(self):
+    try:
+      os.nice(10)
+    except OSError:
+      pass
     cloudlog.warning("Starting read-only pedal recovery event recorder")
     try:
       while True:

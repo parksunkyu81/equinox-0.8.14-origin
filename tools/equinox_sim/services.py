@@ -3,15 +3,14 @@ import os
 import time
 
 from cereal import log, messaging
-from common.params import Params
 from common.realtime import Priority, config_realtime_process, sec_since_boot
 from selfdrive.hardware import TICI
 from selfdrive.controls.lib.drive_helpers import CONTROL_N
 from selfdrive.swaglog import cloudlog
+from tools.equinox_sim.command_state import CommandStateReader
 
 
 SIM_ENV = "EQUINOX_SIMULATOR"
-PARAM_TARGET_SPEED = "EquinoxSimTargetSpeedKph"
 SERVICE_DT = 0.05
 MODEL_POINT_COUNT = 33
 
@@ -29,7 +28,7 @@ class EquinoxBenchServices:
         "Equinox bench services require EQUINOX_SIMULATOR=1, SIMULATION=1 and NOBOARD=1"
       )
 
-    self.params = Params()
+    self.command_reader = CommandStateReader()
     self.pm = messaging.PubMaster([
       "longitudinalPlan", "lateralPlan", "driverMonitoringState", "dynamicFollowData",
       "modelV2", "liveCalibration", "liveLocationKalman", "liveParameters",
@@ -48,12 +47,7 @@ class EquinoxBenchServices:
     self.model_edge_ys = [[offset] * MODEL_POINT_COUNT for offset in (5.8, -5.8)]
 
   def _target_speed_kph(self):
-    raw = self.params.get(PARAM_TARGET_SPEED, encoding="utf8")
-    try:
-      target = float(raw) if raw is not None else 100.0
-    except ValueError:
-      target = 100.0
-    return min(145.0, max(20.0, target))
+    return float(self.command_reader.read()["targetSpeedKph"])
 
   def _vehicle_state(self):
     if self.sm.rcv_frame["carState"] > 0:
