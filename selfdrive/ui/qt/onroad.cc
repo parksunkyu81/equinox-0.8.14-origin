@@ -942,7 +942,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   drawIcon(p, x, y2, ic_brake, QColor(0, 0, 0, (255 * bg_alpha)), img_alpha);
   p.setOpacity(1.0);
 
-  // 5. long control state
+  // 5. long control state (replaced by the live comma-pedal gauge below)
+#if 0
   x = icon_start_x + (icon_step * 4);
   int longControlState = (int)controls_state.getLongControlState();
   const char* long_state[] = {"꺼짐", "켜짐", "정지", "출발"};
@@ -958,6 +959,50 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
   configFont(p, "Open Sans", textSize, "Bold");
   drawTextWithColor(p, x, y2+50, str, textColor);
+  p.setOpacity(1.0);
+#endif
+
+  // 5. Live comma-pedal ACCEL gauge. CarController writes the actual clipped
+  // gas-interceptor command into carControl.actuatorsOutput.gas, so 0.55 is
+  // shown as 55%. The outer red arc starts at 12 o'clock and advances clockwise.
+  x = icon_start_x + (icon_step * 4);
+  const float comma_pedal = std::max(0.0f, (float)car_control.getActuatorsOutput().getGas());
+  const float comma_pedal_ratio = std::min(comma_pedal, 1.0f);
+  const int comma_pedal_percent = (int)std::round(comma_pedal_ratio * 100.0f);
+  const int gauge_pen_width = 14;
+  const int gauge_inset = gauge_pen_width / 2 + 4;
+  const QRectF gauge_rect(x - radius / 2 + gauge_inset,
+                          y2 - radius / 2 + gauge_inset,
+                          radius - gauge_inset * 2,
+                          radius - gauge_inset * 2);
+
+  p.save();
+  p.setPen(Qt::NoPen);
+  p.setBrush(blackColor(215));
+  p.drawEllipse(x - radius / 2, y2 - radius / 2, radius, radius);
+
+  p.setBrush(Qt::NoBrush);
+  p.setPen(QPen(QColor(82, 82, 82, 220), gauge_pen_width,
+                Qt::SolidLine, Qt::RoundCap));
+  p.drawEllipse(gauge_rect);
+
+  if (comma_pedal_percent > 0) {
+    p.setPen(QPen(QColor(255, 45, 45, 245), gauge_pen_width,
+                  Qt::SolidLine, Qt::RoundCap));
+    const int start_angle = 90 * 16;
+    const int span_angle = -(comma_pedal_percent * 360 * 16) / 100;
+    p.drawArc(gauge_rect, start_angle, span_angle);
+  }
+
+  QColor accel_label_color(255, 180, 180, 230);
+  configFont(p, "Open Sans", 28, "Bold");
+  drawTextWithColor(p, x, y2 - 24, "ACCEL", accel_label_color);
+
+  const QString comma_pedal_text = QString("%1%").arg(comma_pedal_percent);
+  QColor comma_pedal_text_color(255, 255, 255, 245);
+  configFont(p, "Open Sans", comma_pedal_percent < 100 ? 46 : 40, "Bold");
+  drawTextWithColor(p, x, y2 + 42, comma_pedal_text, comma_pedal_text_color);
+  p.restore();
   p.setOpacity(1.0);
 
 }
