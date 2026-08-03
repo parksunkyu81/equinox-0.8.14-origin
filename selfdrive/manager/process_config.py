@@ -29,6 +29,7 @@ procs = [
   PythonProcess("calibrationd", "selfdrive.locationd.calibrationd", enabled=not EQUINOX_SIMULATOR),
   PythonProcess("torqued", "selfdrive.locationd.torqued", enabled=not EQUINOX_SIMULATOR),
   PythonProcess("controlsd", "selfdrive.controls.controlsd"),
+  PythonProcess("lateralcenterlogger", "selfdrive.controls.lateral_center_logger", enabled=not EQUINOX_SIMULATOR),
   PythonProcess("recoverylogger", "tools.equinox_sim.recovery_recorder"),
   PythonProcess("deleter", "selfdrive.loggerd.deleter", persistent=True),
   PythonProcess("dmonitoringd", "selfdrive.monitoring.dmonitoringd",
