@@ -348,9 +348,9 @@ class EquinoxVirtualPanda:
 
   def run(self):
     cloudlog.warning("Starting Equinox virtual Panda bench simulator (NOBOARD)")
+    next_frame_time = sec_since_boot()
 
     while True:
-      loop_started_at = sec_since_boot()
       self.sm.update(0)
       commands = self._read_commands()
       self._consume_sendcan()
@@ -385,12 +385,15 @@ class EquinoxVirtualPanda:
         self.last_status_time = status_time
 
       self.frame += 1
-      # Do not run missed frames faster than real time. Ratekeeper's cumulative
-      # schedule catches up after startup stalls and can flood EON at 200-300
-      # Hz, evicting other messaging readers. This limiter drops missed ticks.
-      loop_elapsed = sec_since_boot() - loop_started_at
-      if loop_elapsed < DT_CTRL:
-        time.sleep(DT_CTRL - loop_elapsed)
+      # Schedule against an absolute deadline. This compensates for normal
+      # Android sleep overshoot without the unbounded catch-up bursts that
+      # previously flooded messaging readers after a long startup stall.
+      next_frame_time += DT_CTRL
+      now = sec_since_boot()
+      if now < next_frame_time:
+        time.sleep(next_frame_time - now)
+      elif now - next_frame_time > DT_CTRL:
+        next_frame_time = now
 
 
 def main():

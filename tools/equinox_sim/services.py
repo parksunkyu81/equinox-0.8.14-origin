@@ -249,8 +249,8 @@ class EquinoxBenchServices:
 
   def run(self):
     cloudlog.warning("Starting Equinox synthetic bench services at 20 Hz")
+    next_frame_time = sec_since_boot()
     while True:
-      loop_started_at = sec_since_boot()
       self.sm.update(0)
       speed_mps, accel_mps2 = self._vehicle_state()
       self._publish_plans(self._target_speed_kph(), speed_mps)
@@ -259,10 +259,12 @@ class EquinoxBenchServices:
       if self.frame % 5 == 0:
         self._publish_slow_state()
       self.frame += 1
-
-      elapsed = sec_since_boot() - loop_started_at
-      if elapsed < SERVICE_DT:
-        time.sleep(SERVICE_DT - elapsed)
+      next_frame_time += SERVICE_DT
+      now = sec_since_boot()
+      if now < next_frame_time:
+        time.sleep(next_frame_time - now)
+      elif now - next_frame_time > SERVICE_DT:
+        next_frame_time = now
 
 
 def main():

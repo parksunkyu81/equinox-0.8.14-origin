@@ -6,6 +6,7 @@ PEDAL_FORCE_RECOVERY_ACCEL_EPS = 1e-3
 PEDAL_FORCE_RECOVERY_PEDAL_FLOOR = 0.060
 PEDAL_FORCE_RECOVERY_SPEED_ERROR = 0.30
 PEDAL_FORCE_RECOVERY_INJECTED_SPEED_ERROR = 0.05
+PEDAL_FORCE_RECOVERY_REARM_SECONDS = 0.5
 
 
 def recovery_speed_demand(speed_error, future_speed_error, injected_fault=False):
@@ -51,8 +52,10 @@ class PedalForceRecovery:
 
   def __init__(self, dt=0.01):
     self.dt = float(dt)
+    self.rearm_frames = max(1, int(round(PEDAL_FORCE_RECOVERY_REARM_SECONDS / self.dt)))
     self.active = False
     self.active_frames = 0
+    self.inactive_frames = self.rearm_frames
     self.activation_count = 0
     self.raw_accel = 0.0
     self.forced_accel = 0.0
@@ -64,6 +67,7 @@ class PedalForceRecovery:
   def reset(self):
     self.active = False
     self.active_frames = 0
+    self.inactive_frames = self.rearm_frames
     self.raw_accel = 0.0
     self.forced_accel = 0.0
 
@@ -73,14 +77,20 @@ class PedalForceRecovery:
 
     if force_now:
       if not self.active:
-        self.activation_count += 1
+        # Safety/eligibility gates still cancel the forced output immediately.
+        # Only count a new event after a meaningful inactive interval so a
+        # one-frame plan/state timing gap cannot inflate activation_count.
+        if self.inactive_frames >= self.rearm_frames:
+          self.activation_count += 1
         self.active_frames = 0
       self.active = True
+      self.inactive_frames = 0
       self.active_frames += 1
       self.forced_accel = max(self.raw_accel, PEDAL_FORCE_RECOVERY_ACCEL)
     else:
       self.active = False
       self.active_frames = 0
+      self.inactive_frames = min(self.rearm_frames, self.inactive_frames + 1)
       self.forced_accel = self.raw_accel
 
     return self.forced_accel
