@@ -766,6 +766,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // Immediate forced-acceleration recovery warning. Keep it attached to the
   // PEDAL gauge so it does not look like an unrelated system-wide alert.
   const bool pedal_force_recovery_active = controls_state.getPedalForceRecoveryActive();
+  const int pedal_force_recovery_count = controls_state.getPedalForceRecoveryCount();
   const double recovery_now = millis_since_boot();
   if (pedal_force_recovery_active) {
     pedal_force_recovery_alert_until = recovery_now + 2000.0;
@@ -896,8 +897,13 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     textColor = QColor(254, 32, 32, 200);
   }
 
-  configFont(p, "Open Sans", 38, "Bold");
-  drawText(p, x, y2-20, "PEDAL", 200);
+  // Show the controlsd-session activation count directly on the PEDAL gauge.
+  // This is the number of distinct accel=0 forced-recovery activations, not a
+  // paint-frame counter. Keep the title compact enough for the circular gauge.
+  const QString pedal_title = QString("PEDAL(%1)").arg(pedal_force_recovery_count);
+  const int pedal_title_font_size = pedal_force_recovery_count < 100 ? 32 : 28;
+  configFont(p, "Open Sans", pedal_title_font_size, "Bold");
+  drawText(p, x, y2-20, pedal_title, 200);
 
   configFont(p, "Open Sans", textSize, "Bold");
   drawTextWithColor(p, x, y2+50, str, textColor);
