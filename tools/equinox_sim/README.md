@@ -9,6 +9,11 @@ openpilot이 실제로 생성한 `sendcan` 페달·조향 명령을 디코딩하
 차량 모델에 입력합니다. 시뮬레이터 모드에서만 `plannerd`를 직선 도로용
 크루즈 주행계획으로 대체합니다.
 
+시간에 민감한 `equinoxcan`은 CAN·sendcan·차량 모델만 100Hz로 처리합니다.
+`equinoxservices`는 modelV2·주행계획·위치·레이더를 20Hz/4Hz로 별도 처리하여
+모델 메시지 생성이 CAN 주기를 늦추지 않게 합니다. `recoverylogger`는 제어에
+개입하지 않고 복구 이벤트 전후 데이터만 메모리에 수집합니다.
+
 ## 안전 범위
 
 - 시작하기 전에 콤마 장치를 차량에서 완전히 분리하십시오.
@@ -63,6 +68,8 @@ python3 -m tools.equinox_sim.control target 100
 python3 -m tools.equinox_sim.control fault on
 python3 -m tools.equinox_sim.control recovery on
 python3 -m tools.equinox_sim.control recovery off
+python3 -m tools.equinox_sim.control production on
+python3 -m tools.equinox_sim.control production off
 python3 -m tools.equinox_sim.control fault off
 python3 -m tools.equinox_sim.control brake on
 python3 -m tools.equinox_sim.control brake off
@@ -78,20 +85,89 @@ python3 -m tools.equinox_sim.control reset
 - `recovery on`: 강제 복구를 한 번 실행한 뒤 장애 주입을 자동 해제하고 정상
   PID로 돌아갑니다. 복구 직후 `recoveryCount`는 한 번만 증가해야 합니다.
 - `recovery off`: 장애를 유지한 채 복구를 다시 막습니다.
+- `production on`: `accel = 0` 장애를 계속 유지하면서 실차와 동일한 0.30m/s
+  속도오차 및 모든 안전 조건으로 복구합니다. 시뮬레이터용 조건 우회와 자동
+  fault 해제를 사용하지 않습니다.
+- `production off`: production-fidelity 장애 주입을 종료합니다.
 - `fault off`: `accel = 0` 장애 주입을 해제합니다.
 - `brake on` / `brake off`: 가상 브레이크 입력을 켜거나 끕니다.
 - `reset`: 차량 속도, 이동거리 및 제어 상태를 초기화합니다.
 
 목표속도가 가상 차량의 현재 속도보다 높은 상태에서 먼저 `fault on`을 실행하면
-가속 요구가 0으로 유지되어 속도가 내려갑니다. 그 상태에서 `recovery on`을
-실행하면 실제 운행용 복구 조건과 복구 알고리즘이 그대로 실행됩니다. 복구에
-성공하면 다음 상태를 모두 확인할 수 있습니다.
+가속 요구가 0으로 유지되어 속도가 내려갑니다. `recovery on`은 시연용 1회
+복구이며, 실차 조건을 그대로 검증하려면 `production on`을 사용합니다. 복구에
+성공하면 다음 상태를 확인할 수 있습니다.
 
 - `control status` 출력의 `recoveryActive: true`
 - `pedalCommand`가 0.060 이상
 - `loopHz`가 지속적으로 약 90~105 범위 (`110` 초과는 비정상)
 - 가상 차량 속도 증가
 - PEDAL 게이지 바로 위에 황색 복구 경고 표시
+
+## Production-fidelity 시험
+
+먼저 `status`의 `loopHz`가 90~105이고 통신 오류가 없는지 확인합니다. 현재
+속도보다 목표속도를 충분히 높게 설정한 뒤 지속 장애 모드를 실행합니다.
+
+```bash
+python3 -m tools.equinox_sim.control target 120
+python3 -m tools.equinox_sim.control production on
+python3 -m tools.equinox_sim.control status
+```
+
+정상적인 연속 복구 구간에서는 `faultMode: 3`, `productionFidelity: true`,
+`recoveryRawAccel <= 0.001`, `recoveryForcedAccel >= 0.36`,
+`pedalCommand >= 0.060`이어야 합니다. 목표속도 도달로 복구 조건이 해제된 뒤
+지속 장애로 다시 감속하면 복구가 새 이벤트로 재활성화될 수 있습니다.
+
+시험을 끝낼 때는 반드시 장애를 해제합니다.
+
+```bash
+python3 -m tools.equinox_sim.control production off
+```
+
+## 복구 이벤트 로그
+
+`recoverylogger`는 manager가 자동으로 시작합니다. 평상시에는 최근 5초를
+메모리에만 보관하고, 복구 또는 production 조건의 `accel = 0` 후보가 발생하면
+이전 5초와 이후 10초를 다음 위치에 JSONL로 저장합니다.
+
+```text
+/data/media/0/pedal_recovery_logs/
+```
+
+최근 이벤트와 분석 결과는 다음 명령으로 확인합니다.
+
+```bash
+ls -lt /data/media/0/pedal_recovery_logs/ | head
+python3 -m tools.equinox_sim.analyze_recovery \
+  /data/media/0/pedal_recovery_logs/<이벤트파일>.jsonl
+```
+
+분석 결과는 소프트웨어 복구, CarController 페달 출력, checksum이 정상인
+sendcan 요청, Panda의 성공 송신 receipt(`can`의 반환 source `0x80`), 차량 가속
+반응을 분리해서 표시합니다. 첫 `accel = 0` 시점의 실차 복구 조건을 모두 검사하며,
+실패한 조건은 `failedEligibilityGates`에 이름으로 출력합니다. `sendcan`만 성공하고
+`pandaCanPathPassed`가 거짓이면 Panda 안전 필터·송신 단계까지 통과했다고 판정하지
+않습니다. 실제 배선 이후 ECU 수신 여부는 차량의 `aEgo` 반응과 별도 버스 계측으로
+최종 확인해야 합니다.
+
+과거 전체 `rlog.bz2`가 있다면 파일을 별도 PC의 같은 저장소로 복사한 뒤 현재
+controlsd로 재생한 새 로그와 분석 JSON을 한 번에 생성할 수 있습니다. process
+replay는 테스트 Params를 초기화하므로 콤마 장치에서는 실행을 거부합니다.
+
+```bash
+python3 -m tools.equinox_sim.replay_recovery /복사한/경로/rlog.bz2
+```
+
+로그만으로 차량 fingerprint를 찾지 못할 때만 다음 인자를 추가합니다.
+
+```bash
+--fingerprint "CHEVROLET EQUINOX NO RADAR"
+```
+
+실차에서는 장애를 인위적으로 주입하지 말고, 기록기를 읽기 전용으로 사용하여
+자연 발생 이벤트나 폐쇄 시험 이벤트를 확인하십시오.
 
 시뮬레이터를 종료하려면 실행 중인 첫 번째 터미널에서 `Ctrl+C`를 누릅니다.
 EON/comma two에서 일반 openpilot 동작을 다시 시작하려면 시뮬레이터 종료 후

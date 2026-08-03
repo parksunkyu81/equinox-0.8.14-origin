@@ -17,17 +17,29 @@ def recovery_speed_demand(speed_error, future_speed_error, injected_fault=False)
 
 
 def bench_fault_state(previous_mode, recovery_completed, requested_mode):
-  """Return normalized one-shot bench fault state.
+  """Return normalized bench fault state for off, held, one-shot, or production modes.
 
-  Mode 1 holds accel at zero. Mode 2 permits exactly one recovery activation;
-  after completion the injector stays off even if the asynchronous Params write
-  has not reached readers yet.
+  Mode 1 holds accel at zero with recovery blocked. Mode 2 permits exactly one
+  simulator-assisted recovery activation. Mode 3 holds accel at zero while
+  retaining the unmodified production recovery gates.
   """
-  mode = min(2, max(0, int(requested_mode)))
+  mode = min(3, max(0, int(requested_mode)))
   completed = bool(recovery_completed) if mode == int(previous_mode) else False
-  force_accel_zero = mode in (1, 2) and not (mode == 2 and completed)
+  force_accel_zero = mode in (1, 2, 3) and not (mode == 2 and completed)
   recovery_enabled = mode != 1
   return mode, completed, force_accel_zero, recovery_enabled
+
+
+def recovery_log_trigger(recovery_active, controls_active, adaptive_cruise,
+                         brake_pressed, gas_pressed, standstill, plan_valid,
+                         plan_age_ms, speed_error, future_speed_error, raw_accel):
+  production_candidate = bool(controls_active) and bool(adaptive_cruise) and \
+    not bool(brake_pressed) and not bool(gas_pressed) and not bool(standstill) and \
+    bool(plan_valid) and 0.0 <= float(plan_age_ms) <= 250.0 and \
+    float(speed_error) >= PEDAL_FORCE_RECOVERY_SPEED_ERROR and \
+    float(future_speed_error) >= PEDAL_FORCE_RECOVERY_SPEED_ERROR and \
+    float(raw_accel) <= PEDAL_FORCE_RECOVERY_ACCEL_EPS
+  return bool(recovery_active) or production_candidate
 
 
 class PedalForceRecovery:
