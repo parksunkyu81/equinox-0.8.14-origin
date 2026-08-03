@@ -766,7 +766,16 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // Immediate forced-acceleration recovery warning. Keep it attached to the
   // PEDAL gauge so it does not look like an unrelated system-wide alert.
   const bool pedal_force_recovery_active = controls_state.getPedalForceRecoveryActive();
+  const double recovery_now = millis_since_boot();
   if (pedal_force_recovery_active) {
+    pedal_force_recovery_alert_until = recovery_now + 2000.0;
+    pedal_force_recovery_accel = controls_state.getPedalForceRecoveryAccel();
+    pedal_force_recovery_floor = controls_state.getPedalForceRecoveryPedalFloor();
+    pedal_force_recovery_duration = controls_state.getPedalForceRecoveryDuration();
+  }
+  const bool pedal_force_recovery_visible = pedal_force_recovery_active ||
+                                             recovery_now < pedal_force_recovery_alert_until;
+  if (pedal_force_recovery_visible) {
     const int pedal_x = icon_start_x + icon_step;
     const int alert_w = 600;
     const int alert_h = 120;
@@ -788,16 +797,16 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     p.setBrush(alert_border);
     p.drawPolygon(pointer, 3);
 
-    QString recovery_title = "강제 가속 복구";
+    QString recovery_title = pedal_force_recovery_active ? "강제 가속 복구" : "가속 복구 완료";
     QColor recovery_title_color(255, 242, 211, 255);
     configFont(p, "Open Sans", 42, "Bold");
     drawTextWithColor(p, pedal_x, alert_y + 43, recovery_title, recovery_title_color);
 
     QString recovery_detail;
     recovery_detail.sprintf("ACCEL 0→%.2f  PEDAL≥%.3f  %.1fs",
-                            controls_state.getPedalForceRecoveryAccel(),
-                            controls_state.getPedalForceRecoveryPedalFloor(),
-                            controls_state.getPedalForceRecoveryDuration());
+                            pedal_force_recovery_accel,
+                            pedal_force_recovery_floor,
+                            pedal_force_recovery_duration);
     QColor recovery_detail_color(231, 211, 169, 255);
     configFont(p, "Open Sans", 25, "Regular");
     drawTextWithColor(p, pedal_x, alert_y + 88, recovery_detail, recovery_detail_color);
@@ -862,13 +871,13 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   float accel = car_control.getActuators().getAccel();
 
   p.setPen(Qt::NoPen);
-  p.setBrush(pedal_force_recovery_active ? QColor(255, 127, 0, 235) : blackColor(200));
+  p.setBrush(pedal_force_recovery_visible ? QColor(255, 127, 0, 235) : blackColor(200));
   p.drawEllipse(x - radius / 2, y2 - radius / 2, radius, radius);
 
   textColor = QColor(255, 255, 255, 200);
 
-  if(pedal_force_recovery_active) {
-    str = "복구중";
+  if(pedal_force_recovery_visible) {
+    str = pedal_force_recovery_active ? "복구중" : "복구됨";
     textColor = QColor(255, 255, 255, 235);
   }
   else if(accel > 0) {

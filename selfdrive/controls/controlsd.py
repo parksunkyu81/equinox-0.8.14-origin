@@ -1138,8 +1138,12 @@ class Controls:
                            self.state == State.softDisabling
         speed_error = float(self.LoC.v_pid - CS.vEgo)
         future_speed_error = float(speeds[-1] - CS.vEgo)
-        clear_road_plan = long_plan.longitudinalPlanSource == \
-                          log.LongitudinalPlan.LongitudinalPlanSource.cruise
+        # The plan source describes who limits the target, not whether positive
+        # acceleration is safe. A real accel-zero event can legitimately have a
+        # lead0 source while both the current PID target and the future plan ask
+        # for more speed. Blocking every non-cruise source suppressed recovery,
+        # its UI warning, and the pedal command in that exact situation.
+        no_fcw = not bool(long_plan.fcw)
         # In bench mode fault mode 2 is ground truth that accel was forcibly
         # replaced with zero. Keep all safety/engagement gates, but do not let
         # the normal 0.30 m/s detector chatter at the set-speed boundary.
@@ -1149,7 +1153,7 @@ class Controls:
                self.LoC.long_control_state == LongCtrlState.pid and \
                not CS.brakePressed and not CS.gasPressed and not CS.standstill and \
                CS.vEgo > V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS and \
-               not force_slow_decel and not self.is_curv_driving and clear_road_plan and \
+               not force_slow_decel and not self.is_curv_driving and no_fcw and \
                speed_demand
 
     def state_control(self, CS):

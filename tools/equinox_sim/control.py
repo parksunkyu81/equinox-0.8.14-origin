@@ -2,12 +2,14 @@
 import argparse
 import json
 import os
+import time
 
 from common.params import Params
 from tools.equinox_sim.command_state import load_command_state, save_command_state
 
 
 STATUS_FILE = "/tmp/equinox_sim/status.json"
+STATUS_STALE_SECONDS = 3.0
 BOOL_PARAMS = {
   "fault": "EquinoxSimAccelZero",
   "brake": "EquinoxSimBrakePressed",
@@ -26,6 +28,12 @@ def parse_on_off(value):
 def print_status():
   if not os.path.exists(STATUS_FILE):
     raise SystemExit("No simulator status. Start tools/equinox_sim/launch.sh first.")
+  status_age = time.time() - os.path.getmtime(STATUS_FILE)
+  if status_age > STATUS_STALE_SECONDS:
+    raise SystemExit(
+      "Simulator status is stale "
+      f"({status_age:.1f}s old). equinoxcan is not running; start the simulator first."
+    )
   with open(STATUS_FILE, encoding="utf8") as status_file:
     print(json.dumps(json.load(status_file), ensure_ascii=False, indent=2))
 

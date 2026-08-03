@@ -9,6 +9,17 @@ from selfdrive.controls.lib.pedal_force_recovery import (
 )
 
 
+# Plan source is deliberately not an eligibility gate. A lead-sourced plan can
+# still request acceleration; the actual safety decision is represented by the
+# fresh plan's speed demand plus the FCW/brake/decel gates.
+PRODUCTION_ELIGIBILITY_GATES = (
+  "gasInterceptor", "controlsActive", "adaptiveCruise", "pidState",
+  "noBrake", "noDriverGas", "notStandstill", "aboveMinSpeed",
+  "driverAware", "notForceDecel", "notCurve", "noFcw", "fullPlan",
+  "planFresh", "speedDemand",
+)
+
+
 def _first_sample(samples, predicate, start_time=None, end_time=None):
   for sample in samples:
     mono_time = float(sample["monoTime"])
@@ -36,10 +47,13 @@ def analyze_samples(samples):
   zero_demand = _first_sample(samples, lambda s:
     s["controls"]["speedError"] >= PEDAL_FORCE_RECOVERY_SPEED_ERROR and
     s["controls"]["futureSpeedError"] >= PEDAL_FORCE_RECOVERY_SPEED_ERROR and
-    s["controls"]["recoveryRawAccel"] <= 0.001)
+    abs(s["controls"]["recoveryRawAccel"]) <= 0.001)
   eligibility_at_zero = zero_demand["eligibility"] if zero_demand else {}
+  # Older event files contain clearRoadPlan and predate noFcw. Ignore that
+  # obsolete source gate so they can be re-evaluated against the fixed policy.
   failed_eligibility = sorted(
-    name for name, passed in eligibility_at_zero.items() if not bool(passed)
+    name for name in PRODUCTION_ELIGIBILITY_GATES
+    if name in eligibility_at_zero and not bool(eligibility_at_zero[name])
   )
   candidate = zero_demand if zero_demand is not None and not failed_eligibility else None
   recovery = _first_sample(samples, lambda s: s["controls"]["recoveryActive"])
@@ -48,22 +62,22 @@ def analyze_samples(samples):
 
   forced = _first_sample(samples, lambda s:
     s["controls"]["recoveryForcedAccel"] >= PEDAL_FORCE_RECOVERY_ACCEL,
-    recovery_time, recovery_window_end)
+    recovery_time, recovery_window_end) if recovery else None
   controller_gas = _first_sample(samples, lambda s:
     s["carControl"]["outputGas"] >= PEDAL_FORCE_RECOVERY_PEDAL_FLOOR,
-    recovery_time, recovery_window_end)
+    recovery_time, recovery_window_end) if recovery else None
   sendcan_gas = _first_sample(samples, lambda s:
     s["sendcan"]["enable"] and s["sendcan"]["gasCommand"] >= PEDAL_FORCE_RECOVERY_PEDAL_FLOOR and
     0.0 <= s["sendcan"].get("ageMs", -1.0) <= 50.0,
-    recovery_time, recovery_window_end)
+    recovery_time, recovery_window_end) if recovery else None
   panda_can_gas = _first_sample(samples, lambda s:
     s["pandaCan"]["accepted"] and not s["pandaCan"]["rejected"] and
     s["pandaCan"]["enable"] and
     s["pandaCan"]["gasCommand"] >= PEDAL_FORCE_RECOVERY_PEDAL_FLOOR and
     0.0 <= s["pandaCan"].get("ageMs", -1.0) <= 50.0,
-    recovery_time, recovery_window_end)
+    recovery_time, recovery_window_end) if recovery else None
   positive_accel = _first_sample(samples, lambda s: s["car"]["aEgo"] > 0.05,
-                                 recovery_time, recovery_window_end)
+                                 recovery_time, recovery_window_end) if recovery else None
   brake = _first_sample(samples, lambda s: s["car"]["brakePressed"], recovery_time)
   brake_time = float(brake["monoTime"]) if brake else None
   gas_zero_after_brake = _first_sample(samples, lambda s:
@@ -92,6 +106,8 @@ def analyze_samples(samples):
     "candidateDetected": candidate is not None,
     "eligibilityAtFirstZeroDemand": eligibility_at_zero or None,
     "failedEligibilityGates": failed_eligibility,
+    "planSourceAtFirstZeroDemand": zero_demand.get("plan", {}).get("source")
+      if zero_demand else None,
     "recoveryTriggered": recovery is not None,
     "forcedAccelOk": forced is not None,
     "controllerGasOk": controller_gas is not None,

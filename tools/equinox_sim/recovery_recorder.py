@@ -21,7 +21,6 @@ from selfdrive.swaglog import cloudlog
 
 PRE_EVENT_SECONDS = 5.0
 POST_EVENT_SECONDS = 10.0
-MIN_EVENT_INTERVAL_SECONDS = 60.0
 EXPECTED_CONTROL_HZ = 50
 PRE_EVENT_SAMPLES = int(PRE_EVENT_SECONDS * EXPECTED_CONTROL_HZ) + 50
 DEFAULT_LOG_DIR = "/data/media/0/pedal_recovery_logs"
@@ -79,12 +78,12 @@ class PedalRecoveryRecorder:
     requested_dir = log_dir or os.getenv("PEDAL_RECOVERY_LOG_DIR", DEFAULT_LOG_DIR)
     self.log_dir = requested_dir if os.path.isdir(os.path.dirname(requested_dir)) else FALLBACK_LOG_DIR
     self.pre_event = deque(maxlen=PRE_EVENT_SAMPLES)
-    self.event_samples = []
-    self.recording = False
-    self.post_event_deadline = 0.0
+    # More than one event may be collecting its post-event window at once.
+    # This guarantees that a second accel=0 edge gets its own file even when
+    # it occurs within ten seconds of the previous event.
+    self.active_events = []
     self.last_trigger_signal = False
     self.event_sequence = 0
-    self.last_event_started_at = -MIN_EVENT_INTERVAL_SECONDS
     self.latest_sendcan = {
       "gasCommand": 0.0,
       "gasCommand2": 0.0,
@@ -211,6 +210,7 @@ class PedalRecoveryRecorder:
         "speedCount": len(speeds),
         "ageMs": round(plan_age * 1000.0, 3) if plan_age >= 0.0 else -1.0,
         "source": str(plan.longitudinalPlanSource),
+        "fcw": bool(plan.fcw),
         "futureSpeed": round(future_speed, 5),
       },
       "eligibility": {
@@ -225,7 +225,7 @@ class PedalRecoveryRecorder:
         "driverAware": float(driver_monitoring.awarenessStatus) >= 0.0,
         "notForceDecel": not bool(controls.forceDecel),
         "notCurve": not bool(controls.curvDriving),
-        "clearRoadPlan": str(plan.longitudinalPlanSource) == "cruise",
+        "noFcw": not bool(plan.fcw),
         "fullPlan": len(speeds) == CONTROL_N,
         "planFresh": 0.0 <= plan_age <= 0.25,
         "speedDemand": speed_error >= PEDAL_FORCE_RECOVERY_SPEED_ERROR and
@@ -264,49 +264,77 @@ class PedalRecoveryRecorder:
   def _is_trigger(snapshot):
     controls = snapshot["controls"]
     car = snapshot["car"]
-    plan = snapshot["plan"]
     return recovery_log_trigger(
       controls["recoveryActive"], controls["active"], car["adaptiveCruise"],
       car["brakePressed"], car["gasPressed"], car["standstill"],
-      plan["valid"], plan["ageMs"], controls["speedError"],
-      controls["futureSpeedError"], controls["recoveryRawAccel"],
+      controls["recoveryRawAccel"],
     )
 
   def _start_event(self, snapshot, now):
-    self.recording = True
-    self.event_samples = list(self.pre_event)
-    self.event_samples.append(snapshot)
-    self.post_event_deadline = now + POST_EVENT_SECONDS
     self.event_sequence += 1
-    self.last_event_started_at = now
+    wall_time = datetime.now()
+    event = {
+      "sequence": self.event_sequence,
+      "triggerMonoTime": now,
+      "triggerWallTime": wall_time.isoformat(timespec="microseconds"),
+      "wallStamp": wall_time.strftime("%Y%m%d_%H%M%S_%f"),
+      "postEventDeadline": now + POST_EVENT_SECONDS,
+      "samples": list(self.pre_event) + [snapshot],
+    }
+    self.active_events.append(event)
     cloudlog.warning(
       f"Pedal recovery event {self.event_sequence} triggered; "
       f"capturing {PRE_EVENT_SECONDS:.0f}s before and {POST_EVENT_SECONDS:.0f}s after"
     )
 
-  def _write_event(self):
+  def _write_event(self, event):
     os.makedirs(self.log_dir, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    filename = f"pedal_recovery_{stamp}_{self.event_sequence:04d}.jsonl"
+    filename = f"pedal_recovery_{event['wallStamp']}_{event['sequence']:04d}.jsonl"
     output_path = os.path.join(self.log_dir, filename)
     temp_path = output_path + ".tmp"
     metadata = {
       "type": "metadata",
-      "formatVersion": 1,
+      "formatVersion": 2,
       "preEventSeconds": PRE_EVENT_SECONDS,
       "postEventSeconds": POST_EVENT_SECONDS,
-      "minimumEventIntervalSeconds": MIN_EVENT_INTERVAL_SECONDS,
-      "sampleCount": len(self.event_samples),
+      "minimumEventIntervalSeconds": 0.0,
+      "triggerPolicy": "active ACC and abs(rawAccel) <= 0.001",
+      "triggerMonoTime": round(float(event["triggerMonoTime"]), 6),
+      "triggerWallTime": event["triggerWallTime"],
+      "eventSequence": int(event["sequence"]),
+      "sampleCount": len(event["samples"]),
     }
     with open(temp_path, "w", encoding="utf8") as output_file:
       output_file.write(json.dumps(metadata, ensure_ascii=False) + "\n")
-      for sample in self.event_samples:
+      for sample in event["samples"]:
         output_file.write(json.dumps(sample, ensure_ascii=False, separators=(",", ":")) + "\n")
     os.replace(temp_path, output_path)
     cloudlog.warning(f"Pedal recovery event saved: {output_path}")
     print(f"Pedal recovery event saved: {output_path}")
-    self.event_samples = []
-    self.recording = False
+
+  def _record_snapshot(self, snapshot, now, trigger_signal):
+    trigger_edge = bool(trigger_signal) and not self.last_trigger_signal
+
+    # Append the sample to every already-active post-event window before
+    # opening a new independent event on this edge.
+    for event in self.active_events:
+      event["samples"].append(snapshot)
+    if trigger_edge:
+      self._start_event(snapshot, now)
+
+    self.pre_event.append(snapshot)
+    self.last_trigger_signal = bool(trigger_signal)
+
+    completed_events = [
+      event for event in self.active_events
+      if now >= event["postEventDeadline"]
+    ]
+    self.active_events = [
+      event for event in self.active_events
+      if now < event["postEventDeadline"]
+    ]
+    for event in completed_events:
+      self._write_event(event)
 
   def run(self):
     try:
@@ -328,22 +356,12 @@ class PedalRecoveryRecorder:
         now = sec_since_boot()
         snapshot = self._snapshot(now)
         trigger_signal = self._is_trigger(snapshot)
-        trigger_edge = trigger_signal and not self.last_trigger_signal
-
-        cooldown_elapsed = now - self.last_event_started_at >= MIN_EVENT_INTERVAL_SECONDS
-        if trigger_edge and not self.recording and cooldown_elapsed:
-          self._start_event(snapshot, now)
-        elif self.recording:
-          self.event_samples.append(snapshot)
-
-        self.pre_event.append(snapshot)
-        self.last_trigger_signal = trigger_signal
-
-        if self.recording and now >= self.post_event_deadline:
-          self._write_event()
+        self._record_snapshot(snapshot, now, trigger_signal)
     except KeyboardInterrupt:
-      if self.recording and self.event_samples:
-        self._write_event()
+      for event in self.active_events:
+        if event["samples"]:
+          self._write_event(event)
+      self.active_events = []
       raise
 
 

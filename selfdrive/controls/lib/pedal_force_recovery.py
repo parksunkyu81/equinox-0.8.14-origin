@@ -32,15 +32,17 @@ def bench_fault_state(previous_mode, recovery_completed, requested_mode):
 
 
 def recovery_log_trigger(recovery_active, controls_active, adaptive_cruise,
-                         brake_pressed, gas_pressed, standstill, plan_valid,
-                         plan_age_ms, speed_error, future_speed_error, raw_accel):
-  production_candidate = bool(controls_active) and bool(adaptive_cruise) and \
+                         brake_pressed, gas_pressed, standstill, raw_accel):
+  """Capture every zero-accel occurrence while ACC is actively driving.
+
+  Logging deliberately does not require a valid/fresh plan or a minimum speed
+  error. Those values are evidence used after capture; making them trigger
+  gates hid the very events needed to diagnose why recovery did not run.
+  """
+  zero_accel_while_driving = bool(controls_active) and bool(adaptive_cruise) and \
     not bool(brake_pressed) and not bool(gas_pressed) and not bool(standstill) and \
-    bool(plan_valid) and 0.0 <= float(plan_age_ms) <= 250.0 and \
-    float(speed_error) >= PEDAL_FORCE_RECOVERY_SPEED_ERROR and \
-    float(future_speed_error) >= PEDAL_FORCE_RECOVERY_SPEED_ERROR and \
-    float(raw_accel) <= PEDAL_FORCE_RECOVERY_ACCEL_EPS
-  return bool(recovery_active) or production_candidate
+    abs(float(raw_accel)) <= PEDAL_FORCE_RECOVERY_ACCEL_EPS
+  return bool(recovery_active) or zero_accel_while_driving
 
 
 class PedalForceRecovery:
