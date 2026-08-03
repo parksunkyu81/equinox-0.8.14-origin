@@ -77,6 +77,8 @@ LANE_DEPARTURE_THRESHOLD = 0.1
 REPLAY = "REPLAY" in os.environ
 SIMULATION = "SIMULATION" in os.environ
 NOSENSOR = "NOSENSOR" in os.environ
+EQUINOX_SIMULATOR = SIMULATION and os.getenv("EQUINOX_SIMULATOR") == "1" and \
+                    os.getenv("NOBOARD") is not None
 IGNORE_PROCESSES = {"rtshield", "uploader", "deleter", "loggerd", "logmessaged", "tombstoned",
                     "logcatd", "proclogd", "clocksd", "updated", "timezoned", "manage_athenad",
                     "statsd", "shutdownd", "recoverylogger"} | \
@@ -123,7 +125,13 @@ class Controls:
 
         self.sm = sm
         if self.sm is None:
-            ignore = ['driverCameraState', 'managerState'] if SIMULATION else None
+            if EQUINOX_SIMULATOR:
+                # The bench simulator owns modelV2 and planning, not camera
+                # capture. A missing physical camera stream must not block the
+                # synthetic longitudinal control test.
+                ignore = ['roadCameraState', 'driverCameraState', 'managerState']
+            else:
+                ignore = ['driverCameraState', 'managerState'] if SIMULATION else None
             self.sm = messaging.SubMaster(
                 ['deviceState', 'pandaStates', 'peripheralState', 'modelV2', 'liveCalibration',
                  'driverMonitoringState', 'longitudinalPlan', 'lateralPlan', 'liveLocationKalman', 'dynamicFollowData',
@@ -229,8 +237,7 @@ class Controls:
         self.pedal_deadzone_accel_request = 0.0
         self.pedal_deadzone_vehicle_accel = 0.0
         self.pedal_force_recovery = PedalForceRecovery(DT_CTRL)
-        self.equinox_simulator = SIMULATION and os.getenv("EQUINOX_SIMULATOR") == "1" and \
-                                 os.getenv("NOBOARD") is not None
+        self.equinox_simulator = EQUINOX_SIMULATOR
         self.equinox_sim_force_accel_zero = False
         self.equinox_sim_recovery_enabled = True
         self.equinox_sim_fault_mode = 0
@@ -859,8 +866,10 @@ class Controls:
         comm_diagnostic_active = checks_failed or self.can_rcv_error
         if comm_diagnostic_active and not self.logged_comm_issue:
             invalid = [s for s, valid in self.sm.valid.items() if not valid]
-            not_alive = [s for s, alive in self.sm.alive.items() if not alive]
-            not_freq_ok = [s for s, freq_ok in self.sm.freq_ok.items() if not freq_ok]
+            not_alive = [s for s, alive in self.sm.alive.items()
+                         if not alive and s not in self.sm.ignore_alive]
+            not_freq_ok = [s for s, freq_ok in self.sm.freq_ok.items()
+                            if not freq_ok and s not in self.sm.ignore_alive]
             manager_processes = [{
                 "name": p.name,
                 "running": bool(p.running),

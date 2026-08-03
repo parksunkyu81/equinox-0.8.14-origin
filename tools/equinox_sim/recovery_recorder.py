@@ -5,7 +5,7 @@ import json
 import os
 
 from cereal import car, messaging
-from common import conversions as CV
+from common.conversions import Conversions as CV
 from common.params import Params
 from common.realtime import sec_since_boot
 from opendbc.can.parser import CANParser
