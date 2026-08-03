@@ -8,10 +8,12 @@ import numpy as np
 import cereal.messaging as messaging
 from cereal import car
 from common.params import Params, put_nonblocking
-from common.realtime import set_realtime_priority, DT_MDL
+from common.realtime import set_realtime_priority, sec_since_boot, DT_MDL
 from common.numpy_fast import clip
+from selfdrive.locationd.live_parameters_validity import LiveParametersValidity
 from selfdrive.locationd.models.car_kf import CarKalman, ObservationKind, States
 from selfdrive.locationd.models.constants import GENERATED_DIR
+from selfdrive.process_diagnostics import append_process_diagnostic
 from selfdrive.swaglog import cloudlog
 
 
@@ -157,10 +159,15 @@ def main(sm=None, pm=None):
   learner = ParamsLearner(CP, params['steerRatio'], params['stiffnessFactor'], math.radians(params['angleOffsetAverageDeg']))
   angle_offset_average = params['angleOffsetAverageDeg']
   angle_offset = angle_offset_average
+  message_validity = LiveParametersValidity()
+  input_issue_active = False
+  input_issue_started = 0.0
+  input_grace_expired_logged = False
 
   while True:
     sm.update()
-    if sm.all_checks():
+    input_checks_ok = sm.all_checks()
+    if input_checks_ok:
       for which in sorted(sm.updated.keys(), key=lambda x: sm.logMonoTime[x]):
         if sm.updated[which]:
           t = sm.logMonoTime[which] * 1e-9
@@ -199,7 +206,71 @@ def main(sm=None, pm=None):
       liveParameters.angleOffsetAverageStd = float(P[States.ANGLE_OFFSET])
       liveParameters.angleOffsetFastStd = float(P[States.ANGLE_OFFSET_FAST])
 
-      msg.valid = sm.all_checks()
+      now = sec_since_boot()
+      msg.valid, grace_active = message_validity.update(
+        input_checks_ok, liveParameters.valid, now
+      )
+
+      if not input_checks_ok:
+        invalid = [s for s, valid in sm.valid.items() if not valid]
+        not_alive = [s for s, alive in sm.alive.items()
+                     if not alive and s not in sm.ignore_alive]
+        not_freq_ok = [s for s, freq_ok in sm.freq_ok.items()
+                       if not freq_ok and s not in sm.ignore_alive]
+
+        if not input_issue_active:
+          input_issue_active = True
+          input_issue_started = now
+          input_grace_expired_logged = False
+          append_process_diagnostic(
+            "live_parameters_input_issue",
+            invalid=invalid,
+            not_alive=not_alive,
+            not_freq_ok=not_freq_ok,
+            grace_active=bool(grace_active),
+            parameters_sane=bool(liveParameters.valid),
+          )
+          cloudlog.event(
+            "liveParametersInputIssue",
+            invalid=invalid,
+            not_alive=not_alive,
+            not_freq_ok=not_freq_ok,
+            grace_active=bool(grace_active),
+            parameters_sane=bool(liveParameters.valid),
+            error=True,
+          )
+        elif not msg.valid and not input_grace_expired_logged:
+          input_grace_expired_logged = True
+          append_process_diagnostic(
+            "live_parameters_input_grace_expired",
+            duration=now - input_issue_started,
+            invalid=invalid,
+            not_alive=not_alive,
+            not_freq_ok=not_freq_ok,
+            parameters_sane=bool(liveParameters.valid),
+          )
+          cloudlog.event(
+            "liveParametersInputGraceExpired",
+            duration=now - input_issue_started,
+            invalid=invalid,
+            not_alive=not_alive,
+            not_freq_ok=not_freq_ok,
+            parameters_sane=bool(liveParameters.valid),
+            error=True,
+          )
+      elif input_issue_active:
+        append_process_diagnostic(
+          "live_parameters_input_recovered",
+          duration=now - input_issue_started,
+          grace_expired=bool(input_grace_expired_logged),
+        )
+        cloudlog.event(
+          "liveParametersInputRecovered",
+          duration=now - input_issue_started,
+          grace_expired=bool(input_grace_expired_logged),
+        )
+        input_issue_active = False
+        input_grace_expired_logged = False
 
       if sm.frame % 1200 == 0:  # once a minute
         params = {
