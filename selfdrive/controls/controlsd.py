@@ -36,7 +36,7 @@ from selfdrive.controls.lib.vehicle_model import VehicleModel
 from selfdrive.locationd.calibrationd import Calibration
 from selfdrive.hardware import HARDWARE, TICI, EON
 from selfdrive.manager.process_config import managed_processes
-from selfdrive.process_diagnostics import append_process_diagnostic
+from selfdrive.process_diagnostics import append_process_diagnostic, DiagnosticRateLimiter
 
 from selfdrive.ntune import ntune_common_get, ntune_common_enabled, ntune_scc_get, ntune_torque_get
 from selfdrive.road_speed_limiter import road_speed_limiter_get_max_speed, road_speed_limiter_get_active, \
@@ -273,7 +273,9 @@ class Controls:
         self.last_functional_fan_frame = 0
         self.events_prev = []
         self.current_alert_types = [ET.PERMANENT]
-        self.logged_comm_issue = False
+        self.comm_diagnostic_limiter = DiagnosticRateLimiter(
+            persistent_seconds=0.3, summary_seconds=60.0, max_signatures=16
+        )
         self.logged_process_not_running = False
         self.button_timers = {ButtonEvent.Type.decelCruise: 0, ButtonEvent.Type.accelCruise: 0}
         self.last_actuators = car.CarControl.Actuators.new_message()
@@ -860,44 +862,69 @@ class Controls:
                 self.last_controls_allowed_mismatch_log_frame = self.sm.frame
             self.events.add(EventName.controlsMismatch)
 
-        # Persist the first frame of every communication failure. Reset after
-        # recovery so a later recurrence is recorded as a separate event.
+        # Keep short communication failures in memory. Persist only a failure
+        # lasting at least 0.3 seconds, its recovery, or one 60 second summary.
+        # The safety event below remains immediate and is not rate limited.
         checks_failed = not self.sm.all_checks()
         comm_diagnostic_active = checks_failed or self.can_rcv_error
-        if comm_diagnostic_active and not self.logged_comm_issue:
+        if comm_diagnostic_active:
             invalid = [s for s, valid in self.sm.valid.items() if not valid]
             not_alive = [s for s, alive in self.sm.alive.items()
                          if not alive and s not in self.sm.ignore_alive]
             not_freq_ok = [s for s, freq_ok in self.sm.freq_ok.items()
                             if not freq_ok and s not in self.sm.ignore_alive]
-            manager_processes = [{
-                "name": p.name,
-                "running": bool(p.running),
-                "should_be_running": bool(p.shouldBeRunning),
-                "pid": int(p.pid),
-                "exit_code": int(p.exitCode),
-            } for p in self.sm['managerState'].processes]
+        else:
+            invalid = []
+            not_alive = []
+            not_freq_ok = []
 
-            append_process_diagnostic(
-                "communication_issue",
-                frame=int(self.sm.frame),
-                initialized=bool(self.initialized),
-                enabled=bool(self.enabled),
-                active=bool(self.active),
-                invalid=invalid,
-                not_alive=not_alive,
-                not_freq_ok=not_freq_ok,
-                can_rcv_error=bool(self.can_rcv_error),
-                can_rcv_error_counter=int(self.can_rcv_error_counter),
-                manager_state_alive=bool(self.sm.alive['managerState']),
-                manager_state_valid=bool(self.sm.valid['managerState']),
-                manager_processes=manager_processes,
-            )
-            cloudlog.event("commIssue", invalid=invalid, not_alive=not_alive,
-                           not_freq_ok=not_freq_ok, can_error=self.can_rcv_error, error=True)
-            self.logged_comm_issue = True
-        elif not comm_diagnostic_active:
-            self.logged_comm_issue = False
+        comm_signature = "invalid=%s;not_alive=%s;not_freq_ok=%s;can=%d" % (
+            ",".join(invalid), ",".join(not_alive), ",".join(not_freq_ok),
+            int(bool(self.can_rcv_error)),
+        )
+        diagnostic_events = self.comm_diagnostic_limiter.update(
+            sec_since_boot(), comm_diagnostic_active, comm_signature
+        )
+        for diagnostic in diagnostic_events:
+            diagnostic_kind = diagnostic.pop("kind")
+            if diagnostic_kind == "persistent":
+                manager_processes = [{
+                    "name": p.name,
+                    "running": bool(p.running),
+                    "should_be_running": bool(p.shouldBeRunning),
+                    "pid": int(p.pid),
+                    "exit_code": int(p.exitCode),
+                } for p in self.sm['managerState'].processes]
+                append_process_diagnostic(
+                    "communication_issue_persistent",
+                    frame=int(self.sm.frame),
+                    initialized=bool(self.initialized),
+                    enabled=bool(self.enabled),
+                    active=bool(self.active),
+                    invalid=invalid,
+                    not_alive=not_alive,
+                    not_freq_ok=not_freq_ok,
+                    can_rcv_error=bool(self.can_rcv_error),
+                    can_rcv_error_counter=int(self.can_rcv_error_counter),
+                    manager_state_alive=bool(self.sm.alive['managerState']),
+                    manager_state_valid=bool(self.sm.valid['managerState']),
+                    manager_processes=manager_processes,
+                    **diagnostic,
+                )
+                cloudlog.event("commIssuePersistent", invalid=invalid, not_alive=not_alive,
+                               not_freq_ok=not_freq_ok, can_error=self.can_rcv_error,
+                               duration=diagnostic["duration"], error=True)
+            elif diagnostic_kind == "recovered":
+                append_process_diagnostic("communication_issue_recovered", **diagnostic)
+            elif diagnostic_kind == "summary":
+                append_process_diagnostic(
+                    "communication_issue_summary",
+                    frame=int(self.sm.frame),
+                    initialized=bool(self.initialized),
+                    enabled=bool(self.enabled),
+                    active=bool(self.active),
+                    **diagnostic,
+                )
 
         # Check for HW or system issues
         if len(self.sm['radarState'].radarErrors):
@@ -977,6 +1004,7 @@ class Controls:
                     } for p in self.sm['managerState'].processes]
                     append_process_diagnostic(
                         "process_not_running",
+                        sync=True,
                         frame=int(self.sm.frame),
                         processes=sorted(unexpected_not_running),
                         manager_processes=manager_processes,
