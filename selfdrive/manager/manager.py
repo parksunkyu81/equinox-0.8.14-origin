@@ -18,7 +18,6 @@ from selfdrive.hardware import HARDWARE, PC, EON
 from selfdrive.manager.helpers import unblock_stdout
 from selfdrive.manager.process import ensure_running, launcher
 from selfdrive.manager.process_config import managed_processes
-from selfdrive.process_diagnostics import append_process_diagnostic
 from selfdrive.athena.registration import register, UNREGISTERED_DONGLE_ID
 from selfdrive.swaglog import cloudlog, add_file_handler
 from selfdrive.version import is_dirty, get_commit, get_version, get_origin, get_short_branch, \
@@ -183,7 +182,6 @@ def manager_thread() -> None:
   ensure_running(managed_processes.values(), started=False, not_run=ignore)
 
   started_prev = False
-  logged_dead_processes = set()
   sm = messaging.SubMaster(['deviceState'])
   pm = messaging.PubMaster(['managerState'])
 
@@ -194,36 +192,6 @@ def manager_thread() -> None:
     started = sm['deviceState'].started
     driverview = params.get_bool("IsDriverViewEnabled")
     ensure_running(managed_processes.values(), started, driverview, not_run)
-
-    # Persist unexpected exits here as well as in controlsd. This path still
-    # works when controlsd itself is the process that exited.
-    process_states = []
-    dead_processes = set()
-    for p in managed_processes.values():
-      running = p.proc is not None and p.proc.is_alive()
-      should_be_running = p.proc is not None and not p.shutting_down
-      pid = p.proc.pid if p.proc is not None and p.proc.pid is not None else 0
-      exit_code = p.proc.exitcode if p.proc is not None else None
-      process_states.append({
-        "name": p.name,
-        "running": bool(running),
-        "should_be_running": bool(should_be_running),
-        "pid": int(pid),
-        "exit_code": exit_code,
-      })
-      if should_be_running and not running:
-        dead_processes.add((p.name, int(pid), exit_code))
-
-    for dead_process in dead_processes - logged_dead_processes:
-      name, pid, exit_code = dead_process
-      append_process_diagnostic(
-        "manager_process_exit",
-        sync=True,
-        started=bool(started),
-        process={"name": name, "pid": pid, "exit_code": exit_code},
-        manager_processes=process_states,
-      )
-    logged_dead_processes = dead_processes
 
     # trigger an update after going offroad
     if started_prev and not started and 'updated' in managed_processes:
