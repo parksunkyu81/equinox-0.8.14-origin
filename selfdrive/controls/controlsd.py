@@ -274,6 +274,7 @@ class Controls:
         self.events_prev = []
         self.current_alert_types = [ET.PERMANENT]
         self.logged_comm_issue = False
+        self.last_comm_diagnostic_log_time = -1000000.0
         self.logged_process_not_running = False
         self.button_timers = {ButtonEvent.Type.decelCruise: 0, ButtonEvent.Type.accelCruise: 0}
         self.last_actuators = car.CarControl.Actuators.new_message()
@@ -870,32 +871,30 @@ class Controls:
                          if not alive and s not in self.sm.ignore_alive]
             not_freq_ok = [s for s, freq_ok in self.sm.freq_ok.items()
                             if not freq_ok and s not in self.sm.ignore_alive]
-            manager_processes = [{
-                "name": p.name,
-                "running": bool(p.running),
-                "should_be_running": bool(p.shouldBeRunning),
-                "pid": int(p.pid),
-                "exit_code": int(p.exitCode),
-            } for p in self.sm['managerState'].processes]
 
-            append_process_diagnostic(
-                "communication_issue",
-                frame=int(self.sm.frame),
-                initialized=bool(self.initialized),
-                enabled=bool(self.enabled),
-                active=bool(self.active),
-                invalid=invalid,
-                not_alive=not_alive,
-                not_freq_ok=not_freq_ok,
-                can_rcv_error=bool(self.can_rcv_error),
-                can_rcv_error_counter=int(self.can_rcv_error_counter),
-                manager_state_alive=bool(self.sm.alive['managerState']),
-                manager_state_valid=bool(self.sm.valid['managerState']),
-                manager_processes=manager_processes,
-            )
-            cloudlog.event("commIssue", invalid=invalid, not_alive=not_alive,
-                           not_freq_ok=not_freq_ok, can_error=self.can_rcv_error, error=True)
-            self.logged_comm_issue = True
+            now = sec_since_boot()
+            # Keep one compact sample at most every five seconds. Avoid the
+            # synchronous fsync and full process snapshot that delayed
+            # carState/controlsState and could cascade into radarState invalid.
+            if now - self.last_comm_diagnostic_log_time >= 5.0:
+                append_process_diagnostic(
+                    "communication_issue",
+                    frame=int(self.sm.frame),
+                    initialized=bool(self.initialized),
+                    enabled=bool(self.enabled),
+                    active=bool(self.active),
+                    invalid=invalid,
+                    not_alive=not_alive,
+                    not_freq_ok=not_freq_ok,
+                    can_rcv_error=bool(self.can_rcv_error),
+                    can_rcv_error_counter=int(self.can_rcv_error_counter),
+                    manager_state_alive=bool(self.sm.alive['managerState']),
+                    manager_state_valid=bool(self.sm.valid['managerState']),
+                )
+                cloudlog.event("commIssue", invalid=invalid, not_alive=not_alive,
+                               not_freq_ok=not_freq_ok, can_error=self.can_rcv_error, error=True)
+                self.last_comm_diagnostic_log_time = now
+                self.logged_comm_issue = True
         elif not comm_diagnostic_active:
             self.logged_comm_issue = False
 
@@ -977,6 +976,7 @@ class Controls:
                     } for p in self.sm['managerState'].processes]
                     append_process_diagnostic(
                         "process_not_running",
+                        sync=True,
                         frame=int(self.sm.frame),
                         processes=sorted(unexpected_not_running),
                         manager_processes=manager_processes,

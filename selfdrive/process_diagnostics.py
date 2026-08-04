@@ -9,7 +9,7 @@ PROCESS_DIAGNOSTICS_PATH = os.getenv(
 )
 
 
-def append_process_diagnostic(event_type, **fields):
+def append_process_diagnostic(event_type, sync=False, **fields):
   """Persist one process/communication diagnostic as a single JSON line."""
   record = {
     "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -30,7 +30,8 @@ def append_process_diagnostic(event_type, **fields):
         if written <= 0:
           raise OSError("failed to append process diagnostic")
         remaining = remaining[written:]
-      os.fsync(fd)
+      if sync:
+        os.fsync(fd)
     finally:
       os.close(fd)
     return True
