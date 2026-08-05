@@ -390,7 +390,7 @@ class Controls:
                                MANUAL_BRAKE_FCW_STOP_DISTANCE + MANUAL_BRAKE_FCW_HEADWAY * max(CS.vEgo, 0.0))
         return lead.dRel <= warning_distance and ttc <= MANUAL_BRAKE_FCW_TTC
 
-    def get_long_lead_safe_speed(self, sm, CS, vEgo):
+    def get_long_lead_safe_speed(self, sm, CS, v_ego_clu):
         if CS.adaptiveCruise:
             lead = self.get_lead(sm)
             if lead is not None:
@@ -402,7 +402,7 @@ class Controls:
                     accel *= 1.2
 
                     if accel < 0.:
-                        target_speed = vEgo + accel
+                        target_speed = v_ego_clu + accel
                         target_speed = max(target_speed, self.kph_to_clu(10))
                         return target_speed
 
@@ -412,7 +412,7 @@ class Controls:
                     accel *= 1.2
 
                     if accel < 0.:
-                        target_speed = vEgo + accel
+                        target_speed = v_ego_clu + accel
                         target_speed = max(target_speed, self.kph_to_clu(20))
                         return target_speed
 
@@ -422,7 +422,7 @@ class Controls:
                     accel *= 1.2
 
                     if accel < 0.:
-                        target_speed = vEgo + accel
+                        target_speed = v_ego_clu + accel
                         target_speed = max(target_speed, self.kph_to_clu(30))
                         return target_speed
 
@@ -651,10 +651,14 @@ class Controls:
     # [크루즈 MAX 속도 설정] #
     def cal_max_speed(self, frame: int, vEgo, sm, CS):
 
+        # vEgo는 m/s이고, road speed limiter와 max_speed_clu는 계기판 단위
+        # (metric: km/h, imperial: mph)를 사용하므로 함수 초입에서 한 번만 변환한다.
+        v_ego_clu = vEgo * self.speed_conv_to_clu
+
         road_speed_limiter = get_road_speed_limiter()
 
         apply_limit_speed, road_limit_speed, left_dist, first_started, max_speed_log = \
-            road_speed_limiter_get_max_speed(vEgo, self.is_metric)
+            road_speed_limiter_get_max_speed(v_ego_clu, self.is_metric)
 
         # print("apply_limit_speed : ", apply_limit_speed)
         # print("road_limit_speed : ", road_limit_speed)
@@ -674,7 +678,7 @@ class Controls:
         if road_speed_limiter.roadLimitSpeed is not None:
             camSpeedFactor = clip(road_speed_limiter.roadLimitSpeed.camSpeedFactor, 1.0, 1.1)
             self.over_speed_limit = road_speed_limiter.roadLimitSpeed.camLimitSpeedLeftDist > 0 and \
-                                    0 < road_limit_speed * camSpeedFactor < vEgo + 2
+                                    0 < road_limit_speed * camSpeedFactor < v_ego_clu + 2
         else:
             self.over_speed_limit = False
 
@@ -685,13 +689,13 @@ class Controls:
             # 크루즈 초기 설정 속도 (PSK)
             # controls.v_cruise_kph : 크루즈 설정 속도
             if first_started:
-                self.max_speed_clu = vEgo
+                self.max_speed_clu = v_ego_clu
                 # self.max_speed_clu = self.v_cruise_kph
 
             max_speed_clu = min(max_speed_clu, apply_limit_speed)
 
             # if self.v_cruise_kph > apply_limit_speed:
-            if vEgo > apply_limit_speed:
+            if v_ego_clu > apply_limit_speed:
                 if not self.slowing_down_alert and not self.slowing_down:
                     self.slowing_down_sound_alert = True
                     self.slowing_down = True
@@ -702,14 +706,14 @@ class Controls:
             self.slowing_down_alert = False
             self.slowing_down = False
 
-        lead_speed = self.get_long_lead_safe_speed(sm, CS, vEgo)
+        lead_speed = self.get_long_lead_safe_speed(sm, CS, v_ego_clu)
         lead_limited = self.stop_accel_boost and \
                        lead_speed >= self.min_set_speed_clu and \
                        lead_speed < max_speed_clu
         if lead_limited:
             max_speed_clu = lead_speed
             if not self.limited_lead:
-                self.max_speed_clu = vEgo + 3.
+                self.max_speed_clu = v_ego_clu + 3.
         elif self.limited_lead:
             # The longitudinal planner already rate-limits acceleration. Do not
             # keep a stale lead-imposed cruise target for another 2-3 seconds
