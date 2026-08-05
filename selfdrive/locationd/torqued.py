@@ -87,7 +87,7 @@ def center_offset_residual(lateral_accel, applied_steer, lat_accel_factor):
 
 def equinox_learning_confidence(normal_counts, limited_counts, min_points,
                                  clip_ratio=0.0, rate_ratio=0.0, driver_ratio=0.0,
-                                 start_points=1800.0, full_points=10000.0):
+                                 start_points=600.0, full_points=5000.0):
     """Return 0..1 confidence for widening the Equinox learning envelope."""
     normal = [max(0.0, float(v)) for v in normal_counts]
     limited = [max(0.0, float(v)) for v in limited_counts]
@@ -101,18 +101,18 @@ def equinox_learning_confidence(normal_counts, limited_counts, min_points,
         (total - float(start_points)) / max(float(full_points) - float(start_points), 1.0), 0.0, 1.0)
     coverage = sum(_profile_clip(c / max(0.50 * r, 15.0), 0.0, 1.0)
                    for c, r in zip(counts, required)) / float(len(counts))
-    coverage_progress = _profile_clip((coverage - 0.30) / 0.55, 0.0, 1.0)
+    coverage_progress = _profile_clip((coverage - 0.20) / 0.60, 0.0, 1.0)
 
     split = len(counts) // 2
     negative = sum(counts[:split])
     positive = sum(counts[split:])
     direction_balance = min(negative, positive) / max(max(negative, positive), 1.0)
-    balance_progress = _profile_clip((direction_balance - 0.30) / 0.50, 0.0, 1.0)
+    balance_progress = _profile_clip((direction_balance - 0.20) / 0.55, 0.0, 1.0)
 
     bad_ratio = max(_profile_clip(clip_ratio, 0.0, 1.0),
                     _profile_clip(rate_ratio, 0.0, 1.0),
                     _profile_clip(driver_ratio, 0.0, 1.0))
-    quality = _profile_clip(1.0 - (bad_ratio / 0.35), 0.0, 1.0)
+    quality = _profile_clip(1.0 - (bad_ratio / 0.45), 0.0, 1.0)
     return _profile_clip(total_progress * coverage_progress * balance_progress * quality, 0.0, 1.0)
 
 
@@ -122,15 +122,15 @@ def adaptive_equinox_bands(lat_accel_anchor, friction_anchor, confidence):
     lat_anchor = float(lat_accel_anchor)
     friction_anchor = float(friction_anchor)
 
-    factor_down = 0.025 + conf * (0.140 - 0.025)
-    factor_up = 0.035 + conf * (0.160 - 0.035)
-    friction_down = 0.065 + conf * (0.280 - 0.065)
-    friction_up = 0.065 + conf * (0.300 - 0.065)
+    factor_down = 0.060 + conf * (0.140 - 0.060)
+    factor_up = 0.050 + conf * (0.160 - 0.050)
+    friction_down = 0.100 + conf * (0.280 - 0.100)
+    friction_up = 0.120 + conf * (0.300 - 0.120)
 
-    factor_abs_min = 1.95 + conf * (1.75 - 1.95)
-    factor_abs_max = 2.12 + conf * (2.42 - 2.12)
-    friction_abs_min = 0.220 + conf * (0.165 - 0.220)
-    friction_abs_max = 0.245 + conf * (0.305 - 0.245)
+    factor_abs_min = 1.88 + conf * (1.75 - 1.88)
+    factor_abs_max = 2.16 + conf * (2.42 - 2.16)
+    friction_abs_min = 0.205 + conf * (0.165 - 0.205)
+    friction_abs_max = 0.265 + conf * (0.305 - 0.265)
 
     min_factor = max((1.0 - factor_down) * lat_anchor, factor_abs_min)
     max_factor = min((1.0 + factor_up) * lat_anchor, factor_abs_max)
@@ -214,7 +214,10 @@ LAT_ACCEL_FACTOR_ABS_MAX = 2.12
 FRICTION_ABS_MIN = 0.220
 FRICTION_ABS_MAX = 0.245
 # ✅ 직선 쏠림 보완: offset 학습 허용(단, 직선 샘플이 실제로 들어온 프레임에서만 업데이트 게이트)
-DISABLE_LATACCEL_OFFSET_LEARNING = False  # master kill switch; vehicle profile still gates activation
+# 직선에서 지속적인 한쪽 토크가 생기는 것을 막기 위한 안전 기본값.
+# 도로 캠버/얼라인먼트/롤 추정 오차를 차량 중심 오프셋으로 잘못 학습할 수 있으므로
+# 원인 검증이 끝날 때까지 latAccelOffset 학습과 publish를 모두 비활성화한다.
+DISABLE_LATACCEL_OFFSET_LEARNING = True
 
 # 2020 Korean Equinox 1.6 diesel / no-radar fingerprint. The wider envelope is
 # enabled only for this platform and only after balanced, high-quality samples.
@@ -228,7 +231,7 @@ EQUINOX_CENTER_OFFSET_MAX_ROLL_RAD = math.radians(1.5)
 # Lower latAccelFactor commands more steering torque. Keep the learner stable, but
 # make the published value slightly more assertive when clip-quality persists and
 # there is no real EPS/max-limit evidence.
-LAT_ACCEL_FACTOR_AGGRESSIVE_ASSIST = False  # fixed profile: never lower latAccelFactor while driving
+LAT_ACCEL_FACTOR_AGGRESSIVE_ASSIST = True  # Equinox low/mid-speed understeer assist
 LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE = 0.930  # up to -7.0%
 LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA = 0.16   # absolute cap, e.g. 1.88 -> not below 1.72 by assist alone
 LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START = 0.16
@@ -417,7 +420,7 @@ MIN_ENGAGE_BUFFER = 2  # secs
 # -----------------------------
 STEER_MAX_DIAG = 300
 STEER_DELTA_UP_DIAG = 10  # SAFETY: match lower controller delta-up target; 14 was too abrupt
-STEER_DELTA_DOWN_DIAG = 14  # SAFETY: unwind still faster than up, but less snappy
+STEER_DELTA_DOWN_DIAG = 20  # SAFETY: unwind still faster than up, but less snappy
 STEER_SAT_THRESHOLD = 0.98
 STEER_CLIP_EPS = 0.05  # ignore small desired/applied gaps that are normal actuator lag
 STEER_CLIP_MIN_DES = 0.18  # ignore 'clip' inference when desired is small
@@ -479,10 +482,10 @@ LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START = 0.14
 LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL = 0.42
 LAT_ACCEL_FACTOR_ASSIST_RATE_STRONG_LIMIT = 0.18
 LAT_ACCEL_FACTOR_ASSIST_LOW_SPEED_KPH = 30.0
-LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE_LOW_SPEED = 0.900
-LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA_LOW_SPEED = 0.20
-LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START_LOW_SPEED = 0.10
-LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL_LOW_SPEED = 0.34
+LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE_LOW_SPEED = 0.880
+LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA_LOW_SPEED = 0.24
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START_LOW_SPEED = 0.07
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL_LOW_SPEED = 0.28
 LAT_ACCEL_FACTOR_ASSIST_RATE_STRONG_LIMIT_LOW_SPEED = 0.30
 LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_ENABLED = False
 LAT_ACCEL_FACTOR_ASSIST_BIG_CORNER_MIN_KPH = 32.0
@@ -496,19 +499,19 @@ LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE_BIG_CORNER = 0.890
 LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA_BIG_CORNER = 0.24
 LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START_BIG_CORNER = 0.07
 LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL_BIG_CORNER = 0.30
-LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_ENABLED = False
+LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_ENABLED = True
 LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_MIN_KPH = 20.0
-LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_MAX_KPH = 65.0
-LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_STEER_MIN = 0.42
-LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_STEER_EXIT = 0.36
-LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_DRIVER_TORQUE_MAX = 1.20
-LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_RATE_STRONG_LIMIT = 0.35
-LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_RATE_STRONG_HOLD_LIMIT = 0.38
+LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_MAX_KPH = 60.0
+LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_STEER_MIN = 0.32
+LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_STEER_EXIT = 0.27
+LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_DRIVER_TORQUE_MAX = 1.50
+LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_RATE_STRONG_LIMIT = 0.42
+LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_RATE_STRONG_HOLD_LIMIT = 0.45
 LAT_ACCEL_FACTOR_ASSIST_WIDE_CORNER_HOLD_S = 1.30
-LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE_WIDE_CORNER = 0.875
-LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA_WIDE_CORNER = 0.30
-LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START_WIDE_CORNER = 0.05
-LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL_WIDE_CORNER = 0.26
+LAT_ACCEL_FACTOR_ASSIST_MIN_SCALE_WIDE_CORNER = 0.900
+LAT_ACCEL_FACTOR_ASSIST_MAX_DELTA_WIDE_CORNER = 0.24
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_START_WIDE_CORNER = 0.03
+LAT_ACCEL_FACTOR_ASSIST_CLIP_RATIO_FULL_WIDE_CORNER = 0.20
 
 MIDSPD_DELTA_UP_GAIN = 0.00
 MIDSPD_DELTA_DOWN_GAIN = 0.00
@@ -528,7 +531,7 @@ QUALITY_STEER_PRESSED_LOW_SPEED_KPH = 30.0
 QUALITY_STEER_PRESSED_EXTEND_GUARD_KPH = 30.0
 QUALITY_FREEZE_HOLD_S = 0.65
 
-VERSION = 37  # Conservative, per-drive center-offset learning
+VERSION = 39  # Low-speed corner authority + highway torque-cap profile
 
 
 def slope2rot(slope):
@@ -1028,8 +1031,9 @@ class TorqueEstimator:
         self.max_lataccel_factor = (1.0 + FACTOR_SANITY) * self.offline_latAccelFactor
         self.min_friction = (1.0 - FRICTION_SANITY) * self.offline_friction
         self.max_friction = (1.0 + FRICTION_SANITY) * self.offline_friction
+        # 학습이 꺼진 경우 offset 허용 범위도 0으로 만들어 stale 값이 제어로 유출되지 않게 한다.
         self.max_offset_abs = (EQUINOX_CENTER_OFFSET_ABS_MAX if self._offset_learning_enabled
-                               else OFFSET_SANITY_ABS)
+                               else 0.0)
         self._car_tune_type = CP.lateralTuning.which() if hasattr(CP, 'lateralTuning') else None
 
         warm_loaded, warm_params, warm_decay = self._try_restore_warm_state(CP)
@@ -1799,6 +1803,16 @@ class TorqueEstimator:
 
         for param, value in params.items():
             if not _finite(value):
+                continue
+
+            # 방어적 차단: 학습 비활성 상태에서는 어떤 경로로 offset 후보가 들어와도
+            # 필터 상태를 즉시 0으로 유지한다. KeyError 방지를 위해 known param만 처리한다.
+            if param == 'latAccelOffset' and not self._offset_learning_enabled:
+                if param in self.filtered_params:
+                    self.filtered_params[param].x = 0.0
+                continue
+
+            if param not in self.filtered_params:
                 continue
 
             cur = self.filtered_params[param].x
@@ -3039,20 +3053,28 @@ class TorqueEstimator:
             low_boost = max(low_boost, min_boost)
 
         total_pts = len(self.corner_points) + len(self.straight_points) + len(self.limited_corner_points)
-        learning_gate = float(np.interp(total_pts, [1500.0, 6000.0], [0.0, 1.0]))
+        learning_gate = float(np.interp(total_pts, [300.0, 2500.0], [0.0, 1.0]))
+        if turning_hint and v_kph <= 60.0:
+            learning_gate = max(0.35, learning_gate)
         blend = float(np.clip(max(low_boost, mid_boost, high_gate) * learning_gate, 0.0, 1.0))
         lat_scale = float(np.interp(v_kph, DYN_LOG_LAT_FACTOR_BP,
-                                    [1.000, 0.995, 0.985, 0.980, 0.980, 0.985, 0.990,
-                                     0.995, 1.000, 1.010, 1.020, 1.025, 1.030]))
+                                    [1.000, 0.980, 0.960, 0.940, 0.930, 0.930, 0.940,
+                                     0.960, 0.985, 1.000, 1.010, 1.015, 1.020]))
         fric_scale = float(np.interp(v_kph, DYN_LOG_FRICTION_BP,
-                                     [1.000, 1.010, 1.025, 1.030, 1.030, 1.025, 1.015,
-                                      1.010, 1.000, 0.995, 0.985, 0.980, 0.980]))
+                                     [1.000, 1.015, 1.035, 1.050, 1.055, 1.050, 1.040,
+                                      1.025, 1.010, 1.000, 0.990, 0.985, 0.980]))
         target_lat = base_lat * lat_scale
         target_fric = base_fric * fric_scale
+        lat_min_scale = float(np.interp(v_kph,
+                                        [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 130.0],
+                                        [0.98, 0.94, 0.88, 0.88, 0.91, 0.94, 0.97, 0.99, 1.00]))
+        fric_max_scale = float(np.interp(v_kph,
+                                         [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 130.0],
+                                         [1.05, 1.10, 1.15, 1.15, 1.12, 1.10, 1.08, 1.05, 1.02]))
         eff_lat = float(np.clip(base_lat + (target_lat - base_lat) * blend,
-                                max(1.75, base_lat * 0.96), min(2.42, base_lat * 1.04)))
+                                max(1.75, base_lat * lat_min_scale), min(2.42, base_lat * 1.04)))
         eff_fric = float(np.clip(base_fric + (target_fric - base_fric) * blend,
-                                 max(0.165, base_fric * 0.90), min(0.305, base_fric * 1.10)))
+                                 max(0.165, base_fric * 0.90), min(0.305, base_fric * fric_max_scale)))
         return eff_lat, eff_fric, blend, corner_strength, low_gate, mid_gate, high_gate
 
     def _log_to_file(self, msg):
