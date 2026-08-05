@@ -419,8 +419,8 @@ MIN_ENGAGE_BUFFER = 2  # secs
 # Controller diagnostics (for steer limit flags)
 # -----------------------------
 STEER_MAX_DIAG = 300
-STEER_DELTA_UP_DIAG = 10  # SAFETY: match lower controller delta-up target; 14 was too abrupt
-STEER_DELTA_DOWN_DIAG = 20  # SAFETY: unwind still faster than up, but less snappy
+STEER_DELTA_UP_DIAG = 7  # SAFETY: match lower controller delta-up target; 14 was too abrupt
+STEER_DELTA_DOWN_DIAG = 17  # SAFETY: unwind still faster than up, but less snappy
 STEER_SAT_THRESHOLD = 0.98
 STEER_CLIP_EPS = 0.05  # ignore small desired/applied gaps that are normal actuator lag
 STEER_CLIP_MIN_DES = 0.18  # ignore 'clip' inference when desired is small
