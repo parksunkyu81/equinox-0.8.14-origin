@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from cereal import car
-from common.numpy_fast import interp
+from common.numpy_fast import interp, clip
 from common.realtime import DT_CTRL
 from math import fabs
 from common.conversions import Conversions as CV
