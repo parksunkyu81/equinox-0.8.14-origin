@@ -235,6 +235,9 @@ std::unordered_map<std::string, uint32_t> keys = {
     {"TorqueLowSpeedGain30_40", PERSISTENT},
     {"TorqueLowSpeedGain30_40Count", PERSISTENT},
 
+    {"ManualLeadCatchupEnabled", PERSISTENT},
+    {"ManualLeadCatchupMaxAccel", PERSISTENT},
+
     {"IsLiveTorque", PERSISTENT},
     {"IsLowSpeedFactor", PERSISTENT},
     {"E2ELong", PERSISTENT},

@@ -13,14 +13,20 @@ ACCEL_MAX_ISO = 2.0  # m/s^2
 
 
 def long_control_state_trans(CP, active, long_control_state, v_ego, v_target,
-                             v_target_future, brake_pressed, cruise_standstill):
+                             v_target_future, brake_pressed, cruise_standstill,
+                             manual_handoff_ready=False):
   """Update longitudinal control state machine"""
   accelerating = v_target_future > v_target
   stopping_condition = (v_ego < 2.0 and cruise_standstill) or \
                        (v_ego < CP.vEgoStopping and
                         (v_target_future < CP.vEgoStopping and not accelerating))
 
-  starting_condition = v_target_future > CP.vEgoStarting and accelerating and not cruise_standstill
+  normal_starting_condition = v_target_future > CP.vEgoStarting and accelerating and not cruise_standstill
+  # Manual handoff is already gated by an explicit driver launch, fresh lead
+  # data, safe distance, and vehicle speed above 1 km/h. Do not wait for the
+  # slower planner trajectory to clear the normal starting threshold.
+  manual_starting_condition = bool(manual_handoff_ready) and v_ego > (1.0 / 3.6) and not brake_pressed
+  starting_condition = normal_starting_condition or manual_starting_condition
 
   if not active:
     long_control_state = LongCtrlState.off
@@ -55,7 +61,8 @@ class LongControl:
     self.pid.reset()
     self.v_pid = v_pid
 
-  def update(self, active, CS, long_plan, accel_limits, t_since_plan):
+  def update(self, active, CS, long_plan, accel_limits, t_since_plan,
+             manual_handoff_ready=False):
     """Update longitudinal control. This updates the state machine and runs a PID loop"""
     # Interp control trajectory
     speeds = long_plan.speeds
@@ -86,7 +93,8 @@ class LongControl:
     output_accel = self.last_output_accel
     self.long_control_state = long_control_state_trans(self.CP, active, self.long_control_state, CS.vEgo,
                                                        v_target, v_target_future, CS.brakePressed,
-                                                       CS.cruiseState.standstill)
+                                                       CS.cruiseState.standstill,
+                                                       manual_handoff_ready=manual_handoff_ready)
 
     # 운전자가 가속페달을 밟으면 자동 가속을 즉시 중지하고 PID 누적값을 지워, 운전자가 페달을 놓은 뒤 갑자기 자동 가속하는 것을 방지하는 코드입니다.
     gas_override = bool(CS.gasPressed)
@@ -100,7 +108,11 @@ class LongControl:
 
       # Toyota starts braking more when it thinks you want to stop
       # Freeze the integrator so we don't accelerate to compensate, and don't allow positive acceleration
-      prevent_overshoot = not self.CP.stoppingControl and CS.vEgo < 1.5 and v_target_future < 0.7 and v_target_future < self.v_pid
+      prevent_overshoot = (not bool(manual_handoff_ready) and
+                           not self.CP.stoppingControl and
+                           CS.vEgo < 1.5 and
+                           v_target_future < 0.7 and
+                           v_target_future < self.v_pid)
       deadzone = interp(CS.vEgo, self.CP.longitudinalTuning.deadzoneBP, self.CP.longitudinalTuning.deadzoneV)
       freeze_integrator = prevent_overshoot
 
