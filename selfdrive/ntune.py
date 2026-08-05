@@ -198,9 +198,9 @@ class nTune():
 
     if self.checkValue("useSteeringAngle", 0., 1., 1.):
       updated = True
-    if self.checkValue("latAccelFactor", 0.5, 4.5, 2.0):
+    if self.checkValue("latAccelFactor", 1.75, 2.42, 2.05):
       updated = True
-    if self.checkValue("friction", 0.0, 0.2, 0.05):
+    if self.checkValue("friction", 0.165, 0.305, 0.230):
       updated = True
     if self.checkValue("angle_deadzone_v2", 0.0, 2.0, 0.0):
       updated = True

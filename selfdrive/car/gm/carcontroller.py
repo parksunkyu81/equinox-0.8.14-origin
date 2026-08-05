@@ -2,12 +2,17 @@ from cereal import car
 from common.numpy_fast import interp, clip
 from common.conversions import Conversions as CV
 from common.realtime import DT_CTRL
+from common.params import Params
 from selfdrive.car import apply_std_steer_torque_limits, create_gas_interceptor_command
 from selfdrive.car.gm import gmcan
 from selfdrive.car.gm.values import DBC, NO_ASCM, CanBus, CarControllerParams
 from opendbc.can.packer import CANPacker
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
 from selfdrive.controls.lib.pedal_force_recovery import PEDAL_FORCE_RECOVERY_PEDAL_FLOOR
+from selfdrive.controls.lib.torque_tuning_config import (
+  EQUINOX_TORQUE_FINGERPRINT, equinox_steer_delta_profile,
+  read_torque_tuning_config,
+)
 
 VisualAlert = car.CarControl.HUDControl.VisualAlert
 GearShifter = car.CarState.GearShifter
@@ -17,10 +22,16 @@ class CarController():
     self.apply_steer_last = 0
     self.comma_pedal = 0.0
 
-    # Dynamic steering delta diagnostics/state
+    # Dynamic steering delta diagnostics/state. The map is vehicle-side only;
+    # panda safety remains the final independent limit.
+    self._is_equinox_torque_profile = str(CP.carFingerprint) == EQUINOX_TORQUE_FINGERPRINT
+    self._torque_config_params = Params()
+    self._torque_config = read_torque_tuning_config(self._torque_config_params, migrate=False)
+    self._torque_config_last_frame = -1000000
     self._dyn_steer_limited_prev = False
-    self._dyn_delta_up_last = 0
-    self._dyn_delta_down_last = 0
+    self._dyn_delta_up_last = 7
+    self._dyn_delta_down_last = 17
+    self._requested_steer_last = 0
 
     self.accel = 0.0
 
@@ -38,6 +49,13 @@ class CarController():
              hud_v_cruise, hud_show_lanes, hud_show_car, hud_alert):
 
     P = self.params
+
+    if self._is_equinox_torque_profile and (frame - self._torque_config_last_frame) >= 50:
+      self._torque_config_last_frame = int(frame)
+      try:
+        self._torque_config = read_torque_tuning_config(self._torque_config_params, migrate=False)
+      except Exception:
+        pass
 
     # Send CAN commands.
     can_sends = []
@@ -60,10 +78,31 @@ class CarController():
     elif (frame % P.STEER_STEP) == 0:  # 수신 카운터가 변경되지 않았고, 현재 프레임이 조향 명령 전송 주기일 때만 (2프레임마다 조향 명령을 계산하고 전송)
       if lkas_enabled:
         new_steer = int(round(actuators.steer * P.STEER_MAX))
-        apply_steer = apply_std_steer_torque_limits(new_steer, self.apply_steer_last, CS.out.steeringTorque, P)
+        reversing = bool(self.apply_steer_last != 0 and new_steer != 0 and
+                         (self.apply_steer_last * new_steer) < 0)
+        if self._is_equinox_torque_profile:
+          delta_up, delta_down = equinox_steer_delta_profile(
+            CS.out.vEgo * CV.MS_TO_KPH, self._torque_config,
+            steering_pressed=CS.out.steeringPressed,
+            driver_torque=CS.out.steeringTorque,
+            reversing=reversing,
+          )
+        else:
+          delta_up, delta_down = int(P.STEER_DELTA_UP), int(P.STEER_DELTA_DOWN)
+
+        apply_steer = apply_std_steer_torque_limits(
+          new_steer, self.apply_steer_last, CS.out.steeringTorque, P,
+          delta_up=delta_up, delta_down=delta_down,
+        )
+        self._requested_steer_last = int(new_steer)
+        self._dyn_delta_up_last = int(delta_up)
+        self._dyn_delta_down_last = int(delta_down)
         self.steer_rate_limited = new_steer != apply_steer
       else:
         apply_steer = 0  # LKAS가 비활성화된 경우에는 EPS에 조향 토크를 요청하지 않도록 0을 사용
+        self._requested_steer_last = 0
+        self._dyn_delta_up_last = int(P.STEER_DELTA_UP)
+        self._dyn_delta_down_last = int(P.STEER_DELTA_DOWN)
 
       self.apply_steer_last = apply_steer  # 적용한 조향 토크를 저장합니다. 다음 주기의 토크 변화량 제한을 계산할 때 기준값으로 사용
 
@@ -79,6 +118,10 @@ class CarController():
     # 조향 PID 제어기는 이 정보를 이용해 토크 제한 중 적분값이 과도하게 누적되는 현상 등을 방지
     # 현재 제한 상태를 조향 PID에 전달
     controls.gm_steer_torque_limited = bool(self.steer_rate_limited)
+    controls.gm_steer_requested_torque = int(self._requested_steer_last)
+    controls.gm_steer_command_torque = int(self.apply_steer_last)
+    controls.gm_steer_delta_up = int(self._dyn_delta_up_last)
+    controls.gm_steer_delta_down = int(self._dyn_delta_down_last)
 
     # GM EPS의 메시지 카운터 규칙을 지키면서 OpenPilot의 조향 요청을 안전한 토크로 제한하여 전송하는 기능
     # ================================================================================================================== #

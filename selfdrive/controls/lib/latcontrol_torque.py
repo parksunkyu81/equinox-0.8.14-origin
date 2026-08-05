@@ -8,6 +8,11 @@ from selfdrive.controls.lib.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
 from common.params import Params
 from decimal import Decimal
 import cereal.messaging as messaging
+from selfdrive.controls.lib.torque_tuning_config import (
+    CONTROLLER_FRICTION_MAX, CONTROLLER_FRICTION_MIN,
+    CONTROLLER_LAT_ACCEL_MAX, CONTROLLER_LAT_ACCEL_MIN,
+    equinox_steer_delta_profile, read_torque_tuning_config,
+)
 
 # At higher speeds (25+mph) we can assume:
 # Lateral acceleration achieved by a specific car correlates to
@@ -131,12 +136,7 @@ DYN_LAT_FACTOR_MIN_SCALE_V = [0.98, 0.94, 0.88, 0.88, 0.91, 0.94, 0.97, 0.99, 1.
 DYN_FRICTION_MAX_SCALE_BP = [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 130.0]
 DYN_FRICTION_MAX_SCALE_V = [1.05, 1.10, 1.15, 1.15, 1.12, 1.10, 1.08, 1.05, 1.02]
 
-# 실제 CarController의 STEER_DELTA_UP/DOWN은 carcontroller 쪽에서 적용해야 한다.
-# 아래 맵은 이 파일 안에서는 torque slew와 디버그용 목표값으로만 사용한다.
-DYN_DELTA_UP_BP   = [0.0, 10.0, 30.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
-DYN_DELTA_UP_V    = [10.0, 14.0, 14.0, 14.0, 13.0, 12.0, 9.0, 8.0, 7.0, 7.0]
-DYN_DELTA_DOWN_BP = [0.0, 10.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
-DYN_DELTA_DOWN_V  = [14.0, 17.0, 17.0, 17.0, 16.0, 15.0, 15.0, 14.0, 14.0]
+# Actual STEER_DELTA_UP/DOWN is now selected in GM CarController through the shared profile.
 
 # 코너 강도 판정. 세 값 중 가장 큰 값을 사용한다.
 # 코너 감지 민감도 보정.
@@ -193,27 +193,56 @@ DYN_LAT_FACTOR_MAX = 2.42
 DYN_FRICTION_MIN = 0.165
 DYN_FRICTION_MAX = 0.305
 
+# Separate low-speed adaptation. The base torqued learner is restricted to
+# medium/high speed; these three bounded gains correct 10~40km/h tracking
+# without contaminating the vehicle-wide latAccelFactor/friction estimate.
+LOW_SPEED_GAIN_BIN_EDGES_KPH = [10.0, 20.0, 30.0, 40.0]
+LOW_SPEED_GAIN_DEFAULTS = [1.020, 1.040, 1.030]
+LOW_SPEED_GAIN_PARAM_KEYS = [
+    "TorqueLowSpeedGain10_20",
+    "TorqueLowSpeedGain20_30",
+    "TorqueLowSpeedGain30_40",
+]
+LOW_SPEED_GAIN_STATE_VERSION = 1
+LOW_SPEED_GAIN_MIN = 0.97
+LOW_SPEED_GAIN_MAX = 1.10
+LOW_SPEED_GAIN_MIN_POINTS = 500
+LOW_SPEED_GAIN_FULL_POINTS = 2000
+LOW_SPEED_GAIN_MAX_STEP = 0.00005
+LOW_SPEED_GAIN_TARGET_WEIGHT = 0.20
+LOW_SPEED_GAIN_SAVE_SAMPLES = 3000
+LOW_SPEED_FRICTION_SCALE_BP = [10.0, 20.0, 30.0, 40.0, 50.0]
+LOW_SPEED_FRICTION_SCALE_V = [1.02, 1.05, 1.06, 1.03, 1.00]
+
 # A learned center offset is applied to feedforward even on a straight road.
 # Keep the final controller-side clamp independent from torqued so a stale or
 # malformed publisher can never create a large continuous steering bias.
 # 직선 지속 쏠림 방지용 이중 안전장치. torqued가 stale/non-zero 값을 publish해도
-# 컨트롤러에서는 latAccelOffset을 사용하지 않는다. 원인 검증 후에만 True로 되돌린다.
-LAT_ACCEL_OFFSET_COMP_ENABLED = False
-LAT_ACCEL_OFFSET_ABS_MAX = 0.03
+# The offset remains disabled by Params by default and is hard-clamped when explicitly enabled.
+LAT_ACCEL_OFFSET_COMP_ENABLED = True
+LAT_ACCEL_OFFSET_ABS_MAX = 0.01
 LAT_ACCEL_OFFSET_DEADBAND = 0.003
+CENTER_OFFSET_PARAM_KEYS = (
+    "TorqueCenterOffset20_40",
+    "TorqueCenterOffset40_60",
+    "TorqueCenterOffset60_100",
+)
+CENTER_OFFSET_COUNT_KEYS = tuple(key + "Count" for key in CENTER_OFFSET_PARAM_KEYS)
+CENTER_OFFSET_ABS_MAX_BY_BIN = (0.006, 0.008, 0.010)
+CENTER_OFFSET_EFFECTIVE_DEADBAND = 0.0005
 
 # Directional torque balance.
 # latAccelOffset remains the straight-line bias correction. These small,
 # bounded per-direction assists compensate left/right corner response
 # differences without moving the straight offset.
-DIRECTIONAL_TORQUE_COMP_ENABLED = False
+DIRECTIONAL_TORQUE_COMP_ENABLED = True
 DIRECTIONAL_TORQUE_MIN_SPEED = 5.0
 DIRECTIONAL_TORQUE_MIN_LAT_ACCEL = 0.12
 DIRECTIONAL_TORQUE_ERROR_DEADBAND = 0.035
 DIRECTIONAL_TORQUE_ERROR_FULL = 0.28
-DIRECTIONAL_TORQUE_STEP = 0.00045
-DIRECTIONAL_TORQUE_ASSIST_MIN = 0.94
-DIRECTIONAL_TORQUE_ASSIST_MAX = 1.08
+DIRECTIONAL_TORQUE_STEP = 0.00008
+DIRECTIONAL_TORQUE_ASSIST_MIN = 0.97
+DIRECTIONAL_TORQUE_ASSIST_MAX = 1.03
 DIRECTIONAL_TORQUE_FRICTION_GAIN = 0.55
 
 
@@ -265,8 +294,174 @@ class LatControlTorque(LatControl):
         self._dir_torque_assist_right = 1.0
         self._dir_torque_last_side = 0
 
+        self._torque_config_params = Params()
+        self._torque_runtime_config = read_torque_tuning_config(self._torque_config_params, migrate=False)
+        self._torque_config_counter = 0
+        self._center_offset_enabled = bool(self._torque_runtime_config.center_offset_enabled)
+        self._directional_comp_enabled = bool(self._torque_runtime_config.directional_comp_enabled)
+        self._center_offsets = [0.0, 0.0, 0.0]
+        self._center_offset_counts = [0, 0, 0]
+        self._load_center_offsets()
+        self._low_speed_gains = list(LOW_SPEED_GAIN_DEFAULTS)
+        self._low_speed_gain_counts = [0, 0, 0]
+        self._low_speed_gain_save_counter = 0
+        self._low_speed_gain_sample_counter = 0
+        self._directional_gain_sample_counter = 0
+        self._load_low_speed_gains()
+
+    def _load_low_speed_gains(self):
+        try:
+            raw_version = self._torque_config_params.get('TorqueLowSpeedGainVersion')
+            version = int(raw_version.decode('utf-8')) if raw_version is not None else 0
+        except Exception:
+            version = 0
+        if version != LOW_SPEED_GAIN_STATE_VERSION:
+            return
+        for i, key in enumerate(LOW_SPEED_GAIN_PARAM_KEYS):
+            try:
+                raw = self._torque_config_params.get(key)
+                if raw is not None:
+                    val = float(raw.decode('utf-8', errors='ignore').strip())
+                    if math.isfinite(val):
+                        self._low_speed_gains[i] = float(clip(val, LOW_SPEED_GAIN_MIN, LOW_SPEED_GAIN_MAX))
+                raw_count = self._torque_config_params.get(key + 'Count')
+                if raw_count is not None:
+                    self._low_speed_gain_counts[i] = max(0, int(float(raw_count.decode('utf-8', errors='ignore').strip())))
+            except Exception:
+                pass
+
+    def _save_low_speed_gains(self):
+        try:
+            self._torque_config_params.put('TorqueLowSpeedGainVersion',
+                                           str(LOW_SPEED_GAIN_STATE_VERSION).encode('utf-8'))
+            for i, key in enumerate(LOW_SPEED_GAIN_PARAM_KEYS):
+                self._torque_config_params.put(key, ('%.5f' % self._low_speed_gains[i]).encode('utf-8'))
+                self._torque_config_params.put(key + 'Count', str(int(self._low_speed_gain_counts[i])).encode('utf-8'))
+        except Exception:
+            pass
+
+    def _load_center_offsets(self):
+        for i, key in enumerate(CENTER_OFFSET_PARAM_KEYS):
+            try:
+                raw = self._torque_config_params.get(key)
+                if raw is not None:
+                    val = float(raw.decode('utf-8', errors='ignore').strip())
+                    if math.isfinite(val):
+                        self._center_offsets[i] = float(clip(
+                            val, -CENTER_OFFSET_ABS_MAX_BY_BIN[i], CENTER_OFFSET_ABS_MAX_BY_BIN[i]))
+                raw_count = self._torque_config_params.get(CENTER_OFFSET_COUNT_KEYS[i])
+                if raw_count is not None:
+                    self._center_offset_counts[i] = max(
+                        0, int(float(raw_count.decode('utf-8', errors='ignore').strip())))
+            except Exception:
+                pass
+
+    def _resolved_center_offsets(self, fallback=0.0):
+        """Fill an unlearned speed bin from the nearest learned bin.
+
+        This prevents a temporary zero-offset hole at 40 or 60 km/h while a new
+        bin is still collecting its first valid straight-road window.
+        """
+        values = [float(x) for x in self._center_offsets]
+        valid = [int(c) > 0 for c in self._center_offset_counts]
+        fallback = float(clip(float(fallback), -LAT_ACCEL_OFFSET_ABS_MAX, LAT_ACCEL_OFFSET_ABS_MAX))
+        if not any(valid):
+            return fallback, fallback, fallback
+
+        resolved = list(values)
+        for i in range(3):
+            if valid[i]:
+                continue
+            nearest = min((j for j in range(3) if valid[j]), key=lambda j: abs(j - i))
+            resolved[i] = values[nearest]
+        return tuple(resolved)
+
+    def _get_center_offset_for_speed(self, v_kph, fallback=0.0):
+        if not (LAT_ACCEL_OFFSET_COMP_ENABLED and getattr(self, '_center_offset_enabled', False)):
+            return 0.0
+        try:
+            low, mid, high = self._resolved_center_offsets(fallback)
+            # 10~20km/h applies only a weak fraction of the low-speed value.
+            # Above 60km/h the highway value is applied at 100%.
+            off = float(interp(float(v_kph),
+                               [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 100.0],
+                               [0.0, 0.0, 0.25 * low, low, 0.5 * (low + mid), mid, high, high]))
+            off = float(clip(off, -LAT_ACCEL_OFFSET_ABS_MAX, LAT_ACCEL_OFFSET_ABS_MAX))
+            if abs(off) < CENTER_OFFSET_EFFECTIVE_DEADBAND:
+                return 0.0
+            return off
+        except Exception:
+            return float(fallback)
+
+    def _reload_runtime_torque_config(self):
+        self._torque_config_counter += 1
+        if self._torque_config_counter < 50:
+            return
+        self._torque_config_counter = 0
+        try:
+            self._torque_runtime_config = read_torque_tuning_config(self._torque_config_params, migrate=False)
+            self._center_offset_enabled = bool(self._torque_runtime_config.center_offset_enabled)
+            self._directional_comp_enabled = bool(self._torque_runtime_config.directional_comp_enabled)
+            self._load_center_offsets()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _low_speed_gain_bin(v_kph):
+        if 10.0 <= v_kph < 20.0:
+            return 0
+        if 20.0 <= v_kph < 30.0:
+            return 1
+        if 30.0 <= v_kph < 40.0:
+            return 2
+        return None
+
+    def _update_low_speed_gain(self, v_kph, desired_lateral_accel, actual_lateral_accel,
+                               steering_pressed, steer_limited, rate_limited_strong):
+        idx = self._low_speed_gain_bin(v_kph)
+        if idx is None or not self._is_equinox_torque_profile or not self._torque_runtime_config.enabled:
+            return
+        self._low_speed_gain_sample_counter = (self._low_speed_gain_sample_counter + 1) % 10
+        if self._low_speed_gain_sample_counter != 0:
+            return
+        if bool(steering_pressed) or bool(steer_limited) or bool(rate_limited_strong):
+            return
+
+        desired = self._safe_float(desired_lateral_accel, 0.0)
+        actual = self._safe_float(actual_lateral_accel, 0.0)
+        desired_abs = abs(desired)
+        actual_abs = abs(actual)
+        if desired_abs < 0.15 or desired_abs > 1.30 or actual_abs < 0.05:
+            return
+        if desired * actual <= 0.0 or abs(desired - actual) > 0.60:
+            return
+
+        ratio = desired_abs / max(actual_abs, 0.05)
+        target = 1.0 + LOW_SPEED_GAIN_TARGET_WEIGHT * (ratio - 1.0)
+        target = float(clip(target, LOW_SPEED_GAIN_MIN, LOW_SPEED_GAIN_MAX))
+        current = float(self._low_speed_gains[idx])
+        current += float(clip(target - current, -LOW_SPEED_GAIN_MAX_STEP, LOW_SPEED_GAIN_MAX_STEP))
+        self._low_speed_gains[idx] = float(clip(current, LOW_SPEED_GAIN_MIN, LOW_SPEED_GAIN_MAX))
+        self._low_speed_gain_counts[idx] += 1
+        self._low_speed_gain_save_counter += 1
+        if self._low_speed_gain_save_counter >= LOW_SPEED_GAIN_SAVE_SAMPLES:
+            self._low_speed_gain_save_counter = 0
+            self._save_low_speed_gains()
+
+    def _get_low_speed_gain(self, v_kph):
+        centers = [15.0, 25.0, 35.0]
+        effective = []
+        for i in range(3):
+            confidence = float(interp(float(self._low_speed_gain_counts[i]),
+                                      [LOW_SPEED_GAIN_MIN_POINTS, LOW_SPEED_GAIN_FULL_POINTS],
+                                      [0.0, 1.0]))
+            effective.append(float(LOW_SPEED_GAIN_DEFAULTS[i] +
+                                   (self._low_speed_gains[i] - LOW_SPEED_GAIN_DEFAULTS[i]) * confidence))
+        return float(interp(v_kph, [10.0] + centers + [45.0],
+                            [1.0] + effective + [1.0]))
+
     def update_live_torque_params(self, latAccelFactor, latAccelOffset, friction, totalBucketPoints=0):
-        if not LAT_ACCEL_OFFSET_COMP_ENABLED:
+        if not (LAT_ACCEL_OFFSET_COMP_ENABLED and getattr(self, '_center_offset_enabled', False)):
             safe_offset = 0.0
         else:
             try:
@@ -297,7 +492,7 @@ class LatControlTorque(LatControl):
     def _get_directional_torque_params(self, torque_params, v_ego, desired_lateral_accel,
                                        actual_lateral_accel, steering_pressed=False,
                                        steer_limited=False):
-        if not DIRECTIONAL_TORQUE_COMP_ENABLED:
+        if not (DIRECTIONAL_TORQUE_COMP_ENABLED and getattr(self, '_directional_comp_enabled', False)):
             return torque_params
 
         desired_lat = self._safe_float(desired_lateral_accel, 0.0)
@@ -317,6 +512,8 @@ class LatControlTorque(LatControl):
             not bool(steering_pressed) and
             not bool(steer_limited)
         )
+        self._directional_gain_sample_counter = (self._directional_gain_sample_counter + 1) % 10
+        can_learn = can_learn and self._directional_gain_sample_counter == 0
         if can_learn:
             signed_error = (desired_lat - actual_lat) * float(side)
             error_mag = abs(signed_error)
@@ -452,27 +649,29 @@ class LatControlTorque(LatControl):
                                    actual_lateral_accel, steer_limited=False, steering_pressed=False,
                                    last_actuators=None, rate_limited_strong=False, rate_limit_err=0.0,
                                    driver_steering_torque=0.0):
+        """Apply one bounded low-speed model on top of the learned base.
+
+        torqued owns the medium/high-speed vehicle model. This controller only
+        adapts a small 10~40km/h gain and a bounded friction fallback. High-speed
+        stability is handled by curvature filtering and the final torque cap,
+        avoiding the old duplicate high-speed latAccelFactor/friction scaling.
         """
-        속도/코너 강도 기반 effective torque params.
-        - liveTorqueParameters 학습값은 건드리지 않는다.
-        - torque_from_lateral_accel()에 넣는 임시 파라미터만 변경한다.
-        - 10~35kph: latAccelFactor 낮춤 + friction 올림 = 저속 코너 최대 조향.
-        - 60~110kph: latAccelFactor 올림 + friction 낮춤 = 고속 와리가리 억제.
-        """
+        self._reload_runtime_torque_config()
         base_params = dict(getattr(self, '_dyn_base_live_torque_params', self.live_torque_params))
 
-        if not DYN_TORQUE_PROFILE_ENABLED or not self._is_equinox_torque_profile:
+        if (not DYN_TORQUE_PROFILE_ENABLED or not self._is_equinox_torque_profile or
+                not self._torque_runtime_config.enabled):
             self._dyn_effective_active = False
             self._dyn_last_blend = 0.0
             self.live_torque_params = dict(base_params)
             return self.live_torque_params
 
-        base_lat = self._safe_float(base_params.get('latAccelFactor', 1.88), 1.88)
-        base_fric = self._safe_float(base_params.get('friction', 0.255), 0.255)
-        base_off = self._safe_float(base_params.get('latAccelOffset', 0.0), 0.0)
+        base_lat = self._safe_float(base_params.get('latAccelFactor', 2.05), 2.05)
+        base_fric = self._safe_float(base_params.get('friction', 0.230), 0.230)
+        published_off = self._safe_float(base_params.get('latAccelOffset', 0.0), 0.0)
         total_pts = base_params.get('totalBucketPoints', 0)
-
         v_kph = self._safe_float(v_ego, 0.0) * 3.6
+        base_off = self._get_center_offset_for_speed(v_kph, fallback=published_off)
         desired_curv_abs = abs(self._safe_float(desired_curvature, 0.0))
         desired_lat_abs = abs(self._safe_float(desired_lateral_accel, 0.0))
 
@@ -487,116 +686,49 @@ class LatControlTorque(LatControl):
         latacc_w = float(interp(desired_lat_abs, DYN_LATACC_STRENGTH_BP, [0.0, 1.0]))
         steer_w = float(interp(steer_abs, DYN_STEER_STRENGTH_BP, [0.0, 1.0]))
         corner_strength = float(clip(max(curv_w, latacc_w, steer_w), 0.0, 1.0))
+        low_gate = float(clip(interp(v_kph, [8.0, 10.0, 35.0, 40.0, 45.0],
+                                     [0.0, 1.0, 1.0, 0.55, 0.0]), 0.0, 1.0))
 
-        low_gate = float(clip(interp(v_kph, DYN_LOW_SPEED_GATE_BP, DYN_LOW_SPEED_GATE_V), 0.0, 1.0))
-        mid_gate = float(clip(interp(v_kph, DYN_MID_SPEED_GATE_BP, DYN_MID_SPEED_GATE_V), 0.0, 1.0))
-        high_gate = float(clip(interp(v_kph, DYN_HIGH_SPEED_GATE_BP, DYN_HIGH_SPEED_GATE_V), 0.0, 1.0))
-
-        rate_err = abs(self._safe_float(rate_limit_err, 0.0))
-        strong_rate_limited = bool(rate_limited_strong) or (rate_err >= float(DYN_RATE_LIMITED_STRONG_OUTPUT_GAP))
-
-        low_boost_target = corner_strength * low_gate
-        mid_boost_target = corner_strength * mid_gate
+        strong_rate_limited = bool(rate_limited_strong) or (
+            abs(self._safe_float(rate_limit_err, 0.0)) >= float(DYN_RATE_LIMITED_STRONG_OUTPUT_GAP))
+        self._update_low_speed_gain(v_kph, desired_lateral_accel, actual_lateral_accel,
+                                    steering_pressed, steer_limited, strong_rate_limited)
 
         driver_torque_abs = abs(self._safe_float(driver_steering_torque, 0.0))
-        strong_driver_override = bool(steering_pressed) and (driver_torque_abs >= float(DYN_DRIVER_TORQUE_HARD_DISABLE))
-
-        # steeringPressed가 들어와도 저속 코너 보조를 완전히 끄지 않는다.
-        # - 강한 운전자 토크면 OP와 싸우지 않도록 0으로 차단
-        # - 가벼운 hand-on/미세 개입이면 보조를 일부 유지
+        strong_driver_override = bool(steering_pressed) and driver_torque_abs >= float(DYN_DRIVER_TORQUE_HARD_DISABLE)
+        blend = corner_strength * low_gate
         if strong_driver_override:
-            low_boost_target = 0.0
-            mid_boost_target = 0.0
-            self._dyn_corner_hold_frames = 0
+            blend = 0.0
         elif bool(steering_pressed):
-            low_boost_target *= float(DYN_STEERING_PRESSED_LOW_BOOST_MULT)
-            mid_boost_target *= float(DYN_STEERING_PRESSED_MID_BOOST_MULT)
-
-        # 제한이 걸리면 더 밀지 않고 부스트를 줄임.
-        # strong rate-limit은 단순 limit보다 더 강하게 backoff한다.
-        low_speed_backoff = float(DYN_LOW_SPEED_LIMIT_BACKOFF_MULT) if v_kph <= 50.0 else None
+            blend *= 0.45
         if bool(strong_rate_limited):
-            mult = low_speed_backoff if low_speed_backoff is not None else float(DYN_RATE_LIMITED_STRONG_BOOST_MULT)
-            low_boost_target *= mult
-            mid_boost_target *= mult
+            blend *= 0.65
         elif bool(steer_limited):
-            mult = low_speed_backoff if low_speed_backoff is not None else float(DYN_STEER_LIMITED_BOOST_MULT)
-            low_boost_target *= mult
-            mid_boost_target *= mult
-        if bool(getattr(self, '_stable_torque_slew_active', False)):
-            mult = low_speed_backoff if low_speed_backoff is not None else float(DYN_TORQUE_SLEW_ACTIVE_MULT)
-            low_boost_target *= mult
-            mid_boost_target *= mult
+            blend *= 0.80
+        blend = float(clip(blend, 0.0, 1.0))
 
-        # 10~35km/h는 로그상 clip/rate가 가장 심한 저속~저중속 코너 영역이므로
-        # 작은 코너 요구라도 부스트를 충분히 확보한다.
-        # BUGFIX: 기존 corner_strength 임계가 높으면 완만한 코너에서 dynamic 값이 거의 안 변했다.
-        # desired curvature / lateral accel / 이전 steer 중 하나라도 코너 힌트가 있으면 최소 부스트를 보장한다.
-        turning_hint = bool(
-            (desired_curv_abs >= 0.00020) or
-            (desired_lat_abs >= 0.035) or
-            (steer_abs >= 0.015)
-        )
-        if (10.0 <= v_kph <= 35.0) and turning_hint and (not strong_driver_override):
-            low35_min_boost = 0.90 if bool(strong_rate_limited) else 1.00
-            if bool(steering_pressed):
-                low35_min_boost *= float(DYN_STEERING_PRESSED_LOW_MIN_BOOST)
-            low_boost_target = max(low_boost_target, low35_min_boost * low_gate)
-        elif (35.0 < v_kph <= 45.0) and turning_hint and (not strong_driver_override):
-            bridge_min_boost = float(interp(v_kph, [35.0, 40.0, 45.0], [0.85, 0.72, 0.58]))
-            if bool(strong_rate_limited):
-                bridge_min_boost *= 0.82
-            if bool(steering_pressed):
-                bridge_min_boost *= float(DYN_STEERING_PRESSED_BRIDGE_MIN_BOOST)
-            low_boost_target = max(low_boost_target, bridge_min_boost)
+        low_speed_gain = self._get_low_speed_gain(v_kph)
+        applied_gain = 1.0 + (low_speed_gain - 1.0) * blend
+        eff_lat = base_lat / max(applied_gain, 0.90)
+        friction_scale = float(interp(v_kph, LOW_SPEED_FRICTION_SCALE_BP, LOW_SPEED_FRICTION_SCALE_V))
+        eff_fric = base_fric * (1.0 + (friction_scale - 1.0) * blend)
+        eff_lat = float(clip(eff_lat, CONTROLLER_LAT_ACCEL_MIN, CONTROLLER_LAT_ACCEL_MAX))
+        eff_fric = float(clip(eff_fric, CONTROLLER_FRICTION_MIN, CONTROLLER_FRICTION_MAX))
 
-        # 코너 종료 후 짧게 유지한 뒤 천천히 감쇠.
-        if low_boost_target > 0.08:
-            self._dyn_corner_hold_frames = int(DYN_LOW_SPEED_HOLD_FRAMES)
-        elif self._dyn_corner_hold_frames > 0:
-            self._dyn_corner_hold_frames -= 1
-            low_boost_target = max(low_boost_target, min(float(self._dyn_corner_boost), 0.65) * low_gate)
-
-        # 램프 적용: 갑자기 토크 성격이 바뀌지 않도록 함.
-        cur_boost = float(getattr(self, '_dyn_corner_boost', 0.0) or 0.0)
-        if low_boost_target > cur_boost:
-            cur_boost = min(low_boost_target, cur_boost + float(DYN_BOOST_RISE_STEP))
-        else:
-            cur_boost = max(low_boost_target, cur_boost - float(DYN_BOOST_FALL_STEP))
-        cur_boost = float(clip(cur_boost, 0.0, 1.0))
-        self._dyn_corner_boost = cur_boost
-
-        target_lat = base_lat * float(interp(v_kph, DYN_LAT_FACTOR_BP, DYN_LAT_FACTOR_SCALE_V))
-        target_fric = base_fric * float(interp(v_kph, DYN_FRICTION_BP, DYN_FRICTION_SCALE_V))
-
-        # 저속은 코너 강도 기반, 중속은 완만한 코너 보조, 고속은 안정 게이트 기반으로 블렌딩.
-        learning_gate = float(interp(float(total_pts),
-                                     [DYN_PROFILE_MIN_POINTS, DYN_PROFILE_FULL_POINTS],
-                                     [0.0, 1.0]))
-        if turning_hint and v_kph <= 60.0:
-            learning_gate = max(float(DYN_PROFILE_LOW_SPEED_MIN_GATE), learning_gate)
-        blend = float(clip(max(cur_boost, mid_boost_target, high_gate) * learning_gate, 0.0, 1.0))
-        self._dyn_last_blend = float(blend)
-
-        eff_lat = base_lat + (target_lat - base_lat) * blend
-        eff_fric = base_fric + (target_fric - base_fric) * blend
-
-        lat_min_scale = float(interp(v_kph, DYN_LAT_FACTOR_MIN_SCALE_BP, DYN_LAT_FACTOR_MIN_SCALE_V))
-        fric_max_scale = float(interp(v_kph, DYN_FRICTION_MAX_SCALE_BP, DYN_FRICTION_MAX_SCALE_V))
-        eff_lat = float(clip(eff_lat,
-                             max(DYN_LAT_FACTOR_MIN, base_lat * lat_min_scale),
-                             min(DYN_LAT_FACTOR_MAX, base_lat * 1.04)))
-        eff_fric = float(clip(eff_fric,
-                              max(DYN_FRICTION_MIN, base_fric * 0.90),
-                              min(DYN_FRICTION_MAX, base_fric * fric_max_scale)))
-
+        delta_up, delta_down = equinox_steer_delta_profile(
+            v_kph, self._torque_runtime_config,
+            steering_pressed=steering_pressed, driver_torque=driver_steering_torque,
+            reversing=False)
+        self._dyn_last_target_delta_up = float(delta_up)
+        self._dyn_last_target_delta_down = float(delta_down)
         self._dyn_last_corner_strength = corner_strength
         self._dyn_last_low_speed_gate = low_gate
-        self._dyn_last_mid_speed_gate = mid_gate
-        self._dyn_last_high_speed_gate = high_gate
+        self._dyn_last_mid_speed_gate = 0.0
+        self._dyn_last_high_speed_gate = 0.0
         self._dyn_last_rate_limited_strong = bool(strong_rate_limited)
-        self._dyn_last_target_delta_up = float(interp(v_kph, DYN_DELTA_UP_BP, DYN_DELTA_UP_V))
-        self._dyn_last_target_delta_down = float(interp(v_kph, DYN_DELTA_DOWN_BP, DYN_DELTA_DOWN_V))
+        self._dyn_last_blend = blend
+        self._dyn_last_low_speed_gain = float(low_speed_gain)
+        self._dyn_last_low_speed_gain_applied = float(applied_gain)
 
         self._dyn_last_effective_params = {
             'latAccelFactor': eff_lat,
@@ -604,8 +736,6 @@ class LatControlTorque(LatControl):
             'latAccelOffset': base_off,
             'totalBucketPoints': total_pts,
         }
-        # BUGFIX: 실제 적용 effective 값을 self.live_torque_params에도 반영한다.
-        # base는 _dyn_base_live_torque_params에 따로 보존하므로, 코너가 끝나면 원래 학습값으로 정상 복귀한다.
         self._dyn_effective_active = bool(blend > 1e-4)
         self.live_torque_params = dict(self._dyn_last_effective_params if self._dyn_effective_active else base_params)
         return self.live_torque_params
@@ -638,6 +768,9 @@ class LatControlTorque(LatControl):
             'dirAssistSide': int(getattr(self, '_dir_torque_last_side', 0) or 0),
             'targetDeltaUp': float(getattr(self, '_dyn_last_target_delta_up', 0.0) or 0.0),
             'targetDeltaDown': float(getattr(self, '_dyn_last_target_delta_down', 0.0) or 0.0),
+            'lowSpeedGain': float(getattr(self, '_dyn_last_low_speed_gain', 1.0) or 1.0),
+            'lowSpeedGainApplied': float(getattr(self, '_dyn_last_low_speed_gain_applied', 1.0) or 1.0),
+            'lowSpeedGainCounts': list(getattr(self, '_low_speed_gain_counts', [0, 0, 0])),
             'rateLimitedStrong': bool(getattr(self, '_dyn_last_rate_limited_strong', False)),
             'speedTorqueCap': float(getattr(self, '_speed_torque_cap', self.steer_max) or self.steer_max),
             'speedTorqueCapActive': bool(getattr(self, '_speed_torque_cap_active', False)),

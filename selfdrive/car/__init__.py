@@ -45,7 +45,8 @@ def dbc_dict(pt_dbc, radar_dbc, chassis_dbc=None, body_dbc=None):
   return {'pt': pt_dbc, 'radar': radar_dbc, 'chassis': chassis_dbc, 'body': body_dbc}
 
 
-def apply_std_steer_torque_limits(apply_torque, apply_torque_last, driver_torque, LIMITS):
+def apply_std_steer_torque_limits(apply_torque, apply_torque_last, driver_torque, LIMITS,
+                                  delta_up=None, delta_down=None):
 
   # limits due to driver torque
   driver_max_torque = LIMITS.STEER_MAX + (LIMITS.STEER_DRIVER_ALLOWANCE + driver_torque * LIMITS.STEER_DRIVER_FACTOR) * LIMITS.STEER_DRIVER_MULTIPLIER
@@ -54,13 +55,18 @@ def apply_std_steer_torque_limits(apply_torque, apply_torque_last, driver_torque
   min_steer_allowed = min(max(-LIMITS.STEER_MAX, driver_min_torque), 0)
   apply_torque = clip(apply_torque, min_steer_allowed, max_steer_allowed)
 
+  # Optional per-command rate limits keep existing callers fully compatible.
+  # Vehicle-specific controllers may provide a conservative speed profile.
+  steer_delta_up = LIMITS.STEER_DELTA_UP if delta_up is None else max(1, int(delta_up))
+  steer_delta_down = LIMITS.STEER_DELTA_DOWN if delta_down is None else max(1, int(delta_down))
+
   # slow rate if steer torque increases in magnitude
   if apply_torque_last > 0:
-    apply_torque = clip(apply_torque, max(apply_torque_last - LIMITS.STEER_DELTA_DOWN, -LIMITS.STEER_DELTA_UP),
-                        apply_torque_last + LIMITS.STEER_DELTA_UP)
+    apply_torque = clip(apply_torque, max(apply_torque_last - steer_delta_down, -steer_delta_up),
+                        apply_torque_last + steer_delta_up)
   else:
-    apply_torque = clip(apply_torque, apply_torque_last - LIMITS.STEER_DELTA_UP,
-                        min(apply_torque_last + LIMITS.STEER_DELTA_DOWN, LIMITS.STEER_DELTA_UP))
+    apply_torque = clip(apply_torque, apply_torque_last - steer_delta_up,
+                        min(apply_torque_last + steer_delta_down, steer_delta_up))
 
   return int(round(float(apply_torque)))
 
