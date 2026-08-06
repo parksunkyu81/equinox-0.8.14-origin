@@ -18,13 +18,7 @@ from selfdrive.car.car_helpers import get_car, get_startup_event, get_one_can
 from selfdrive.controls.lib.lane_planner import CAMERA_OFFSET
 from selfdrive.controls.lib.drive_helpers import update_v_cruise, initialize_v_cruise
 from selfdrive.controls.lib.drive_helpers import get_lag_adjusted_curvature
-from selfdrive.controls.lib.longcontrol import LongControl, LongCtrlState
-from selfdrive.controls.lib.pedal_force_recovery import (
-  PEDAL_FORCE_RECOVERY_PEDAL_FLOOR,
-  PedalForceRecovery,
-  bench_fault_state,
-  recovery_speed_demand,
-)
+from selfdrive.controls.lib.longcontrol import LongControl
 from selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from selfdrive.controls.lib.latcontrol_indi import LatControlINDI
 from selfdrive.controls.lib.latcontrol_lqr import LatControlLQR
@@ -36,12 +30,11 @@ from selfdrive.controls.lib.vehicle_model import VehicleModel
 from selfdrive.locationd.calibrationd import Calibration
 from selfdrive.hardware import HARDWARE, TICI, EON
 from selfdrive.manager.process_config import managed_processes
-from selfdrive.process_diagnostics import append_process_diagnostic
 
 from selfdrive.ntune import ntune_common_get, ntune_common_enabled, ntune_scc_get, ntune_torque_get
 from selfdrive.road_speed_limiter import road_speed_limiter_get_max_speed, road_speed_limiter_get_active, \
   get_road_speed_limiter
-from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, V_CRUISE_ENABLE_MIN, CONTROL_N
+from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, CONTROL_N
 from selfdrive.car.gm.values import SLOW_ON_CURVES, MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
@@ -50,38 +43,18 @@ MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
 
 SOFT_DISABLE_TIME = 3  # seconds
-FCW_MIN_CLOSING_SPEED = 0.8
-FCW_URGENT_TTC = 1.6
-FCW_CRITICAL_TTC = 1.0
-FCW_DECEL_SUPPRESS = -0.8
-MANUAL_BRAKE_FCW_MIN_CLOSING_SPEED = 0.8
-MANUAL_BRAKE_FCW_TTC = 3.0
-MANUAL_BRAKE_FCW_MIN_DISTANCE = 8.0
-MANUAL_BRAKE_FCW_STOP_DISTANCE = 5.5
-MANUAL_BRAKE_FCW_HEADWAY = 1.2
-LOW_SPEED_CURVE_SLOWDOWN_MIN_KPH = 10.0
-LOW_SPEED_CURVE_SLOWDOWN_MAX_KPH = 35.0
-LOW_SPEED_CURVE_SLOWDOWN_FLOOR_KPH = 8.0
-LOW_SPEED_CURVE_SLOWDOWN_MIN_RATIO = 1.20
-LOW_SPEED_CURVE_SLOWDOWN_FULL_RATIO = 2.20
-LOW_SPEED_CURVE_SLOWDOWN_MIN_DROP_KPH = 0.5
-LOW_SPEED_CURVE_SLOWDOWN_CLIP_HOLD_FRAMES = int(2.0 / DT_CTRL)
-LOW_SPEED_CURVE_SLOWDOWN_KPH_BP = [10.0, 15.0, 20.0, 30.0, 35.0]
-LOW_SPEED_CURVE_SLOWDOWN_MAX_DROP_KPH = [1.4, 2.4, 3.4, 4.8, 3.0]
 # controlsAllowed mismatch는 CAN/pandaState 수신 타이밍 차이로 순간 발생할 수 있으므로
 # 연속 mismatch만 controlsMismatch로 처리한다. 100Hz 기준 10프레임 = 약 100ms.
-CONTROLS_ALLOWED_MISMATCH_FRAMES = int(0.5 / DT_CTRL)
+CONTROLS_ALLOWED_MISMATCH_FRAMES = 10
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
 REPLAY = "REPLAY" in os.environ
 SIMULATION = "SIMULATION" in os.environ
 NOSENSOR = "NOSENSOR" in os.environ
-EQUINOX_SIMULATOR = SIMULATION and os.getenv("EQUINOX_SIMULATOR") == "1" and \
-                    os.getenv("NOBOARD") is not None
 IGNORE_PROCESSES = {"rtshield", "uploader", "deleter", "loggerd", "logmessaged", "tombstoned",
                     "logcatd", "proclogd", "clocksd", "updated", "timezoned", "manage_athenad",
-                    "statsd", "shutdownd", "recoverylogger"} | \
+                    "statsd", "shutdownd"} | \
                    {k for k, v in managed_processes.items() if not v.enabled}
 
 ACTUATOR_FIELDS = set(car.CarControl.Actuators.schema.fields.keys())
@@ -125,13 +98,7 @@ class Controls:
 
         self.sm = sm
         if self.sm is None:
-            if EQUINOX_SIMULATOR:
-                # The bench simulator owns modelV2 and planning, not camera
-                # capture. A missing physical camera stream must not block the
-                # synthetic longitudinal control test.
-                ignore = ['roadCameraState', 'driverCameraState', 'managerState']
-            else:
-                ignore = ['driverCameraState', 'managerState'] if SIMULATION else None
+            ignore = ['driverCameraState', 'managerState'] if SIMULATION else None
             self.sm = messaging.SubMaster(
                 ['deviceState', 'pandaStates', 'peripheralState', 'modelV2', 'liveCalibration',
                  'driverMonitoringState', 'longitudinalPlan', 'lateralPlan', 'liveLocationKalman', 'dynamicFollowData',
@@ -188,6 +155,7 @@ class Controls:
 
         self.LoC = LongControl(self.CP)
         self.VM = VehicleModel(self.CP)
+
         if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
             self.LaC = LatControlAngle(self.CP, self.CI)
         elif self.CP.lateralTuning.which() == 'pid':
@@ -217,7 +185,7 @@ class Controls:
         self.roadLimitSpeedLeftDist = 0
 
         self.slow_on_curves = Params().get_bool('SccSmootherSlowOnCurves')
-        self.stop_accel_boost = Params().get_bool('StopAccelBoost')
+        self.safe_distance_speed = Params().get_bool('SafeDistanceSpeed')
 
         self.min_set_speed_clu = self.kph_to_clu(MIN_SET_SPEED_KPH)
         self.max_set_speed_clu = self.kph_to_clu(MAX_SET_SPEED_KPH)
@@ -228,34 +196,6 @@ class Controls:
         self.slowing_down = False
         self.slowing_down_alert = False
         self.slowing_down_sound_alert = False
-        self.pedal_comfort_accel_cap = 0.0
-        self.pedal_deadzone_boost_candidate = False
-        self.pedal_deadzone_boost_active = False
-        self.pedal_deadzone_raw_command = 0.0
-        self.pedal_deadzone_applied_command = 0.0
-        self.pedal_deadzone_floor = 0.0
-        self.pedal_deadzone_accel_request = 0.0
-        self.pedal_deadzone_vehicle_accel = 0.0
-        self.pedal_force_recovery = PedalForceRecovery(DT_CTRL)
-        self.equinox_simulator = EQUINOX_SIMULATOR
-        self.equinox_sim_force_accel_zero = False
-        self.equinox_sim_recovery_enabled = True
-        self.equinox_sim_fault_mode = 0
-        self.equinox_sim_recovery_completed = False
-        self.equinox_sim_params = Params() if self.equinox_simulator else None
-        self.gm_steer_command_sent = False
-        self.gm_steer_command_gap_ms = 0.0
-        self.gm_steer_command_deadline_lag_ms = 0.0
-        self.gm_steer_command_counter = 0
-        self.gm_steer_loopback_counter = 0
-        self.gm_steer_loopback_changed = False
-        self.gm_steer_loopback_acked = True
-        self.gm_steer_command_gap_fault = False
-        self.gm_lkas_status = 0
-        self.gm_steer_command_active = False
-        self.gm_steer_command_torque = 0
-        self.gm_steer_requested_torque = 0
-        self.gm_steer_torque_limited = False
         self.active_cam = False
         self.over_speed_limit = False
 
@@ -274,7 +214,6 @@ class Controls:
         self.events_prev = []
         self.current_alert_types = [ET.PERMANENT]
         self.logged_comm_issue = False
-        self.logged_process_not_running = False
         self.button_timers = {ButtonEvent.Type.decelCruise: 0, ButtonEvent.Type.accelCruise: 0}
         self.last_actuators = car.CarControl.Actuators.new_message()
 
@@ -295,13 +234,6 @@ class Controls:
         self.disable_op_fcw = params.get_bool('DisableOpFcw')
 
         self.limited_lead = False
-
-        # 커브 운행중 (2026-05-18)
-        self.is_curv_driving = False
-        self.low_speed_curv_slowdown = False
-        self.low_speed_steer_clip_hold_frames = 0
-        # 커브 스피드 (2026-05-18)
-        self.curv_speed = 0.0
 
         # TODO: no longer necessary, aside from process replay
         self.sm['liveParameters'].valid = True
@@ -352,46 +284,6 @@ class Controls:
             return radar.leadOne
         return None
 
-    def op_fcw_dangerous_lead(self, CS):
-        lead = self.get_lead(self.sm)
-        if lead is None or lead.dRel <= 0.0:
-            return False
-
-        closing_speed = -lead.vRel
-        if closing_speed <= 0.0:
-            return False
-
-        ttc = lead.dRel / max(closing_speed, 0.1)
-        close_distance = max(4.5, CS.vEgo * 0.65 + 2.5)
-        critical_distance = max(3.0, CS.vEgo * 0.25 + 1.5)
-
-        close_and_urgent = lead.dRel <= close_distance and closing_speed >= FCW_MIN_CLOSING_SPEED and ttc <= FCW_URGENT_TTC
-        critical_now = lead.dRel <= critical_distance and ttc <= FCW_CRITICAL_TTC
-        if not (close_and_urgent or critical_now):
-            return False
-
-        already_decelerating = CS.aEgo <= FCW_DECEL_SUPPRESS
-        return not already_decelerating or critical_now
-
-    def manual_brake_early_warning(self, CS):
-        # Pedal-only longitudinal control needs more driver reaction time than
-        # the normal last-moment FCW path because it cannot apply the brakes.
-        if not self.CP.enableGasInterceptor or not CS.adaptiveCruise or CS.brakePressed:
-            return False
-
-        lead = self.get_lead(self.sm)
-        if lead is None or lead.dRel <= 0.0:
-            return False
-
-        closing_speed = -lead.vRel
-        if closing_speed < MANUAL_BRAKE_FCW_MIN_CLOSING_SPEED:
-            return False
-
-        ttc = lead.dRel / max(closing_speed, 0.1)
-        warning_distance = max(MANUAL_BRAKE_FCW_MIN_DISTANCE,
-                               MANUAL_BRAKE_FCW_STOP_DISTANCE + MANUAL_BRAKE_FCW_HEADWAY * max(CS.vEgo, 0.0))
-        return lead.dRel <= warning_distance and ttc <= MANUAL_BRAKE_FCW_TTC
-
     def get_long_lead_safe_speed(self, sm, CS, vEgo):
         if CS.adaptiveCruise:
             lead = self.get_lead(sm)
@@ -430,7 +322,7 @@ class Controls:
 
         return 0
 
-    """def cal_curve_speed(self, sm, v_ego, frame):
+    def cal_curve_speed(self, sm, v_ego, frame):
 
         lateralPlan = sm['lateralPlan']
         if len(lateralPlan.curvatures) == CONTROL_N:
@@ -447,207 +339,7 @@ class Controls:
             if np.isnan(self.curve_speed_ms):
                 self.curve_speed_ms = 255.
         else:
-            self.curve_speed_ms = 255."""
-
-    def cal_curve_speed(self, sm, v_ego, frame):
-        lateralPlan = sm['lateralPlan']
-        if len(lateralPlan.curvatures) != CONTROL_N:
             self.curve_speed_ms = 255.
-            self.is_curv_driving = False
-            self.low_speed_curv_slowdown = False
-            self.curv_speed = float(self.curve_speed_ms * self.speed_conv_to_clu)
-            return
-
-        curvatures = np.asarray(lateralPlan.curvatures, dtype=np.float32)
-        n = len(curvatures)
-
-        # ===== 1) 모델 샘플 간격/제어 주기(없으면 안전한 기본값) =====
-        DT_MDL = getattr(self, "DT_MDL", 0.2)  # curvatures 시간 간격(초). 보통 0.2s 근처
-        DT_CTRL = getattr(self, "DT_CTRL", globals().get("DT_CTRL", 0.01))  # 이 함수가 도는 주기(초)
-
-        horizon_s = (n - 1) * DT_MDL
-
-        # ===== 2) 속도 기반 lookahead window 자동 결정 =====
-        v = float(max(v_ego, 0.0))
-        v_kph = v * 3.6
-
-        # "언제부터 보기 시작할지"(너무 가까운 구간은 노이즈/조향 순간변화가 섞이기 쉬움)
-        ahead_start_s = float(np.interp(v, [0.0, 13.9, 27.8], [1.0, 1.2, 1.5]))
-
-        # "어디까지 볼지"(속도 높을수록 더 멀리)
-        ahead_end_s = float(np.interp(v, [0.0, 13.9, 27.8, 33.3], [3.0, 3.6, 4.4, 4.8]))
-        ahead_end_s = min(ahead_end_s, horizon_s)
-
-        # 대표 곡률 분위수(저속은 더 공격적, 고속은 더 부드럽게)
-        perc = float(np.interp(v, [0.0, 13.9, 27.8], [92.0, 90.0, 85.0]))
-
-        i0 = int(round(ahead_start_s / DT_MDL))
-        i1 = int(round(ahead_end_s / DT_MDL))
-
-        i0 = max(0, min(i0, n - 1))
-        i1 = max(i0 + 1, min(i1, n))  # slice end
-
-        seg = np.abs(curvatures[i0:i1])
-
-        # ===== 2-1) 대표 곡률(curv_abs) 산출 =====
-        # 기존: 분위수 + top-k mean (스파이크 감지)
-        # 추가: upper_mean (지속 완만 커브 감지)
-        if seg.size > 0:
-            curv_p = float(np.percentile(seg, perc))
-            seg_sorted = np.sort(seg)
-
-            # 속도 높을수록 k를 조금 키워 과민을 줄이면서도 스파이크는 잡게
-            k = int(np.interp(v, [0.0, 13.9, 27.8], [3, 4, 5]))
-            k = max(1, min(k, int(seg_sorted.size)))
-
-            topk_mean = float(np.mean(seg_sorted[-k:])) if seg_sorted.size >= k else float(np.max(seg_sorted))
-
-            # ✅ upper_mean: 상위 50% 평균 (seg가 너무 작으면 영향 최소화)
-            if seg_sorted.size >= 8:
-                upper = seg_sorted[int(0.5 * seg_sorted.size):]
-                upper_mean = float(np.mean(upper)) if upper.size > 0 else float(curv_p)
-            else:
-                upper_mean = float(curv_p)
-
-            # 기본 결합(스파이크 + 분위수)
-            curv_abs = max(curv_p, topk_mean * 0.95)
-
-            # upper_mean 보강은 노이즈 바닥 이상일 때만 (과민 방지)
-            # -> 아래 mild_curv_min(완만 코너 인정 최소 곡률)의 60% 정도를 노이즈 바닥으로 사용
-            #    (완만 코너 감지 강화는 하되, 직진/차선변경 노이즈는 배제)
-            # mild_curv_min은 아래에서 계산하지만, 여기서는 우선 임시로 속도 기반으로 근사합니다.
-            # (정확한 mild_curv_min은 3-1에서 다시 계산하며, extra 적용은 그쪽에서만 합니다.)
-            mild_curv_min_tmp = float(np.interp(
-                v_kph,
-                [0, 30, 60, 100, 130],
-                [0.0100, 0.0034, 0.00145, 0.00082, 0.00061]
-            ))
-            noise_floor = mild_curv_min_tmp * 0.60
-
-            if upper_mean > noise_floor:
-                curv_abs = max(curv_abs, upper_mean * 0.90)
-        else:
-            curv_abs = float(abs(curvatures[-1]))
-
-        curv_abs = max(float(curv_abs), 1e-4)
-
-        # ===== 3) 허용 횡가속 기반 안전 속도 계산 =====
-        a_y_max = 2.975 - v * 0.0375
-        a_y_max = float(np.clip(a_y_max, 1.2, 3.0))
-
-        v_curvature = sqrt(a_y_max / curv_abs)
-
-        # 보수 계수(기본)
-        scc_curvature_factor = 0.96
-        base_factor = float(np.interp(v, [0.0, 13.9, 27.8], [0.86, 0.83, 0.80]))
-        model_speed = v_curvature * base_factor * scc_curvature_factor
-
-        # ===== 3-1) ✅ 완만 코너 감지 강화(과민 방지): 5kph 단위 mild_curv_min + extra =====
-        # speed breakpoints (kph)
-        MILD_KPH_BP = [
-            0, 5, 10, 15, 20, 25, 30,
-            35, 40, 45, 50, 55, 60,
-            65, 70, 75, 80, 85, 90, 95,
-            100, 105, 110, 115, 120, 125, 130
-        ]
-
-        # mild curvature min threshold (1/m)
-        MILD_CURV_MIN_VAL = [
-            0.0100, 0.0090, 0.0080, 0.0065, 0.0052, 0.0042, 0.0034,  # 0~30kph
-            0.0028, 0.0023, 0.0020, 0.0018, 0.0016, 0.00145,  # 35~60kph
-            0.00133, 0.00122, 0.00112, 0.00105, 0.00098, 0.00092, 0.00087,  # 65~95kph
-            0.00082, 0.00078, 0.00074, 0.00070, 0.00067, 0.00064, 0.00061  # 100~130kph
-        ]
-
-        # extra factor: model_speed *= extra (1보다 작을수록 더 일찍/더 보수 감속)
-        EXTRA_VAL = [
-            1.000, 1.000, 1.000, 0.998, 0.995, 0.992, 0.990,  # 0~30
-            0.988, 0.985, 0.982, 0.979, 0.976, 0.973,  # 35~60
-            0.970, 0.968, 0.966, 0.964, 0.962, 0.960, 0.958,  # 65~95
-            0.956, 0.954, 0.952, 0.950, 0.949, 0.948, 0.947  # 100~130
-        ]
-
-        mild_curv_min = float(np.interp(v_kph, MILD_KPH_BP, MILD_CURV_MIN_VAL))
-        extra = float(np.interp(v_kph, MILD_KPH_BP, EXTRA_VAL))
-
-        # ---- (권장) 차선변경/깜빡이 중에는 extra 적용 금지(직진/차선변경 과민 방지) ----
-        in_lane_change = False
-        try:
-            in_lane_change = int(getattr(lateralPlan, "laneChangeState", 0)) != 0
-        except Exception:
-            in_lane_change = False
-
-        blinker_on = False
-        try:
-            cs = sm['carState']
-            blinker_on = bool(getattr(cs, "leftBlinker", False) or getattr(cs, "rightBlinker", False))
-        except Exception:
-            blinker_on = False
-
-        # ---- (적용) 완만 코너로 의미 있을 때만 model_speed 보수화 ----
-        if (curv_abs > mild_curv_min) and (not in_lane_change) and (not blinker_on):
-            model_speed *= extra
-
-        low_speed_eps_slowdown = False
-        # ===== 4) 코너 감속 ON/OFF 히스테리시스(깜빡임 방지) =====
-        ON_THRESH = 0.992
-        OFF_THRESH = 1.03
-        normal_curve_allowed = v >= MIN_CURVE_SPEED
-
-        if not getattr(self, "is_curv_driving", False):
-            if low_speed_eps_slowdown or (normal_curve_allowed and model_speed < v * ON_THRESH):
-                self.is_curv_driving = True
-        else:
-            if (not low_speed_eps_slowdown) and ((not normal_curve_allowed) or model_speed > v * OFF_THRESH):
-                self.is_curv_driving = False
-        self.low_speed_curv_slowdown = bool(low_speed_eps_slowdown and self.is_curv_driving)
-
-        # ===== 5) 목표 속도 결정 + 자연스러운 램프(변화율 제한) =====
-        if self.is_curv_driving:
-            if self.low_speed_curv_slowdown:
-                desired = float(max(model_speed, LOW_SPEED_CURVE_SLOWDOWN_FLOOR_KPH * CV.KPH_TO_MS))
-            else:
-                desired = float(max(model_speed, MIN_CURVE_SPEED))
-
-            prev = float(getattr(self, "curve_speed_ms", 255.0))
-            if prev > 200.0:  # 센티널 상태에서 처음 진입 시
-                prev = v
-
-            # 기본 램프 제한
-            decel_base = float(np.interp(v, [0.0, 13.9, 27.8], [0.9, 1.1, 1.3]))  # m/s^2
-            accel_limit = 2.0
-
-            # "커브가 가까운데 속도가 아직 높으면" 필요한 감속을 자동으로 더 허용
-            if seg.size > 0:
-                imax = int(np.argmax(seg))
-                t_peak = max((i0 + imax) * DT_MDL, 0.1)  # sec (0 방지)
-
-                a_req = (prev * prev - desired * desired) / max(2.0 * max(prev, 1e-3) * t_peak, 1e-3)
-                a_req = float(np.clip(a_req, 0.0, 2.8))  # 상한: 2.0~3.2 정도 취향 조절
-            else:
-                a_req = 0.0
-
-            decel_limit = max(decel_base, a_req)
-
-            # 원하는 값(desired)으로 서서히 수렴
-            if desired < prev:
-                new_speed = max(desired, prev - decel_limit * DT_CTRL)
-            else:
-                new_speed = min(desired, prev + accel_limit * DT_CTRL)
-
-            # 현재 속도보다 위로 튀지 않게(제한값이므로)
-            self.curve_speed_ms = float(min(new_speed, v))
-        else:
-            self.curve_speed_ms = 255.
-            self.low_speed_curv_slowdown = False
-
-        # ===== 6) NaN 방어 + 표시 단위 변환 =====
-        if np.isnan(self.curve_speed_ms) or self.curve_speed_ms <= 0.0:
-            self.curve_speed_ms = 255.
-            self.is_curv_driving = False
-            self.low_speed_curv_slowdown = False
-
-        self.curv_speed = float(self.curve_speed_ms * self.speed_conv_to_clu)
 
 
     # [크루즈 MAX 속도 설정] #
@@ -666,8 +358,7 @@ class Controls:
 
         curv_limit = 0
         self.cal_curve_speed(sm, vEgo, frame)
-        if self.slow_on_curves and SLOW_ON_CURVES and \
-                (self.curve_speed_ms >= MIN_CURVE_SPEED or bool(getattr(self, "low_speed_curv_slowdown", False))):
+        if self.slow_on_curves and SLOW_ON_CURVES and self.curve_speed_ms >= MIN_CURVE_SPEED:
             max_speed_clu = min(self.v_cruise_kph * CV.KPH_TO_MS, self.curve_speed_ms) * self.speed_conv_to_clu
             curv_limit = int(max_speed_clu)
         else:
@@ -705,20 +396,14 @@ class Controls:
             self.slowing_down = False
 
         lead_speed = self.get_long_lead_safe_speed(sm, CS, vEgo)
-        lead_limited = self.stop_accel_boost and \
-                       lead_speed >= self.min_set_speed_clu and \
-                       lead_speed < max_speed_clu
-        if lead_limited:
-            max_speed_clu = lead_speed
-            if not self.limited_lead:
-                self.max_speed_clu = vEgo + 3.
-        elif self.limited_lead:
-            # The longitudinal planner already rate-limits acceleration. Do not
-            # keep a stale lead-imposed cruise target for another 2-3 seconds
-            # after the lead is no longer limiting us.
-            self.max_speed_clu = max_speed_clu
-
-        self.limited_lead = lead_limited
+        if self.safe_distance_speed and lead_speed >= self.min_set_speed_clu:
+            if lead_speed < max_speed_clu:
+                max_speed_clu = min(max_speed_clu, lead_speed)
+                if not self.limited_lead:
+                    self.max_speed_clu = vEgo + 3.
+                    self.limited_lead = True
+        else:
+          self.limited_lead = False
 
 
         self.update_max_speed(int(max_speed_clu + 0.5), CS,
@@ -772,9 +457,9 @@ class Controls:
             self.events.add(EventName.lowMemory)
 
         # TODO: enable this once loggerd CPU usage is more reasonable
-        #cpus = list(self.sm['deviceState'].cpuUsagePercent)[:(-1 if EON else None)]
-        #if max(cpus, default=0) > 95 and not SIMULATION:
-        #  self.events.add(EventName.highCpuUsage)
+        cpus = list(self.sm['deviceState'].cpuUsagePercent)[:(-1 if EON else None)]
+        if max(cpus, default=0) > 95 and not SIMULATION:
+          self.events.add(EventName.highCpuUsage)
 
         # Alert if fan isn't spinning for 5 seconds
         if self.sm['peripheralState'].pandaType in (PandaType.uno, PandaType.dos):
@@ -814,7 +499,7 @@ class Controls:
 
         # Panda safety 설정 불일치는 즉시 controlsMismatch로 처리한다.
         # 단, pandaStates 자체가 invalid/stale이면 아래 usbError/commIssue 경로에서 처리한다.
-        if self.initialized and self.sm.valid["pandaStates"]:
+        if self.sm.valid["pandaStates"]:
             for i, pandaState in enumerate(self.sm['pandaStates']):
                 # All pandas must match the list of safetyConfigs,
                 # and if outside this list, must be silent or noOutput.
@@ -860,45 +545,6 @@ class Controls:
                 self.last_controls_allowed_mismatch_log_frame = self.sm.frame
             self.events.add(EventName.controlsMismatch)
 
-        # Persist the first frame of every communication failure. Reset after
-        # recovery so a later recurrence is recorded as a separate event.
-        checks_failed = not self.sm.all_checks()
-        comm_diagnostic_active = checks_failed or self.can_rcv_error
-        if comm_diagnostic_active and not self.logged_comm_issue:
-            invalid = [s for s, valid in self.sm.valid.items() if not valid]
-            not_alive = [s for s, alive in self.sm.alive.items()
-                         if not alive and s not in self.sm.ignore_alive]
-            not_freq_ok = [s for s, freq_ok in self.sm.freq_ok.items()
-                            if not freq_ok and s not in self.sm.ignore_alive]
-            manager_processes = [{
-                "name": p.name,
-                "running": bool(p.running),
-                "should_be_running": bool(p.shouldBeRunning),
-                "pid": int(p.pid),
-                "exit_code": int(p.exitCode),
-            } for p in self.sm['managerState'].processes]
-
-            append_process_diagnostic(
-                "communication_issue",
-                frame=int(self.sm.frame),
-                initialized=bool(self.initialized),
-                enabled=bool(self.enabled),
-                active=bool(self.active),
-                invalid=invalid,
-                not_alive=not_alive,
-                not_freq_ok=not_freq_ok,
-                can_rcv_error=bool(self.can_rcv_error),
-                can_rcv_error_counter=int(self.can_rcv_error_counter),
-                manager_state_alive=bool(self.sm.alive['managerState']),
-                manager_state_valid=bool(self.sm.valid['managerState']),
-                manager_processes=manager_processes,
-            )
-            cloudlog.event("commIssue", invalid=invalid, not_alive=not_alive,
-                           not_freq_ok=not_freq_ok, can_error=self.can_rcv_error, error=True)
-            self.logged_comm_issue = True
-        elif not comm_diagnostic_active:
-            self.logged_comm_issue = False
-
         # Check for HW or system issues
         if len(self.sm['radarState'].radarErrors):
             self.events.add(EventName.radarFault)
@@ -906,8 +552,16 @@ class Controls:
             self.events.add(EventName.usbError)
         # self.sm.all_checks()
         # self.sm.all_alive_and_valid()
-        elif checks_failed or self.can_rcv_error:
+        elif not self.sm.all_checks() or self.can_rcv_error:
             self.events.add(EventName.commIssue)
+            if not self.logged_comm_issue:
+                invalid = [s for s, valid in self.sm.valid.items() if not valid]
+                not_alive = [s for s, alive in self.sm.alive.items() if not alive]
+                cloudlog.event("commIssue", invalid=invalid, not_alive=not_alive, can_error=self.can_rcv_error,
+                               error=True)
+                self.logged_comm_issue = True
+        else:
+            self.logged_comm_issue = False
 
         if not self.sm['liveParameters'].valid:
             self.events.add(EventName.vehicleModelInvalid)
@@ -921,7 +575,7 @@ class Controls:
         if not self.sm['liveLocationKalman'].deviceStable:
             self.events.add(EventName.deviceFalling)
 
-        if not REPLAY and not self.equinox_simulator:
+        if not REPLAY:
             # Check for mismatch between openpilot and car's PCM
             cruise_mismatch = CS.cruiseState.enabled and (not self.enabled or not self.CP.pcmCruise)
             self.cruise_mismatch_counter = self.cruise_mismatch_counter + 1 if cruise_mismatch else 0
@@ -932,9 +586,7 @@ class Controls:
         stock_long_is_braking = self.enabled and not self.CP.openpilotLongitudinalControl and CS.aEgo < -1.25
         model_fcw = self.sm['modelV2'].meta.hardBrakePredicted and not CS.brakePressed and not stock_long_is_braking
         planner_fcw = self.sm['longitudinalPlan'].fcw and self.enabled
-        manual_brake_fcw = self.enabled and self.manual_brake_early_warning(CS)
-        if not self.disable_op_fcw and (manual_brake_fcw or
-                                        (self.op_fcw_dangerous_lead(CS) and (planner_fcw or model_fcw))):
+        if not self.disable_op_fcw and (planner_fcw or model_fcw):
             self.events.add(EventName.fcw)
 
         if TICI:
@@ -964,26 +616,8 @@ class Controls:
 
             # Check if all manager processes are running
             not_running = {p.name for p in self.sm['managerState'].processes if not p.running}
-            unexpected_not_running = not_running - IGNORE_PROCESSES
-            if self.sm.rcv_frame['managerState'] and unexpected_not_running:
+            if self.sm.rcv_frame['managerState'] and (not_running - IGNORE_PROCESSES):
                 self.events.add(EventName.processNotRunning)
-                if not self.logged_process_not_running:
-                    manager_processes = [{
-                        "name": p.name,
-                        "running": bool(p.running),
-                        "should_be_running": bool(p.shouldBeRunning),
-                        "pid": int(p.pid),
-                        "exit_code": int(p.exitCode),
-                    } for p in self.sm['managerState'].processes]
-                    append_process_diagnostic(
-                        "process_not_running",
-                        frame=int(self.sm.frame),
-                        processes=sorted(unexpected_not_running),
-                        manager_processes=manager_processes,
-                    )
-                    self.logged_process_not_running = True
-            else:
-                self.logged_process_not_running = False
 
         # Only allow engagement with brake pressed when stopped behind another stopped car
         speeds = self.sm['longitudinalPlan'].speeds
@@ -1128,30 +762,6 @@ class Controls:
         # Check if openpilot is engaged
         self.enabled = self.active or self.state == State.preEnabled
 
-    def pedal_force_recovery_eligible(self, CS, long_plan, t_since_plan, injected_fault=False):
-        speeds = long_plan.speeds
-        plan_valid = self.sm.valid['longitudinalPlan'] and len(speeds) == CONTROL_N and t_since_plan <= 0.25
-        if not plan_valid:
-            return False
-
-        force_slow_decel = self.sm['driverMonitoringState'].awarenessStatus < 0.0 or \
-                           self.state == State.softDisabling
-        speed_error = float(self.LoC.v_pid - CS.vEgo)
-        future_speed_error = float(speeds[-1] - CS.vEgo)
-        clear_road_plan = long_plan.longitudinalPlanSource == \
-                          log.LongitudinalPlan.LongitudinalPlanSource.cruise
-        # In bench mode fault mode 2 is ground truth that accel was forcibly
-        # replaced with zero. Keep all safety/engagement gates, but do not let
-        # the normal 0.30 m/s detector chatter at the set-speed boundary.
-        speed_demand = recovery_speed_demand(speed_error, future_speed_error, injected_fault)
-
-        return self.CP.enableGasInterceptor and self.active and CS.adaptiveCruise and \
-               self.LoC.long_control_state == LongCtrlState.pid and \
-               not CS.brakePressed and not CS.gasPressed and not CS.standstill and \
-               CS.vEgo > V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS and \
-               not force_slow_decel and not self.is_curv_driving and clear_road_plan and \
-               speed_demand
-
     def state_control(self, CS):
         """Given the state, this function returns an actuators packet"""
 
@@ -1180,13 +790,12 @@ class Controls:
 
                     self.LaC.update_live_torque_params(torque_params.latAccelFactorFiltered,
                                                        torque_params.latAccelOffsetFiltered,
-                                                       torque_params.frictionCoefficientFiltered,
-                                                       torque_params.totalBucketPoints)
+                                                       torque_params.frictionCoefficientFiltered)
 
             else:
                 self.torque_latAccelFactor = ntune_torque_get('latAccelFactor')  # LAT_ACCEL_FACTOR
                 self.torque_friction = ntune_torque_get('friction')  # FRICTION
-                self.torque_latAccelOffset = 0.0
+                self.torque_latAccelOffset = 1
                 self.LaC.update_live_torque_params(self.torque_latAccelFactor, self.torque_latAccelOffset,
                                                    self.torque_friction)
 
@@ -1198,7 +807,7 @@ class Controls:
         CC.enabled = self.enabled
         # Check which actuators can be enabled
         CC.latActive = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
-                       CS.vEgo >= self.CP.minSteerSpeed and not CS.standstill \
+                       CS.vEgo > self.CP.minSteerSpeed and not CS.standstill \
                        and abs(CS.steeringAngleDeg) < self.CP.maxSteeringAngleDeg
         CC.longActive = self.active and not self.events.any(ET.OVERRIDE) and self.CP.openpilotLongitudinalControl
 
@@ -1226,13 +835,10 @@ class Controls:
             t_since_plan = (self.sm.frame - self.sm.rcv_frame['longitudinalPlan']) * DT_CTRL
 
             actuators.accel = self.LoC.update(self.active, CS, long_plan, pid_accel_limits, t_since_plan)
-            if CS.brakePressed:
-                actuators.accel = min(actuators.accel, 0.0)
-                self.LoC.reset(v_pid=CS.vEgo)
 
             # Steering PID loop and lateral MPC
             # lat_active = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
-            #             CS.vEgo >= self.CP.minSteerSpeed and not CS.standstill \
+            #             CS.vEgo > self.CP.minSteerSpeed and not CS.standstill \
             #             and abs(CS.steeringAngleDeg) < self.CP.maxSteeringAngleDeg
 
             self.desired_curvature, self.desired_curvature_rate = get_lag_adjusted_curvature(self.CP, CS.vEgo,
@@ -1260,52 +866,6 @@ class Controls:
                 lac_log.saturated = abs(steer) >= 0.9
 
         # Send a "steering required alert" if saturation count has reached the limit (조향 제어 초과)
-        # Driver brake is the final authority over every longitudinal path.
-        if CS.brakePressed:
-            actuators.accel = min(actuators.accel, 0.0)
-
-        # A pedal-only GM car must not remain at zero throttle while the valid
-        # cruise plan is explicitly asking to regain speed. Once that normal-
-        # driving predicate is true, force recovery starts on the same 100 Hz
-        # control frame without waiting to classify PID P/I/F internals.
-        # This hook exists only for the NOBOARD Equinox bench simulator. It
-        # injects the reported failure immediately before the production
-        # recovery predicate, so every real recovery gate remains in force.
-        if self.equinox_simulator:
-            if self.sm.frame % 10 == 0:
-                raw_fault_mode = self.equinox_sim_params.get("EquinoxSimAccelZero")
-                try:
-                    fault_mode = int(raw_fault_mode) if raw_fault_mode is not None else 0
-                except ValueError:
-                    fault_mode = 0
-                self.equinox_sim_fault_mode, self.equinox_sim_recovery_completed, \
-                    self.equinox_sim_force_accel_zero, self.equinox_sim_recovery_enabled = \
-                    bench_fault_state(self.equinox_sim_fault_mode,
-                                      self.equinox_sim_recovery_completed,
-                                      fault_mode)
-            if self.equinox_sim_force_accel_zero:
-                actuators.accel = 0.0
-
-        recovery_plan_age = (self.sm.frame - self.sm.rcv_frame['longitudinalPlan']) * DT_CTRL
-        injected_recovery_fault = self.equinox_simulator and self.equinox_sim_fault_mode == 2 and \
-                                  self.equinox_sim_force_accel_zero and \
-                                  self.equinox_sim_recovery_enabled
-        recovery_eligible = not self.joystick_mode and \
-                            (not self.equinox_simulator or self.equinox_sim_recovery_enabled) and \
-                            self.pedal_force_recovery_eligible(CS, long_plan, recovery_plan_age,
-                                                               injected_fault=injected_recovery_fault)
-        actuators.accel = self.pedal_force_recovery.update(recovery_eligible, actuators.accel)
-
-        # Fault mode 2 is a one-shot bench test. The first forced output proves
-        # that recovery took control, so stop injecting accel=0 immediately and
-        # return the following frame to the normal PID. Keeping the fault
-        # latched would create an artificial coast/recover cycle and repeatedly
-        # increment activation_count near the target speed.
-        if injected_recovery_fault and self.pedal_force_recovery.active:
-            self.equinox_sim_recovery_completed = True
-            self.equinox_sim_force_accel_zero = False
-            put_nonblocking("EquinoxSimAccelZero", "0")
-
         if lac_log.active and lac_log.saturated and not CS.steeringPressed:
             dpath_points = lat_plan.dPathPoints
             if len(dpath_points):
@@ -1414,16 +974,7 @@ class Controls:
             self.last_actuators, can_sends = self.CI.apply(CC, self)
             self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
             CC.actuatorsOutput = self.last_actuators
-            if self.CP.carName == 'gm':
-                # GM calculates at 100 Hz but transmits steering at 50 Hz. The
-                # CarController state is based only on a command that was really
-                # sent, so an expected non-send frame cannot freeze the PID.
-                self.steer_limited = bool(self.gm_steer_torque_limited)
-            else:
-                self.steer_limited = abs(CC.actuators.steer - CC.actuatorsOutput.steer) > 1e-2
-
-        # Disabled: 10~35km/h steer_clip feedback must not reduce target speed.
-        self.low_speed_steer_clip_hold_frames = 0
+            self.steer_limited = abs(CC.actuators.steer - CC.actuatorsOutput.steer) > 1e-2
 
         force_decel = (self.sm['driverMonitoringState'].awarenessStatus < 0.) or \
                       (self.state == State.softDisabling)
@@ -1499,10 +1050,6 @@ class Controls:
         controlsState.friction = self.torque_friction
         controlsState.totalBucketPoints = self.totalBucketPoints
 
-        # curv driving (20260518)
-        controlsState.curvDriving = bool(self.is_curv_driving)
-        controlsState.curvSpeed = float(self.curv_speed)
-
         # Dynamic TR
         #controlsState.cruiseGap = int(Params().get("cruiseGap", encoding="utf8"))
         controlsState.minTR = float(Params().get("minTR", encoding="utf8"))
@@ -1511,47 +1058,6 @@ class Controls:
         controlsState.globalDfMod = float(Params().get("globalDfMod", encoding="utf8"))
         # self.sm['liveTorqueParameters']
         controlsState.dynamicTRValue = float(self.sm['dynamicFollowData'].mpcTR)
-        controlsState.pedalFollowAccelAuthority = 1.0
-        controlsState.pedalFollowTargetDistance = 0.0
-        controlsState.pedalFollowGuardDistance = 0.0
-        controlsState.pedalFollowPredictedDistance = 0.0
-        controlsState.pedalLaunchActive = False
-        controlsState.pedalDeadzoneBoostCandidate = bool(self.pedal_deadzone_boost_candidate)
-        controlsState.pedalDeadzoneBoostActive = bool(self.pedal_deadzone_boost_active)
-        controlsState.pedalDeadzoneRawCommand = float(self.pedal_deadzone_raw_command)
-        controlsState.pedalDeadzoneAppliedCommand = float(self.pedal_deadzone_applied_command)
-        controlsState.pedalDeadzoneFloor = float(self.pedal_deadzone_floor)
-        controlsState.pedalDeadzoneAccelRequest = float(self.pedal_deadzone_accel_request)
-        controlsState.pedalDeadzoneVehicleAccel = float(self.pedal_deadzone_vehicle_accel)
-        controlsState.gmSteerCommandSent = bool(self.gm_steer_command_sent)
-        controlsState.gmSteerCommandGapMs = float(self.gm_steer_command_gap_ms)
-        controlsState.gmSteerCommandDeadlineLagMs = float(self.gm_steer_command_deadline_lag_ms)
-        controlsState.gmSteerCommandCounter = int(self.gm_steer_command_counter)
-        controlsState.gmSteerLoopbackCounter = int(self.gm_steer_loopback_counter)
-        controlsState.gmSteerLoopbackChanged = bool(self.gm_steer_loopback_changed)
-        controlsState.gmSteerLoopbackAcked = bool(self.gm_steer_loopback_acked)
-        controlsState.gmSteerCommandGapFault = bool(self.gm_steer_command_gap_fault)
-        controlsState.gmLkasStatus = int(self.gm_lkas_status)
-        controlsState.gmSteerCommandActive = bool(self.gm_steer_command_active)
-        controlsState.gmSteerCommandTorque = int(self.gm_steer_command_torque)
-        controlsState.gmSteerRequestedTorque = int(self.gm_steer_requested_torque)
-        controlsState.gmSteerTorqueLimited = bool(self.gm_steer_torque_limited)
-        # Legacy pedal-safety diagnostics remain neutral for schema compatibility.
-        controlsState.pedalLaunchState = 0
-        controlsState.pedalLaunchSafeDistance = 0.0
-        controlsState.pedalLaunchDistanceDelta = 0.0
-        controlsState.pedalLaunchConfirmTime = 0.0
-        controlsState.pedalManualLaunchRequired = False
-        controlsState.pedalManualLaunchSeen = False
-        controlsState.pedalManualLaunchAssistActive = False
-        controlsState.pedalForceRecoveryActive = bool(self.pedal_force_recovery.active)
-        controlsState.pedalForceRecoveryDuration = float(self.pedal_force_recovery.duration)
-        controlsState.pedalForceRecoveryCount = int(self.pedal_force_recovery.activation_count)
-        controlsState.pedalForceRecoveryRawAccel = float(self.pedal_force_recovery.raw_accel)
-        controlsState.pedalForceRecoveryAccel = float(self.pedal_force_recovery.forced_accel)
-        controlsState.pedalForceRecoveryPedalFloor = float(PEDAL_FORCE_RECOVERY_PEDAL_FLOOR)
-        controlsState.pedalManualLaunchAutoAllowed = False
-        controlsState.pedalComfortAccelCap = float(self.pedal_comfort_accel_cap)
 
         controlsState.totalCameraOffset = totalCameraOffset
 
