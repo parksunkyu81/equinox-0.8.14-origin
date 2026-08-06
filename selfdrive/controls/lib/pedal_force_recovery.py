@@ -102,11 +102,8 @@ def recovery_plan_decelerating(speeds, v_ego,
   # Ignore point zero because it is normally initialized from current speed and
   # can contain small estimator noise. A meaningful drop in the following
   # points is treated as an intentional coast/deceleration request.
-  # capnp _DynamicListReader supports integer indexing, but not Python slices.
-  # Read each future point explicitly so this works with both capnp lists and
-  # ordinary Python sequences used by tests.
-  future_min = min(float(speeds[i]) for i in range(1, end))
-  return future_min < float(v_ego) - float(margin)
+  future = speeds[1:end]
+  return min(float(v) for v in future) < float(v_ego) - float(margin)
 
 
 def recovery_curve_decelerating(is_curv_driving, slow_on_curves,
