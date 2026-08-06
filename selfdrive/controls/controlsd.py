@@ -80,7 +80,7 @@ EQUINOX_SIMULATOR = SIMULATION and os.getenv("EQUINOX_SIMULATOR") == "1" and \
                     os.getenv("NOBOARD") is not None
 IGNORE_PROCESSES = {"rtshield", "uploader", "deleter", "loggerd", "logmessaged", "tombstoned",
                     "logcatd", "proclogd", "clocksd", "updated", "timezoned", "manage_athenad",
-                    "statsd", "shutdownd"} | \
+                    "statsd", "shutdownd", "recoverylogger"} | \
                    {k for k, v in managed_processes.items() if not v.enabled}
 
 ACTUATOR_FIELDS = set(car.CarControl.Actuators.schema.fields.keys())
