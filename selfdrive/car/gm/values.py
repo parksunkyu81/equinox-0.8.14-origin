@@ -21,7 +21,7 @@ class CarControllerParams():
         self.STEER_STEP = 2  # 50 Hz at the 100 Hz control loop
         self.STEER_DELTA_UP = 7   # 7
         self.STEER_DELTA_DOWN = 17   # 17
-        self.MIN_STEER_SPEED = 10.0 * CV.KPH_TO_MS
+        self.MIN_STEER_SPEED = 3.  # m/s
         self.STEER_DRIVER_ALLOWANCE = 50
         self.STEER_DRIVER_MULTIPLIER = 4
         self.STEER_DRIVER_FACTOR = 100
