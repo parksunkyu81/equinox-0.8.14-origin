@@ -8,8 +8,9 @@ import numpy as np
 import cereal.messaging as messaging
 from cereal import car
 from common.params import Params, put_nonblocking
-from common.realtime import set_realtime_priority, DT_MDL
+from common.realtime import set_realtime_priority, sec_since_boot, DT_MDL
 from common.numpy_fast import clip
+from selfdrive.locationd.live_parameters_validity import LiveParametersValidity
 from selfdrive.locationd.models.car_kf import CarKalman, ObservationKind, States
 from selfdrive.locationd.models.constants import GENERATED_DIR
 from selfdrive.swaglog import cloudlog
@@ -157,10 +158,12 @@ def main(sm=None, pm=None):
   learner = ParamsLearner(CP, params['steerRatio'], params['stiffnessFactor'], math.radians(params['angleOffsetAverageDeg']))
   angle_offset_average = params['angleOffsetAverageDeg']
   angle_offset = angle_offset_average
+  message_validity = LiveParametersValidity()
 
   while True:
     sm.update()
-    if sm.all_checks():
+    input_checks_ok = sm.all_checks()
+    if input_checks_ok:
       for which in sorted(sm.updated.keys(), key=lambda x: sm.logMonoTime[x]):
         if sm.updated[which]:
           t = sm.logMonoTime[which] * 1e-9
@@ -199,7 +202,11 @@ def main(sm=None, pm=None):
       liveParameters.angleOffsetAverageStd = float(P[States.ANGLE_OFFSET])
       liveParameters.angleOffsetFastStd = float(P[States.ANGLE_OFFSET_FAST])
 
-      msg.valid = sm.all_checks()
+      # Do not turn a sane learned model invalid for a sub-300 ms input gap.
+      # No diagnostic file is written from paramsd on this path.
+      msg.valid = message_validity.update(
+        input_checks_ok, liveParameters.valid, sec_since_boot()
+      )
 
       if sm.frame % 1200 == 0:  # once a minute
         params = {
