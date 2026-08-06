@@ -62,6 +62,9 @@ def manager_init() -> None:
     ("ShowDebugUI", "0"),
     ("NewRadarInterface", "0"),
     ("StopAccelBoost", "1"),
+    # Strict zero-accel pedal recovery. Default OFF: enable only after logs prove
+    # a repeatable exact-zero controller stall.
+    ("PedalForceRecoveryEnabled", "0"),
     ("IsLiveTorque", "1"),
     ("IsLowSpeedFactor", "1"),
     ("E2ELong", "0"),

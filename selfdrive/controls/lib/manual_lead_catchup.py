@@ -8,8 +8,9 @@ from common.realtime import DT_CTRL
 
 MANUAL_CATCHUP_IDLE = 0
 MANUAL_CATCHUP_GAS_PRESSED = 1
-MANUAL_CATCHUP_ACTIVE = 2
-MANUAL_CATCHUP_BLEND_OUT = 3
+MANUAL_CATCHUP_RELEASE_PENDING = 2
+MANUAL_CATCHUP_ACTIVE = 3
+MANUAL_CATCHUP_BLEND_OUT = 4
 
 # The stock MPC distance model is intentionally mirrored here instead of
 # importing long_mpc.py. Importing long_mpc pulls in the generated acados
@@ -20,8 +21,19 @@ STOP_DISTANCE = 5.5
 MANUAL_GAS_ARM_MAX_EGO_KPH = 8.0
 CATCHUP_MAX_EGO_KPH = 30.0
 MIN_PEDAL_SPEED_KPH = 1.0
-MIN_LEAD_SPEED_MS = 0.8
-MIN_REL_SPEED_MS = 0.3
+
+# Radar on this GM platform runs at 15 Hz. The old implementation required the
+# lead to already be above 0.8 m/s on the exact accelerator-release frame. A
+# normal one-frame radar delay therefore cancelled the handoff permanently.
+# Keep an explicit-driver-launch requirement, but allow a short post-release
+# window for fresh lead motion to be confirmed.
+MIN_LEAD_SPEED_MS = 0.45
+MIN_REL_SPEED_MS = 0.15
+STRONG_LEAD_SPEED_MS = 0.80
+STRONG_REL_SPEED_MS = 0.30
+LEAD_START_CONFIRM_S = 0.10
+RELEASE_PENDING_TIMEOUT_S = 0.80
+
 LEAD_STOP_SPEED_MS = 0.25
 MIN_ABSOLUTE_DISTANCE_M = 3.5
 MIN_HANDOFF_GAP_RATIO = 0.80
@@ -32,7 +44,11 @@ RELEASE_SURPLUS_M = 0.8
 RELEASE_REL_SPEED_MS = 0.3
 RELEASE_CONFIRM_S = 0.30
 MAX_STEERING_ANGLE_DEG = 15.0
-BOOST_RISE_JERK = 0.8
+
+# Enter with a small bounded floor and then ramp quickly enough that the driver
+# does not perceive another half-second dead period after a valid handoff.
+BOOST_ENTRY_ACCEL = 0.12
+BOOST_RISE_JERK = 1.6
 BOOST_FALL_JERK = 1.5
 CONFIG_REFRESH_S = 0.50
 SAFETY_RECOVERY_BLOCK_S = 0.50
@@ -50,6 +66,10 @@ class ManualLeadCatchup:
   This helper never permits a standstill launch. It can arm only while the
   driver is pressing the accelerator and becomes active only after the driver
   releases it with vehicle speed already above 1 km/h.
+
+  A short RELEASE_PENDING state absorbs normal radar/planner latency after the
+  release edge. It never creates motion by itself: driver gas input and ego
+  speed above 1 km/h remain mandatory.
   """
 
   def __init__(self, dt=DT_CTRL, params=None):
@@ -57,6 +77,8 @@ class ManualLeadCatchup:
     self.params = params if params is not None else Params()
     self.config_refresh_frames = max(1, int(round(CONFIG_REFRESH_S / self.dt)))
     self.release_confirm_frames = max(1, int(round(RELEASE_CONFIRM_S / self.dt)))
+    self.lead_start_confirm_frames = max(1, int(round(LEAD_START_CONFIRM_S / self.dt)))
+    self.release_pending_timeout_frames = max(1, int(round(RELEASE_PENDING_TIMEOUT_S / self.dt)))
     self.max_active_frames = max(1, int(round(MAX_ACTIVE_S / self.dt)))
     self.safety_recovery_block_frames = max(1, int(round(SAFETY_RECOVERY_BLOCK_S / self.dt)))
 
@@ -68,6 +90,8 @@ class ManualLeadCatchup:
     self.prev_gas_pressed = False
     self.active_frames = 0
     self.release_frames = 0
+    self.pending_frames = 0
+    self.lead_motion_frames = 0
     self.recovery_block_frames = 0
     self.accel_floor = 0.0
     self.target_accel_floor = 0.0
@@ -82,12 +106,18 @@ class ManualLeadCatchup:
     return self.state in (MANUAL_CATCHUP_ACTIVE, MANUAL_CATCHUP_BLEND_OUT)
 
   @property
+  def pending(self):
+    return self.state == MANUAL_CATCHUP_RELEASE_PENDING
+
+  @property
   def handoff_ready(self):
     return self.active
 
   @property
   def recovery_blocked(self):
-    return self.active or self.recovery_block_frames > 0
+    # Do not let the pedal-force watchdog interfere while a manual handoff is
+    # waiting for a fresh radar update or already applying a bounded floor.
+    return self.pending or self.active or self.recovery_block_frames > 0
 
   @property
   def duration(self):
@@ -122,6 +152,8 @@ class ManualLeadCatchup:
     self.state = MANUAL_CATCHUP_IDLE
     self.active_frames = 0
     self.release_frames = 0
+    self.pending_frames = 0
+    self.lead_motion_frames = 0
     self.accel_floor = 0.0
     self.target_accel_floor = 0.0
     self.cancel_reason = str(reason)
@@ -139,13 +171,28 @@ class ManualLeadCatchup:
       not bool(curve_blocked) and abs(float(getattr(CS, "steeringAngleDeg", 0.0))) <= MAX_STEERING_ANGLE_DEG and \
       not bool(getattr(CS, "brakePressed", False)) and self._lead_valid(lead)
 
+  def _activate(self, v_ego, d_rel, dynamic_tr):
+    self.state = MANUAL_CATCHUP_ACTIVE
+    self.active_frames = 0
+    self.release_frames = 0
+    self.pending_frames = 0
+    self.lead_motion_frames = 0
+    self.accel_floor = 0.0
+    self.target_accel_floor = 0.0
+    self.safe_distance = safe_obstacle_distance(v_ego, dynamic_tr)
+    self.gap_surplus = d_rel - self.safe_distance
+    self.effective_gap_surplus = self.gap_surplus
+    self.cancel_reason = ""
+    self.activation_count += 1
+
   def pre_update(self, frame, controls_active, adaptive_cruise, CS, lead,
                  dynamic_tr, plan_valid, fcw, curve_blocked):
     """Observe the driver launch before LongControl runs.
 
-    Returns True only after the driver has released the accelerator and every
-    handoff safety gate is valid. LongControl uses this to leave stopping mode;
-    the pedal remains protected by the existing >1 km/h CarController gate.
+    Returns True only after the driver has released the accelerator, ego speed
+    is already above 1 km/h, fresh lead motion has been confirmed, and every
+    handoff safety gate is valid. A short pending window prevents a single
+    delayed 15 Hz radar sample from permanently missing the release edge.
     """
     self._read_config(frame)
     if self.recovery_block_frames > 0:
@@ -165,43 +212,68 @@ class ManualLeadCatchup:
                                                 plan_valid, fcw, curve_blocked)
 
     if gas_pressed:
-      # Explicit driver intent is mandatory. Merely detecting lead motion can
-      # never arm this state machine.
-      if context_valid and v_ego_kph <= MANUAL_GAS_ARM_MAX_EGO_KPH and \
-         float(getattr(lead, "vLead", 0.0)) > LEAD_STOP_SPEED_MS and \
-         float(getattr(lead, "dRel", 0.0)) >= MIN_ABSOLUTE_DISTANCE_M:
-        self.state = MANUAL_CATCHUP_GAS_PRESSED
-        self.active_frames = 0
-        self.release_frames = 0
-        self.accel_floor = 0.0
-        self.target_accel_floor = 0.0
-        self.cancel_reason = ""
-      elif self.active:
+      if self.active or self.pending:
         self._reset_active("driver_gas", safety=True)
 
+      # Capture explicit driver intent even if the 15 Hz radar has not yet
+      # reported lead movement. Activation still requires a later confirmed
+      # moving lead, safe distance, and ego speed above 1 km/h.
+      if context_valid and v_ego_kph <= MANUAL_GAS_ARM_MAX_EGO_KPH and \
+         float(getattr(lead, "dRel", 0.0)) >= MIN_ABSOLUTE_DISTANCE_M:
+        if self.state != MANUAL_CATCHUP_GAS_PRESSED:
+          self.state = MANUAL_CATCHUP_GAS_PRESSED
+          self.active_frames = 0
+          self.release_frames = 0
+          self.pending_frames = 0
+          self.lead_motion_frames = 0
+          self.accel_floor = 0.0
+          self.target_accel_floor = 0.0
+          self.cancel_reason = ""
+
     elif gas_released and self.state == MANUAL_CATCHUP_GAS_PRESSED:
-      d_rel = float(getattr(lead, "dRel", 0.0)) if self._lead_valid(lead) else 0.0
-      v_lead = float(getattr(lead, "vLead", 0.0)) if self._lead_valid(lead) else 0.0
-      v_rel = float(getattr(lead, "vRel", v_lead - v_ego)) if self._lead_valid(lead) else -99.0
-      safe_dist = safe_obstacle_distance(v_ego, dynamic_tr)
-      handoff_gap = max(MIN_ABSOLUTE_DISTANCE_M, safe_dist * MIN_HANDOFF_GAP_RATIO)
-
-      ready = context_valid and not bool(getattr(CS, "standstill", False)) and \
-        v_ego_kph > MIN_PEDAL_SPEED_KPH and v_lead >= MIN_LEAD_SPEED_MS and \
-        v_rel >= MIN_REL_SPEED_MS and d_rel >= handoff_gap
-
-      if ready:
-        self.state = MANUAL_CATCHUP_ACTIVE
-        self.active_frames = 0
-        self.release_frames = 0
-        self.accel_floor = 0.0
-        self.target_accel_floor = 0.0
-        self.safe_distance = safe_dist
-        self.gap_surplus = d_rel - safe_dist
-        self.effective_gap_surplus = self.gap_surplus
-        self.activation_count += 1
+      # Do not decide the whole handoff on this single release frame. Radar and
+      # the longitudinal plan can legitimately be one update behind.
+      if context_valid and not bool(getattr(CS, "standstill", False)) and \
+         v_ego_kph > MIN_PEDAL_SPEED_KPH:
+        self.state = MANUAL_CATCHUP_RELEASE_PENDING
+        self.pending_frames = 0
+        self.lead_motion_frames = 0
+        self.cancel_reason = ""
       else:
         self._reset_active("handoff_gate", safety=True)
+
+    if self.state == MANUAL_CATCHUP_RELEASE_PENDING:
+      if not context_valid:
+        self._reset_active("pending_context", safety=True)
+      elif gas_pressed:
+        self._reset_active("driver_gas", safety=True)
+      elif bool(getattr(CS, "standstill", False)) or v_ego_kph <= MIN_PEDAL_SPEED_KPH:
+        self._reset_active("below_pedal_speed", safety=True)
+      else:
+        d_rel = float(getattr(lead, "dRel", 0.0))
+        v_lead = float(getattr(lead, "vLead", 0.0))
+        v_rel = float(getattr(lead, "vRel", v_lead - v_ego))
+        safe_dist = safe_obstacle_distance(v_ego, dynamic_tr)
+        handoff_gap = max(MIN_ABSOLUTE_DISTANCE_M, safe_dist * MIN_HANDOFF_GAP_RATIO)
+
+        lead_moving = v_lead >= MIN_LEAD_SPEED_MS and v_rel >= MIN_REL_SPEED_MS
+        strong_lead_moving = v_lead >= STRONG_LEAD_SPEED_MS and v_rel >= STRONG_REL_SPEED_MS
+        if lead_moving:
+          self.lead_motion_frames += 1
+        else:
+          self.lead_motion_frames = 0
+
+        self.pending_frames += 1
+        if d_rel < MIN_ABSOLUTE_DISTANCE_M:
+          self._reset_active("distance", safety=True)
+        elif d_rel >= handoff_gap and (strong_lead_moving or
+                                       self.lead_motion_frames >= self.lead_start_confirm_frames):
+          # Preserve immediate handoff when the release frame already contains
+          # a strong, unambiguous lead-departure sample. Only weaker fresh
+          # motion needs the short confirmation window.
+          self._activate(v_ego, d_rel, dynamic_tr)
+        elif self.pending_frames >= self.release_pending_timeout_frames:
+          self._reset_active("lead_start_timeout", safety=True)
 
     elif self.active:
       # Gates independent of the current MPC acceleration are checked here so
@@ -215,9 +287,8 @@ class ManualLeadCatchup:
       elif v_ego_kph > CATCHUP_MAX_EGO_KPH:
         self._reset_active("speed_complete")
 
-    elif self.state == MANUAL_CATCHUP_GAS_PRESSED:
-      # The release edge is the only legal transition to active. If that edge
-      # was missed because the surrounding context disappeared, disarm.
+    elif self.state == MANUAL_CATCHUP_GAS_PRESSED and not gas_pressed:
+      # The only legal path out of GAS_PRESSED is the release edge above.
       self._reset_active("manual_launch_expired")
 
     self.prev_gas_pressed = gas_pressed
@@ -312,6 +383,9 @@ class ManualLeadCatchup:
       target_floor = 0.0
 
     self.target_accel_floor = max(0.0, float(target_floor))
+    if self.active_frames == 0 and self.target_accel_floor > 0.0:
+      self.accel_floor = min(self.target_accel_floor, BOOST_ENTRY_ACCEL)
+
     if self.target_accel_floor > self.accel_floor:
       self.accel_floor = min(self.target_accel_floor, self.accel_floor + BOOST_RISE_JERK * self.dt)
     else:

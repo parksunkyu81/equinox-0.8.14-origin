@@ -38,6 +38,7 @@ from selfdrive.controls.lib.pedal_force_recovery import (
   RECOVERY_BLOCK_CURVE_DECEL,
   RECOVERY_BLOCK_LEAD_RISK,
   RECOVERY_BLOCK_NO_INTERCEPTOR,
+  RECOVERY_BLOCK_DISABLED,
   PedalForceRecovery,
   bench_fault_state,
   recovery_block_reason_text,
@@ -278,6 +279,8 @@ class Controls:
         self.pedal_deadzone_accel_request = 0.0
         self.pedal_deadzone_vehicle_accel = 0.0
         self.pedal_force_recovery = PedalForceRecovery(DT_CTRL)
+        self.pedal_force_recovery_enabled = params.get_bool("PedalForceRecoveryEnabled")
+        self.pedal_force_recovery_param_frame = -10000
         self.pedal_recovery_eligible = False
         self.pedal_recovery_block_reason = 0
         self.pedal_recovery_speed_error = 0.0
@@ -1373,6 +1376,16 @@ class Controls:
             if self.equinox_sim_force_accel_zero:
                 actuators.accel = 0.0
 
+        # Runtime master switch. Default is OFF because false throttle is more
+        # dangerous than a missed recovery. The strict zero-only classifier is
+        # enabled only when the user explicitly sets PedalForceRecoveryEnabled=1.
+        if (self.sm.frame - self.pedal_force_recovery_param_frame) >= 100:
+            self.pedal_force_recovery_param_frame = int(self.sm.frame)
+            try:
+                self.pedal_force_recovery_enabled = Params().get_bool("PedalForceRecoveryEnabled")
+            except Exception:
+                self.pedal_force_recovery_enabled = False
+
         recovery_plan_age = (self.sm.frame - self.sm.rcv_frame['longitudinalPlan']) * DT_CTRL
         injected_recovery_fault = self.equinox_simulator and self.equinox_sim_fault_mode == 2 and \
                                   self.equinox_sim_force_accel_zero and \
@@ -1381,6 +1394,8 @@ class Controls:
         recovery_eligible, recovery_block_reason = self.pedal_force_recovery_eligible(
             CS, long_plan, recovery_plan_age, injected_fault=injected_recovery_fault)
 
+        if not self.pedal_force_recovery_enabled:
+            recovery_block_reason |= RECOVERY_BLOCK_DISABLED
         if self.joystick_mode:
             recovery_block_reason |= RECOVERY_BLOCK_JOYSTICK
         if self.manual_lead_catchup.recovery_blocked:
@@ -1392,7 +1407,7 @@ class Controls:
         self.pedal_recovery_eligible = bool(recovery_eligible)
         self.pedal_recovery_block_reason = int(recovery_block_reason)
 
-        recovery_observed_event = recovery_log_trigger(
+        recovery_observed_event = self.pedal_force_recovery_enabled and recovery_log_trigger(
             self.pedal_force_recovery.watchdog_active, self.active, CS.adaptiveCruise,
             CS.brakePressed, CS.gasPressed, CS.standstill, raw_recovery_accel,
             vehicle_accel=CS.aEgo,
@@ -1404,20 +1419,21 @@ class Controls:
         actuators.accel = self.pedal_force_recovery.update(
             recovery_eligible, raw_recovery_accel,
             vehicle_accel=CS.aEgo,
-            speed_error=self.pedal_recovery_speed_error)
+            speed_error=self.pedal_recovery_speed_error,
+            v_ego=CS.vEgo)
 
-        # Reuse the existing legacy diagnostic channels so qlog/rlog captures
-        # both stages without requiring a cereal schema migration.
+        # Reuse existing legacy diagnostic channels without a cereal schema
+        # migration. Candidate means observation only; active means throttle floor.
         self.pedal_deadzone_boost_candidate = bool(
             recovery_observed_event or self.pedal_force_recovery.positive_candidate)
-        self.pedal_deadzone_boost_active = bool(self.pedal_force_recovery.watchdog_active)
+        self.pedal_deadzone_boost_active = bool(self.pedal_force_recovery.active)
         self.pedal_deadzone_raw_command = float(raw_recovery_accel)
         self.pedal_deadzone_applied_command = float(actuators.accel)
         self.pedal_deadzone_floor = float(self.pedal_force_recovery.pedal_floor)
         self.pedal_deadzone_accel_request = float(self.pedal_force_recovery.requested_floor_accel)
         self.pedal_deadzone_vehicle_accel = float(CS.aEgo)
 
-        # Record the exact reason whenever a zero or ineffective-positive request is blocked. Repeated
+        # Record the exact reason whenever an exact-zero observation is blocked. Repeated
         # identical reasons are rate-limited to five seconds at 100 Hz.
         if recovery_observed_event and (not recovery_eligible):
             reason_changed = recovery_block_reason != self.pedal_recovery_last_logged_reason

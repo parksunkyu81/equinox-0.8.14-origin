@@ -1,3 +1,5 @@
+> **중요:** 이 문서는 이전 동작 설명입니다. 현재 소스는 `PEDAL_FORCE_RECOVERY_STRICT_ZERO_KO.md`의 기본 OFF·엄격 0 고착 전용 방식으로 변경되었습니다.
+
 # 콤마 페달 완전 복구 Watchdog
 
 ## 1. 목적

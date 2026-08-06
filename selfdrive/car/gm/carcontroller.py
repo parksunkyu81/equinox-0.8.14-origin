@@ -150,8 +150,8 @@ class CarController():
                           )
         # 원래 가속 명령 계산
         pedal_command = acc_mult * self.accel
-        # Recovery publishes a dynamic floor: 3.5% for ineffective-positive
-        # stage 1 and 6% for persistent zero or stage 2.
+        # Strict recovery publishes a 6% floor only after a confirmed,
+        # sustained exact-zero controller stall.
         recovery_pedal_floor = float(controls.pedal_force_recovery.pedal_floor)
         if recovery_pedal_floor > 0.0:
           pedal_command = max(pedal_command, recovery_pedal_floor)

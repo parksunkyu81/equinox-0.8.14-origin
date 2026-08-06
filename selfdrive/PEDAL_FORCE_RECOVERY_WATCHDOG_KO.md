@@ -1,3 +1,5 @@
+> **중요:** 이 문서는 이전 동작 설명입니다. 현재 소스는 `PEDAL_FORCE_RECOVERY_STRICT_ZERO_KO.md`의 기본 OFF·엄격 0 고착 전용 방식으로 변경되었습니다.
+
 > **최신 안내:** 이 문서는 ACCEL=0 전용 1차 구현 설명입니다. 현재 배포본에는 ACCEL>0인데 실제 차량이 감속하는 경우까지 처리하는 양수 페달 무효 watchdog이 추가되었습니다. 최신 적용 기준은 `PEDAL_FORCE_RECOVERY_COMPLETE_WATCHDOG_KO.md`를 확인하십시오.
 
 # 콤마 페달 ACCEL=0 멍때림 복구 Watchdog

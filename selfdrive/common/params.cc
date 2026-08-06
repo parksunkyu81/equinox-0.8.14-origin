@@ -214,6 +214,7 @@ std::unordered_map<std::string, uint32_t> keys = {
     {"WideCameraOnly", PERSISTENT},
 
     {"StopAccelBoost", PERSISTENT},
+    {"PedalForceRecoveryEnabled", PERSISTENT},
     {"TorqueFriction", PERSISTENT},
     {"TorqueMaxLatAccel", PERSISTENT},
     {"DynamicSteerDeltaEnabled", PERSISTENT},
