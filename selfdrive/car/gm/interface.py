@@ -11,11 +11,7 @@ from selfdrive.car import STD_CARGO_KG, scale_rot_inertia, scale_tire_stiffness,
 from selfdrive.car.interfaces import CarInterfaceBase
 from selfdrive.ntune import ntune_common_get, ntune_torque_get
 from common.params import Params
-from selfdrive.controls.lib.torque_tuning_config import (
-  CONTROLLER_FRICTION_MAX, CONTROLLER_FRICTION_MIN,
-  CONTROLLER_LAT_ACCEL_MAX, CONTROLLER_LAT_ACCEL_MIN,
-  read_torque_tuning_config,
-)
+from decimal import Decimal
 
 ButtonType = car.CarState.ButtonEvent.Type
 EventName = car.CarEvent.EventName
@@ -147,18 +143,14 @@ class CarInterface(CarInterfaceBase):
             params = Params()
             ret.lateralTuning.init('torque')
 
-            torque_cfg = read_torque_tuning_config(params, migrate=True)
             try:
-              torque_lat_accel_factor = float(ntune_torque_get('latAccelFactor'))
-              torque_friction = float(ntune_torque_get('friction'))
-            except Exception:
-              torque_lat_accel_factor = float(torque_cfg.lat_accel_anchor)
-              torque_friction = float(torque_cfg.friction_anchor)
-
-            torque_lat_accel_factor = float(clip(
-              torque_lat_accel_factor, CONTROLLER_LAT_ACCEL_MIN, CONTROLLER_LAT_ACCEL_MAX))
-            torque_friction = float(clip(
-              torque_friction, CONTROLLER_FRICTION_MIN, CONTROLLER_FRICTION_MAX))
+              torque_lat_accel_factor = ntune_torque_get('latAccelFactor')  # LAT_ACCEL_FACTOR
+              torque_friction = ntune_torque_get('friction')  # FRICTION
+            except:
+              torque_lat_accel_factor = float(
+                    Decimal(params.get("TorqueMaxLatAccel", encoding="utf8")) * Decimal('0.1'))  # LAT_ACCEL_FACTOR
+              torque_friction = float(
+                    Decimal(params.get("TorqueFriction", encoding="utf8")) * Decimal('0.001'))  # FRICTION
             CarInterfaceBase.configure_torque_tune(ret.lateralTuning, torque_lat_accel_factor, torque_friction)
 
 

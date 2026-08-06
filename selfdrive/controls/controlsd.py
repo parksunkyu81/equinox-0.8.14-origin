@@ -29,11 +29,6 @@ from selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from selfdrive.controls.lib.latcontrol_indi import LatControlINDI
 from selfdrive.controls.lib.latcontrol_lqr import LatControlLQR
 from selfdrive.controls.lib.latcontrol_torque import LatControlTorque
-from selfdrive.controls.lib.torque_tuning_config import (
-    CONTROLLER_FRICTION_MAX, CONTROLLER_FRICTION_MIN,
-    CONTROLLER_LAT_ACCEL_MAX, CONTROLLER_LAT_ACCEL_MIN,
-    read_torque_tuning_config,
-)
 from selfdrive.controls.lib.latcontrol_angle import LatControlAngle
 from selfdrive.controls.lib.events import Events, ET
 from selfdrive.controls.lib.alertmanager import AlertManager, set_offroad_alert
@@ -110,17 +105,6 @@ class Controls:
         speed_conv_to_clu = CV.MS_TO_KPH if self.is_metric else CV.MS_TO_MPH
         return int(kph * CV.KPH_TO_MS * speed_conv_to_clu)
 
-    @staticmethod
-    def _torque_param_approach(current, target, max_step):
-        try:
-            current = float(current)
-            target = float(target)
-            if not math.isfinite(current) or current <= 0.0:
-                return target
-            return float(clip(target, current - max_step, current + max_step))
-        except Exception:
-            return float(target)
-
     def __init__(self, sm=None, pm=None, can_sock=None, CI=None):
         config_realtime_process(4 if TICI else 3, Priority.CTRL_HIGH)
 
@@ -135,9 +119,6 @@ class Controls:
             self.camera_packets.append("wideRoadCameraState")
 
         params = Params()
-        self._torque_param_store = params
-        self._torque_config = read_torque_tuning_config(params, migrate=True)
-        self._torque_config_last_frame = -1000000
         self.joystick_mode = params.get_bool("JoystickDebugMode")
         joystick_packet = ['testJoystick'] if self.joystick_mode else []
 
@@ -177,7 +158,7 @@ class Controls:
 
 
         # read params
-        self.is_live_torque = bool(self._torque_config.enabled)
+        self.is_live_torque = params.get_bool('IsLiveTorque')
         self.is_metric = params.get_bool("IsMetric")
         self.is_ldw_enabled = params.get_bool("IsLdwEnabled")
         openpilot_enabled_toggle = params.get_bool("OpenpilotEnabledToggle")
@@ -273,8 +254,6 @@ class Controls:
         self.gm_steer_command_active = False
         self.gm_steer_command_torque = 0
         self.gm_steer_requested_torque = 0
-        self.gm_steer_delta_up = 7
-        self.gm_steer_delta_down = 17
         self.gm_steer_torque_limited = False
         self.active_cam = False
         self.over_speed_limit = False
@@ -325,12 +304,11 @@ class Controls:
         # TODO: no longer necessary, aside from process replay
         self.sm['liveParameters'].valid = True
 
-        # Live torque. Start from the same validated anchors used by torqued and
-        # nTune so startup cannot jump from the old 3.0/0.120 defaults.
-        self.torque_latAccelFactor = float(self._torque_config.lat_accel_anchor)
-        self.torque_latAccelOffset = 0.0
-        self.torque_friction = float(self._torque_config.friction_anchor)
-        self.totalBucketPoints = 0.0
+        # Live torque
+        self.torque_latAccelFactor = 0.
+        self.torque_latAccelOffset = 0.
+        self.torque_friction = 0.
+        self.totalBucketPoints = 0.
 
         self.startup_event = get_startup_event(car_recognized, controller_available, len(self.CP.carFw) > 0)
 
@@ -1146,55 +1124,28 @@ class Controls:
 
         self.VM.update_params(x, sr)
 
-        # Update Torque Params. IsLiveTorque is reloaded at runtime by both
-        # controlsd and torqued. Source changes are rate-limited for about one
-        # second so enabling/disabling live tuning cannot create a steering step.
+        # Update Torque Params
         if self.CP.lateralTuning.which() == 'torque':
-            if (self.sm.frame - self._torque_config_last_frame) >= 50:
-                self._torque_config_last_frame = int(self.sm.frame)
-                try:
-                    cfg = read_torque_tuning_config(self._torque_param_store, migrate=False)
-                    if bool(cfg.enabled) != bool(self.is_live_torque):
-                        cloudlog.info(f"Torque tuning source changed: live={bool(cfg.enabled)}")
-                    self._torque_config = cfg
-                    self.is_live_torque = bool(cfg.enabled)
-                except Exception:
-                    pass
-
-            target_lat = float(self._torque_config.lat_accel_anchor)
-            target_fric = float(self._torque_config.friction_anchor)
-            target_offset = 0.0
-            target_points = 0.0
-
             if self.is_live_torque:
                 torque_params = self.sm['liveTorqueParameters']
-                if (torque_params.latAccelFactorFiltered > 0) and self.sm.valid['liveTorqueParameters']:
-                    target_lat = float(torque_params.latAccelFactorFiltered)
-                    target_offset = float(torque_params.latAccelOffsetFiltered)
-                    target_fric = float(torque_params.frictionCoefficientFiltered)
-                    target_points = float(torque_params.totalBucketPoints)
+
+                if (torque_params.latAccelFactorFiltered > 0) and (self.sm.valid['liveTorqueParameters']):
+                    self.torque_latAccelFactor = torque_params.latAccelFactorFiltered
+                    self.torque_latAccelOffset = torque_params.latAccelOffsetFiltered
+                    self.torque_friction = torque_params.frictionCoefficientFiltered
+                    self.totalBucketPoints = torque_params.totalBucketPoints
+
+                    self.LaC.update_live_torque_params(torque_params.latAccelFactorFiltered,
+                                                       torque_params.latAccelOffsetFiltered,
+                                                       torque_params.frictionCoefficientFiltered,
+                                                       torque_params.totalBucketPoints)
+
             else:
-                target_lat = float(ntune_torque_get('latAccelFactor'))
-                target_fric = float(ntune_torque_get('friction'))
-                target_offset = 0.0
-
-            target_lat = float(clip(target_lat, CONTROLLER_LAT_ACCEL_MIN, CONTROLLER_LAT_ACCEL_MAX))
-            target_fric = float(clip(target_fric, CONTROLLER_FRICTION_MIN, CONTROLLER_FRICTION_MAX))
-            if not self._torque_config.center_offset_enabled:
-                target_offset = 0.0
-
-            self.torque_latAccelFactor = self._torque_param_approach(
-                self.torque_latAccelFactor, target_lat, 0.0030)
-            self.torque_friction = self._torque_param_approach(
-                self.torque_friction, target_fric, 0.0008)
-            self.torque_latAccelOffset = float(clip(
-                target_offset, self.torque_latAccelOffset - 0.0002,
-                self.torque_latAccelOffset + 0.0002))
-            self.totalBucketPoints = target_points
-
-            self.LaC.update_live_torque_params(
-                self.torque_latAccelFactor, self.torque_latAccelOffset,
-                self.torque_friction, self.totalBucketPoints)
+                self.torque_latAccelFactor = ntune_torque_get('latAccelFactor')  # LAT_ACCEL_FACTOR
+                self.torque_friction = ntune_torque_get('friction')  # FRICTION
+                self.torque_latAccelOffset = 0.0
+                self.LaC.update_live_torque_params(self.torque_latAccelFactor, self.torque_latAccelOffset,
+                                                   self.torque_friction)
 
 
         lat_plan = self.sm['lateralPlan']

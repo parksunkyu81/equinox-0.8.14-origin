@@ -66,22 +66,8 @@ def manager_init() -> None:
     ("IsLowSpeedFactor", "1"),
     ("E2ELong", "0"),
 
-    # Shared live-torque defaults (human-readable, no hidden scale).
-    ("TorqueFriction", "0.230"),
-    ("TorqueMaxLatAccel", "2.050"),
-    # Dynamic GM steering-rate profile is wired in, but max-up remains the
-    # stock-safe 7 until the installed panda safety firmware is verified.
-    ("DynamicSteerDeltaEnabled", "0"),
-    ("DynamicSteerDeltaMaxUp", "7"),
-    ("DynamicSteerDeltaMaxDown", "17"),
-    ("TorqueDirectionalCompEnabled", "0"),
-    ("TorqueCenterOffsetEnabled", "0"),
-    ("TorqueCenterOffset20_40", "0.0"),
-    ("TorqueCenterOffset20_40Count", "0"),
-    ("TorqueCenterOffset40_60", "0.0"),
-    ("TorqueCenterOffset40_60Count", "0"),
-    ("TorqueCenterOffset60_100", "0.0"),
-    ("TorqueCenterOffset60_100Count", "0"),
+    ("TorqueFriction", "120"),
+    ("TorqueMaxLatAccel", "30"),
 
     # Dynamic TR
     ("CustomTREnabled", "1"),
