@@ -111,7 +111,7 @@ class CarController():
         self.comma_pedal = clip(pedal_command, 0.0, 0.8)  # 최대 0.8까지만 허용하여 연비 개선'''
 
         # D 모드에서 페달은 0일 때 거의 관성 주행에 가깝고, 1일 때 100%의 출력을 냅니다.
-        self.comma_pedal = clip(actuators.accel, 0., 1.)
+        self.comma_pedal = clip(actuators.accel/2, 0., 1.)
 
         # self.comma_pedal = pedal_command
       else:
