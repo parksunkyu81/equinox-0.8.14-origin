@@ -11,7 +11,8 @@ openpilot이 실제로 생성한 `sendcan` 페달·조향 명령을 디코딩하
 
 시간에 민감한 `equinoxcan`은 CAN·sendcan·차량 모델만 100Hz로 처리합니다.
 `equinoxservices`는 modelV2·주행계획·위치·레이더를 20Hz/4Hz로 별도 처리하여
-모델 메시지 생성이 CAN 주기를 늦추지 않게 합니다.
+모델 메시지 생성이 CAN 주기를 늦추지 않게 합니다. `recoverylogger`는 제어에
+개입하지 않고 복구 이벤트 전후 데이터만 메모리에 수집합니다.
 
 ## 안전 범위
 
@@ -127,15 +128,8 @@ python3 -m tools.equinox_sim.control production off
 
 ## 복구 이벤트 로그
 
-복구 기록기는 manager가 자동으로 시작하지 않습니다. 벤치 시뮬레이션에서
-기록이 필요할 때만 별도 터미널에서 다음 명령으로 수동 실행합니다.
-
-```bash
-python3 -m tools.equinox_sim.recovery_recorder
-```
-
-평상시에는 최근 5초를 메모리에만 보관합니다. ACC가 활성화된 주행 중
-브레이크·운전자 가속 입력 없이
+`recoverylogger`는 manager가 자동으로 시작합니다. 평상시에는 최근 5초를
+메모리에만 보관합니다. ACC가 활성화된 주행 중 브레이크·운전자 가속 입력 없이
 `abs(accel) <= 0.001`이 발생하면 속도오차, 플랜 유효성 및 플랜 소스와 관계없이
 이전 5초와 이후 10초를 다음 위치에 JSONL로 저장합니다.
 
