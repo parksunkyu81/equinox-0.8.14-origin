@@ -201,98 +201,14 @@ PY
 
 Panda safety와 GM EPS 동작을 확인하지 않은 상태에서 바로 11 또는 12로 올리지 마십시오.
 
-## 10. 먼저 실제 적용값 확인
-
-설정 후 다음 명령으로 Params와 속도별 프로파일을 확인하세요.
-
-```bash
-cd /data/openpilot
-
-python3 - <<'PY'
-from common.params import Params
-from selfdrive.controls.lib.torque_tuning_config import (
-  read_torque_tuning_config,
-  equinox_steer_delta_profile,
-)
-
-p = Params()
-cfg = read_torque_tuning_config(p)
-
-print("Enabled :", cfg.dynamic_delta_enabled)
-print("MaxUp   :", cfg.dynamic_delta_max_up)
-print("MaxDown :", cfg.dynamic_delta_max_down)
-print()
-
-for speed in [0, 10, 15, 20, 30, 35, 45, 60, 80, 100]:
-  up, down = equinox_steer_delta_profile(speed, cfg)
-  print(f"{speed:3d} km/h -> UP={up}, DOWN={down}")
-PY
-```
-
-정상이라면 대략 이렇게 나옵니다.
-
-```bash
-  0 km/h -> UP=7, DOWN=17
- 10 km/h -> UP=7, DOWN=17
- 15 km/h -> UP=8, DOWN=17
- 20 km/h -> UP=9, DOWN=17
- 30 km/h -> UP=9, DOWN=17
- 35 km/h -> UP=9, DOWN=17
- 45 km/h -> UP=9, DOWN=16
- 60 km/h -> UP=8, DOWN=15
- 80 km/h -> UP=7, DOWN=14
-100 km/h -> UP=7, DOWN=14
-```
-
-MaxDown=17은 모든 속도에서 17로 고정한다는 의미가 아닙니다. 속도별 맵의 상한이 17이라는 뜻이라서 고속에서는 16, 15, 14가 적용됩니다.
-
 ## 10. 문제 발생 시
 
 다음 증상이 발생하면 중앙 정렬 기능을 즉시 OFF하고 학습값을 초기화합니다.
 
-- steerFaultTemporary
-- steerFaultPermanent
-- LKAS 아이콘이 반복해서 꺼짐
-- EPS 경고
-- 조향이 순간적으로 끊김
-- 핸들이 코너 안쪽으로 갑자기 파고듦
-- 좌우로 반복 진동
-- 방향 반전 때 핸들이 튐
-- 조향 명령이 전달됐다가 갑자기 0으로 떨어짐
-- Panda가 LKAS CAN 메시지를 거부하는 것으로 의심되는 현상
-
-```bash
-cd /data/openpilot
-
-python3 - <<'PY'
-from common.params import Params
-
-p = Params()
-p.put("DynamicSteerDeltaEnabled", b"0")
-p.put("DynamicSteerDeltaMaxUp", b"7")
-p.put("DynamicSteerDeltaMaxDown", b"17")
-
-print("Dynamic steer delta disabled")
-PY
-
-```
-
-
-## 11. 합격 기준
-
-MaxUp=9는 아래 조건을 모두 만족해야 합격으로 보는 것이 좋습니다.
-
-```bash
-20~45km/h 코너 진입 반응 개선
-차선 바깥 밀림 감소
-코너 안쪽 과진입 없음
-좌우 조향 진동 증가 없음
-EPS/LKAS 오류 0회
-운전자 개입 시 즉시 기존 속도로 복귀
-방향 반전 시 토크 튐 없음
-60km/h 이상에서 기존과 비슷한 안정감
-```
-한두 번 괜찮았다고 바로 11로 올리지 말고, 좌·우 코너와 다른 노면에서 여러 차례 MaxUp=9를 유지하는 것이 좋습니다. MaxUp=9에서 안정적이고도 30~40km/h 코너 진입이 여전히 늦을 때만 다음 단계로 11을 검토하세요.
-
+- 직선에서 한쪽으로 더 강하게 끌림
+- 중앙 주변에서 좌우로 반복 흔들림
+- 반대 방향 도로에서 편향이 심해짐
+- 운전자 개입이 자주 필요함
+- EPS temporary/permanent fault 발생
 
 오픈파일럿을 끈 상태에서도 차량이 쏠린다면 먼저 타이어, 얼라인먼트, 핸들 물리 센터, 카메라 장착 상태를 점검해야 합니다.
