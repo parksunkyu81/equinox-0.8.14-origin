@@ -54,12 +54,6 @@ TogglesPanel::TogglesPanel(SettingsWindow *parent) : ListWidget(parent) {
       "../assets/offroad/icon_openpilot_mirrored.png",
     },
     {
-      "IsMetric",
-      "Use Metric System",
-      "Display speed in km/h instead of mph.",
-      "../assets/offroad/icon_metric.png",
-    },
-    {
       "RecordFront",
       "Record and Upload Driver Camera",
       "Upload data from the driver facing camera and help improve the driver monitoring algorithm.",

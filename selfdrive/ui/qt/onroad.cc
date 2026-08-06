@@ -1017,7 +1017,7 @@ void NvgWindow::drawSpeed(QPainter &p) {
 
   // std::max 타입 에러 방지(전부 float로 통일)
   float v_ego = sm["carState"].getCarState().getVEgo();
-  float conv = s->scene.is_metric ? (float)MS_TO_KPH : (float)MS_TO_MPH;
+  float conv = (float)MS_TO_KPH;
   float cur_speed = std::max(0.0f, v_ego * conv);
 
   auto car_state = sm["carState"].getCarState();
@@ -1043,7 +1043,7 @@ void NvgWindow::drawSpeed(QPainter &p) {
 
   QString speed;
   speed.sprintf("%.0f", cur_speed);
-  const QString unit = s->scene.is_metric ? "km/h" : "mph";
+  const QString unit = "km/h";
 
   // =========================
   // 고정 배경(템플릿 기준) + 폭 20% 확대
@@ -1103,8 +1103,9 @@ void NvgWindow::drawSpeed(QPainter &p) {
   // -------------------------
   const auto car_state = sm["carState"].getCarState();
   const float v_ego = car_state.getVEgo();
-  const float conv = s->scene.is_metric ? (float)MS_TO_KPH : (float)MS_TO_MPH;
-  const float cur_speed = std::max(0.0f, v_ego * conv);
+  // carState.vEgo is m/s. This UI is fixed to km/h so current, cruise,
+  // apply and road-limit speeds all use one unit.
+  const float cur_speed = std::max(0.0f, v_ego * (float)MS_TO_KPH);
 
   const float accel = car_state.getAEgo();
 
@@ -1138,6 +1139,7 @@ void NvgWindow::drawSpeed(QPainter &p) {
   // -------------------------
   const QString speed_template = "888";
   const QString unit_template  = "km/h";
+  const QString unit = "km/h";
 
   configFont(p, "Open Sans", 176, "Bold");
   QFontMetricsF fmSpeed(p.font());
@@ -1171,6 +1173,17 @@ void NvgWindow::drawSpeed(QPainter &p) {
   // ✅ 패널 배경을 10% 더 투명하게 (alpha 160 -> 144)
   QColor panelBgColor(77, 77, 77, 144);
 
+  // 활성 drawSpeed() 리팩터링 중 빠졌던 메인 현재속도 렌더링 복구.
+  p.setPen(Qt::NoPen);
+  p.setBrush(bgBright30);
+  p.drawRoundedRect(bgFixed, 22, 22);
+
+  configFont(p, "Open Sans", 176, "Bold");
+  drawTextWithColor(p, x, y_speed, speed, speedColor);
+
+  configFont(p, "Open Sans", 66, "Regular");
+  drawText(p, x, y_unit, unit, 200);
+
   // -------------------------
   // Cruise/Apply panel (left)
   // -------------------------
@@ -1181,8 +1194,7 @@ void NvgWindow::drawSpeed(QPainter &p) {
 
   auto to_display_speed = [&](float kph) -> int {
     if (kph <= 0.f) return 0;
-    if (s->scene.is_metric) return (int)(kph + 0.5f);
-    return (int)(kph * (float)KM_TO_MILE + 0.5f);
+    return (int)(kph + 0.5f);
   };
 
   // ✅ 패널 폭 10% 증가 (콘텐츠 폭 기준으로 같이 확대)

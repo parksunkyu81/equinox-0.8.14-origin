@@ -99,7 +99,7 @@ LOW_SPEED_CURVE_SLOWDOWN_MAX_DROP_KPH = [1.4, 2.4, 3.4, 4.8, 3.0]
 # controlsAllowed mismatch는 CAN/pandaState 수신 타이밍 차이로 순간 발생할 수 있으므로
 # 연속 mismatch만 controlsMismatch로 처리한다. 100Hz 기준 10프레임 = 약 100ms.
 CONTROLS_ALLOWED_MISMATCH_FRAMES = int(0.5 / DT_CTRL)
-LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
+LDW_MIN_SPEED = 50 * CV.KPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
 REPLAY = "REPLAY" in os.environ
@@ -131,8 +131,8 @@ CSID_MAP = {"0": EventName.roadCameraError, "1": EventName.wideRoadCameraError, 
 class Controls:
 
     def kph_to_clu(self, kph):
-        speed_conv_to_clu = CV.MS_TO_KPH if self.is_metric else CV.MS_TO_MPH
-        return int(kph * CV.KPH_TO_MS * speed_conv_to_clu)
+        # Cluster/control speed unit is fixed to km/h in this fork.
+        return int(kph)
 
     @staticmethod
     def _torque_param_approach(current, target, max_step):
@@ -202,7 +202,9 @@ class Controls:
 
         # read params
         self.is_live_torque = bool(self._torque_config.enabled)
-        self.is_metric = params.get_bool("IsMetric")
+        # All speed display/control paths in this fork use km/h only.
+        # Keep this internal compatibility flag true for alerts and road limiter APIs.
+        self.is_metric = True
         self.is_ldw_enabled = params.get_bool("IsLdwEnabled")
         openpilot_enabled_toggle = params.get_bool("OpenpilotEnabledToggle")
         passive = params.get_bool("Passive") or not openpilot_enabled_toggle
@@ -264,8 +266,8 @@ class Controls:
         self.min_set_speed_clu = self.kph_to_clu(MIN_SET_SPEED_KPH)
         self.max_set_speed_clu = self.kph_to_clu(MAX_SET_SPEED_KPH)
 
-        self.speed_conv_to_ms = CV.KPH_TO_MS if self.is_metric else CV.MPH_TO_MS
-        self.speed_conv_to_clu = CV.MS_TO_KPH if self.is_metric else CV.MS_TO_MPH
+        self.speed_conv_to_ms = CV.KPH_TO_MS
+        self.speed_conv_to_clu = CV.MS_TO_KPH
 
         self.slowing_down = False
         self.slowing_down_alert = False
@@ -710,8 +712,7 @@ class Controls:
     # [크루즈 MAX 속도 설정] #
     def cal_max_speed(self, frame: int, vEgo, sm, CS):
 
-        # vEgo는 m/s이고, road speed limiter와 max_speed_clu는 계기판 단위
-        # (metric: km/h, imperial: mph)를 사용하므로 함수 초입에서 한 번만 변환한다.
+        # vEgo is m/s; road speed limiter and max_speed_clu use km/h.
         v_ego_clu = vEgo * self.speed_conv_to_clu
 
         road_speed_limiter = get_road_speed_limiter()
@@ -1066,10 +1067,10 @@ class Controls:
 
         # if stock cruise is completely disabled, then we can use our own set speed logic
         # if CS.adaptiveCruise:
-        # update_v_cruise(v_cruise_kph, buttonEvents, button_timers, enabled, metric):
+        # Set speed is always maintained in km/h.
         if not self.CP.pcmCruise:
           if CS.adaptiveCruise:
-            self.v_cruise_kph = update_v_cruise(self.v_cruise_kph, CS.buttonEvents, self.button_timers, self.enabled, self.is_metric)
+            self.v_cruise_kph = update_v_cruise(self.v_cruise_kph, CS.buttonEvents, self.button_timers, self.enabled)
         elif CS.cruiseState.enabled:
             self.v_cruise_kph = CS.cruiseState.speed * CV.MS_TO_KPH
 
