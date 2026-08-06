@@ -535,7 +535,7 @@ void NvgWindow::drawHud(QPainter &p) {
   }
 
   //drawMaxSpeed(p);
-  //drawSpeed(p);
+  drawSpeed(p);
   drawSpeedLimit(p);
   drawThermal(p);
   drawRestArea(p);
@@ -1092,7 +1092,6 @@ void NvgWindow::drawSpeed(QPainter &p) {
   p.restore();
 }*/
 
-/*
 void NvgWindow::drawSpeed(QPainter &p) {
   p.save();
 
@@ -1271,7 +1270,7 @@ void NvgWindow::drawSpeed(QPainter &p) {
   drawTextWithColor(p, panel_cx, y_apply, strApply, applyOrange);
 
   p.restore();
-}*/
+}
 
 
 
