@@ -27,35 +27,33 @@ LOW_SPEED_Y = [15, 10, 0, 0, 5]
 
 # ==============================
 # Curvature request guard
-# 60km/h 이상에서 목표 곡률(desired_curvature) 변화를 완화한다.
-# 중저속은 추종력을 우선하고, 고속에서는 안정성을 우선한다.
+# 30km/h 이상에서 목표 곡률(desired_curvature) 변화를 완화한다.
+# 중속에서는 부드럽게, 고속에서는 더 보수적으로 적용한다.
 # ==============================
-HS_CURV_GUARD_ON_KPH = 60.0
+HS_CURV_GUARD_ON_KPH = 40.0
 
-# 60km/h 미만에서는 모델 곡률을 그대로 사용해 중저속 코너 추종력을 확보한다.
-# 60km/h 이상부터만 속도에 따라 점진적으로 곡률 변화량을 완화한다.
-HS_CURV_DELTA_MAX_BP = [60.0, 70.0, 90.0, 110.0, 130.0]
-HS_CURV_DELTA_MAX_V = [0.00080, 0.00062, 0.00040, 0.00025, 0.00017]
+# update 1회당 desired_curvature 최대 변화량
+HS_CURV_DELTA_MAX_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
+HS_CURV_DELTA_MAX_V = [0.00100, 0.00072, 0.00052, 0.00038, 0.00024, 0.00016]
 
 # desired_curvature_rate 절대값 제한
-HS_CURV_RATE_MAX_BP = [60.0, 70.0, 90.0, 110.0, 130.0]
-HS_CURV_RATE_MAX_V = [0.024, 0.018, 0.012, 0.008, 0.005]
+HS_CURV_RATE_MAX_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
+HS_CURV_RATE_MAX_V = [0.030, 0.023, 0.017, 0.012, 0.008, 0.005]
 
 # 저역통과 필터 alpha (작을수록 더 부드러움)
-HS_CURV_ALPHA_BP = [60.0, 70.0, 90.0, 110.0, 130.0]
-HS_CURV_ALPHA_V = [0.60, 0.50, 0.38, 0.27, 0.18]
+HS_CURV_ALPHA_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
+HS_CURV_ALPHA_V = [0.58, 0.50, 0.42, 0.34, 0.24, 0.16]
 
 # 좌/우 부호가 갑자기 뒤집히는 경우 완화
 HS_SIGN_FLIP_MIN_CURV = 0.00045
 HS_SIGN_FLIP_KEEP_RATIO = 0.12
 
 # steer_limited / saturated 직후 몇 프레임 더 보수적으로 유지할지
-HS_LIMIT_HOLD_BP = [60.0, 70.0, 90.0, 110.0, 130.0]
-HS_LIMIT_HOLD_V = [3.0, 5.0, 8.0, 12.0, 16.0]
+HS_LIMIT_HOLD_BP = [30.0, 60.0, 90.0, 110.0, 130.0]
+HS_LIMIT_HOLD_V = [4.0, 6.0, 8.0, 12.0, 16.0]
 
-# 제한 직후에도 코너 요구를 과도하게 죽이지 않도록 완화한다.
-HS_LIMIT_DELTA_SHRINK = 0.70
-HS_LIMIT_ALPHA_SHRINK = 0.85
+HS_LIMIT_DELTA_SHRINK = 0.55
+HS_LIMIT_ALPHA_SHRINK = 0.75
 
 # Low-speed adaptive slew guard.
 # It does not reduce steady-state steering authority. It only slows a sudden
@@ -63,11 +61,11 @@ HS_LIMIT_ALPHA_SHRINK = 0.85
 LS_ADAPTIVE_SLEW_MIN_KPH = 8.0
 LS_ADAPTIVE_SLEW_FULL_ON_KPH = 12.0
 LS_ADAPTIVE_SLEW_FULL_OFF_KPH = 28.0
-LS_ADAPTIVE_SLEW_MAX_KPH = 34.0
+LS_ADAPTIVE_SLEW_MAX_KPH = 8.0
 LS_ADAPTIVE_SLEW_GAP_START = 0.45
 LS_ADAPTIVE_SLEW_GAP_FULL = 1.00
 LS_ADAPTIVE_SLEW_ALLOW_GAP_BP = [8.0, 12.0, 20.0, 28.0, 34.0]
-LS_ADAPTIVE_SLEW_ALLOW_GAP_V = [1.00, 0.92, 0.88, 0.92, 1.00]
+LS_ADAPTIVE_SLEW_ALLOW_GAP_V = [1.00, 0.78, 0.72, 0.78, 1.00]
 
 # Safety output torque slew guard.
 # This is separate from model curvature smoothing and protects against abrupt
@@ -76,27 +74,9 @@ STABLE_TORQUE_SLEW_ENABLED = True
 # 저속은 더 빠르게, 고속은 더 안정적으로 torque slew 제한.
 # 목적: 10~30kph 코너 추종력 확보 + 80~110kph 와리가리 억제.
 STABLE_TORQUE_SLEW_KPH_BP = [0.0, 10.0, 20.0, 30.0, 35.0, 40.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-STABLE_TORQUE_UP_V =       [0.075, 0.110, 0.120, 0.115, 0.105, 0.090, 0.075, 0.030, 0.022, 0.017, 0.014]
-STABLE_TORQUE_DOWN_V =     [0.100, 0.140, 0.150, 0.145, 0.130, 0.115, 0.095, 0.045, 0.036, 0.028, 0.022]
+STABLE_TORQUE_UP_V =       [0.065, 0.090, 0.095, 0.090, 0.080, 0.065, 0.050, 0.028, 0.021, 0.016, 0.013]
+STABLE_TORQUE_DOWN_V =     [0.085, 0.115, 0.120, 0.110, 0.100, 0.080, 0.065, 0.040, 0.032, 0.025, 0.020]
 STABLE_TORQUE_LIMITED_SHRINK = 0.85
-
-# Slew limiter anti-windup.
-# 출력이 증가 방향으로 제한되는 동안에는 PID I 적분을 누적하지 않고,
-# 토크를 줄이거나 반대 방향으로 전환하는 동안에는 남은 I 값을 완만하게 감쇠한다.
-STABLE_TORQUE_ANTI_WINDUP_ENABLED = True
-STABLE_TORQUE_I_RELEASE_DECAY = 0.985
-
-# 속도별 최종 토크 상한.
-# 60km/h 미만은 1.0을 유지해 GM STEER_MAX=300을 모두 사용할 수 있다.
-# 고속에서는 기본 상한을 낮추되 실제 코너 횡가속 요구가 크면 headroom을 추가해
-# 고속도로 코너를 놓치지 않도록 한다.
-SPEED_TORQUE_CAP_ENABLED = True
-SPEED_TORQUE_CAP_KPH_BP = [0.0, 50.0, 60.0, 70.0, 90.0, 110.0, 130.0]
-SPEED_TORQUE_CAP_BASE_V = [1.00, 1.00, 0.98, 0.93, 0.86, 0.80, 0.76]
-SPEED_TORQUE_CAP_LATACC_BP = [0.0, 0.25, 0.60, 1.00, 1.50]
-SPEED_TORQUE_CAP_HEADROOM_V = [0.00, 0.02, 0.06, 0.12, 0.20]
-SPEED_TORQUE_CAP_MIN = 0.70
-SPEED_TORQUE_CAP_MAX = 1.00
 
 # ==============================
 # Dynamic effective torque profile
@@ -116,20 +96,12 @@ DYN_FRICTION_BP   = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 
 # Equinox uses the learned live values as the base. These small relative scales
 # improve low/mid-speed corner authority and add high-speed stability without
 # pulling a well-learned vehicle back toward a hard-coded absolute target.
-DYN_LAT_FACTOR_SCALE_V = [1.000, 0.980, 0.960, 0.940, 0.930, 0.930, 0.940,
-                          0.960, 0.985, 1.000, 1.010, 1.015, 1.020]
-DYN_FRICTION_SCALE_V = [1.000, 1.015, 1.035, 1.050, 1.055, 1.050, 1.040,
-                        1.025, 1.010, 1.000, 0.990, 0.985, 0.980]
-DYN_PROFILE_MIN_POINTS = 300
-DYN_PROFILE_FULL_POINTS = 2500
-DYN_PROFILE_LOW_SPEED_MIN_GATE = 0.35
-
-# 속도별 dynamic 최종 클램프. 저속에서는 latAccelFactor를 더 낮출 수 있고,
-# 고속으로 갈수록 base 값 근처로 복귀한다.
-DYN_LAT_FACTOR_MIN_SCALE_BP = [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 130.0]
-DYN_LAT_FACTOR_MIN_SCALE_V = [0.98, 0.94, 0.88, 0.88, 0.91, 0.94, 0.97, 0.99, 1.00]
-DYN_FRICTION_MAX_SCALE_BP = [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 130.0]
-DYN_FRICTION_MAX_SCALE_V = [1.05, 1.10, 1.15, 1.15, 1.12, 1.10, 1.08, 1.05, 1.02]
+DYN_LAT_FACTOR_SCALE_V = [1.000, 0.995, 0.985, 0.980, 0.980, 0.985, 0.990,
+                          0.995, 1.000, 1.010, 1.020, 1.025, 1.030]
+DYN_FRICTION_SCALE_V = [1.000, 1.010, 1.025, 1.030, 1.030, 1.025, 1.015,
+                        1.010, 1.000, 0.995, 0.985, 0.980, 0.980]
+DYN_PROFILE_MIN_POINTS = 1500
+DYN_PROFILE_FULL_POINTS = 6000
 
 # 실제 CarController의 STEER_DELTA_UP/DOWN은 carcontroller 쪽에서 적용해야 한다.
 # 아래 맵은 이 파일 안에서는 torque slew와 디버그용 목표값으로만 사용한다.
@@ -168,8 +140,6 @@ DYN_LOW_SPEED_HOLD_FRAMES = 80  # 약 0.8초 @100Hz 근처
 # limit 상황에서는 더 밀어붙이지 않고 부스트를 줄인다.
 DYN_STEER_LIMITED_BOOST_MULT = 0.75
 DYN_TORQUE_SLEW_ACTIVE_MULT = 0.85
-# 50km/h 이하에서는 제한이 감지돼도 코너 보조를 거의 유지한다.
-DYN_LOW_SPEED_LIMIT_BACKOFF_MULT = 0.95
 
 # steeringPressed가 True라고 해서 저속 코너 dynamic boost를 0으로 끄면,
 # 운전자가 핸들을 살짝 잡은 일반 코너에서 LatAccelFactor/Friction 보조가 전혀 체감되지 않는다.
@@ -196,9 +166,6 @@ DYN_FRICTION_MAX = 0.305
 # A learned center offset is applied to feedforward even on a straight road.
 # Keep the final controller-side clamp independent from torqued so a stale or
 # malformed publisher can never create a large continuous steering bias.
-# 직선 지속 쏠림 방지용 이중 안전장치. torqued가 stale/non-zero 값을 publish해도
-# 컨트롤러에서는 latAccelOffset을 사용하지 않는다. 원인 검증 후에만 True로 되돌린다.
-LAT_ACCEL_OFFSET_COMP_ENABLED = False
 LAT_ACCEL_OFFSET_ABS_MAX = 0.03
 LAT_ACCEL_OFFSET_DEADBAND = 0.003
 
@@ -236,11 +203,6 @@ class LatControlTorque(LatControl):
         self._stable_prev_output_torque = 0.0
         self._stable_torque_slew_gap = 0.0
         self._stable_torque_slew_active = False
-        self._stable_torque_slew_windup_block = False
-        self._speed_torque_cap = float(self.steer_max)
-        self._speed_torque_cap_gap = 0.0
-        self._speed_torque_cap_active = False
-        self._speed_torque_cap_windup_block = False
 
         # dynamic effective torque state
         self._dyn_corner_boost = 0.0
@@ -266,17 +228,14 @@ class LatControlTorque(LatControl):
         self._dir_torque_last_side = 0
 
     def update_live_torque_params(self, latAccelFactor, latAccelOffset, friction, totalBucketPoints=0):
-        if not LAT_ACCEL_OFFSET_COMP_ENABLED:
-            safe_offset = 0.0
-        else:
-            try:
-                safe_offset = float(clip(float(latAccelOffset),
-                                         -LAT_ACCEL_OFFSET_ABS_MAX,
-                                         LAT_ACCEL_OFFSET_ABS_MAX))
-                if abs(safe_offset) < LAT_ACCEL_OFFSET_DEADBAND:
-                    safe_offset = 0.0
-            except Exception:
+        try:
+            safe_offset = float(clip(float(latAccelOffset),
+                                     -LAT_ACCEL_OFFSET_ABS_MAX,
+                                     LAT_ACCEL_OFFSET_ABS_MAX))
+            if abs(safe_offset) < LAT_ACCEL_OFFSET_DEADBAND:
                 safe_offset = 0.0
+        except Exception:
+            safe_offset = 0.0
         base_params = {
             'latAccelFactor': latAccelFactor,
             'friction': friction,
@@ -514,19 +473,15 @@ class LatControlTorque(LatControl):
 
         # 제한이 걸리면 더 밀지 않고 부스트를 줄임.
         # strong rate-limit은 단순 limit보다 더 강하게 backoff한다.
-        low_speed_backoff = float(DYN_LOW_SPEED_LIMIT_BACKOFF_MULT) if v_kph <= 50.0 else None
         if bool(strong_rate_limited):
-            mult = low_speed_backoff if low_speed_backoff is not None else float(DYN_RATE_LIMITED_STRONG_BOOST_MULT)
-            low_boost_target *= mult
-            mid_boost_target *= mult
+            low_boost_target *= float(DYN_RATE_LIMITED_STRONG_BOOST_MULT)
+            mid_boost_target *= float(DYN_RATE_LIMITED_STRONG_BOOST_MULT)
         elif bool(steer_limited):
-            mult = low_speed_backoff if low_speed_backoff is not None else float(DYN_STEER_LIMITED_BOOST_MULT)
-            low_boost_target *= mult
-            mid_boost_target *= mult
+            low_boost_target *= float(DYN_STEER_LIMITED_BOOST_MULT)
+            mid_boost_target *= float(DYN_STEER_LIMITED_BOOST_MULT)
         if bool(getattr(self, '_stable_torque_slew_active', False)):
-            mult = low_speed_backoff if low_speed_backoff is not None else float(DYN_TORQUE_SLEW_ACTIVE_MULT)
-            low_boost_target *= mult
-            mid_boost_target *= mult
+            low_boost_target *= float(DYN_TORQUE_SLEW_ACTIVE_MULT)
+            mid_boost_target *= float(DYN_TORQUE_SLEW_ACTIVE_MULT)
 
         # 10~35km/h는 로그상 clip/rate가 가장 심한 저속~저중속 코너 영역이므로
         # 작은 코너 요구라도 부스트를 충분히 확보한다.
@@ -573,22 +528,18 @@ class LatControlTorque(LatControl):
         learning_gate = float(interp(float(total_pts),
                                      [DYN_PROFILE_MIN_POINTS, DYN_PROFILE_FULL_POINTS],
                                      [0.0, 1.0]))
-        if turning_hint and v_kph <= 60.0:
-            learning_gate = max(float(DYN_PROFILE_LOW_SPEED_MIN_GATE), learning_gate)
         blend = float(clip(max(cur_boost, mid_boost_target, high_gate) * learning_gate, 0.0, 1.0))
         self._dyn_last_blend = float(blend)
 
         eff_lat = base_lat + (target_lat - base_lat) * blend
         eff_fric = base_fric + (target_fric - base_fric) * blend
 
-        lat_min_scale = float(interp(v_kph, DYN_LAT_FACTOR_MIN_SCALE_BP, DYN_LAT_FACTOR_MIN_SCALE_V))
-        fric_max_scale = float(interp(v_kph, DYN_FRICTION_MAX_SCALE_BP, DYN_FRICTION_MAX_SCALE_V))
         eff_lat = float(clip(eff_lat,
-                             max(DYN_LAT_FACTOR_MIN, base_lat * lat_min_scale),
+                             max(DYN_LAT_FACTOR_MIN, base_lat * 0.96),
                              min(DYN_LAT_FACTOR_MAX, base_lat * 1.04)))
         eff_fric = float(clip(eff_fric,
                               max(DYN_FRICTION_MIN, base_fric * 0.90),
-                              min(DYN_FRICTION_MAX, base_fric * fric_max_scale)))
+                              min(DYN_FRICTION_MAX, base_fric * 1.10)))
 
         self._dyn_last_corner_strength = corner_strength
         self._dyn_last_low_speed_gate = low_gate
@@ -639,45 +590,12 @@ class LatControlTorque(LatControl):
             'targetDeltaUp': float(getattr(self, '_dyn_last_target_delta_up', 0.0) or 0.0),
             'targetDeltaDown': float(getattr(self, '_dyn_last_target_delta_down', 0.0) or 0.0),
             'rateLimitedStrong': bool(getattr(self, '_dyn_last_rate_limited_strong', False)),
-            'speedTorqueCap': float(getattr(self, '_speed_torque_cap', self.steer_max) or self.steer_max),
-            'speedTorqueCapActive': bool(getattr(self, '_speed_torque_cap_active', False)),
-            'speedTorqueCapGap': float(getattr(self, '_speed_torque_cap_gap', 0.0) or 0.0),
         }
-
-    def _get_speed_torque_cap(self, v_ego, desired_lateral_accel=0.0, desired_curvature=0.0):
-        if (not SPEED_TORQUE_CAP_ENABLED) or (not self._is_equinox_torque_profile):
-            return float(self.steer_max)
-        try:
-            v_kph = max(0.0, float(v_ego) * 3.6)
-        except Exception:
-            v_kph = 0.0
-        try:
-            lat_abs = abs(float(desired_lateral_accel))
-            if not math.isfinite(lat_abs):
-                lat_abs = 0.0
-        except Exception:
-            lat_abs = 0.0
-        try:
-            curv_abs = abs(float(desired_curvature))
-            if not math.isfinite(curv_abs):
-                curv_abs = 0.0
-        except Exception:
-            curv_abs = 0.0
-
-        base_norm = float(interp(v_kph, SPEED_TORQUE_CAP_KPH_BP, SPEED_TORQUE_CAP_BASE_V))
-        headroom = float(interp(lat_abs, SPEED_TORQUE_CAP_LATACC_BP, SPEED_TORQUE_CAP_HEADROOM_V))
-        # 짧고 급한 고속 코너는 횡가속 계산이 올라오기 전에도 약간의 여유를 준다.
-        if curv_abs >= 0.0010:
-            headroom = max(headroom, 0.06)
-        cap_norm = float(clip(base_norm + headroom, SPEED_TORQUE_CAP_MIN, SPEED_TORQUE_CAP_MAX))
-        return float(cap_norm * self.steer_max)
 
     def _guard_output_torque_slew(self, v_ego, output_torque, steering_pressed=False, steer_limited=False):
         if (not STABLE_TORQUE_SLEW_ENABLED) or bool(steering_pressed):
             self._stable_prev_output_torque = float(output_torque)
-            self._stable_torque_slew_gap = 0.0
             self._stable_torque_slew_active = False
-            self._stable_torque_slew_windup_block = False
             return float(output_torque)
 
         try:
@@ -702,11 +620,6 @@ class LatControlTorque(LatControl):
         self._stable_prev_output_torque = out
         self._stable_torque_slew_gap = float(abs(out - target))
         self._stable_torque_slew_active = bool(self._stable_torque_slew_gap > 1e-6)
-        # 증가 방향 제한에서만 적분 windup을 차단한다. 감속/부호 전환에서는
-        # 적분기가 자연스럽게 풀릴 수 있도록 별도로 표시한다.
-        self._stable_torque_slew_windup_block = bool(
-            self._stable_torque_slew_active and increasing_abs
-        )
         return out
 
     def update(self, active, CS, VM, params, last_actuators, steer_limited, desired_curvature, desired_curvature_rate,
@@ -724,11 +637,6 @@ class LatControlTorque(LatControl):
             self._stable_prev_output_torque = 0.0
             self._stable_torque_slew_gap = 0.0
             self._stable_torque_slew_active = False
-            self._stable_torque_slew_windup_block = False
-            self._speed_torque_cap = float(self.steer_max)
-            self._speed_torque_cap_gap = 0.0
-            self._speed_torque_cap_active = False
-            self._speed_torque_cap_windup_block = False
             self._dyn_prev_rate_limited_strong = False
             self._dyn_prev_rate_limit_err = 0.0
             self._dyn_effective_active = False
@@ -792,35 +700,16 @@ class LatControlTorque(LatControl):
                 lateral_accel_deadzone=lateral_accel_deadzone,
                 friction_compensation=True
             )
-            # 현재 프레임에서 slew 제한이 새로 발생할 수 있으므로 I 값을 보관했다가
-            # 증가 방향 제한이면 update 후 복원한다. 이전 프레임부터 증가 제한 중이면
-            # 이번 프레임은 처음부터 freeze한다. 감속/반전 제한은 freeze하지 않는다.
-            try:
-                pid_i_before_update = float(self.pid.i)
-            except Exception:
-                pid_i_before_update = 0.0
-
             freeze_integrator = (
                 steer_limited or
                 CS.steeringPressed or
                 CS.vEgo < 5 or
-                bool(getattr(self, '_stable_torque_slew_windup_block', False)) or
-                bool(getattr(self, '_speed_torque_cap_windup_block', False)) or
                 (hs_guard_active and self._hs_guard_hold_frames > 0)
             )
             output_torque = self.pid.update(pid_log.error,
                                             feedforward=ff,
                                             speed=CS.vEgo,
                                             freeze_integrator=freeze_integrator)
-
-            # 속도별 상한은 slew 전에 적용해 상한 진입/복귀도 부드럽게 만든다.
-            pid_target_before_speed_cap = float(output_torque)
-            speed_cap = self._get_speed_torque_cap(CS.vEgo, desired_lateral_accel, desired_curvature)
-            output_torque = float(clip(output_torque, -speed_cap, speed_cap))
-            self._speed_torque_cap = float(speed_cap)
-            self._speed_torque_cap_gap = float(abs(pid_target_before_speed_cap - output_torque))
-            self._speed_torque_cap_active = bool(self._speed_torque_cap_gap > 1e-6)
-            self._speed_torque_cap_windup_block = bool(self._speed_torque_cap_active)
 
             requested_steer_raw = -output_torque
             requested_steer = requested_steer_raw
@@ -831,37 +720,9 @@ class LatControlTorque(LatControl):
                 output_torque = -requested_steer
                 self.pid.control = output_torque
 
-            stable_prev_before_slew = float(getattr(self, '_stable_prev_output_torque', 0.0) or 0.0)
-            pid_target_before_slew = float(output_torque)
             output_torque = self._guard_output_torque_slew(
                 CS.vEgo, output_torque, CS.steeringPressed, bool(steer_limited)
             )
-
-            if STABLE_TORQUE_ANTI_WINDUP_ENABLED:
-                windup_limited_now = bool(
-                    low_speed_slew_active or
-                    getattr(self, '_stable_torque_slew_windup_block', False) or
-                    getattr(self, '_speed_torque_cap_windup_block', False)
-                )
-                if windup_limited_now and not freeze_integrator:
-                    # PID가 요구한 증가량을 실제 출력이 따라가지 못한 프레임의 I 누적을 취소한다.
-                    try:
-                        self.pid.i = float(pid_i_before_update)
-                    except Exception:
-                        pass
-                elif bool(getattr(self, '_stable_torque_slew_active', False)):
-                    # 토크 감소 또는 좌/우 반전이 slew에 막힌 경우 남아 있는 I를 천천히 풀어
-                    # 커브 종료 후 이전 방향으로 미는 시간을 줄인다.
-                    reducing_or_reversing = bool(
-                        (stable_prev_before_slew * pid_target_before_slew) < 0.0 or
-                        abs(pid_target_before_slew) < abs(stable_prev_before_slew)
-                    )
-                    if reducing_or_reversing:
-                        try:
-                            self.pid.i = float(self.pid.i) * float(STABLE_TORQUE_I_RELEASE_DECAY)
-                        except Exception:
-                            pass
-
             self.pid.control = output_torque
 
             # v2: 다음 프레임 dynamic boost에 직접 넣을 strong rate-limit proxy를 저장한다.
@@ -879,13 +740,11 @@ class LatControlTorque(LatControl):
             else:
                 tracking_gap = abs(float(requested_steer_raw) - applied_last)
             stable_gap = float(getattr(self, '_stable_torque_slew_gap', 0.0) or 0.0)
-            speed_cap_gap = float(getattr(self, '_speed_torque_cap_gap', 0.0) or 0.0)
-            dyn_rate_err = max(stable_gap, speed_cap_gap, tracking_gap if bool(low_speed_slew_active) else 0.0)
+            dyn_rate_err = max(stable_gap, tracking_gap if bool(low_speed_slew_active) else 0.0)
             self._dyn_prev_rate_limit_err = float(dyn_rate_err)
             self._dyn_prev_rate_limited_strong = bool(
                 (bool(low_speed_slew_active) and tracking_gap >= float(DYN_RATE_LIMITED_STRONG_TRACKING_GAP)) or
-                (bool(getattr(self, '_stable_torque_slew_active', False)) and stable_gap >= float(DYN_RATE_LIMITED_STRONG_OUTPUT_GAP)) or
-                (bool(getattr(self, '_speed_torque_cap_active', False)) and speed_cap_gap >= float(DYN_RATE_LIMITED_STRONG_OUTPUT_GAP))
+                (bool(getattr(self, '_stable_torque_slew_active', False)) and stable_gap >= float(DYN_RATE_LIMITED_STRONG_OUTPUT_GAP))
             )
 
             pid_log.active = True
