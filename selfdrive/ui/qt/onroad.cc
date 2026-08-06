@@ -614,7 +614,6 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // 1. 핸들 토크 각도
   int x = icon_start_x;
   const int y1 = rect().bottom() - footer_h / 2 - 10;
-  const int y2 = rect().bottom() - (footer_h / 2) - (radius + 50) - 10;
 
   float cur_speed = std::max(0.0, car_state.getVEgo() * MS_TO_KPH);
   QString str;
@@ -644,12 +643,12 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   drawTextWithColor(p, x, y1 + 50, str2, textColor);
   p.setOpacity(1.0);
 
-  // 5. VISION DIST: moved to the former AUTO-mode position.
-  x = icon_start_x + (icon_step * 4);
+  // 2. VISION DIST
+  x = icon_start_x + (icon_step * 1);
 
   p.setPen(Qt::NoPen);
   p.setBrush(blackColor(200));
-  p.drawEllipse(x - radius / 2, y2 - radius / 2, radius, radius);
+  p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
 
   textColor = QColor(255, 255, 255, 200);
 
@@ -674,10 +673,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   }
 
   configFont(p, "Open Sans", 38, "Bold");
-  drawText(p, x, y2-20, "DIST", 200);
+  drawText(p, x, y1-20, "DIST", 200);
 
   configFont(p, "Open Sans", textSize, "Bold");
-  drawTextWithColor(p, x, y2+50, str, textColor);
+  drawTextWithColor(p, x, y1+50, str, textColor);
   p.setOpacity(1.0);
 
   // 3. LKAS
@@ -761,6 +760,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
   // ================================================================================================================ //
   x = 140;
+  const int y2 = rect().bottom() - (footer_h / 2) - (radius + 50) - 10;
   x = icon_start_x;
 
   // Immediate forced-acceleration recovery warning. Keep it attached to the
@@ -813,8 +813,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     drawTextWithColor(p, pedal_x, alert_y + 88, recovery_detail, recovery_detail_color);
   }
 
-  // 1. AUTO/Dynamic-TR mode: moved to the former ACCEL position.
-  x = icon_start_x;
+  // 5. TR Value (rightmost; swapped with the ACCEL gauge)
+  x = icon_start_x + (icon_step * 4);
   float tr_value = controls_state.getDynamicTRValue();
   auto tr_mode = controls_state.getDynamicTRMode();
   //int cruise_gap = car_state.getCruiseGap();
@@ -963,24 +963,24 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.setOpacity(1.0);
 #endif
 
-  // 2. Live comma-pedal ACCEL gauge: moved to the former DIST position. CarController writes the actual clipped
+  // 1. Live comma-pedal ACCEL gauge (leftmost; swapped with DIST). CarController writes the actual clipped
   // gas-interceptor command into carControl.actuatorsOutput.gas, so 0.55 is
   // shown as 55%. The outer red arc starts at 12 o'clock and advances clockwise.
-  x = icon_start_x + (icon_step * 1);
+  x = icon_start_x;
   const float comma_pedal = std::max(0.0f, (float)car_control.getActuatorsOutput().getGas());
   const float comma_pedal_ratio = std::min(comma_pedal, 1.0f);
   const int comma_pedal_percent = (int)std::round(comma_pedal_ratio * 100.0f);
   const int gauge_pen_width = 14;
   const int gauge_inset = gauge_pen_width / 2 + 4;
   const QRectF gauge_rect(x - radius / 2 + gauge_inset,
-                          y1 - radius / 2 + gauge_inset,
+                          y2 - radius / 2 + gauge_inset,
                           radius - gauge_inset * 2,
                           radius - gauge_inset * 2);
 
   p.save();
   p.setPen(Qt::NoPen);
   p.setBrush(blackColor(215));
-  p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
+  p.drawEllipse(x - radius / 2, y2 - radius / 2, radius, radius);
 
   p.setBrush(Qt::NoBrush);
   p.setPen(QPen(QColor(82, 82, 82, 220), gauge_pen_width,
@@ -997,12 +997,12 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
   QColor accel_label_color(255, 180, 180, 230);
   configFont(p, "Open Sans", 28, "Bold");
-  drawTextWithColor(p, x, y1 - 24, "ACCEL", accel_label_color);
+  drawTextWithColor(p, x, y2 - 24, "ACCEL", accel_label_color);
 
   const QString comma_pedal_text = QString("%1%").arg(comma_pedal_percent);
   QColor comma_pedal_text_color(255, 255, 255, 245);
   configFont(p, "Open Sans", comma_pedal_percent < 100 ? 46 : 40, "Bold");
-  drawTextWithColor(p, x, y1 + 42, comma_pedal_text, comma_pedal_text_color);
+  drawTextWithColor(p, x, y2 + 42, comma_pedal_text, comma_pedal_text_color);
   p.restore();
   p.setOpacity(1.0);
 
