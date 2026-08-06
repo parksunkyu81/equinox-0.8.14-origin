@@ -21,7 +21,6 @@ class CarController():
     self._dyn_delta_up_last = 0
     self._dyn_delta_down_last = 0
 
-    self.accel = 0.0
 
     self.lka_steering_cmd_counter_last = -1
     self.lka_icon_status_last = (False, False)
@@ -42,7 +41,6 @@ class CarController():
     can_sends = []
 
     brake_pressed = bool(CS.out.brakePressed)
-    self.accel = float(actuators.accel)
 
     # Steering (50Hz)
     # 메시지를 너무 짧은 간격으로 전송할 때 발생하는 GM EPS 오류를 방지하십시오.
