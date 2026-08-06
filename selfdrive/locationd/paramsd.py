@@ -13,7 +13,7 @@ from common.numpy_fast import clip
 from selfdrive.locationd.live_parameters_validity import LiveParametersValidity
 from selfdrive.locationd.models.car_kf import CarKalman, ObservationKind, States
 from selfdrive.locationd.models.constants import GENERATED_DIR
-from selfdrive.process_diagnostics import append_process_diagnostic, DiagnosticRateLimiter
+from selfdrive.process_diagnostics import append_process_diagnostic
 from selfdrive.swaglog import cloudlog
 
 
@@ -160,9 +160,9 @@ def main(sm=None, pm=None):
   angle_offset_average = params['angleOffsetAverageDeg']
   angle_offset = angle_offset_average
   message_validity = LiveParametersValidity()
-  input_diagnostic_limiter = DiagnosticRateLimiter(
-    persistent_seconds=0.3, summary_seconds=60.0, max_signatures=8
-  )
+  input_issue_active = False
+  input_issue_started = 0.0
+  input_grace_expired_logged = False
 
   while True:
     sm.update()
@@ -217,42 +217,60 @@ def main(sm=None, pm=None):
                      if not alive and s not in sm.ignore_alive]
         not_freq_ok = [s for s, freq_ok in sm.freq_ok.items()
                        if not freq_ok and s not in sm.ignore_alive]
-      else:
-        invalid = []
-        not_alive = []
-        not_freq_ok = []
 
-      input_signature = "invalid=%s;not_alive=%s;not_freq_ok=%s" % (
-        ",".join(invalid), ",".join(not_alive), ",".join(not_freq_ok)
-      )
-      diagnostic_events = input_diagnostic_limiter.update(
-        now, not input_checks_ok, input_signature
-      )
-      for diagnostic in diagnostic_events:
-        diagnostic_kind = diagnostic.pop("kind")
-        if diagnostic_kind == "persistent":
+        if not input_issue_active:
+          input_issue_active = True
+          input_issue_started = now
+          input_grace_expired_logged = False
           append_process_diagnostic(
-            "live_parameters_input_persistent",
+            "live_parameters_input_issue",
             invalid=invalid,
             not_alive=not_alive,
             not_freq_ok=not_freq_ok,
             grace_active=bool(grace_active),
             parameters_sane=bool(liveParameters.valid),
-            **diagnostic,
           )
           cloudlog.event(
-            "liveParametersInputPersistent",
+            "liveParametersInputIssue",
+            invalid=invalid,
+            not_alive=not_alive,
+            not_freq_ok=not_freq_ok,
+            grace_active=bool(grace_active),
+            parameters_sane=bool(liveParameters.valid),
+            error=True,
+          )
+        elif not msg.valid and not input_grace_expired_logged:
+          input_grace_expired_logged = True
+          append_process_diagnostic(
+            "live_parameters_input_grace_expired",
+            duration=now - input_issue_started,
             invalid=invalid,
             not_alive=not_alive,
             not_freq_ok=not_freq_ok,
             parameters_sane=bool(liveParameters.valid),
-            duration=diagnostic["duration"],
+          )
+          cloudlog.event(
+            "liveParametersInputGraceExpired",
+            duration=now - input_issue_started,
+            invalid=invalid,
+            not_alive=not_alive,
+            not_freq_ok=not_freq_ok,
+            parameters_sane=bool(liveParameters.valid),
             error=True,
           )
-        elif diagnostic_kind == "recovered":
-          append_process_diagnostic("live_parameters_input_recovered", **diagnostic)
-        elif diagnostic_kind == "summary":
-          append_process_diagnostic("live_parameters_input_summary", **diagnostic)
+      elif input_issue_active:
+        append_process_diagnostic(
+          "live_parameters_input_recovered",
+          duration=now - input_issue_started,
+          grace_expired=bool(input_grace_expired_logged),
+        )
+        cloudlog.event(
+          "liveParametersInputRecovered",
+          duration=now - input_issue_started,
+          grace_expired=bool(input_grace_expired_logged),
+        )
+        input_issue_active = False
+        input_grace_expired_logged = False
 
       if sm.frame % 1200 == 0:  # once a minute
         params = {
