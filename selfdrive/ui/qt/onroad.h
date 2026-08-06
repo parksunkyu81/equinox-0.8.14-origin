@@ -49,13 +49,6 @@ protected:
   double prev_draw_t = 0;
   FirstOrderFilter fps_filter;
 
-  // Keep a short visual record of a recovery after the control pulse ends.
-  // This affects presentation only; it never extends the actuator command.
-  double pedal_force_recovery_alert_until = 0.0;
-  float pedal_force_recovery_accel = 0.0f;
-  float pedal_force_recovery_floor = 0.0f;
-  float pedal_force_recovery_duration = 0.0f;
-
   uint64_t last_update_params;
 
   // neokii

@@ -129,14 +129,8 @@ python3 -m tools.equinox_sim.control production off
 ## 복구 이벤트 로그
 
 `recoverylogger`는 manager가 자동으로 시작합니다. 평상시에는 최근 5초를
-메모리에만 보관합니다. ACC가 활성화된 주행 중 브레이크·운전자 가속 입력 없이
-`abs(accel) <= 0.001`이 발생하면 속도오차, 플랜 유효성 및 플랜 소스와 관계없이
+메모리에만 보관하고, 복구 또는 production 조건의 `accel = 0` 후보가 발생하면
 이전 5초와 이후 10초를 다음 위치에 JSONL로 저장합니다.
-
-60초 저장 제한은 없습니다. 하나의 연속된 `accel = 0` 구간은 이벤트 한 건으로
-기록하고, 값이 0에서 벗어났다가 다시 0이 되면 앞 이벤트의 이후 10초 수집과
-겹치더라도 새로운 파일로 별도 기록합니다. 파일명과 metadata의
-`triggerWallTime`은 저장 완료 시각이 아니라 실제 이벤트 시작 시각입니다.
 
 ```text
 /data/media/0/pedal_recovery_logs/
