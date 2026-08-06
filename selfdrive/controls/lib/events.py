@@ -784,8 +784,8 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   EventName.commIssue: {
     #ET.SOFT_DISABLE: soft_disable_alert("Communication Issue between Processes"),
     #ET.NO_ENTRY: NoEntryAlert("Communication Issue between Processes"),
-    ET.SOFT_DISABLE: soft_disable_alert("주행 데이터 통신 지연"),
-    ET.NO_ENTRY: NoEntryAlert("주행 데이터 통신 지연"),
+    ET.SOFT_DISABLE: soft_disable_alert("장치 프로세스 동작오류"),
+    ET.NO_ENTRY: NoEntryAlert("장치 프로세스 동작오류"),
   },
   EventName.commIssueAvgFreq: {
     #ET.SOFT_DISABLE: soft_disable_alert("Low Communication Rate between Processes"),
