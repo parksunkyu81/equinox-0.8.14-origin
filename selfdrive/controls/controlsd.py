@@ -20,31 +20,9 @@ from selfdrive.controls.lib.drive_helpers import update_v_cruise, initialize_v_c
 from selfdrive.controls.lib.drive_helpers import get_lag_adjusted_curvature
 from selfdrive.controls.lib.longcontrol import LongControl, LongCtrlState
 from selfdrive.controls.lib.pedal_force_recovery import (
-  RECOVERY_BLOCK_BENCH_DISABLED,
-  RECOVERY_BLOCK_MANUAL_CATCHUP,
-  RECOVERY_BLOCK_JOYSTICK,
-  RECOVERY_BLOCK_PLAN_INVALID,
-  RECOVERY_BLOCK_CONTROLS_INACTIVE,
-  RECOVERY_BLOCK_ACC_INACTIVE,
-  RECOVERY_BLOCK_LONG_NOT_PID,
-  RECOVERY_BLOCK_BRAKE,
-  RECOVERY_BLOCK_DRIVER_GAS,
-  RECOVERY_BLOCK_STANDSTILL,
-  RECOVERY_BLOCK_LOW_SPEED,
-  RECOVERY_BLOCK_SOFT_DISABLE,
-  RECOVERY_BLOCK_FCW,
-  RECOVERY_BLOCK_NO_SPEED_DEMAND,
-  RECOVERY_BLOCK_PLAN_DECEL,
-  RECOVERY_BLOCK_CURVE_DECEL,
-  RECOVERY_BLOCK_LEAD_RISK,
-  RECOVERY_BLOCK_NO_INTERCEPTOR,
+  PEDAL_FORCE_RECOVERY_PEDAL_FLOOR,
   PedalForceRecovery,
   bench_fault_state,
-  recovery_block_reason_text,
-  recovery_curve_decelerating,
-  recovery_lead_risk,
-  recovery_log_trigger,
-  recovery_plan_decelerating,
   recovery_speed_demand,
 )
 from selfdrive.controls.lib.manual_lead_catchup import ManualLeadCatchup
@@ -278,16 +256,6 @@ class Controls:
         self.pedal_deadzone_accel_request = 0.0
         self.pedal_deadzone_vehicle_accel = 0.0
         self.pedal_force_recovery = PedalForceRecovery(DT_CTRL)
-        self.pedal_recovery_eligible = False
-        self.pedal_recovery_block_reason = 0
-        self.pedal_recovery_speed_error = 0.0
-        self.pedal_recovery_future_speed_error = 0.0
-        self.pedal_recovery_plan_age = 0.0
-        self.pedal_recovery_plan_decelerating = False
-        self.pedal_recovery_curve_decelerating = False
-        self.pedal_recovery_lead_risk = False
-        self.pedal_recovery_last_log_frame = -10000
-        self.pedal_recovery_last_logged_reason = -1
         self.manual_lead_catchup = ManualLeadCatchup(DT_CTRL, params=params)
         self.equinox_simulator = EQUINOX_SIMULATOR
         self.equinox_sim_force_accel_zero = False
@@ -1140,58 +1108,30 @@ class Controls:
     def pedal_force_recovery_eligible(self, CS, long_plan, t_since_plan, injected_fault=False):
         speeds = long_plan.speeds
         plan_valid = self.sm.valid['longitudinalPlan'] and len(speeds) == CONTROL_N and t_since_plan <= 0.25
+        if not plan_valid:
+            return False
+
         force_slow_decel = self.sm['driverMonitoringState'].awarenessStatus < 0.0 or \
                            self.state == State.softDisabling
         speed_error = float(self.LoC.v_pid - CS.vEgo)
-        future_speed_error = float(speeds[-1] - CS.vEgo) if len(speeds) else -100.0
+        future_speed_error = float(speeds[-1] - CS.vEgo)
+        # The plan source describes who limits the target, not whether positive
+        # acceleration is safe. A real accel-zero event can legitimately have a
+        # lead0 source while both the current PID target and the future plan ask
+        # for more speed. Blocking every non-cruise source suppressed recovery,
+        # its UI warning, and the pedal command in that exact situation.
         no_fcw = not bool(long_plan.fcw)
+        # In bench mode fault mode 2 is ground truth that accel was forcibly
+        # replaced with zero. Keep all safety/engagement gates, but do not let
+        # the normal 0.30 m/s detector chatter at the set-speed boundary.
         speed_demand = recovery_speed_demand(speed_error, future_speed_error, injected_fault)
-        plan_decelerating = plan_valid and recovery_plan_decelerating(speeds, CS.vEgo)
-        curve_decelerating = recovery_curve_decelerating(
-            self.is_curv_driving, self.slow_on_curves, self.curve_speed_ms, CS.vEgo)
-        lead_risk = recovery_lead_risk(self.get_lead(self.sm), CS.vEgo)
 
-        reason = 0
-        if not self.CP.enableGasInterceptor:
-            reason |= RECOVERY_BLOCK_NO_INTERCEPTOR
-        if not plan_valid:
-            reason |= RECOVERY_BLOCK_PLAN_INVALID
-        if not self.active:
-            reason |= RECOVERY_BLOCK_CONTROLS_INACTIVE
-        if not CS.adaptiveCruise:
-            reason |= RECOVERY_BLOCK_ACC_INACTIVE
-        if self.LoC.long_control_state != LongCtrlState.pid:
-            reason |= RECOVERY_BLOCK_LONG_NOT_PID
-        if CS.brakePressed:
-            reason |= RECOVERY_BLOCK_BRAKE
-        if CS.gasPressed:
-            reason |= RECOVERY_BLOCK_DRIVER_GAS
-        if CS.standstill:
-            reason |= RECOVERY_BLOCK_STANDSTILL
-        if CS.vEgo <= V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS:
-            reason |= RECOVERY_BLOCK_LOW_SPEED
-        if force_slow_decel:
-            reason |= RECOVERY_BLOCK_SOFT_DISABLE
-        if not no_fcw:
-            reason |= RECOVERY_BLOCK_FCW
-        if not speed_demand:
-            reason |= RECOVERY_BLOCK_NO_SPEED_DEMAND
-        if plan_decelerating:
-            reason |= RECOVERY_BLOCK_PLAN_DECEL
-        if curve_decelerating:
-            reason |= RECOVERY_BLOCK_CURVE_DECEL
-        if lead_risk:
-            reason |= RECOVERY_BLOCK_LEAD_RISK
-
-        self.pedal_recovery_speed_error = speed_error
-        self.pedal_recovery_future_speed_error = future_speed_error
-        self.pedal_recovery_plan_age = float(t_since_plan)
-        self.pedal_recovery_plan_decelerating = bool(plan_decelerating)
-        self.pedal_recovery_curve_decelerating = bool(curve_decelerating)
-        self.pedal_recovery_lead_risk = bool(lead_risk)
-        self.pedal_recovery_block_reason = int(reason)
-        self.pedal_recovery_eligible = reason == 0
-        return self.pedal_recovery_eligible, self.pedal_recovery_block_reason
+        return self.CP.enableGasInterceptor and self.active and CS.adaptiveCruise and \
+               self.LoC.long_control_state == LongCtrlState.pid and \
+               not CS.brakePressed and not CS.gasPressed and not CS.standstill and \
+               CS.vEgo > V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS and \
+               not force_slow_decel and not self.is_curv_driving and no_fcw and \
+               speed_demand
 
     def state_control(self, CS):
         """Given the state, this function returns an actuators packet"""
@@ -1377,93 +1317,12 @@ class Controls:
         injected_recovery_fault = self.equinox_simulator and self.equinox_sim_fault_mode == 2 and \
                                   self.equinox_sim_force_accel_zero and \
                                   self.equinox_sim_recovery_enabled
-        raw_recovery_accel = float(actuators.accel)
-        recovery_eligible, recovery_block_reason = self.pedal_force_recovery_eligible(
-            CS, long_plan, recovery_plan_age, injected_fault=injected_recovery_fault)
-
-        if self.joystick_mode:
-            recovery_block_reason |= RECOVERY_BLOCK_JOYSTICK
-        if self.manual_lead_catchup.recovery_blocked:
-            recovery_block_reason |= RECOVERY_BLOCK_MANUAL_CATCHUP
-        if self.equinox_simulator and not self.equinox_sim_recovery_enabled:
-            recovery_block_reason |= RECOVERY_BLOCK_BENCH_DISABLED
-
-        recovery_eligible = recovery_block_reason == 0
-        self.pedal_recovery_eligible = bool(recovery_eligible)
-        self.pedal_recovery_block_reason = int(recovery_block_reason)
-
-        recovery_observed_event = recovery_log_trigger(
-            self.pedal_force_recovery.watchdog_active, self.active, CS.adaptiveCruise,
-            CS.brakePressed, CS.gasPressed, CS.standstill, raw_recovery_accel,
-            vehicle_accel=CS.aEgo,
-            speed_error=self.pedal_recovery_speed_error)
-        previous_watchdog_active = self.pedal_force_recovery.watchdog_active
-        previous_force_active = self.pedal_force_recovery.active
-        previous_positive_stage = self.pedal_force_recovery.positive_stage
-        previous_delivery_fault = self.pedal_force_recovery.delivery_fault
-        actuators.accel = self.pedal_force_recovery.update(
-            recovery_eligible, raw_recovery_accel,
-            vehicle_accel=CS.aEgo,
-            speed_error=self.pedal_recovery_speed_error)
-
-        # Reuse the existing legacy diagnostic channels so qlog/rlog captures
-        # both stages without requiring a cereal schema migration.
-        self.pedal_deadzone_boost_candidate = bool(
-            recovery_observed_event or self.pedal_force_recovery.positive_candidate)
-        self.pedal_deadzone_boost_active = bool(self.pedal_force_recovery.watchdog_active)
-        self.pedal_deadzone_raw_command = float(raw_recovery_accel)
-        self.pedal_deadzone_applied_command = float(actuators.accel)
-        self.pedal_deadzone_floor = float(self.pedal_force_recovery.pedal_floor)
-        self.pedal_deadzone_accel_request = float(self.pedal_force_recovery.requested_floor_accel)
-        self.pedal_deadzone_vehicle_accel = float(CS.aEgo)
-
-        # Record the exact reason whenever a zero or ineffective-positive request is blocked. Repeated
-        # identical reasons are rate-limited to five seconds at 100 Hz.
-        if recovery_observed_event and (not recovery_eligible):
-            reason_changed = recovery_block_reason != self.pedal_recovery_last_logged_reason
-            log_due = (self.sm.frame - self.pedal_recovery_last_log_frame) >= 500
-            if reason_changed or log_due:
-                cloudlog.warning(
-                    "PedalForceRecovery blocked: reason=%s raw=%.4f vEgo=%.3f "
-                    "vPid=%.3f speedErr=%.3f futureErr=%.3f planAge=%.3f "
-                    "planDecel=%d curveDecel=%d leadRisk=%d",
-                    recovery_block_reason_text(recovery_block_reason), raw_recovery_accel,
-                    CS.vEgo, self.LoC.v_pid, self.pedal_recovery_speed_error,
-                    self.pedal_recovery_future_speed_error, self.pedal_recovery_plan_age,
-                    int(self.pedal_recovery_plan_decelerating),
-                    int(self.pedal_recovery_curve_decelerating),
-                    int(self.pedal_recovery_lead_risk))
-                self.pedal_recovery_last_log_frame = int(self.sm.frame)
-                self.pedal_recovery_last_logged_reason = int(recovery_block_reason)
-
-        if not previous_watchdog_active and self.pedal_force_recovery.watchdog_active:
-            cloudlog.warning(
-                "PedalForceRecovery watchdog start: raw=%.4f held=%.4f "
-                "speedErr=%.3f futureErr=%.3f",
-                raw_recovery_accel, self.pedal_force_recovery.last_positive_accel,
-                self.pedal_recovery_speed_error, self.pedal_recovery_future_speed_error)
-        if not previous_force_active and self.pedal_force_recovery.active:
-            cloudlog.warning(
-                "PedalForceRecovery force start: raw=%.4f forced=%.4f zeroFrames=%d positiveStage=%d",
-                raw_recovery_accel, actuators.accel, self.pedal_force_recovery.zero_frames,
-                self.pedal_force_recovery.positive_stage)
-        if previous_positive_stage != self.pedal_force_recovery.positive_stage:
-            cloudlog.warning(
-                "PedalPositiveWatchdog stage: %d->%d raw=%.4f output=%.4f aEgo=%.3f "
-                "speedErr=%.3f floor=%.3f",
-                previous_positive_stage, self.pedal_force_recovery.positive_stage,
-                raw_recovery_accel, actuators.accel, CS.aEgo,
-                self.pedal_recovery_speed_error, self.pedal_force_recovery.pedal_floor)
-        if (not previous_delivery_fault) and self.pedal_force_recovery.delivery_fault:
-            cloudlog.error(
-                "PedalPositiveWatchdog delivery fault suspected: raw=%.4f aEgo=%.3f "
-                "speedErr=%.3f forced floor timed out",
-                raw_recovery_accel, CS.aEgo, self.pedal_recovery_speed_error)
-        if previous_watchdog_active and not self.pedal_force_recovery.watchdog_active:
-            cloudlog.info(
-                "PedalForceRecovery end: raw=%.4f output=%.4f reason=%s",
-                raw_recovery_accel, actuators.accel,
-                recovery_block_reason_text(recovery_block_reason))
+        recovery_eligible = not self.joystick_mode and \
+                            not self.manual_lead_catchup.recovery_blocked and \
+                            (not self.equinox_simulator or self.equinox_sim_recovery_enabled) and \
+                            self.pedal_force_recovery_eligible(CS, long_plan, recovery_plan_age,
+                                                               injected_fault=injected_recovery_fault)
+        actuators.accel = self.pedal_force_recovery.update(recovery_eligible, actuators.accel)
 
         # Fault mode 2 is a one-shot bench test. The first forced output proves
         # that recovery took control, so stop injecting accel=0 immediately and
@@ -1718,7 +1577,7 @@ class Controls:
         controlsState.pedalForceRecoveryCount = int(self.pedal_force_recovery.activation_count)
         controlsState.pedalForceRecoveryRawAccel = float(self.pedal_force_recovery.raw_accel)
         controlsState.pedalForceRecoveryAccel = float(self.pedal_force_recovery.forced_accel)
-        controlsState.pedalForceRecoveryPedalFloor = float(self.pedal_force_recovery.pedal_floor)
+        controlsState.pedalForceRecoveryPedalFloor = float(PEDAL_FORCE_RECOVERY_PEDAL_FLOOR)
         controlsState.pedalManualLaunchAutoAllowed = False
         controlsState.pedalComfortAccelCap = float(self.pedal_comfort_accel_cap)
 
