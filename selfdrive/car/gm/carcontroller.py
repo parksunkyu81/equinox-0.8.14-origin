@@ -85,7 +85,7 @@ class CarController():
     if CS.CP.enableGasInterceptor:
       # 이것이 없으면 저속에서 너무 공격적입니다.
       pedal_speed_allowed = CS.out.vEgo > V_CRUISE_ENABLE_MIN / CV.MS_TO_KPH
-      if c.active and CS.adaptive_Cruise and not brake_pressed and not CS.out.gasPressed and \
+      if CS.adaptive_Cruise and not brake_pressed and not CS.out.gasPressed and \
          pedal_speed_allowed:
 
         # Speed-dependent pedal conversion baseline. Tune this map from logged
@@ -100,18 +100,13 @@ class CarController():
         pedal_command = float(clip(acc_mult * self.accel, 0., 0.75))"""
 
         # 가속 멀티플라이어 설정
-        '''pedaloffset  = interp(CS.out.vEgo,
+        pedaloffset = interp(CS.out.vEgo,
                           [0., 20 * CV.KPH_TO_MS, 30 * CV.KPH_TO_MS, 60 * CV.KPH_TO_MS, 80 * CV.KPH_TO_MS, 100.0 * CV.KPH_TO_MS],
                           [0.186, 0.178, 0.175, 0.170, 0.172, 0.184]
                           )
-        # 원래 가속 명령 계산
-        pedal_command = (pedaloffset + self.accel)/7
 
         # 연비 향상을 위해 클리핑
-        self.comma_pedal = clip(pedal_command, 0.0, 0.8)  # 최대 0.8까지만 허용하여 연비 개선'''
-
-        # D 모드에서 페달은 0일 때 거의 관성 주행에 가깝고, 1일 때 100%의 출력을 냅니다.
-        self.comma_pedal = clip(actuators.accel/2, 0., 1.)
+        self.comma_pedal = clip(pedaloffset * actuators.accel, 0.0, 0.85)  # 최대 0.8까지만 허용하여 연비 개선
 
         # self.comma_pedal = pedal_command
       else:
