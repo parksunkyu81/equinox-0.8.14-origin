@@ -7,7 +7,6 @@ from selfdrive.car.gm import gmcan
 from selfdrive.car.gm.values import DBC, NO_ASCM, CanBus, CarControllerParams
 from opendbc.can.packer import CANPacker
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
-from selfdrive.controls.lib.pedal_force_recovery import PEDAL_FORCE_RECOVERY_PEDAL_FLOOR
 
 VisualAlert = car.CarControl.HUDControl.VisualAlert
 GearShifter = car.CarState.GearShifter
@@ -101,17 +100,15 @@ class CarController():
         pedal_command = float(clip(acc_mult * self.accel, 0., 0.75))"""
 
         # 가속 멀티플라이어 설정
-        acc_mult = interp(CS.out.vEgo,
+        pedaloffset  = interp(CS.out.vEgo,
                           [0., 20 * CV.KPH_TO_MS, 30 * CV.KPH_TO_MS, 60 * CV.KPH_TO_MS, 80 * CV.KPH_TO_MS, 100.0 * CV.KPH_TO_MS],
                           [0.186, 0.178, 0.175, 0.170, 0.172, 0.184]
-                          #[0.18, 0.21, 0.23, 0.25]
                           )
         # 원래 가속 명령 계산
-        pedal_command = acc_mult * self.accel
-        if controls.pedal_force_recovery.active:
-          pedal_command = max(pedal_command, PEDAL_FORCE_RECOVERY_PEDAL_FLOOR)
+        pedal_command = pedaloffset + self.accel
+
         # 연비 향상을 위해 클리핑
-        self.comma_pedal = clip(pedal_command, 0., 0.85)  # 최대 0.8까지만 허용하여 연비 개선
+        self.comma_pedal = clip(pedal_command, 0.0, 1.0)  # 최대 0.8까지만 허용하여 연비 개선
 
         # self.comma_pedal = pedal_command
       else:
@@ -141,7 +138,7 @@ class CarController():
 
     new_actuators = actuators.copy()
     new_actuators.steer = self.apply_steer_last / P.STEER_MAX
-    new_actuators.accel = float(self.accel)
+    # new_actuators.accel = float(self.accel)
     new_actuators.gas = float(self.comma_pedal)
 
     return new_actuators, can_sends
