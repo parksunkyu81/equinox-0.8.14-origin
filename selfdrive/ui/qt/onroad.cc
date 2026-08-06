@@ -813,8 +813,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     drawTextWithColor(p, pedal_x, alert_y + 88, recovery_detail, recovery_detail_color);
   }
 
-  // 5. TR Value (rightmost; swapped with the ACCEL gauge)
-  x = icon_start_x + (icon_step * 4);
+  // 1.TR Value
   float tr_value = controls_state.getDynamicTRValue();
   auto tr_mode = controls_state.getDynamicTRMode();
   //int cruise_gap = car_state.getCruiseGap();
@@ -963,10 +962,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.setOpacity(1.0);
 #endif
 
-  // 1. Live comma-pedal ACCEL gauge (leftmost; swapped with DIST). CarController writes the actual clipped
+  // 5. Live comma-pedal ACCEL gauge. CarController writes the actual clipped
   // gas-interceptor command into carControl.actuatorsOutput.gas, so 0.55 is
   // shown as 55%. The outer red arc starts at 12 o'clock and advances clockwise.
-  x = icon_start_x;
+  x = icon_start_x + (icon_step * 4);
   const float comma_pedal = std::max(0.0f, (float)car_control.getActuatorsOutput().getGas());
   const float comma_pedal_ratio = std::min(comma_pedal, 1.0f);
   const int comma_pedal_percent = (int)std::round(comma_pedal_ratio * 100.0f);
