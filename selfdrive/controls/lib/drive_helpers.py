@@ -26,8 +26,6 @@ MAX_LATERAL_JERK = 5.0
 
 ButtonType = car.CarState.ButtonEvent.Type
 CRUISE_LONG_PRESS = 50
-CRUISE_SHORT_PRESS_DELTA_KPH = 5
-CRUISE_LONG_PRESS_DELTA_KPH = 10
 CRUISE_NEAREST_FUNC = {
   ButtonType.accelCruise: math.ceil,
   ButtonType.decelCruise: math.floor,
@@ -54,26 +52,21 @@ def apply_deadzone(error, deadzone):
 def rate_limit(new_value, last_value, dw_step, up_step):
   return clip(new_value, last_value + dw_step, last_value + up_step)
 
-def _align_v_cruise_to_interval(v_cruise_kph, interval_kph, button_type):
-  """버튼 방향에 맞춰 설정 속도를 지정 간격 경계로 정렬한다."""
-  return CRUISE_NEAREST_FUNC[button_type](v_cruise_kph / interval_kph) * interval_kph
-
-
 def update_v_cruise(v_cruise_kph, buttonEvents, button_timers, enabled, metric):
   # 크루즈 컨트롤이 활성화되지 않은 경우 속도 변경을 적용하지 않음
   if not enabled:
     return v_cruise_kph
 
-  # 이 포크는 계기판 단위와 관계없이 내부 설정 속도를 km/h로 관리하며,
-  # 짧게 5km/h, 길게 10km/h 변경하는 사용자 설정을 유지한다.
-  _ = metric
   long_press = False
   button_type = None
+
+  # 기본 속도 증가 값 설정
+  v_cruise_delta = 5  # 짧은 누름일 때 5km/h 증가
 
   for b in buttonEvents:
     if b.type.raw in button_timers and not b.pressed:
       if button_timers[b.type.raw] > CRUISE_LONG_PRESS:
-        return v_cruise_kph  # 길게 누른 뒤 버튼을 놓을 때 중복 변경 방지
+        return v_cruise_kph  # 길게 누름 종료
       button_type = b.type.raw
       break
   else:
@@ -84,43 +77,23 @@ def update_v_cruise(v_cruise_kph, buttonEvents, button_timers, enabled, metric):
         break
 
   if button_type:
-    v_cruise_delta = CRUISE_LONG_PRESS_DELTA_KPH if long_press else CRUISE_SHORT_PRESS_DELTA_KPH
-    remainder = v_cruise_kph % v_cruise_delta
-
-    # 63km/h처럼 경계에서 벗어난 값은 RES+ 65, SET- 60으로 먼저 정렬한다.
-    # 이미 경계에 맞아 있으면 설정한 5/10km/h만큼 변경한다.
-    if not math.isclose(remainder, 0.0, abs_tol=1e-3):
-      v_cruise_kph = _align_v_cruise_to_interval(v_cruise_kph, v_cruise_delta, button_type)
-    else:
+    if long_press:
+      v_cruise_delta = 10  # 길게 누를 때 10km/h 증가
+    if long_press and v_cruise_kph % v_cruise_delta != 0:  # 사용자가 버튼을 길게 눌렀으며, 현재 속도 v_cruise_kph가 10의 배수가 아닐 경우
+      v_cruise_kph = CRUISE_NEAREST_FUNC[button_type](v_cruise_kph / v_cruise_delta) * v_cruise_delta # 10의 배수로 반올림 또는 내림
+    else:  # 속도가 10의 배수로 이미 맞춰져 있는 경우
       v_cruise_kph += v_cruise_delta * CRUISE_INTERVAL_SIGN[button_type]
-
     v_cruise_kph = clip(round(v_cruise_kph, 1), V_CRUISE_MIN, V_CRUISE_MAX)
 
   return v_cruise_kph
 
-
 def initialize_v_cruise(v_ego, buttonEvents, v_cruise_last):
-  current_speed_kph = clip(v_ego * CV.MS_TO_KPH, V_CRUISE_MIN, V_CRUISE_MAX)
-
   for b in buttonEvents:
-    if b.type == ButtonType.accelCruise and v_cruise_last < 250:
-      # RES+: 이전 목표속도를 복원하되 5km/h 상향 경계에 맞춘다.
-      restored_speed = clip(v_cruise_last, V_CRUISE_MIN, V_CRUISE_MAX)
-      return int(_align_v_cruise_to_interval(restored_speed,
-                                             CRUISE_SHORT_PRESS_DELTA_KPH,
-                                             ButtonType.accelCruise))
+    # 250kph 이상일 경우 설정 속도가 없었던 것으로 간주
+    if b.type == car.CarState.ButtonEvent.Type.accelCruise and v_cruise_last < 250:
+      return v_cruise_last
 
-    if b.type == ButtonType.decelCruise:
-      # SET-: 현재속도를 기준으로 5km/h 하향 경계에 맞춘다.
-      return int(_align_v_cruise_to_interval(current_speed_kph,
-                                             CRUISE_SHORT_PRESS_DELTA_KPH,
-                                             ButtonType.decelCruise))
-
-  # 버튼 종류를 확인하지 못한 예외 상황에서는 가장 가까운 5km/h로 설정한다.
-  nearest_speed = math.floor((current_speed_kph + CRUISE_SHORT_PRESS_DELTA_KPH / 2.0) /
-                             CRUISE_SHORT_PRESS_DELTA_KPH) * CRUISE_SHORT_PRESS_DELTA_KPH
-  return int(clip(nearest_speed, V_CRUISE_MIN, V_CRUISE_MAX))
-
+  return int(round(clip(v_ego * CV.MS_TO_KPH, V_CRUISE_MIN, V_CRUISE_MAX)))
 
 def get_lag_adjusted_curvature(CP, v_ego, psis, curvatures, curvature_rates):
   if len(psis) != CONTROL_N:
