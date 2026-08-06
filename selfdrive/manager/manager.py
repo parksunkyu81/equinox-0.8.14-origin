@@ -83,11 +83,6 @@ def manager_init() -> None:
     ("TorqueCenterOffset60_100", "0.0"),
     ("TorqueCenterOffset60_100Count", "0"),
 
-    # Manual launch handoff: never auto-starts from standstill. The driver must
-    # move the vehicle above 1 km/h before distance-aware catch-up can engage.
-    ("ManualLeadCatchupEnabled", "0"),
-    ("ManualLeadCatchupMaxAccel", "0.70"),
-
     # Dynamic TR
     ("CustomTREnabled", "1"),
     ("DynamicTRGap", "auto"),

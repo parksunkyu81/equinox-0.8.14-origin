@@ -25,7 +25,6 @@ from selfdrive.controls.lib.pedal_force_recovery import (
   bench_fault_state,
   recovery_speed_demand,
 )
-from selfdrive.controls.lib.manual_lead_catchup import ManualLeadCatchup
 from selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from selfdrive.controls.lib.latcontrol_indi import LatControlINDI
 from selfdrive.controls.lib.latcontrol_lqr import LatControlLQR
@@ -256,7 +255,6 @@ class Controls:
         self.pedal_deadzone_accel_request = 0.0
         self.pedal_deadzone_vehicle_accel = 0.0
         self.pedal_force_recovery = PedalForceRecovery(DT_CTRL)
-        self.manual_lead_catchup = ManualLeadCatchup(DT_CTRL, params=params)
         self.equinox_simulator = EQUINOX_SIMULATOR
         self.equinox_sim_force_accel_zero = False
         self.equinox_sim_recovery_enabled = True
@@ -1233,25 +1231,7 @@ class Controls:
             pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, CS.vEgo, self.v_cruise_kph * CV.KPH_TO_MS)
             t_since_plan = (self.sm.frame - self.sm.rcv_frame['longitudinalPlan']) * DT_CTRL
 
-            lead = self.get_lead(self.sm)
-            dynamic_tr = float(self.sm['dynamicFollowData'].mpcTR)
-            if not math.isfinite(dynamic_tr) or dynamic_tr <= 0.0:
-                dynamic_tr = 1.3
-            catchup_factor = float(clip(self.sm['dynamicFollowData'].catchupFactor, 0.0, 1.0))
-            plan_valid = (self.sm.valid['longitudinalPlan'] and
-                          len(long_plan.speeds) == CONTROL_N and
-                          t_since_plan <= 0.25)
-            manual_handoff_ready = self.manual_lead_catchup.pre_update(
-                self.sm.frame, self.active, CS.adaptiveCruise, CS, lead,
-                dynamic_tr, plan_valid, bool(long_plan.fcw), self.is_curv_driving)
-
-            actuators.accel = self.LoC.update(
-                self.active, CS, long_plan, pid_accel_limits, t_since_plan,
-                manual_handoff_ready=manual_handoff_ready)
-            actuators.accel = self.manual_lead_catchup.apply(
-                actuators.accel, pid_accel_limits, CS, lead, dynamic_tr,
-                plan_valid, bool(long_plan.fcw), self.is_curv_driving,
-                catchup_factor=catchup_factor)
+            actuators.accel = self.LoC.update(self.active, CS, long_plan, pid_accel_limits, t_since_plan)
             if CS.brakePressed:
                 actuators.accel = min(actuators.accel, 0.0)
                 self.LoC.reset(v_pid=CS.vEgo)
@@ -1272,7 +1252,6 @@ class Controls:
                                                                                    self.desired_curvature_rate,
                                                                                    self.sm['liveLocationKalman'])
         else:
-            self.manual_lead_catchup.reset()
             lac_log = log.ControlsState.LateralDebugState.new_message()
             if self.sm.rcv_frame['testJoystick'] > 0 and self.active:
                 actuators.accel = 4.0 * clip(self.sm['testJoystick'].axes[0], -1, 1)
@@ -1318,7 +1297,6 @@ class Controls:
                                   self.equinox_sim_force_accel_zero and \
                                   self.equinox_sim_recovery_enabled
         recovery_eligible = not self.joystick_mode and \
-                            not self.manual_lead_catchup.recovery_blocked and \
                             (not self.equinox_simulator or self.equinox_sim_recovery_enabled) and \
                             self.pedal_force_recovery_eligible(CS, long_plan, recovery_plan_age,
                                                                injected_fault=injected_recovery_fault)
