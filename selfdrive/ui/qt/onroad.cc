@@ -535,7 +535,7 @@ void NvgWindow::drawHud(QPainter &p) {
   }
 
   //drawMaxSpeed(p);
-  drawSpeed(p);
+  //drawSpeed(p);
   drawSpeedLimit(p);
   drawThermal(p);
   drawRestArea(p);
@@ -1092,6 +1092,7 @@ void NvgWindow::drawSpeed(QPainter &p) {
   p.restore();
 }*/
 
+/*
 void NvgWindow::drawSpeed(QPainter &p) {
   p.save();
 
@@ -1131,36 +1132,58 @@ void NvgWindow::drawSpeed(QPainter &p) {
   const int y_speed = 460 + speed_y_offset;
   const int y_unit  = 540 + speed_y_offset;
 
-  // 중앙의 큰 현재속도 박스는 제거한다.
-  // 현재속도는 아래 Cruise/Current/Apply 패널의 Current 줄에만 표시한다.
-  // bgFixed는 왼쪽 패널 위치를 기존과 동일하게 유지하기 위한 비표시 레이아웃 기준이다.
+  QString speed;
+  speed.sprintf("%.0f", cur_speed);
+
+  // -------------------------
+  // Speed background (template-based)
+  // -------------------------
   const QString speed_template = "888";
-  const QString unit_template = "km/h";
+  const QString unit_template  = "km/h";
+  const QString unit = "km/h";
 
   configFont(p, "Open Sans", 176, "Bold");
   QFontMetricsF fmSpeed(p.font());
-  const QRectF rSpeedT = fmSpeed.boundingRect(speed_template);
-  const QRectF speedRectT(x - rSpeedT.width() / 2.0,
-                          y_speed - fmSpeed.ascent(),
-                          rSpeedT.width(),
-                          fmSpeed.height());
+  QRectF rSpeedT = fmSpeed.boundingRect(speed_template);
+  QRectF speedRectT(x - rSpeedT.width() / 2.0,
+                    y_speed - fmSpeed.ascent(),
+                    rSpeedT.width(),
+                    fmSpeed.height());
 
   configFont(p, "Open Sans", 66, "Regular");
   QFontMetricsF fmUnit(p.font());
-  const QRectF rUnitT = fmUnit.boundingRect(unit_template);
-  const QRectF unitRectT(x - rUnitT.width() / 2.0,
-                         y_unit - fmUnit.ascent(),
-                         rUnitT.width(),
-                         fmUnit.height());
+  QRectF rUnitT = fmUnit.boundingRect(unit_template);
+  QRectF unitRectT(x - rUnitT.width() / 2.0,
+                   y_unit - fmUnit.ascent(),
+                   rUnitT.width(),
+                   fmUnit.height());
 
-  const QRectF bgBase = speedRectT.united(unitRectT).adjusted(-28, -18, 28, 18);
+  QRectF bgBase = speedRectT.united(unitRectT).adjusted(-28, -18, 28, 18);
+
+  // 폭 20% 확대 + 센터 유지
   const qreal bgW = bgBase.width() * 1.2;
   const qreal bgH = bgBase.height();
   const QPointF bgC = bgBase.center();
-  const QRectF bgFixed(bgC.x() - bgW / 2.0, bgC.y() - bgH / 2.0, bgW, bgH);
+  QRectF bgFixed(bgC.x() - bgW / 2.0, bgC.y() - bgH / 2.0, bgW, bgH);
 
-  // 왼쪽 Cruise/Current/Apply 패널 배경
+  // -------------------------
+  // Background color (30% brighter)
+  // -------------------------
+  QColor bgBright30(77, 77, 77, 160);
+
+  // ✅ 패널 배경을 10% 더 투명하게 (alpha 160 -> 144)
   QColor panelBgColor(77, 77, 77, 144);
+
+  // 활성 drawSpeed() 리팩터링 중 빠졌던 메인 현재속도 렌더링 복구.
+  p.setPen(Qt::NoPen);
+  p.setBrush(bgBright30);
+  p.drawRoundedRect(bgFixed, 22, 22);
+
+  configFont(p, "Open Sans", 176, "Bold");
+  drawTextWithColor(p, x, y_speed, speed, speedColor);
+
+  configFont(p, "Open Sans", 66, "Regular");
+  drawText(p, x, y_unit, unit, 200);
 
   // -------------------------
   // Cruise/Apply panel (left)
@@ -1248,7 +1271,7 @@ void NvgWindow::drawSpeed(QPainter &p) {
   drawTextWithColor(p, panel_cx, y_apply, strApply, applyOrange);
 
   p.restore();
-}
+}*/
 
 
 
