@@ -108,7 +108,7 @@ class CarController():
         pedal_command = pedaloffset + self.accel
 
         # 연비 향상을 위해 클리핑
-        self.comma_pedal = clip(pedal_command, 0.0, 1.0)  # 최대 0.8까지만 허용하여 연비 개선
+        self.comma_pedal = clip(pedal_command, 0.0, 0.8)  # 최대 0.8까지만 허용하여 연비 개선
 
         # self.comma_pedal = pedal_command
       else:
