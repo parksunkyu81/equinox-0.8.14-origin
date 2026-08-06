@@ -395,7 +395,7 @@ class Controls:
             self.slowing_down_alert = False
             self.slowing_down = False
 
-        lead_speed = self.get_long_lead_safe_speed(sm, CS, vEgo)
+        '''lead_speed = self.get_long_lead_safe_speed(sm, CS, vEgo)
         if self.safe_distance_speed and lead_speed >= self.min_set_speed_clu:
             if lead_speed < max_speed_clu:
                 max_speed_clu = min(max_speed_clu, lead_speed)
@@ -403,7 +403,7 @@ class Controls:
                     self.max_speed_clu = vEgo + 3.
                     self.limited_lead = True
         else:
-          self.limited_lead = False
+          self.limited_lead = False'''
 
 
         self.update_max_speed(int(max_speed_clu + 0.5), CS,
