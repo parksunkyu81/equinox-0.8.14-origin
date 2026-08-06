@@ -42,6 +42,7 @@ def manager_init() -> None:
     ("DisengageOnAccelerator", "0"),
     ("HasAcceptedTerms", "0"),
     ("OpenpilotEnabledToggle", "1"),
+    ("IsMetric", "1"),
 
     # HKG
     ("EndToEndToggle", "0"),

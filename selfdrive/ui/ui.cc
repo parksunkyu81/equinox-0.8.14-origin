@@ -195,8 +195,7 @@ static void update_state(UIState *s) {
 
 void ui_update_params(UIState *s) {
   Params params;
-  // This fork uses km/h for all speed displays.
-  s->scene.is_metric = true;
+  s->scene.is_metric = params.getBool("IsMetric");
   s->show_debug = params.getBool("ShowDebugUI");
   s->lat_control = std::string(Params().get("LateralControl"));
 
