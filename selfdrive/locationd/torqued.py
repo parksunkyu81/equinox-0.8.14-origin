@@ -240,26 +240,9 @@ CENTER_OFFSET_PARAM_KEYS = (
 )
 CENTER_OFFSET_COUNT_KEYS = tuple(k + "Count" for k in CENTER_OFFSET_PARAM_KEYS)
 CENTER_OFFSET_ABS_MAX_BY_BIN = (0.006, 0.008, 0.010)
-
-# Two-stage center-offset learning.  The first accepted update is deliberately
-# quick but small, so a newly installed/reset system can establish a useful
-# baseline without waiting a full minute.  Every later update uses a fresh,
-# longer observation window and the original conservative step envelope.
-CENTER_OFFSET_BOOTSTRAP_STEP_MAX_BY_BIN = (0.00010, 0.00015, 0.00020)
-CENTER_OFFSET_BOOTSTRAP_MIN_OK_BY_BIN = (350, 320, 350)
-CENTER_OFFSET_BOOTSTRAP_MIN_OBSERVATION_S_BY_BIN = (20.0, 18.0, 20.0)
-CENTER_OFFSET_BOOTSTRAP_MIN_RATIO = 0.82
-
-CENTER_OFFSET_REFINE_STEP_MAX_BY_BIN = (0.00015, 0.00025, 0.00050)
-CENTER_OFFSET_REFINE_MIN_OK_BY_BIN = (700, 800, 1000)
-CENTER_OFFSET_REFINE_MIN_OBSERVATION_S_BY_BIN = (40.0, 45.0, 60.0)
-CENTER_OFFSET_REFINE_MIN_RATIO = 0.90
-
-# Backward-compatible aliases for diagnostics/tools that still import the old
-# names.  Runtime decisions use _center_offset_requirements().
-CENTER_OFFSET_STEP_MAX_BY_BIN = CENTER_OFFSET_REFINE_STEP_MAX_BY_BIN
-CENTER_OFFSET_MIN_OK_BY_BIN = CENTER_OFFSET_REFINE_MIN_OK_BY_BIN
-CENTER_OFFSET_MIN_OBSERVATION_S_BY_BIN = CENTER_OFFSET_REFINE_MIN_OBSERVATION_S_BY_BIN
+CENTER_OFFSET_STEP_MAX_BY_BIN = (0.00015, 0.00025, 0.00050)
+CENTER_OFFSET_MIN_OK_BY_BIN = (1200, 1000, 900)
+CENTER_OFFSET_MIN_OBSERVATION_S_BY_BIN = (45.0, 50.0, 60.0)
 CENTER_OFFSET_MAX_YAW_RATE_BY_BIN = (0.008, 0.010, 0.012)
 CENTER_OFFSET_MAX_LATACC_BY_BIN = (0.070, 0.085, 0.100)
 CENTER_OFFSET_MAX_STEER_BY_BIN = (0.045, 0.055, 0.065)
@@ -1320,49 +1303,6 @@ class TorqueEstimator:
                 return i
         return None
 
-    def _center_offset_requirements(self, bin_idx):
-        """Return staged learning requirements for one speed bin.
-
-        Count == 0 uses the bootstrap profile.  Count >= 1 uses the refinement
-        profile.  The profile changes only after an accepted/saved update.
-        """
-        try:
-            idx = int(bin_idx)
-            if idx < 0 or idx >= len(CENTER_OFFSET_BIN_RANGES_KPH):
-                raise IndexError(idx)
-            count = int(self._center_offset_counts[idx])
-        except Exception:
-            idx = 1
-            count = 0
-
-        if count <= 0:
-            return {
-                "phase": "bootstrap",
-                "min_ok": int(CENTER_OFFSET_BOOTSTRAP_MIN_OK_BY_BIN[idx]),
-                "min_observation_s": float(CENTER_OFFSET_BOOTSTRAP_MIN_OBSERVATION_S_BY_BIN[idx]),
-                "min_ratio": float(CENTER_OFFSET_BOOTSTRAP_MIN_RATIO),
-                "step_max": float(CENTER_OFFSET_BOOTSTRAP_STEP_MAX_BY_BIN[idx]),
-            }
-
-        return {
-            "phase": "refine",
-            "min_ok": int(CENTER_OFFSET_REFINE_MIN_OK_BY_BIN[idx]),
-            "min_observation_s": float(CENTER_OFFSET_REFINE_MIN_OBSERVATION_S_BY_BIN[idx]),
-            "min_ratio": float(CENTER_OFFSET_REFINE_MIN_RATIO),
-            "step_max": float(CENTER_OFFSET_REFINE_STEP_MAX_BY_BIN[idx]),
-        }
-
-    def _mild_center_rate_limit_ok(self):
-        try:
-            return bool(
-                bool(getattr(self, 'last_rate_limited', False)) and
-                (not bool(getattr(self, 'last_rate_limited_strong', False))) and
-                np.isfinite(float(getattr(self, 'last_delta_err', 0.0) or 0.0)) and
-                float(getattr(self, 'last_delta_err', 0.0) or 0.0) <= float(STRAIGHT_RATE_LIM_ALLOW_DELTA)
-            )
-        except Exception:
-            return False
-
     def _load_center_offsets(self):
         for i, key in enumerate(CENTER_OFFSET_PARAM_KEYS):
             try:
@@ -1412,8 +1352,7 @@ class TorqueEstimator:
             return False
         prev = float(self._center_offsets[idx])
         max_abs = float(CENTER_OFFSET_ABS_MAX_BY_BIN[idx])
-        requirements = self._center_offset_requirements(idx)
-        step = float(requirements["step_max"])
+        step = float(CENTER_OFFSET_STEP_MAX_BY_BIN[idx])
         target = float(np.clip(float(target), -max_abs, max_abs))
         new = float(np.clip(target, prev - step, prev + step))
         self._center_offsets[idx] = new
@@ -1422,18 +1361,6 @@ class TorqueEstimator:
         self._save_center_offset_bin(idx)
         self.filtered_params['latAccelOffset'].x = self._center_offset_for_speed(
             float(getattr(self, 'last_vego', 0.0) or 0.0) * 3.6, fallback=prev)
-
-        # Do not reuse bootstrap samples for the refinement update.  Clearing
-        # only this speed bin forces every Count increment to be backed by a
-        # fresh observation window (18~20 s initially, 40~60 s afterwards).
-        try:
-            self._center_bias[idx].clear()
-            self._straight_win_ok = 0
-            self._straight_win_total = 0
-            self._straight_win_ok_ratio = 0.0
-            self._last_straight_ok_t = -1e9
-        except Exception:
-            pass
         return abs(new - prev) > 1e-9
 
     def _update_straight_window_stats(self, bin_idx=None):
@@ -1455,22 +1382,12 @@ class TorqueEstimator:
             self._straight_win_total = 0
             self._straight_win_ok_ratio = 0.0
 
-    def _straight_min_ok_required(self, total: int, bin_idx=None) -> int:
+    def _straight_min_ok_required(self, total: int) -> int:
         try:
             tot = int(max(int(total), 0))
-            if bin_idx is not None:
-                requirements = self._center_offset_requirements(bin_idx)
-                min_ok = int(requirements["min_ok"])
-                min_ratio = float(requirements["min_ratio"])
-                return int(max(min_ok, int(math.ceil(float(tot) * min_ratio))))
             frac = float(STRAIGHT_OK_MIN_FRAC) if 'STRAIGHT_OK_MIN_FRAC' in globals() else 0.65
             return int(max(int(STRAIGHT_OK_MIN_SAMPLES), int(math.ceil(float(tot) * frac))))
         except Exception:
-            if bin_idx is not None:
-                try:
-                    return int(self._center_offset_requirements(bin_idx)["min_ok"])
-                except Exception:
-                    pass
             return int(STRAIGHT_OK_MIN_SAMPLES)
 
     def _offset_update_allowed(self, bin_idx=None) -> bool:
@@ -1486,10 +1403,9 @@ class TorqueEstimator:
             return False
         if not self._get_lat_active(t):
             return False
-        mild_rate_limit_ok = self._mild_center_rate_limit_ok()
         if (bool(getattr(self, 'last_steer_clip', False)) or
                 bool(getattr(self, 'last_max_limited', False)) or
-                (bool(getattr(self, 'last_rate_limited', False)) and not mild_rate_limit_ok) or
+                bool(getattr(self, 'last_rate_limited', False)) or
                 bool(getattr(self, 'last_rate_limited_strong', False)) or
                 bool(getattr(self, '_last_steer_override_db', False))):
             return False
@@ -1509,20 +1425,19 @@ class TorqueEstimator:
             return False
 
         self._update_straight_window_stats(bin_idx)
-        requirements = self._center_offset_requirements(bin_idx)
         try:
             sample_times = [
                 float(s[0]) for s in self._center_bias[bin_idx]
                 if isinstance(s, (list, tuple)) and len(s) >= 6 and np.isfinite(s[0])
             ]
-            if len(sample_times) < 2 or (max(sample_times) - min(sample_times)) < float(requirements["min_observation_s"]):
+            if len(sample_times) < 2 or (max(sample_times) - min(sample_times)) < CENTER_OFFSET_MIN_OBSERVATION_S_BY_BIN[bin_idx]:
                 return False
         except Exception:
             return False
-        min_ok = self._straight_min_ok_required(self._straight_win_total, bin_idx)
+        min_ok = max(self._straight_min_ok_required(self._straight_win_total), CENTER_OFFSET_MIN_OK_BY_BIN[bin_idx])
         if self._straight_win_ok < int(min_ok):
             return False
-        if self._straight_win_ok_ratio < float(requirements["min_ratio"]):
+        if self._straight_win_ok_ratio < STRAIGHT_OK_MIN_RATIO:
             return False
         if (t - float(self._last_offset_update_by_bin[bin_idx])) < OFFSET_UPDATE_MIN_INTERVAL_S:
             return False
@@ -1938,7 +1853,7 @@ class TorqueEstimator:
         total = len(win)
         ok_n = len(vals)
         ratio = float(ok_n) / float(total) if total > 0 else 0.0
-        min_ok = self._straight_min_ok_required(total, bin_idx) if bin_idx is not None else self._straight_min_ok_required(total)
+        min_ok = max(self._straight_min_ok_required(total), CENTER_OFFSET_MIN_OK_BY_BIN[bin_idx] if bin_idx is not None else STRAIGHT_OK_MIN_SAMPLES)
         if ok_n < int(min_ok):
             return float('nan'), ok_n, total, ratio
 
@@ -2622,18 +2537,6 @@ class TorqueEstimator:
                 center_yaw_max = CENTER_OFFSET_MAX_YAW_RATE_BY_BIN[center_bin_idx] if center_bin_idx is not None else 0.0
                 center_latacc_max = CENTER_OFFSET_MAX_LATACC_BY_BIN[center_bin_idx] if center_bin_idx is not None else 0.0
                 center_steer_max = CENTER_OFFSET_MAX_STEER_BY_BIN[center_bin_idx] if center_bin_idx is not None else 0.0
-                # A mild slew/rate-limit event is normal on GM even during a
-                # straight-line correction.  The old gate rejected every
-                # rate-limited frame, although STRAIGHT_RATE_LIM_ALLOW_DELTA
-                # was explicitly defined for accepting small desired/applied
-                # errors.  This could keep every center-offset bin at Count=0.
-                mild_rate_limit_ok = (
-                        bool(self.last_rate_limited) and
-                        (not bool(self.last_rate_limited_strong)) and
-                        np.isfinite(float(getattr(self, 'last_delta_err', 0.0) or 0.0)) and
-                        (float(getattr(self, 'last_delta_err', 0.0) or 0.0) <=
-                         float(STRAIGHT_RATE_LIM_ALLOW_DELTA))
-                )
                 straight_ok = (
                         self._offset_learning_enabled and
                         center_bin_idx is not None and
@@ -2649,7 +2552,7 @@ class TorqueEstimator:
                         (not is_frozen) and
                         (not self.last_steer_clip) and
                         (not self.last_max_limited) and
-                        ((not self.last_rate_limited) or mild_rate_limit_ok) and
+                        (not self.last_rate_limited) and
                         (not self.last_rate_limited_strong)
                 )
                 # ✅ BUGFIX: straight_ok가 True인 순간을 기록(오프셋 업데이트 게이트)
@@ -3705,24 +3608,21 @@ class TorqueEstimator:
             latFactor_s = np.nan
             center_bin_idx = self._center_offset_bin_index(float(getattr(self, 'last_vego', 0.0) or 0.0) * 3.6)
             latOffset_s, win_ok_n, win_total_n, win_ratio = self._estimate_straight_offset_from_window(center_bin_idx)
-            center_requirements = self._center_offset_requirements(center_bin_idx) if center_bin_idx is not None else None
-            min_ok_win_n = self._straight_min_ok_required(win_total_n, center_bin_idx)
-            center_min_ratio = (float(center_requirements["min_ratio"])
-                                if center_requirements is not None else float(STRAIGHT_OK_MIN_RATIO))
+            min_ok_win_n = self._straight_min_ok_required(win_total_n)
             use_straight = (
                     (win_ok_n >= int(min_ok_win_n)) and
-                    (win_ratio >= center_min_ratio) and
+                    (win_ratio >= float(STRAIGHT_OK_MIN_RATIO)) and
                     np.isfinite(latOffset_s)
             )
 
             w = self.straight_weight(self.last_vego, self.last_yaw_rate, self.last_time) if use_straight else 0.0
 
             self._update_straight_window_stats()
-            min_ok_win = self._straight_min_ok_required(self._straight_win_total, center_bin_idx)
+            min_ok_win = self._straight_min_ok_required(self._straight_win_total)
             straight_offset_ok = (
                     np.isfinite(latOffset_s) and
                     (self._straight_win_ok >= int(min_ok_win)) and
-                    (self._straight_win_ok_ratio >= center_min_ratio) and
+                    (self._straight_win_ok_ratio >= STRAIGHT_OK_MIN_RATIO) and
                     (abs(float(latOffset_s)) <= float(OFFSET_UPDATE_TARGET_ABS_MAX))
             )
 
@@ -3942,15 +3842,12 @@ class TorqueEstimator:
             try:
                 center_bin_idx = self._center_offset_bin_index(float(getattr(self, 'last_vego', 0.0) or 0.0) * 3.6)
                 latOffset_s, win_ok_n, win_total_n, win_ratio = self._estimate_straight_offset_from_window(center_bin_idx)
-                self._update_straight_window_stats(center_bin_idx)
-                center_requirements = self._center_offset_requirements(center_bin_idx) if center_bin_idx is not None else None
-                center_min_ratio = (float(center_requirements["min_ratio"])
-                                    if center_requirements is not None else float(STRAIGHT_OK_MIN_RATIO))
-                min_ok_win = self._straight_min_ok_required(self._straight_win_total, center_bin_idx)
+                self._update_straight_window_stats()
+                min_ok_win = self._straight_min_ok_required(self._straight_win_total)
                 straight_offset_ok = (
                         np.isfinite(latOffset_s) and
                         (self._straight_win_ok >= int(min_ok_win)) and
-                        (self._straight_win_ok_ratio >= center_min_ratio) and
+                        (self._straight_win_ok_ratio >= STRAIGHT_OK_MIN_RATIO) and
                         (abs(float(latOffset_s)) <= float(OFFSET_UPDATE_TARGET_ABS_MAX))
                 )
 
