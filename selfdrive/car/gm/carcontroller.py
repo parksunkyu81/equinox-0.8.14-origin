@@ -90,23 +90,21 @@ class CarController():
 
         # Speed-dependent pedal conversion baseline. Tune this map from logged
         # pedal command versus measured vehicle acceleration before PID gains.
-        """acc_mult = interp(CS.out.vEgo,
+        acc_mult = interp(CS.out.vEgo,
                           [0., 10.0 * CV.KPH_TO_MS, 18.0 * CV.KPH_TO_MS, 30.0 * CV.KPH_TO_MS,
                            60.0 * CV.KPH_TO_MS, 80.0 * CV.KPH_TO_MS, 100.0 * CV.KPH_TO_MS],
                           [0.132, 0.145, 0.158, 0.185, 0.162, 0.173, 0.184]
-                          # (기존: 0.12,0.132,0.144,0.168,0.18,0.192,0.204)
                           )
 
-        pedal_command = float(clip(acc_mult * self.accel, 0., 0.75))"""
 
         # 가속 멀티플라이어 설정
-        pedaloffset = interp(CS.out.vEgo,
+        '''acc_mult = interp(CS.out.vEgo,
                           [0., 20 * CV.KPH_TO_MS, 30 * CV.KPH_TO_MS, 60 * CV.KPH_TO_MS, 80 * CV.KPH_TO_MS, 100.0 * CV.KPH_TO_MS],
                           [0.186, 0.178, 0.175, 0.170, 0.172, 0.184]
-                          )
+                          )'''
 
         # 연비 향상을 위해 클리핑
-        self.comma_pedal = clip(pedaloffset * actuators.accel, 0.0, 0.85)  # 최대 0.8까지만 허용하여 연비 개선
+        self.comma_pedal = clip(acc_mult * actuators.accel, 0.0, 0.85)  # 최대 0.8까지만 허용하여 연비 개선
 
         # self.comma_pedal = pedal_command
       else:
