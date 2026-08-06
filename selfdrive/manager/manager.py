@@ -61,7 +61,6 @@ def manager_init() -> None:
     ("HapticFeedbackWhenSpeedCamera", "0"),
     ("DisableOpFcw", "0"),
     ("ShowDebugUI", "0"),
-    ("SafeDistanceSpeed", "1"),
     ("NewRadarInterface", "0"),
     ("IsLiveTorque", "1"),
     ("IsLowSpeedFactor", "1"),
