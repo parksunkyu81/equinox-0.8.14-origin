@@ -97,7 +97,7 @@ class CarController():
 
         # 가속 멀티플라이어 설정
         acc_mult = interp(CS.out.vEgo,
-                          [0., 20 * CV.KPH_TO_MS, 30 * CV.KPH_TO_MS, 60 * CV.KPH_TO_MS, 80 * CV.KPH_TO_MS, 100.0 * CV.KPH_TO_MS],
+                          [1., 20 * CV.KPH_TO_MS, 30 * CV.KPH_TO_MS, 60 * CV.KPH_TO_MS, 80 * CV.KPH_TO_MS, 100.0 * CV.KPH_TO_MS],
                           [0.186, 0.178, 0.175, 0.170, 0.172, 0.184]
                           )
 
