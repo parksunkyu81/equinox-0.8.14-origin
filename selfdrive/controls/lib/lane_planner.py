@@ -1,9 +1,17 @@
 import numpy as np
 from cereal import log
 from common.filter_simple import FirstOrderFilter
-from common.numpy_fast import interp
+from common.numpy_fast import interp, clip, mean
 from common.realtime import DT_MDL
+from selfdrive.hardware import EON, TICI
 from selfdrive.swaglog import cloudlog
+from common.params import Params
+from decimal import Decimal
+from selfdrive.ntune import ntune_common_get
+from selfdrive.car.gm.values import CLOSE_TO_ROAD_EDGE, LEFT_EDGE_OFFSET, RIGHT_EDGE_OFFSET
+
+ENABLE_ZORROBYTE = True
+ENABLE_INC_LANE_PROB = True
 
 TRAJECTORY_SIZE = 33
 # camera offset is meters from center car to camera
@@ -18,12 +26,6 @@ TRAJECTORY_SIZE = 33
 
 PATH_OFFSET = 0.00
 CAMERA_OFFSET = -0.06
-CENTER_LANE_CONF_BP = [0.35, 0.60]
-CENTER_LANE_CONF_V = [0.0, 1.0]
-LANE_WIDTH_MIN_BP = [2.5, 2.8]
-LANE_WIDTH_MAX_BP = [4.0, 5.0]
-LANE_PATH_AGREEMENT_BP = [0.08, 0.20]
-LANE_CENTER_CONTINUITY_BP = [0.10, 0.30]
 
 class LanePlanner:
   def __init__(self, wide_camera=False):
@@ -48,15 +50,57 @@ class LanePlanner:
     self.camera_offset = CAMERA_OFFSET
     self.path_offset = PATH_OFFSET
 
+    self.readings = []
+    self.frame = 0
+
     self.wide_camera = wide_camera
 
+    #opkr
+    self.params = Params()
+    self.drive_close_to_edge = CLOSE_TO_ROAD_EDGE
+    self.left_edge_offset = float(
+      Decimal(LEFT_EDGE_OFFSET) * Decimal('0.01'))  # 0.15 move to right
+    self.right_edge_offset = float(
+      Decimal(RIGHT_EDGE_OFFSET) * Decimal('0.01'))  # -0.15 move to left
+
+    self.road_edge_offset = 0.0
     self.total_camera_offset = self.camera_offset
-    self.last_reliable_lane_center_y = None
+    self.lp_timer = 0
+    self.lp_timer2 = 0
+    self.lp_timer3 = 0
 
   def parse_model(self, md):
 
-    self.camera_offset = CAMERA_OFFSET
-    self.total_camera_offset = self.camera_offset
+    #opkr
+    self.lp_timer += DT_MDL
+    if self.lp_timer > 1.0:
+      self.lp_timer = 0.0
+      self.camera_offset = ntune_common_get('cameraOffset')  # m from center car to camera
+
+    #opkr
+    if self.drive_close_to_edge:
+      left_edge_prob = np.clip(1.0 - md.roadEdgeStds[0], 0.0, 1.0)
+      left_nearside_prob = md.laneLineProbs[0]
+      left_close_prob = md.laneLineProbs[1]
+      right_close_prob = md.laneLineProbs[2]
+      right_nearside_prob = md.laneLineProbs[3]
+      right_edge_prob = np.clip(1.0 - md.roadEdgeStds[1], 0.0, 1.0)
+
+      self.lp_timer3 += DT_MDL
+      if self.lp_timer3 > 3.0:
+        self.lp_timer3 = 0.0
+        if right_nearside_prob < 0.1 and left_nearside_prob < 0.1:
+          self.road_edge_offset = 0.0
+        elif right_edge_prob > 0.35 and right_nearside_prob < 0.2 and right_close_prob > 0.5 and left_nearside_prob >= right_nearside_prob:
+          self.road_edge_offset = -self.right_edge_offset
+        elif left_edge_prob > 0.35 and left_nearside_prob < 0.2 and left_close_prob > 0.5 and right_nearside_prob >= left_nearside_prob:
+          self.road_edge_offset = -self.left_edge_offset
+        else:
+          self.road_edge_offset = 0.0
+    else:
+      self.road_edge_offset = 0.0
+
+    self.total_camera_offset = self.camera_offset + self.road_edge_offset
 
 
     lane_lines = md.laneLines
@@ -85,11 +129,9 @@ class LanePlanner:
     l_prob, r_prob = self.lll_prob, self.rll_prob
     width_pts = self.rll_y - self.lll_y
     prob_mods = []
-    for t_check in (0.0, 1.5, 2.0):
+    for t_check in (0.0, 1.5, 3.0):
       width_at_t = interp(t_check * (v_ego + 7), self.ll_x, width_pts)
-      min_width_mod = interp(width_at_t, LANE_WIDTH_MIN_BP, [0.0, 1.0])
-      max_width_mod = interp(width_at_t, LANE_WIDTH_MAX_BP, [1.0, 0.0])
-      prob_mods.append(min_width_mod * max_width_mod)
+      prob_mods.append(interp(width_at_t, [4.0, 5.0], [1.0, 0.0]))
     mod = min(prob_mods)
     l_prob *= mod
     r_prob *= mod
@@ -100,88 +142,45 @@ class LanePlanner:
     l_prob *= l_std_mod
     r_prob *= r_std_mod
 
-    current_lane_width = abs(self.rll_y[0] - self.lll_y[0])
-    speed_lane_width = interp(v_ego, [0., 31.], [2.8, 3.5])
+    if ENABLE_ZORROBYTE:
+      # zorrobyte code
+      if l_prob > 0.5 and r_prob > 0.5:
+        self.frame += 1
+        if self.frame > 20:
+          self.frame = 0
+          current_lane_width = clip(abs(self.rll_y[0] - self.lll_y[0]), 2.5, 3.5)
+          self.readings.append(current_lane_width)
+          self.lane_width = mean(self.readings)
+          if len(self.readings) >= 30:
+            self.readings.pop(0)
 
-    # Use the last trusted width to evaluate the current lines. Updating the
-    # width estimate before the safety checks would let a persistent misread
-    # gradually teach the planner the wrong lane width.
-    clipped_lane_width = min(4.0, self.lane_width)
-    path_from_left_lane = self.lll_y + clipped_lane_width / 2.0
-    path_from_right_lane = self.rll_y - clipped_lane_width / 2.0
+      # zorrobyte
+      # Don't exit dive
+      if abs(self.rll_y[0] - self.lll_y[0]) > self.lane_width:
+        r_prob = r_prob / interp(l_prob, [0, 1], [1, 3])
 
-    safe_idxs = np.isfinite(self.ll_t) & np.isfinite(self.lll_y) & np.isfinite(self.rll_y)
-    lane_lines_valid = np.count_nonzero(safe_idxs) >= 2
-    if lane_lines_valid:
-      # A high lane-line probability is not sufficient: a confidently
-      # misdetected line can still point well away from the model path. Check
-      # each line-derived center independently so the reliable side can remain
-      # useful while the inconsistent side is rejected.
-      left_path_interp = np.interp(path_t, self.ll_t[safe_idxs], path_from_left_lane[safe_idxs])
-      right_path_interp = np.interp(path_t, self.ll_t[safe_idxs], path_from_right_lane[safe_idxs])
-      near_path_idxs = np.isfinite(path_t) & np.isfinite(path_xyz[:, 1]) & (path_t <= 1.5)
-      if not np.any(near_path_idxs):
-        near_path_idxs = np.isfinite(path_t) & np.isfinite(path_xyz[:, 1])
-
-      if np.any(near_path_idxs):
-        left_path_error = np.median(np.abs(left_path_interp[near_path_idxs] - path_xyz[near_path_idxs, 1]))
-        right_path_error = np.median(np.abs(right_path_interp[near_path_idxs] - path_xyz[near_path_idxs, 1]))
-        l_prob *= interp(left_path_error, LANE_PATH_AGREEMENT_BP, [1.0, 0.0])
-        r_prob *= interp(right_path_error, LANE_PATH_AGREEMENT_BP, [1.0, 0.0])
-      else:
-        l_prob = 0.0
-        r_prob = 0.0
     else:
-      l_prob = 0.0
-      r_prob = 0.0
-
-    self.lane_width_certainty.update(l_prob * r_prob)
-    if min(l_prob, r_prob) >= 0.5 and np.isfinite(current_lane_width):
+      # Find current lanewidth
+      self.lane_width_certainty.update(l_prob * r_prob)
+      current_lane_width = abs(self.rll_y[0] - self.lll_y[0])
       self.lane_width_estimate.update(current_lane_width)
-    self.lane_width = self.lane_width_certainty.x * self.lane_width_estimate.x + \
-                      (1 - self.lane_width_certainty.x) * speed_lane_width
+      speed_lane_width = interp(v_ego, [0., 31.], [2.8, 3.5])
+      self.lane_width = self.lane_width_certainty.x * self.lane_width_estimate.x + \
+                        (1 - self.lane_width_certainty.x) * speed_lane_width
 
     clipped_lane_width = min(4.0, self.lane_width)
     path_from_left_lane = self.lll_y + clipped_lane_width / 2.0
     path_from_right_lane = self.rll_y - clipped_lane_width / 2.0
 
-    raw_d_prob = l_prob + r_prob - l_prob * r_prob
-    both_lane_conf = interp(min(l_prob, r_prob), CENTER_LANE_CONF_BP, CENTER_LANE_CONF_V)
+    self.d_prob = l_prob + r_prob - l_prob * r_prob
 
-    # When both lane lines are reliable, prefer their geometric midpoint.
-    # This prevents model-path bias, lane-width error, or unequal line
-    # probabilities from pulling the target away from the lane center.
-    direct_lane_center_y = (self.lll_y + self.rll_y) / 2.0
-    current_lane_center_y = direct_lane_center_y[0]
-    if self.last_reliable_lane_center_y is None:
-      center_continuity_mod = 1.0
-    else:
-      center_jump = abs(current_lane_center_y - self.last_reliable_lane_center_y)
-      center_continuity_mod = interp(center_jump, LANE_CENTER_CONTINUITY_BP, [1.0, 0.0])
-    both_lane_conf *= center_continuity_mod
+    # neokii
+    if ENABLE_INC_LANE_PROB and self.d_prob > 0.65:
+      self.d_prob = min(self.d_prob * 1.3, 1.0)
 
-    # Only a center supported by two independently consistent lines may update
-    # the continuity reference. A rejected misread must not become the new
-    # baseline merely because it persists for several frames.
-    if both_lane_conf >= 0.5:
-      if self.last_reliable_lane_center_y is None:
-        self.last_reliable_lane_center_y = current_lane_center_y
-      else:
-        self.last_reliable_lane_center_y = 0.9 * self.last_reliable_lane_center_y + 0.1 * current_lane_center_y
-
-    # Squared weights prevent a weak or uncertain line from pulling strongly
-    # against the line that agrees with the model path.
-    l_weight = l_prob * l_prob
-    r_weight = r_prob * r_prob
-    inferred_lane_center_y = \
-      (l_weight * path_from_left_lane + r_weight * path_from_right_lane) / (l_weight + r_weight + 0.0001)
-    lane_path_y = both_lane_conf * direct_lane_center_y + \
-                  (1.0 - both_lane_conf) * inferred_lane_center_y
-
-    # Smoothly remove the model path only when both lane lines agree.
-    # Keep the original model fallback for weak or single-line detection.
-    self.d_prob = raw_d_prob + (1.0 - raw_d_prob) * both_lane_conf
-    if lane_lines_valid:
+    lane_path_y = (l_prob * path_from_left_lane + r_prob * path_from_right_lane) / (l_prob + r_prob + 0.0001)
+    safe_idxs = np.isfinite(self.ll_t)
+    if safe_idxs[0]:
       lane_path_y_interp = np.interp(path_t, self.ll_t[safe_idxs], lane_path_y[safe_idxs])
       path_xyz[:,1] = self.d_prob * lane_path_y_interp + (1.0 - self.d_prob) * path_xyz[:,1]
     else:
