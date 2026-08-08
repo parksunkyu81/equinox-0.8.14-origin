@@ -10,7 +10,7 @@ from decimal import Decimal
 from selfdrive.ntune import ntune_common_get
 from selfdrive.car.gm.values import CLOSE_TO_ROAD_EDGE, LEFT_EDGE_OFFSET, RIGHT_EDGE_OFFSET
 
-ENABLE_ZORROBYTE = True
+ENABLE_ZORROBYTE = False
 ENABLE_INC_LANE_PROB = True
 
 TRAJECTORY_SIZE = 33
@@ -75,7 +75,7 @@ class LanePlanner:
     self.lp_timer += DT_MDL
     if self.lp_timer > 1.0:
       self.lp_timer = 0.0
-      self.camera_offset = ntune_common_get('cameraOffset')  # m from center car to camera
+      self.camera_offset = CAMERA_OFFSET  # m from center car to camera
 
     #opkr
     if self.drive_close_to_edge:
