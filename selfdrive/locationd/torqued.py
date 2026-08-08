@@ -44,7 +44,7 @@ LTP_EPS_SAT_RATIO = 0.95       # steer_out_can close to steer_max => saturation 
 
 [요청 통합]
 (1) 캐시 복원 points(코너+직선 혼합) → steer 기준으로 코너/직선 버킷에 분리 적재
-(2) STEER_DELTA_DOWN_DIAG 실제값과 불일치(17) → 20으로 수정
+(2) STEER_DELTA_UP/DOWN 진단값을 GM 속도별 실제 출력 제한과 일치
 (3) FORCE_TARGET_TUNING 밴드(±5%)가 너무 타이트 → ±8%로 완화
     + 추가: FORCE 밴드를 비대칭으로 하향을 더 넓힘(언더스티어 탈출 여지 확대)
 (4) limited 반영 조건부 강화(clip/max/rate_limited 상황에서 limited_corner 반영 가중치 상향)
@@ -72,6 +72,7 @@ from common.params import Params
 from common.realtime import Priority, config_realtime_process, DT_MDL
 from common.filter_simple import FirstOrderFilter
 from selfdrive.swaglog import cloudlog
+from selfdrive.car.gm.steering_limits import steer_delta_limits_kph
 from selfdrive.controls.lib.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
 from common.numpy_fast import interp, clip
 
@@ -86,9 +87,12 @@ def center_offset_residual(lateral_accel, applied_steer, lat_accel_factor):
 
 
 def equinox_learning_confidence(normal_counts, limited_counts, min_points,
-                                 clip_ratio=0.0, rate_ratio=0.0, driver_ratio=0.0,
                                  start_points=1800.0, full_points=10000.0):
-    """Return 0..1 confidence for widening the Equinox learning envelope."""
+    """Return persistent data confidence for the Equinox learning envelope.
+
+    Recent clip/rate/driver ratios gate parameter updates separately. They must
+    not erase confidence accumulated from accepted, directionally balanced data.
+    """
     normal = [max(0.0, float(v)) for v in normal_counts]
     limited = [max(0.0, float(v)) for v in limited_counts]
     required = [max(1.0, float(v)) for v in min_points]
@@ -109,11 +113,7 @@ def equinox_learning_confidence(normal_counts, limited_counts, min_points,
     direction_balance = min(negative, positive) / max(max(negative, positive), 1.0)
     balance_progress = _profile_clip((direction_balance - 0.30) / 0.50, 0.0, 1.0)
 
-    bad_ratio = max(_profile_clip(clip_ratio, 0.0, 1.0),
-                    _profile_clip(rate_ratio, 0.0, 1.0),
-                    _profile_clip(driver_ratio, 0.0, 1.0))
-    quality = _profile_clip(1.0 - (bad_ratio / 0.35), 0.0, 1.0)
-    return _profile_clip(total_progress * coverage_progress * balance_progress * quality, 0.0, 1.0)
+    return _profile_clip(total_progress * coverage_progress * balance_progress, 0.0, 1.0)
 
 
 def adaptive_equinox_bands(lat_accel_anchor, friction_anchor, confidence):
@@ -416,8 +416,8 @@ MIN_ENGAGE_BUFFER = 2  # secs
 # Controller diagnostics (for steer limit flags)
 # -----------------------------
 STEER_MAX_DIAG = 300
-STEER_DELTA_UP_DIAG = 10  # SAFETY: match lower controller delta-up target; 14 was too abrupt
-STEER_DELTA_DOWN_DIAG = 14  # SAFETY: unwind still faster than up, but less snappy
+STEER_DELTA_UP_DIAG = 10   # Low-speed ceiling/fallback; runtime uses the shared speed map.
+STEER_DELTA_DOWN_DIAG = 20
 STEER_SAT_THRESHOLD = 0.98
 STEER_CLIP_EPS = 0.05  # ignore small desired/applied gaps that are normal actuator lag
 STEER_CLIP_MIN_DES = 0.18  # ignore 'clip' inference when desired is small
@@ -1835,9 +1835,6 @@ class TorqueEstimator:
                 self.corner_points.bucket_lengths(),
                 self.limited_corner_points.bucket_lengths(),
                 self.min_bucket_points,
-                clip_ratio=float(getattr(self, '_qual_clip_quality_ratio', 0.0) or 0.0),
-                rate_ratio=float(getattr(self, '_qual_rate_strong_ratio', 0.0) or 0.0),
-                driver_ratio=float(getattr(self, '_qual_steer_pressed_ratio', 0.0) or 0.0),
             )
         except Exception:
             confidence = 0.0
@@ -2238,8 +2235,9 @@ class TorqueEstimator:
                         v_kph = float(self.last_vego) * 3.6 if (
                                     self.last_vego is not None and np.isfinite(self.last_vego)) else 0.0
                         w_mid = self._midspd_weight(v_kph)
-                        lim_up = STEER_DELTA_UP_NORM * (1.0 + MIDSPD_DELTA_UP_GAIN * w_mid)
-                        lim_dn = STEER_DELTA_DOWN_NORM * (1.0 + MIDSPD_DELTA_DOWN_GAIN * w_mid)
+                        delta_up_diag, delta_down_diag = steer_delta_limits_kph(v_kph)
+                        lim_up = (delta_up_diag / float(STEER_MAX_DIAG)) * (1.0 + MIDSPD_DELTA_UP_GAIN * w_mid)
+                        lim_dn = (delta_down_diag / float(STEER_MAX_DIAG)) * (1.0 + MIDSPD_DELTA_DOWN_GAIN * w_mid)
                         lim = lim_up if abs(desired) > abs(applied) else lim_dn
                         self.last_rate_lim_w = float(w_mid)
                         self.last_delta_lim_up = float(lim_up)

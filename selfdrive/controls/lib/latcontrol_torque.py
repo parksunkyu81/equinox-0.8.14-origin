@@ -8,6 +8,7 @@ from selfdrive.controls.lib.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
 from common.params import Params
 from decimal import Decimal
 import cereal.messaging as messaging
+from selfdrive.car.gm.steering_limits import STEER_DELTA_BP_KPH, STEER_DELTA_DOWN_V, STEER_DELTA_UP_V
 from selfdrive.controls.lib.torque_authority import effective_torque_params
 
 # At higher speeds (25+mph) we can assume:
@@ -93,10 +94,10 @@ DYN_TORQUE_PROFILE_ENABLED = True
 
 # 실제 CarController의 STEER_DELTA_UP/DOWN은 carcontroller 쪽에서 적용해야 한다.
 # 아래 맵은 이 파일 안에서는 torque slew와 디버그용 목표값으로만 사용한다.
-DYN_DELTA_UP_BP   = [0.0, 10.0, 30.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
-DYN_DELTA_UP_V    = [10.0, 14.0, 14.0, 14.0, 13.0, 12.0, 9.0, 8.0, 7.0, 7.0]
-DYN_DELTA_DOWN_BP = [0.0, 10.0, 35.0, 40.0, 45.0, 60.0, 80.0, 100.0, 110.0]
-DYN_DELTA_DOWN_V  = [14.0, 17.0, 17.0, 17.0, 16.0, 15.0, 15.0, 14.0, 14.0]
+DYN_DELTA_UP_BP = STEER_DELTA_BP_KPH
+DYN_DELTA_UP_V = STEER_DELTA_UP_V
+DYN_DELTA_DOWN_BP = STEER_DELTA_BP_KPH
+DYN_DELTA_DOWN_V = STEER_DELTA_DOWN_V
 
 # 코너 강도 판정. 세 값 중 가장 큰 값을 사용한다.
 # 코너 감지 민감도 보정.

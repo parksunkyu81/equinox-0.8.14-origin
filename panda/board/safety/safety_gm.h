@@ -7,8 +7,8 @@
 const int GM_MAX_STEER = 300;             // DEF : 300
 const int GM_MAX_RT_DELTA = 128;          // max delta torque allowed for real time checks
 const uint32_t GM_RT_INTERVAL = 250000;    // 250ms between real time checks
-const int GM_MAX_RATE_UP = 7;
-const int GM_MAX_RATE_DOWN = 17;           // DEF : 17
+const int GM_MAX_RATE_UP = 10;
+const int GM_MAX_RATE_DOWN = 20;
 const int GM_DRIVER_TORQUE_ALLOWANCE = 50;
 const int GM_DRIVER_TORQUE_FACTOR = 4;
 const int GM_MAX_GAS = 3072;
@@ -193,7 +193,7 @@ static int gm_tx_hook(CANPacket_t *to_send, bool longitudinal_allowed) {
 
       // TODO: Re-enable after validating limits that are compatible with
       // GM_MAX_RATE_DOWN. The previous 128/250 ms check can reject a valid
-      // 17-count/20 ms torque unwind.
+      // 20-count/20 ms torque unwind.
       // violation |= rt_rate_limit_check(desired_torque, rt_torque_last, GM_MAX_RT_DELTA);
 
       // uint32_t ts_elapsed = get_ts_elapsed(ts, ts_last);
