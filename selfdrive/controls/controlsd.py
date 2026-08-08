@@ -790,14 +790,15 @@ class Controls:
 
                     self.LaC.update_live_torque_params(torque_params.latAccelFactorFiltered,
                                                        torque_params.latAccelOffsetFiltered,
-                                                       torque_params.frictionCoefficientFiltered)
+                                                       torque_params.frictionCoefficientFiltered,
+                                                       torque_params.totalBucketPoints)
 
             else:
                 self.torque_latAccelFactor = ntune_torque_get('latAccelFactor')  # LAT_ACCEL_FACTOR
                 self.torque_friction = ntune_torque_get('friction')  # FRICTION
-                self.torque_latAccelOffset = 1
+                self.torque_latAccelOffset = 0.0
                 self.LaC.update_live_torque_params(self.torque_latAccelFactor, self.torque_latAccelOffset,
-                                                   self.torque_friction)
+                                                   self.torque_friction, 0)
 
 
         lat_plan = self.sm['lateralPlan']

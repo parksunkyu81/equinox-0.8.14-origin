@@ -8,6 +8,7 @@ from selfdrive.controls.lib.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
 from common.params import Params
 from decimal import Decimal
 import cereal.messaging as messaging
+from selfdrive.controls.lib.torque_authority import effective_torque_params
 
 # At higher speeds (25+mph) we can assume:
 # Lateral acceleration achieved by a specific car correlates to
@@ -30,7 +31,7 @@ LOW_SPEED_Y = [15, 10, 0, 0, 5]
 # 30km/h 이상에서 목표 곡률(desired_curvature) 변화를 완화한다.
 # 중속에서는 부드럽게, 고속에서는 더 보수적으로 적용한다.
 # ==============================
-HS_CURV_GUARD_ON_KPH = 40.0
+HS_CURV_GUARD_ON_KPH = 55.0
 
 # update 1회당 desired_curvature 최대 변화량
 HS_CURV_DELTA_MAX_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
@@ -42,7 +43,7 @@ HS_CURV_RATE_MAX_V = [0.030, 0.023, 0.017, 0.012, 0.008, 0.005]
 
 # 저역통과 필터 alpha (작을수록 더 부드러움)
 HS_CURV_ALPHA_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-HS_CURV_ALPHA_V = [0.58, 0.50, 0.42, 0.34, 0.24, 0.16]
+HS_CURV_ALPHA_V = [0.78, 0.70, 0.58, 0.44, 0.30, 0.22]
 
 # 좌/우 부호가 갑자기 뒤집히는 경우 완화
 HS_SIGN_FLIP_MIN_CURV = 0.00045
@@ -85,23 +86,10 @@ STABLE_TORQUE_LIMITED_SHRINK = 0.85
 # 실제 torque 계산에만 임시 effective latAccelFactor/friction을 적용한다.
 DYN_TORQUE_PROFILE_ENABLED = True
 
-# Speed breakpoints for small relative adjustments around the learned base.
-DYN_LAT_FACTOR_BP = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
 # v4 10~45kph 통합 개선:
 #  - 10~30kph는 안전 클램프 하한/상한까지 사용해 강한 저속 코너 보조
 #  - 30~35kph는 저속 강한 개선을 그대로 연장
 #  - 35~45kph는 bridge 구간으로 LatAccelFactor/Friction을 점진 완화해 추종력과 안정성을 같이 확보
-DYN_FRICTION_BP   = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
-
-# Equinox uses the learned live values as the base. These small relative scales
-# improve low/mid-speed corner authority and add high-speed stability without
-# pulling a well-learned vehicle back toward a hard-coded absolute target.
-DYN_LAT_FACTOR_SCALE_V = [1.000, 0.995, 0.985, 0.980, 0.980, 0.985, 0.990,
-                          0.995, 1.000, 1.010, 1.020, 1.025, 1.030]
-DYN_FRICTION_SCALE_V = [1.000, 1.010, 1.025, 1.030, 1.030, 1.025, 1.015,
-                        1.010, 1.000, 0.995, 0.985, 0.980, 0.980]
-DYN_PROFILE_MIN_POINTS = 1500
-DYN_PROFILE_FULL_POINTS = 6000
 
 # 실제 CarController의 STEER_DELTA_UP/DOWN은 carcontroller 쪽에서 적용해야 한다.
 # 아래 맵은 이 파일 안에서는 torque slew와 디버그용 목표값으로만 사용한다.
@@ -137,8 +125,8 @@ DYN_BOOST_RISE_STEP = 0.14
 DYN_BOOST_FALL_STEP = 0.025
 DYN_LOW_SPEED_HOLD_FRAMES = 80  # 약 0.8초 @100Hz 근처
 
-# limit 상황에서는 더 밀어붙이지 않고 부스트를 줄인다.
-DYN_STEER_LIMITED_BOOST_MULT = 0.75
+# 일반 CAN 램프 제한은 정상 동작이므로 권한을 유지하고, 강한 추종 오차에서만 줄인다.
+DYN_STEER_LIMITED_BOOST_MULT = 1.00
 DYN_TORQUE_SLEW_ACTIVE_MULT = 0.85
 
 # steeringPressed가 True라고 해서 저속 코너 dynamic boost를 0으로 끄면,
@@ -153,16 +141,11 @@ DYN_DRIVER_TORQUE_HARD_DISABLE = 30.0
 # v2: 이전 프레임의 강한 rate-limit/추종 gap을 직접 backoff 입력으로 사용한다.
 # 외부 인터페이스를 바꾸지 않고, 직전 프레임에서 low-speed slew 또는 stable torque slew가
 # 큰 gap을 만들었는지 저장했다가 다음 프레임 dynamic boost를 줄인다.
-DYN_RATE_LIMITED_STRONG_BOOST_MULT = 0.85
+DYN_RATE_LIMITED_STRONG_BOOST_MULT = 0.70
 DYN_RATE_LIMITED_STRONG_TRACKING_GAP = 0.45
 DYN_RATE_LIMITED_STRONG_OUTPUT_GAP = 0.18
 
-# 최종 안전 클램프
-DYN_LAT_FACTOR_MIN = 1.75
-DYN_LAT_FACTOR_MAX = 2.42
-DYN_FRICTION_MIN = 0.165
-DYN_FRICTION_MAX = 0.305
-
+# 절대 파라미터 클램프는 torque_authority.py에서 단일 관리한다.
 # A learned center offset is applied to feedforward even on a straight road.
 # Keep the final controller-side clamp independent from torqued so a stale or
 # malformed publisher can never create a large continuous steering bias.
@@ -493,7 +476,7 @@ class LatControlTorque(LatControl):
             (steer_abs >= 0.015)
         )
         if (10.0 <= v_kph <= 35.0) and turning_hint and (not strong_driver_override):
-            low35_min_boost = 0.90 if bool(strong_rate_limited) else 1.00
+            low35_min_boost = 0.70 if bool(strong_rate_limited) else 1.00
             if bool(steering_pressed):
                 low35_min_boost *= float(DYN_STEERING_PRESSED_LOW_MIN_BOOST)
             low_boost_target = max(low_boost_target, low35_min_boost * low_gate)
@@ -521,25 +504,13 @@ class LatControlTorque(LatControl):
         cur_boost = float(clip(cur_boost, 0.0, 1.0))
         self._dyn_corner_boost = cur_boost
 
-        target_lat = base_lat * float(interp(v_kph, DYN_LAT_FACTOR_BP, DYN_LAT_FACTOR_SCALE_V))
-        target_fric = base_fric * float(interp(v_kph, DYN_FRICTION_BP, DYN_FRICTION_SCALE_V))
+        authority_request = float(clip(max(cur_boost, mid_boost_target, high_gate), 0.0, 1.0))
 
-        # 저속은 코너 강도 기반, 중속은 완만한 코너 보조, 고속은 안정 게이트 기반으로 블렌딩.
-        learning_gate = float(interp(float(total_pts),
-                                     [DYN_PROFILE_MIN_POINTS, DYN_PROFILE_FULL_POINTS],
-                                     [0.0, 1.0]))
-        blend = float(clip(max(cur_boost, mid_boost_target, high_gate) * learning_gate, 0.0, 1.0))
+        # 저속/중속 권한과 학습 신뢰도를 단일 스케줄러에서 블렌딩한다.
+        eff_lat, eff_fric, blend = effective_torque_params(
+            base_lat, base_fric, v_kph, authority_request, total_pts
+        )
         self._dyn_last_blend = float(blend)
-
-        eff_lat = base_lat + (target_lat - base_lat) * blend
-        eff_fric = base_fric + (target_fric - base_fric) * blend
-
-        eff_lat = float(clip(eff_lat,
-                             max(DYN_LAT_FACTOR_MIN, base_lat * 0.96),
-                             min(DYN_LAT_FACTOR_MAX, base_lat * 1.04)))
-        eff_fric = float(clip(eff_fric,
-                              max(DYN_FRICTION_MIN, base_fric * 0.90),
-                              min(DYN_FRICTION_MAX, base_fric * 1.10)))
 
         self._dyn_last_corner_strength = corner_strength
         self._dyn_last_low_speed_gate = low_gate
