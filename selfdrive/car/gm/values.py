@@ -4,7 +4,7 @@ from selfdrive.car import dbc_dict
 Ecu = car.CarParams.Ecu
 from common.conversions import Conversions as CV
 
-CLOSE_TO_ROAD_EDGE = True  # True False 왼쪽, 오른쪽 가깝게 붙는 역활
+CLOSE_TO_ROAD_EDGE = False  # True False 왼쪽, 오른쪽 가깝게 붙는 역활
 LEFT_EDGE_OFFSET = 15       # 양수
 RIGHT_EDGE_OFFSET = -15     # 음수
 
