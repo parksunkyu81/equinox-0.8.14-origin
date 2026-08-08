@@ -25,7 +25,7 @@ TRAJECTORY_SIZE = 33
 # 따라서 경로 오프셋이 필요하지 않습니다.
 
 PATH_OFFSET = ntune_common_get('pathOffset')
-CAMERA_OFFSET = ntune_common_get('cameraOffset')
+CAMERA_OFFSET = -0.055   # 카메라 오른쪽으로 5.5cm 이동
 
 class LanePlanner:
   def __init__(self, wide_camera=False):
