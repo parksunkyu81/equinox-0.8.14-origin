@@ -3,6 +3,7 @@ import os
 import math
 import numpy as np
 from numbers import Number
+from math import sqrt
 
 from cereal import car, log
 from common.numpy_fast import clip, interp, mean
@@ -38,7 +39,6 @@ from selfdrive.car.gm.values import MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.stop_accel_boost import STOP_ACCEL_BOOST_FACTOR
-from selfdrive.controls.lib.curve_speed import calculate_curve_speed, CURVE_SPEED_SENTINEL
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
@@ -94,7 +94,6 @@ class Controls:
             self.camera_packets.append("wideRoadCameraState")
 
         params = Params()
-        self.params = params
         self.joystick_mode = params.get_bool("JoystickDebugMode")
         joystick_packet = ['testJoystick'] if self.joystick_mode else []
 
@@ -180,16 +179,13 @@ class Controls:
         self.v_cruise_kph_last = 0
         self.max_speed_clu = 0.
         self.curve_speed_ms = 0.
-        self.curve_speed_active = False
-        self.is_curv_driving = False
-        self.curv_speed = 0.0
         self.v_cruise_kph_limit = 0
         self.applyMaxSpeed = 0
         self.roadLimitSpeedActive = 0
         self.roadLimitSpeed = 0
         self.roadLimitSpeedLeftDist = 0
 
-        self.slow_on_curves = params.get_bool('SccSmootherSlowOnCurves')
+        self.slow_on_curves = Params().get_bool('SccSmootherSlowOnCurves')
         self.min_set_speed_clu = self.kph_to_clu(MIN_SET_SPEED_KPH)
         self.max_set_speed_clu = self.kph_to_clu(MAX_SET_SPEED_KPH)
 
@@ -326,30 +322,23 @@ class Controls:
         return 0
 
     def cal_curve_speed(self, sm, v_ego, frame):
+
         lateralPlan = sm['lateralPlan']
-        cruise_speed_ms = self.v_cruise_kph * CV.KPH_TO_MS
-        target_speed = None
         if len(lateralPlan.curvatures) == CONTROL_N:
-            target_speed = calculate_curve_speed(
-                lateralPlan.curvatures, v_ego, cruise_speed_ms,
-                ntune_scc_get("sccCurvatureFactor"), MIN_CURVE_SPEED)
+            curv = lateralPlan.curvatures[-1]
+            a_y_max = 2.975 - v_ego * 0.0375  # ~1.85 @ 75mph, ~2.6 @ 25mph
+            v_curvature = sqrt(a_y_max / max(abs(curv), 1e-4))
+            model_speed = v_curvature * 0.85 * ntune_scc_get("sccCurvatureFactor")
 
-        if target_speed is None:
-            self.curve_speed_ms = CURVE_SPEED_SENTINEL
-            self.curve_speed_active = False
-            return
+            if model_speed < v_ego:
+                self.curve_speed_ms = float(max(model_speed, MIN_CURVE_SPEED))
+            else:
+                self.curve_speed_ms = 255.
 
-        # Enter only when the curve target is meaningfully below SET speed.
-        # A small exit hysteresis prevents CURV and the speed target flickering
-        # when the estimated target sits on the cruise setting.
-        enter_margin_ms = 0.5
-        exit_margin_ms = 1.0
-        if self.curve_speed_active:
-            self.curve_speed_active = target_speed < cruise_speed_ms + exit_margin_ms
+            if np.isnan(self.curve_speed_ms):
+                self.curve_speed_ms = 255.
         else:
-            self.curve_speed_active = target_speed < cruise_speed_ms - enter_margin_ms
-
-        self.curve_speed_ms = float(target_speed) if self.curve_speed_active else CURVE_SPEED_SENTINEL
+            self.curve_speed_ms = 255.
 
 
     # [크루즈 MAX 속도 설정] #
@@ -366,18 +355,13 @@ class Controls:
         # print("first_started : ", first_started)
         # print("max_speed_log : ", max_speed_log)
 
-        # Apply Community menu changes without restarting controlsd.
-        if frame % 100 == 0:
-            self.slow_on_curves = self.params.get_bool('SccSmootherSlowOnCurves')
-
-        cruise_speed_clu = self.kph_to_clu(self.v_cruise_kph)
-        curve_limit_clu = 0.0
+        curv_limit = 0
         self.cal_curve_speed(sm, vEgo, frame)
-        if self.slow_on_curves and self.curve_speed_active:
-            curve_limit_clu = self.curve_speed_ms * self.speed_conv_to_clu
-            max_speed_clu = min(cruise_speed_clu, curve_limit_clu)
+        if self.slow_on_curves and self.curve_speed_ms >= MIN_CURVE_SPEED:
+            max_speed_clu = min(self.v_cruise_kph * CV.KPH_TO_MS, self.curve_speed_ms) * self.speed_conv_to_clu
+            curv_limit = int(max_speed_clu)
         else:
-            max_speed_clu = cruise_speed_clu
+            max_speed_clu = self.kph_to_clu(self.v_cruise_kph)
 
         if road_speed_limiter.roadLimitSpeed is not None:
             camSpeedFactor = clip(road_speed_limiter.roadLimitSpeed.camSpeedFactor, 1.0, 1.1)
@@ -421,11 +405,8 @@ class Controls:
           self.limited_lead = False'''
 
 
-        limited_curv = curve_limit_clu > 0.0 and abs(curve_limit_clu - max_speed_clu) < 0.5
-        self.is_curv_driving = bool(limited_curv and CS.cruiseState.enabled)
-        self.curv_speed = self.curve_speed_ms * CV.MS_TO_KPH if self.is_curv_driving else 0.0
-
-        self.update_max_speed(int(max_speed_clu + 0.5), CS, limited_curv)
+        self.update_max_speed(int(max_speed_clu + 0.5), CS,
+                              curv_limit != 0 and curv_limit == int(max_speed_clu))
         # print("update_max_speed() value : ", self.max_speed_clu)
 
         return road_limit_speed, left_dist, max_speed_log
@@ -1078,10 +1059,6 @@ class Controls:
         controlsState.latAccelOffset = self.torque_latAccelOffset
         controlsState.friction = self.torque_friction
         controlsState.totalBucketPoints = self.totalBucketPoints
-
-        # Curve slowdown diagnostics used by the onroad CURV indicator.
-        controlsState.curvDriving = bool(self.is_curv_driving)
-        controlsState.curvSpeed = float(self.curv_speed)
 
         # Dynamic TR
         #controlsState.cruiseGap = int(Params().get("cruiseGap", encoding="utf8"))
