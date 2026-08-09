@@ -606,6 +606,9 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   auto car_state = sm["carState"].getCarState();
   auto car_control = sm["carControl"].getCarControl();
   auto controls_state = sm["controlsState"].getControlsState();
+  const bool stop_accel_boost_active = sm.alive("dynamicFollowData") &&
+                                       sm.valid("dynamicFollowData") &&
+                                       sm["dynamicFollowData"].getDynamicFollowData().getLeadCatchupActive();
 
   // 하단 원형 2줄 시작점
   const int icon_start_x = 600;
@@ -862,7 +865,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   float accel = car_control.getActuators().getAccel();
 
   p.setPen(Qt::NoPen);
-  p.setBrush(pedal_force_recovery_active ? QColor(255, 127, 0, 235) : blackColor(200));
+  p.setBrush(pedal_force_recovery_active ? QColor(255, 127, 0, 235) :
+             (stop_accel_boost_active ? QColor(0, 170, 90, 235) : blackColor(200)));
   p.drawEllipse(x - radius / 2, y2 - radius / 2, radius, radius);
 
   textColor = QColor(255, 255, 255, 200);
@@ -885,6 +889,14 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     //str = "DECEL";
     str = "감속";
     textColor = QColor(254, 32, 32, 200);
+  }
+
+  // Keep the existing PEDAL gauge layout. Only its active color and state
+  // text change while the confirmed stop-and-go launch assist is operating.
+  // Forced-acceleration recovery remains the higher-priority indication.
+  if(stop_accel_boost_active && !pedal_force_recovery_active) {
+    str = "BOOST";
+    textColor = QColor(225, 255, 239, 255);
   }
 
   configFont(p, "Open Sans", 38, "Bold");
