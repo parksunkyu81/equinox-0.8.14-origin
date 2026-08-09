@@ -219,6 +219,7 @@ std::unordered_map<std::string, uint32_t> keys = {
 
     {"IsLiveTorque", PERSISTENT},
     {"IsLowSpeedFactor", PERSISTENT},
+    {"closeToRoadEdge", PERSISTENT},
     {"E2ELong", PERSISTENT},
 
     {"CustomTREnabled", PERSISTENT},

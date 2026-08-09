@@ -8,7 +8,7 @@ from selfdrive.swaglog import cloudlog
 from common.params import Params
 from decimal import Decimal
 from selfdrive.ntune import ntune_common_get
-from selfdrive.car.gm.values import CLOSE_TO_ROAD_EDGE, LEFT_EDGE_OFFSET, RIGHT_EDGE_OFFSET
+from selfdrive.car.gm.values import LEFT_EDGE_OFFSET, RIGHT_EDGE_OFFSET
 
 ENABLE_ZORROBYTE = False
 ENABLE_INC_LANE_PROB = True
@@ -57,7 +57,7 @@ class LanePlanner:
 
     #opkr
     self.params = Params()
-    self.drive_close_to_edge = CLOSE_TO_ROAD_EDGE
+    self.drive_close_to_edge = self.params.get_bool("closeToRoadEdge")
     self.left_edge_offset = float(
       Decimal(LEFT_EDGE_OFFSET) * Decimal('0.01'))  # 0.15 move to right
     self.right_edge_offset = float(
@@ -76,6 +76,7 @@ class LanePlanner:
     if self.lp_timer > 1.0:
       self.lp_timer = 0.0
       self.camera_offset = CAMERA_OFFSET  # m from center car to camera
+      self.drive_close_to_edge = self.params.get_bool("closeToRoadEdge")
 
     #opkr
     if self.drive_close_to_edge:

@@ -64,6 +64,7 @@ def manager_init() -> None:
     ("NewRadarInterface", "0"),
     ("IsLiveTorque", "1"),
     ("IsLowSpeedFactor", "1"),
+    ("closeToRoadEdge", "0"),
     ("E2ELong", "0"),
 
     ("TorqueFriction", "120"),

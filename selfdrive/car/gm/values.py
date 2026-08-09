@@ -4,11 +4,9 @@ from selfdrive.car import dbc_dict
 Ecu = car.CarParams.Ecu
 from common.conversions import Conversions as CV
 
-CLOSE_TO_ROAD_EDGE = False  # True False 왼쪽, 오른쪽 가깝게 붙는 역활
 LEFT_EDGE_OFFSET = 15       # 양수
 RIGHT_EDGE_OFFSET = -15     # 음수
 
-SLOW_ON_CURVES = 1  # 슬로우 커브 사용 유무 (0,1)
 MIN_CURVE_SPEED = 40. * CV.KPH_TO_MS  # 커브 속도 설정
 
 # m/s 속도로 1초당 1미터 -> 3초면 3미터를 이동

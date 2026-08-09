@@ -776,6 +776,12 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                           "../assets/offroad/icon_shell.png",
                                           this));*/
 
+  toggles.append(new ParamControl("closeToRoadEdge",
+                                          "Close to road edge",
+                                          "",
+                                          "../assets/offroad/icon_road.png",
+                                          this));
+
   for(ParamControl *toggle : toggles) {
     if(main_layout->count() != 0) {
       toggleLayout->addWidget(horizontal_line());

@@ -35,7 +35,7 @@ from selfdrive.ntune import ntune_common_get, ntune_common_enabled, ntune_scc_ge
 from selfdrive.road_speed_limiter import road_speed_limiter_get_max_speed, road_speed_limiter_get_active, \
   get_road_speed_limiter
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, CONTROL_N
-from selfdrive.car.gm.values import SLOW_ON_CURVES, MIN_CURVE_SPEED
+from selfdrive.car.gm.values import MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 
@@ -358,7 +358,7 @@ class Controls:
 
         curv_limit = 0
         self.cal_curve_speed(sm, vEgo, frame)
-        if self.slow_on_curves and SLOW_ON_CURVES and self.curve_speed_ms >= MIN_CURVE_SPEED:
+        if self.slow_on_curves and self.curve_speed_ms >= MIN_CURVE_SPEED:
             max_speed_clu = min(self.v_cruise_kph * CV.KPH_TO_MS, self.curve_speed_ms) * self.speed_conv_to_clu
             curv_limit = int(max_speed_clu)
         else:
