@@ -205,7 +205,7 @@ class LatControlTorque(LatControl):
         self._dyn_prev_rate_limited_strong = False
         self._dyn_prev_rate_limit_err = 0.0
         self._dyn_last_rate_limited_strong = False
-        self._dyn_last_target_delta_up = 14.0
+        self._dyn_last_target_delta_up = 12.0
         self._dyn_last_target_delta_down = 20.0
         self._dir_torque_assist_left = 1.0
         self._dir_torque_assist_right = 1.0
