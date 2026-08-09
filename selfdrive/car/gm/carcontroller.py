@@ -93,13 +93,10 @@ class CarController():
 
     if CS.CP.enableGasInterceptor:
       # 이것이 없으면 저속에서 너무 공격적입니다.
-      # Normally the interceptor is enabled above 1 km/h. A confirmed lead
-      # launch is the only exception: it permits the non-boosted release
-      # command from standstill so the car can actually cross 1 km/h. The 10%
-      # boost itself is applied by LongControl only at/above 1 km/h.
-      stop_accel_boost_active = bool(getattr(controls, 'stop_accel_boost_active', False))
-      pedal_speed_allowed = pedal_command_allowed(CS.out.vEgo, stop_accel_boost_active,
-                                                  V_CRUISE_ENABLE_MIN)
+      # Automatic pedal output is never allowed below 1 km/h. The driver must
+      # initiate motion; launch boost can begin only after measured speed has
+      # crossed that threshold.
+      pedal_speed_allowed = pedal_command_allowed(CS.out.vEgo, V_CRUISE_ENABLE_MIN)
       if CS.adaptive_Cruise and not brake_pressed and not CS.out.gasPressed and \
          pedal_speed_allowed:
 

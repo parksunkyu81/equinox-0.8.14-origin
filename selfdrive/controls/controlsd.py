@@ -38,7 +38,7 @@ from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, CON
 from selfdrive.car.gm.values import MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
-from selfdrive.controls.lib.stop_accel_boost import STOP_ACCEL_BOOST_FACTOR
+from selfdrive.controls.lib.stop_accel_boost import STOP_ACCEL_BOOST_FACTOR, StopAccelBoostLatch
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
@@ -228,6 +228,8 @@ class Controls:
 
         self.left_lane_visible = False
         self.right_lane_visible = False
+        self.stop_accel_boost_latch = StopAccelBoostLatch()
+        self.stop_accel_boost_active = False
 
         self.wide_camera = TICI and params.get_bool('EnableWideCamera')
         self.disable_op_fcw = params.get_bool('DisableOpFcw')
@@ -829,14 +831,25 @@ class Controls:
         if not CS.cruiseState.enabled:
             self.LoC.reset(v_pid=CS.vEgo)
 
-        # A launch request is valid only in normal closed-loop control on a GM
-        # gas-interceptor vehicle. Invalid/stale dynamic-follow messages,
-        # overrides, soft-disable, and joystick mode all fail closed.
-        self.stop_accel_boost_active = bool(not self.joystick_mode and
-                                            self.CP.carName == 'gm' and self.CP.enableGasInterceptor and
-                                            self.active and self.state == State.enabled and
-                                            self.sm.valid['dynamicFollowData'] and
-                                            self.sm['dynamicFollowData'].leadCatchupActive)
+        # Remember one confirmed lead launch so BOOST does not disappear when
+        # dynamic-follow finishes its short launch phase. The latch is output-
+        # gated below 1 km/h and released at 25 km/h, on brake, lead re-stop, or
+        # an unsafe closing rate. Normal longitudinal limits still apply.
+        dynamic_follow_valid = self.sm.valid['dynamicFollowData']
+        dynamic_follow = self.sm['dynamicFollowData']
+        boost_system_ready = bool(not self.joystick_mode and
+                                  self.CP.carName == 'gm' and self.CP.enableGasInterceptor and
+                                  self.active and self.state == State.enabled and
+                                  dynamic_follow_valid and dynamic_follow.stopAccelBoostEnabled)
+        self.stop_accel_boost_active = self.stop_accel_boost_latch.update(
+          boost_system_ready,
+          dynamic_follow_valid and dynamic_follow.leadCatchupActive,
+          CS.vEgo,
+          brake_pressed=CS.brakePressed,
+          gas_pressed=CS.gasPressed,
+          lead_speed=dynamic_follow.leadSpeed if dynamic_follow_valid else 0.0,
+          lead_relative_speed=dynamic_follow.leadRelativeSpeed if dynamic_follow_valid else 0.0,
+          lead_distance=dynamic_follow.leadDistance if dynamic_follow_valid else 0.0)
 
         if not self.joystick_mode:
             # accel PID loop
