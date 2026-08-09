@@ -4,10 +4,10 @@ import math
 # Panda enforces these as absolute ceilings. The controller tapers the actual
 # command rate back to the stock 7/17 envelope as vehicle speed rises.
 STEER_DELTA_BP_KPH = (0.0, 10.0, 35.0, 45.0, 60.0, 80.0, 130.0)
-STEER_DELTA_UP_V = (7.0, 10.0, 10.0, 9.0, 8.0, 7.0, 7.0)
+STEER_DELTA_UP_V = (7.0, 12.0, 12.0, 10.0, 8.0, 7.0, 7.0)
 STEER_DELTA_DOWN_V = (17.0, 20.0, 20.0, 19.0, 18.0, 17.0, 17.0)
 
-STEER_DELTA_UP_MAX = 10.0
+STEER_DELTA_UP_MAX = 12.0
 STEER_DELTA_DOWN_MAX = 20.0
 STEER_DELTA_UP_SAFE = 7.0
 STEER_DELTA_DOWN_SAFE = 17.0

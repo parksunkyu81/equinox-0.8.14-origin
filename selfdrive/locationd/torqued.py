@@ -416,7 +416,7 @@ MIN_ENGAGE_BUFFER = 2  # secs
 # Controller diagnostics (for steer limit flags)
 # -----------------------------
 STEER_MAX_DIAG = 300
-STEER_DELTA_UP_DIAG = 10   # Low-speed ceiling/fallback; runtime uses the shared speed map.
+STEER_DELTA_UP_DIAG = 12   # Low-speed ceiling/fallback; runtime uses the shared speed map.
 STEER_DELTA_DOWN_DIAG = 20
 STEER_SAT_THRESHOLD = 0.98
 STEER_CLIP_EPS = 0.05  # ignore small desired/applied gaps that are normal actuator lag
