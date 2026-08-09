@@ -1,4 +1,4 @@
-from cereal import car, log
+from cereal import car
 from common.numpy_fast import clip, interp
 from common.realtime import DT_CTRL
 from selfdrive.controls.lib.drive_helpers import CONTROL_N, apply_deadzone
@@ -115,15 +115,12 @@ class LongControl:
       error = self.v_pid - CS.vEgo
       error_deadzone = apply_deadzone(error, deadzone)
 
-      # A gas-interceptor can only add throttle; it cannot execute a negative
-      # acceleration request. When cruise (rather than a detected lead) is the
-      # active MPC source, a negative planner feedforward must not cancel a
-      # positive speed error while the target trajectory is holding/increasing.
-      # This also covers a distant detected lead that is not constraining the
-      # plan. Real lead-following deceleration and every brake-capable platform
-      # keep the original planner feedforward unchanged.
+      # A gas interceptor cannot execute negative acceleration. Once both
+      # vision leads are gone, do not let stale negative feedforward cancel a
+      # positive PID speed request while the new trajectory is recovering.
+      # While a lead is present, the original MPC deceleration remains intact.
       pedal_clear_road_recovery = self.CP.enableGasInterceptor and \
-                                  long_plan.longitudinalPlanSource == log.LongitudinalPlan.LongitudinalPlanSource.cruise and \
+                                  not long_plan.hasLead and \
                                   error_deadzone > 0.0 and \
                                   v_target_future >= v_target and \
                                   a_target < 0.0

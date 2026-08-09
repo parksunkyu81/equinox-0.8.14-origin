@@ -12,6 +12,7 @@ from selfdrive.controls.lib.longcontrol import LongCtrlState
 from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
 from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, CONTROL_N
+from selfdrive.controls.lib.vision_lead_transition import update_vision_lead_transition
 from selfdrive.swaglog import cloudlog
 
 
@@ -53,6 +54,8 @@ class Planner:
     self.accel_limit_max = float(calc_cruise_accel_limits(init_v)[1])
 
     self.fcw = False
+    self.previous_vision_lead_present = False
+    self.last_vision_lead_mono_time = 0
 
     self.a_desired = init_a
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, DT_MDL)
@@ -74,11 +77,25 @@ class Planner:
 
     reset_state = long_control_off if self.CP.openpilotLongitudinalControl else not sm['controlsState'].enabled
 
-    prev_accel_constraint = not (reset_state or sm['carState'].standstill)
+    # EQUINOX_NR is vision-only. Detect a lead-loss edge using the source
+    # model timestamp, not the republished radarState timestamp. On that one
+    # edge, release the previous lead's acceleration continuity constraint so
+    # the cruise plan does not inherit stale negative acceleration.
+    vision_lead_present = bool(sm['radarState'].leadOne.status or sm['radarState'].leadTwo.status)
+    vision_lead_mono_time = sm['radarState'].mdMonoTime
+    self.previous_vision_lead_present, self.last_vision_lead_mono_time, vision_lead_lost = \
+      update_vision_lead_transition(self.previous_vision_lead_present,
+                                    self.last_vision_lead_mono_time,
+                                    vision_lead_present, vision_lead_mono_time)
+
+    prev_accel_constraint = not (reset_state or sm['carState'].standstill or vision_lead_lost)
 
     if reset_state:
       self.v_desired_filter.x = v_ego
       self.a_desired = 0.0
+    elif vision_lead_lost and self.CP.enableGasInterceptor:
+      self.v_desired_filter.x = max(self.v_desired_filter.x, v_ego)
+      self.a_desired = max(self.a_desired, 0.0)
 
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
 
@@ -131,7 +148,7 @@ class Planner:
     longitudinalPlan.accels = self.a_desired_trajectory.tolist()
     longitudinalPlan.jerks = self.j_desired_trajectory.tolist()
 
-    longitudinalPlan.hasLead = sm['radarState'].leadOne.status
+    longitudinalPlan.hasLead = vision_lead_present
     longitudinalPlan.accelLimitMax = self.accel_limit_max
     longitudinalPlan.longitudinalPlanSource = self.mpc.source
     longitudinalPlan.fcw = self.fcw
