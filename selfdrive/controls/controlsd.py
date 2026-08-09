@@ -38,6 +38,7 @@ from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, CON
 from selfdrive.car.gm.values import MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
+from selfdrive.controls.lib.stop_accel_boost import STOP_ACCEL_BOOST_FACTOR
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
@@ -1067,6 +1068,14 @@ class Controls:
         controlsState.globalDfMod = float(Params().get("globalDfMod", encoding="utf8"))
         # self.sm['liveTorqueParameters']
         controlsState.dynamicTRValue = float(self.sm['dynamicFollowData'].mpcTR)
+
+        # Stop-and-go launch diagnostics. These report the controller-accepted
+        # request and whether it actually raised the acceleration command.
+        controlsState.stopAccelBoostActive = bool(self.stop_accel_boost_active)
+        controlsState.stopAccelBoostApplied = bool(self.LoC.stop_accel_boost_applied)
+        controlsState.stopAccelBoostRawAccel = float(self.LoC.stop_accel_boost_raw_accel)
+        controlsState.stopAccelBoostFinalAccel = float(self.LoC.stop_accel_boost_final_accel)
+        controlsState.stopAccelBoostFactor = float(STOP_ACCEL_BOOST_FACTOR)
 
         controlsState.totalCameraOffset = totalCameraOffset
 

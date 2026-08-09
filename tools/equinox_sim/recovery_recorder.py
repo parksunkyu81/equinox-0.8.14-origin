@@ -21,7 +21,9 @@ from selfdrive.swaglog import cloudlog
 
 PRE_EVENT_SECONDS = 5.0
 POST_EVENT_SECONDS = 10.0
-MIN_EVENT_INTERVAL_SECONDS = 60.0
+# Traffic-light launches are normally farther apart than this, while the
+# cooldown still prevents repeated files from one continuous activation.
+MIN_EVENT_INTERVAL_SECONDS = 20.0
 EXPECTED_CONTROL_HZ = 50
 PRE_EVENT_SAMPLES = int(PRE_EVENT_SECONDS * EXPECTED_CONTROL_HZ) + 50
 DEFAULT_LOG_DIR = "/data/media/0/pedal_recovery_logs"
@@ -29,17 +31,17 @@ FALLBACK_LOG_DIR = "/tmp/pedal_recovery_logs"
 
 
 class PedalRecoveryRecorder:
-  """Read-only event recorder for pedal-force recovery diagnosis.
+  """Read-only event recorder for pedal recovery and stop-boost diagnosis.
 
-  Samples stay in memory during normal driving. A candidate accel=0 event or a
-  recovery activation flushes the preceding five seconds plus the following
-  ten seconds to JSONL, keeping disk I/O out of the timing-critical control path.
+  Samples stay in memory during normal driving. A recovery candidate or a
+  confirmed stopped-lead launch flushes the preceding five seconds plus the
+  following ten seconds to JSONL, keeping disk I/O out of the control path.
   """
 
   def __init__(self, log_dir=None):
     self.sm = messaging.SubMaster(
       ["carState", "controlsState", "carControl", "longitudinalPlan",
-       "driverMonitoringState"],
+       "driverMonitoringState", "dynamicFollowData", "radarState"],
       poll=["controlsState"],
     )
     self.sendcan_sock = messaging.sub_sock("sendcan")
@@ -83,6 +85,7 @@ class PedalRecoveryRecorder:
     self.recording = False
     self.post_event_deadline = 0.0
     self.last_trigger_signal = False
+    self.current_trigger_reason = ""
     self.event_sequence = 0
     self.last_event_started_at = -MIN_EVENT_INTERVAL_SECONDS
     self.latest_sendcan = {
@@ -166,6 +169,8 @@ class PedalRecoveryRecorder:
     car_control = self.sm["carControl"]
     plan = self.sm["longitudinalPlan"]
     driver_monitoring = self.sm["driverMonitoringState"]
+    dynamic_follow = self.sm["dynamicFollowData"]
+    lead = self.sm["radarState"].leadOne
     speeds = plan.speeds
     future_speed = float(speeds[-1]) if len(speeds) else float(car_state.vEgo)
     speed_error = float(controls.vPid - car_state.vEgo)
@@ -205,6 +210,11 @@ class PedalRecoveryRecorder:
         "recoveryCount": int(controls.pedalForceRecoveryCount),
         "forceDecel": bool(controls.forceDecel),
         "curvDriving": bool(controls.curvDriving),
+        "stopAccelBoostActive": bool(controls.stopAccelBoostActive),
+        "stopAccelBoostApplied": bool(controls.stopAccelBoostApplied),
+        "stopAccelBoostRawAccel": round(float(controls.stopAccelBoostRawAccel), 5),
+        "stopAccelBoostFinalAccel": round(float(controls.stopAccelBoostFinalAccel), 5),
+        "stopAccelBoostFactor": round(float(controls.stopAccelBoostFactor), 3),
       },
       "plan": {
         "valid": bool(self.sm.valid["longitudinalPlan"]),
@@ -212,6 +222,17 @@ class PedalRecoveryRecorder:
         "ageMs": round(plan_age * 1000.0, 3) if plan_age >= 0.0 else -1.0,
         "source": str(plan.longitudinalPlanSource),
         "futureSpeed": round(future_speed, 5),
+      },
+      "stopAccelBoost": {
+        "enabled": bool(dynamic_follow.stopAccelBoostEnabled),
+        "launchState": int(dynamic_follow.leadLaunchState),
+        "requestActive": bool(dynamic_follow.leadCatchupActive),
+        "catchupFactor": round(float(dynamic_follow.catchupFactor), 5),
+        "leadStatus": bool(lead.status),
+        "leadSpeed": round(float(dynamic_follow.leadSpeed), 5),
+        "leadRelativeSpeed": round(float(dynamic_follow.leadRelativeSpeed), 5),
+        "leadDistance": round(float(dynamic_follow.leadDistance), 5),
+        "egoSpeed": round(float(dynamic_follow.egoSpeed), 5),
       },
       "eligibility": {
         "gasInterceptor": self.enable_gas_interceptor,
@@ -265,12 +286,13 @@ class PedalRecoveryRecorder:
     controls = snapshot["controls"]
     car = snapshot["car"]
     plan = snapshot["plan"]
-    return recovery_log_trigger(
+    recovery_trigger = recovery_log_trigger(
       controls["recoveryActive"], controls["active"], car["adaptiveCruise"],
       car["brakePressed"], car["gasPressed"], car["standstill"],
       plan["valid"], plan["ageMs"], controls["speedError"],
       controls["futureSpeedError"], controls["recoveryRawAccel"],
     )
+    return recovery_trigger or controls["stopAccelBoostActive"]
 
   def _start_event(self, snapshot, now):
     self.recording = True
@@ -279,15 +301,17 @@ class PedalRecoveryRecorder:
     self.post_event_deadline = now + POST_EVENT_SECONDS
     self.event_sequence += 1
     self.last_event_started_at = now
+    self.current_trigger_reason = "stop_accel_boost" \
+      if snapshot["controls"]["stopAccelBoostActive"] else "pedal_force_recovery"
     cloudlog.warning(
-      f"Pedal recovery event {self.event_sequence} triggered; "
+      f"Pedal event {self.event_sequence} ({self.current_trigger_reason}) triggered; "
       f"capturing {PRE_EVENT_SECONDS:.0f}s before and {POST_EVENT_SECONDS:.0f}s after"
     )
 
   def _write_event(self):
     os.makedirs(self.log_dir, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    filename = f"pedal_recovery_{stamp}_{self.event_sequence:04d}.jsonl"
+    filename = f"{self.current_trigger_reason}_{stamp}_{self.event_sequence:04d}.jsonl"
     output_path = os.path.join(self.log_dir, filename)
     temp_path = output_path + ".tmp"
     metadata = {
@@ -297,14 +321,15 @@ class PedalRecoveryRecorder:
       "postEventSeconds": POST_EVENT_SECONDS,
       "minimumEventIntervalSeconds": MIN_EVENT_INTERVAL_SECONDS,
       "sampleCount": len(self.event_samples),
+      "triggerReason": self.current_trigger_reason,
     }
     with open(temp_path, "w", encoding="utf8") as output_file:
       output_file.write(json.dumps(metadata, ensure_ascii=False) + "\n")
       for sample in self.event_samples:
         output_file.write(json.dumps(sample, ensure_ascii=False, separators=(",", ":")) + "\n")
     os.replace(temp_path, output_path)
-    cloudlog.warning(f"Pedal recovery event saved: {output_path}")
-    print(f"Pedal recovery event saved: {output_path}")
+    cloudlog.warning(f"Pedal event saved: {output_path}")
+    print(f"Pedal event saved: {output_path}")
     self.event_samples = []
     self.recording = False
 

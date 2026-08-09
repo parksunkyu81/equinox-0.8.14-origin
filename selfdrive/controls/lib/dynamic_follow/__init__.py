@@ -27,14 +27,17 @@ LEAD_LAUNCH_MIN_EGO_KPH = 1.0
 LEAD_LAUNCH_MAX_EGO_KPH = 20.0
 LEAD_LAUNCH_ARM_MAX_EGO_KPH = 5.0
 LEAD_STOP_SPEED_MS = 0.3
-LEAD_START_SPEED_MS = 0.8
-LEAD_START_REL_SPEED_MS = 0.3
+# Start reacting as soon as a previously-confirmed stopped lead is clearly
+# rolling.  Keep a small hysteresis above LEAD_STOP_SPEED_MS to reject radar
+# zero-speed noise without waiting for the lead to reach 2.9 km/h.
+LEAD_START_SPEED_MS = 0.45
+LEAD_START_REL_SPEED_MS = 0.15
 LEAD_LAUNCH_CLOSING_REL_SPEED_MS = -0.3
 LEAD_LAUNCH_MIN_DISTANCE_M = 3.0
 LEAD_LAUNCH_MAX_ARM_DISTANCE_M = 30.0
 LEAD_LAUNCH_DISTANCE_JUMP_M = 8.0
 LEAD_STOP_CONFIRM_S = 0.8
-LEAD_START_CONFIRM_S = 0.15
+LEAD_START_CONFIRM_S = 0.10
 LEAD_LAUNCH_MAX_ACTIVE_S = 6.0
 LEAD_LAUNCH_BLEND_IN_S = 0.4
 LEAD_LAUNCH_BLEND_OUT_S = 1.5
@@ -208,6 +211,12 @@ class DynamicFollow:
       dat.dynamicFollowData.leadCatchupActive = self.stop_accel_boost_enabled and self.lead_launch_state == LEAD_LAUNCH_ACTIVE
       dat.dynamicFollowData.catchupFactor = self.lead_launch_blend
       dat.dynamicFollowData.baseTR = self.base_TR
+      dat.dynamicFollowData.leadLaunchState = self.lead_launch_state
+      dat.dynamicFollowData.stopAccelBoostEnabled = self.stop_accel_boost_enabled
+      dat.dynamicFollowData.leadSpeed = float(self.lead_data.v_lead or 0.0)
+      dat.dynamicFollowData.leadRelativeSpeed = float((self.lead_data.v_lead or 0.0) - self.car_data.v_ego)
+      dat.dynamicFollowData.leadDistance = float(self.lead_data.x_lead or 0.0)
+      dat.dynamicFollowData.egoSpeed = float(self.car_data.v_ego)
       #print("dat.dynamicFollowData.mpcTR ======================================== : ", dat.dynamicFollowData.mpcTR)
       #print("dat.dynamicFollowData.profilePred ======================================== : ", dat.dynamicFollowData.profilePred)
       self.pm.send('dynamicFollowData', dat)

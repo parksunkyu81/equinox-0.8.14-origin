@@ -236,7 +236,6 @@ UIState::UIState(QObject *parent) : QObject(parent) {
     "pandaStates", "carParams", "driverMonitoringState", "sensorEvents", "carState", "liveLocationKalman",
     "wideRoadCameraState",
     "gpsLocationExternal", "carControl", "liveParameters", "roadLimitSpeed", "liveTorqueParameters",
-    "dynamicFollowData",
   });
 
   Params params;

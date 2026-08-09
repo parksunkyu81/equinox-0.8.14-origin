@@ -3,7 +3,7 @@ from common.numpy_fast import clip, interp
 from common.realtime import DT_CTRL
 from selfdrive.controls.lib.drive_helpers import CONTROL_N, apply_deadzone
 from selfdrive.controls.lib.pid import PIDController
-from selfdrive.controls.lib.stop_accel_boost import apply_stop_accel_boost
+from selfdrive.controls.lib.stop_accel_boost import apply_stop_accel_boost, STOP_ACCEL_ZERO_EPS
 from selfdrive.modeld.constants import T_IDXS
 
 LongCtrlState = car.CarControl.Actuators.LongControlState
@@ -51,6 +51,9 @@ class LongControl:
                              k_f=CP.longitudinalTuning.kf, rate=1 / DT_CTRL)
     self.v_pid = 0.0
     self.last_output_accel = 0.0
+    self.stop_accel_boost_applied = False
+    self.stop_accel_boost_raw_accel = 0.0
+    self.stop_accel_boost_final_accel = 0.0
 
   def reset(self, v_pid):
     """Reset PID controller and change setpoint"""
@@ -141,7 +144,11 @@ class LongControl:
       self.reset(CS.vEgo)
 
     boost_allowed = stop_accel_boost_active and active and not gas_override and not CS.brakePressed
+    self.stop_accel_boost_raw_accel = float(output_accel)
     final_accel = apply_stop_accel_boost(output_accel, CS.vEgo, boost_allowed, accel_limits)
+    self.stop_accel_boost_final_accel = float(final_accel)
+    self.stop_accel_boost_applied = bool(boost_allowed and
+                                         final_accel > output_accel + STOP_ACCEL_ZERO_EPS)
     self.last_output_accel = final_accel
 
     return final_accel

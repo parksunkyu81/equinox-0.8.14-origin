@@ -672,6 +672,11 @@ struct ControlsState @0x97ff69c53601abf1 {
   pedalForceRecoveryRawAccel @129 :Float32;
   pedalForceRecoveryAccel @130 :Float32;
   pedalForceRecoveryPedalFloor @131 :Float32;
+  stopAccelBoostActive @132 :Bool;
+  stopAccelBoostApplied @133 :Bool;
+  stopAccelBoostRawAccel @134 :Float32;
+  stopAccelBoostFinalAccel @135 :Float32;
+  stopAccelBoostFactor @136 :Float32;
 
 
 
@@ -1913,6 +1918,12 @@ struct DynamicFollowData {
     targetFollowDistance @4 :Float32;
     predictedFollowDistance @5 :Float32;
     baseTR @6 :Float32;
+    leadLaunchState @7 :UInt8;
+    stopAccelBoostEnabled @8 :Bool;
+    leadSpeed @9 :Float32;
+    leadRelativeSpeed @10 :Float32;
+    leadDistance @11 :Float32;
+    egoSpeed @12 :Float32;
 }
 
 struct LaneSpeed {

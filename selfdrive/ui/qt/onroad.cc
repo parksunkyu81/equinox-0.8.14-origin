@@ -606,9 +606,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   auto car_state = sm["carState"].getCarState();
   auto car_control = sm["carControl"].getCarControl();
   auto controls_state = sm["controlsState"].getControlsState();
-  const bool stop_accel_boost_active = sm.alive("dynamicFollowData") &&
-                                       sm.valid("dynamicFollowData") &&
-                                       sm["dynamicFollowData"].getDynamicFollowData().getLeadCatchupActive();
+  const bool stop_accel_boost_active = controls_state.getStopAccelBoostActive();
 
   // 하단 원형 2줄 시작점
   const int icon_start_x = 600;
