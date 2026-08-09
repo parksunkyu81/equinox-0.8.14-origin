@@ -54,6 +54,7 @@ class Planner:
     self.accel_limit_max = float(calc_cruise_accel_limits(init_v)[1])
 
     self.fcw = False
+    self.vision_lead_present = False
     self.previous_vision_lead_present = False
     self.last_vision_lead_mono_time = 0
 
@@ -81,12 +82,12 @@ class Planner:
     # model timestamp, not the republished radarState timestamp. On that one
     # edge, release the previous lead's acceleration continuity constraint so
     # the cruise plan does not inherit stale negative acceleration.
-    vision_lead_present = bool(sm['radarState'].leadOne.status or sm['radarState'].leadTwo.status)
+    self.vision_lead_present = bool(sm['radarState'].leadOne.status or sm['radarState'].leadTwo.status)
     vision_lead_mono_time = sm['radarState'].mdMonoTime
     self.previous_vision_lead_present, self.last_vision_lead_mono_time, vision_lead_lost = \
       update_vision_lead_transition(self.previous_vision_lead_present,
                                     self.last_vision_lead_mono_time,
-                                    vision_lead_present, vision_lead_mono_time)
+                                    self.vision_lead_present, vision_lead_mono_time)
 
     prev_accel_constraint = not (reset_state or sm['carState'].standstill or vision_lead_lost)
 
@@ -148,7 +149,7 @@ class Planner:
     longitudinalPlan.accels = self.a_desired_trajectory.tolist()
     longitudinalPlan.jerks = self.j_desired_trajectory.tolist()
 
-    longitudinalPlan.hasLead = vision_lead_present
+    longitudinalPlan.hasLead = self.vision_lead_present
     longitudinalPlan.accelLimitMax = self.accel_limit_max
     longitudinalPlan.longitudinalPlanSource = self.mpc.source
     longitudinalPlan.fcw = self.fcw
