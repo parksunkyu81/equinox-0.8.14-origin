@@ -4,6 +4,7 @@ from common.realtime import DT_CTRL
 from selfdrive.controls.lib.drive_helpers import CONTROL_N, apply_deadzone
 from selfdrive.controls.lib.pid import PIDController
 from selfdrive.controls.lib.stop_accel_boost import apply_stop_accel_boost, STOP_ACCEL_ZERO_EPS
+from selfdrive.controls.lib.lead_dropout_recovery import apply_lead_dropout_accel
 from selfdrive.modeld.constants import T_IDXS
 
 LongCtrlState = car.CarControl.Actuators.LongControlState
@@ -134,6 +135,19 @@ class LongControl:
 
       if prevent_overshoot:
         output_accel = min(output_accel, 0.0)
+
+      # When a lead that was actively constraining the MPC has been absent for
+      # 0.2 s, the planner marks a short one-shot clear-road recovery window.
+      # The gas interceptor needs 0.36 m/s^2 to cross its physical pedal
+      # deadzone; all normal lead, driver, cruise and low-speed gates remain in
+      # the planner and this gate still requires a cruise-sourced lead-free plan.
+      lead_dropout_recovery_allowed = self.CP.enableGasInterceptor and \
+                                      long_plan.leadDropoutRecoveryActive and \
+                                      not long_plan.hasLead and \
+                                      long_plan.longitudinalPlanSource == log.LongitudinalPlan.LongitudinalPlanSource.cruise and \
+                                      active and not gas_override and not CS.brakePressed and not CS.standstill
+      lead_dropout_recovery_allowed = lead_dropout_recovery_allowed and not stop_accel_boost_active
+      output_accel = apply_lead_dropout_accel(output_accel, lead_dropout_recovery_allowed)
 
     # Intention is to stop, switch to a different brake control until we stop
     elif self.long_control_state == LongCtrlState.stopping:

@@ -12,6 +12,7 @@ from selfdrive.controls.lib.longcontrol import LongCtrlState
 from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
 from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, CONTROL_N
+from selfdrive.controls.lib.lead_dropout_recovery import LeadDropoutRecovery
 from selfdrive.swaglog import cloudlog
 
 
@@ -53,6 +54,7 @@ class Planner:
     self.accel_limit_max = float(calc_cruise_accel_limits(init_v)[1])
 
     self.fcw = False
+    self.lead_dropout_recovery = LeadDropoutRecovery(DT_MDL)
 
     self.a_desired = init_a
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, DT_MDL)
@@ -74,11 +76,26 @@ class Planner:
 
     reset_state = long_control_off if self.CP.openpilotLongitudinalControl else not sm['controlsState'].enabled
 
-    prev_accel_constraint = not (reset_state or sm['carState'].standstill)
+    lead_present = bool(sm['radarState'].leadOne.status or sm['radarState'].leadTwo.status)
+    lead_was_constraining = self.mpc.source in ('lead0', 'lead1')
+    recovery_active = self.lead_dropout_recovery.update(
+      not reset_state and self.CP.enableGasInterceptor and not self.fcw,
+      lead_present, lead_was_constraining,
+      v_ego, v_cruise, sm['carState'].brakePressed, sm['carState'].gasPressed,
+      sm['carState'].standstill, force_slow_decel)
+
+    prev_accel_constraint = not (reset_state or sm['carState'].standstill or recovery_active)
 
     if reset_state:
       self.v_desired_filter.x = v_ego
       self.a_desired = 0.0
+    elif self.lead_dropout_recovery.triggered:
+      # A pedal-only Equinox cannot apply the negative trajectory that remains
+      # after a lead disappears; it clips that command to zero. Remove that
+      # stale trajectory once, after the dropout confirmation, so cruise can
+      # replan from the measured speed without a multi-second coast phase.
+      self.v_desired_filter.x = max(self.v_desired_filter.x, v_ego)
+      self.a_desired = max(self.a_desired, 0.0)
 
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
 
@@ -134,6 +151,9 @@ class Planner:
     longitudinalPlan.hasLead = sm['radarState'].leadOne.status
     longitudinalPlan.accelLimitMax = self.accel_limit_max
     longitudinalPlan.longitudinalPlanSource = self.mpc.source
+    longitudinalPlan.leadDropoutRecoveryActive = bool(self.lead_dropout_recovery.active)
+    longitudinalPlan.leadDropoutRecoveryTriggered = bool(self.lead_dropout_recovery.triggered)
+    longitudinalPlan.leadDropoutAbsentTime = float(self.lead_dropout_recovery.absent_time)
     longitudinalPlan.fcw = self.fcw
 
     pm.send('longitudinalPlan', plan_send)

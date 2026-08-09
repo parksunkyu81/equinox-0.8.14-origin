@@ -961,6 +961,9 @@ struct LongitudinalPlan @0xe00b5b3eba12876c {
   stoplineProb @44 :Float32;
   accelLimitMax @45 :Float32;
   accelProfileFactor @46 :Float32;
+  leadDropoutRecoveryActive @47 :Bool;
+  leadDropoutRecoveryTriggered @48 :Bool;
+  leadDropoutAbsentTime @49 :Float32;
 
   enum LongitudinalPlanSource {
     cruise @0;
