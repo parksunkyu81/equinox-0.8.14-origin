@@ -617,6 +617,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // 1. 핸들 토크 각도
   int x = icon_start_x;
   const int y1 = rect().bottom() - footer_h / 2 - 10;
+  const int y2 = rect().bottom() - (footer_h / 2) - (radius + 50) - 10;
 
   float cur_speed = std::max(0.0, car_state.getVEgo() * MS_TO_KPH);
   QString str;
@@ -647,11 +648,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.setOpacity(1.0);
 
   // 2. VISION DIST
-  x = icon_start_x + (icon_step * 1);
+  x = icon_start_x + (icon_step * 4);
 
   p.setPen(Qt::NoPen);
   p.setBrush(blackColor(200));
-  p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
+  p.drawEllipse(x - radius / 2, y2 - radius / 2, radius, radius);
 
   textColor = QColor(255, 255, 255, 200);
 
@@ -676,10 +677,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   }
 
   configFont(p, "Open Sans", 38, "Bold");
-  drawText(p, x, y1-20, "DIST", 200);
+  drawText(p, x, y2-20, "DIST", 200);
 
   configFont(p, "Open Sans", textSize, "Bold");
-  drawTextWithColor(p, x, y1+50, str, textColor);
+  drawTextWithColor(p, x, y2+50, str, textColor);
   p.setOpacity(1.0);
 
   // 3. LKAS
@@ -763,7 +764,6 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
   // ================================================================================================================ //
   x = 140;
-  const int y2 = rect().bottom() - (footer_h / 2) - (radius + 50) - 10;
   x = icon_start_x;
 
   // Immediate forced-acceleration recovery warning. Keep it attached to the
@@ -939,23 +939,57 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   drawIcon(p, x, y2, ic_brake, QColor(0, 0, 0, (255 * bg_alpha)), img_alpha);
   p.setOpacity(1.0);
 
-  // 5. long control state
-  x = icon_start_x + (icon_step * 4);
+  /*// 5. long control state
+  x = icon_start_x + (icon_step * 1);
   int longControlState = (int)controls_state.getLongControlState();
   const char* long_state[] = {"꺼짐", "켜짐", "정지", "출발"};
   p.setPen(Qt::NoPen);
   p.setBrush(blackColor(200));
-  p.drawEllipse(x - radius / 2, y2 - radius / 2, radius, radius);
+  p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
 
   str = long_state[longControlState];
   textColor = QColor(120, 255, 120, 200);
 
   configFont(p, "Open Sans", 38, "Bold");
-  drawText(p, x, y2-20, "LONG", 200);
+  drawText(p, x, y1-20, "LONG", 200);
 
   configFont(p, "Open Sans", textSize, "Bold");
-  drawTextWithColor(p, x, y2+50, str, textColor);
+  drawTextWithColor(p, x, y1+50, str, textColor);
+  p.setOpacity(1.0);*/
+
+  // 5. STEER MAX
+  // CarControl.steer is normalized to -1.0..1.0. Convert its magnitude to
+  // the GM steering command scale (0..300) and draw it without a percent sign.
+  x = icon_start_x + (icon_step * 1);
+  constexpr float steer_max = 300.0f;
+  const float steer_command = std::clamp(std::abs(car_control.getActuators().getSteer()) * steer_max,
+                                         0.0f, steer_max);
+  const float steer_ratio = steer_command / steer_max;
+  const QRectF steer_ring(x - radius / 2 + 10, y1 - radius / 2 + 10,
+                          radius - 20, radius - 20);
+
+  p.setPen(QPen(QColor(55, 61, 74, 255), 4));
+  p.setBrush(QColor(55, 61, 74, 235));
+  p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
+
+  // Full-scale background ring and clockwise live-command ring.
+  p.setBrush(Qt::NoBrush);
+  p.setPen(QPen(QColor(118, 126, 139, 180), 13, Qt::SolidLine, Qt::FlatCap));
+  p.drawEllipse(steer_ring);
+  p.setPen(QPen(QColor(164, 210, 70, 255), 13, Qt::SolidLine, Qt::FlatCap));
+  p.drawArc(steer_ring, 90 * 16, -static_cast<int>(steer_ratio * 360.0f * 16.0f));
+
+  str = "STEER MAX";
+  configFont(p, "Open Sans", 28, "Bold");
+  drawText(p, x, y1 - 24, str, 230);
+
+  str2.sprintf("%.0f", steer_command);
+  textColor = QColor(255, 255, 255, 245);
+  configFont(p, "Open Sans", 52, "Bold");
+  drawTextWithColor(p, x, y1 + 30, str2, textColor);
   p.setOpacity(1.0);
+  p.setBrush(Qt::NoBrush);
+  p.setPen(Qt::NoPen);
 
 }
 
