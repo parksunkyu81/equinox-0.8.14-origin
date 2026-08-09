@@ -24,7 +24,7 @@ LEAD_LAUNCH_RELEASING = 3
 
 LEAD_LAUNCH_TR = 1.0
 LEAD_LAUNCH_MIN_EGO_KPH = 1.0
-LEAD_LAUNCH_MAX_EGO_KPH = 20.0
+LEAD_LAUNCH_MAX_EGO_KPH = 25.0
 LEAD_LAUNCH_ARM_MAX_EGO_KPH = 5.0
 LEAD_STOP_SPEED_MS = 0.3
 # Start reacting as soon as a previously-confirmed stopped lead is clearly

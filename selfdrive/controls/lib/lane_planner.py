@@ -9,6 +9,9 @@ from common.params import Params
 from decimal import Decimal
 from selfdrive.ntune import ntune_common_get
 from selfdrive.car.gm.values import LEFT_EDGE_OFFSET, RIGHT_EDGE_OFFSET
+from selfdrive.controls.lib.lane_probability import combined_lane_probability, \
+                                                    enhance_lane_probability, \
+                                                    limit_lane_probability_rise
 
 ENABLE_ZORROBYTE = False
 ENABLE_INC_LANE_PROB = True
@@ -173,11 +176,14 @@ class LanePlanner:
     path_from_left_lane = self.lll_y + clipped_lane_width / 2.0
     path_from_right_lane = self.rll_y - clipped_lane_width / 2.0
 
-    self.d_prob = l_prob + r_prob - l_prob * r_prob
-
-    # neokii
-    if ENABLE_INC_LANE_PROB and self.d_prob > 0.65:
-      self.d_prob = min(self.d_prob * 1.3, 1.0)
+    # Build lane-path reliance continuously. The previous >0.65 then x1.3
+    # rule caused a ~21 percentage-point jump for a 0.01 change in each lane
+    # probability. Smooth enhancement removes that discontinuity. Only rising
+    # confidence is rate-limited (more strongly at highway speed); falling
+    # confidence passes immediately so the model path remains the safe fallback.
+    raw_d_prob = combined_lane_probability(l_prob, r_prob)
+    target_d_prob = enhance_lane_probability(raw_d_prob, ENABLE_INC_LANE_PROB)
+    self.d_prob = limit_lane_probability_rise(self.d_prob, target_d_prob, v_ego, DT_MDL)
 
     lane_path_y = (l_prob * path_from_left_lane + r_prob * path_from_right_lane) / (l_prob + r_prob + 0.0001)
     safe_idxs = np.isfinite(self.ll_t)
