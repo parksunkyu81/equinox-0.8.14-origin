@@ -3,7 +3,6 @@ import os
 import math
 import numpy as np
 from numbers import Number
-from math import sqrt
 
 from cereal import car, log
 from common.numpy_fast import clip, interp, mean
@@ -39,6 +38,7 @@ from selfdrive.car.gm.values import MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.stop_accel_boost import STOP_ACCEL_BOOST_FACTOR, StopAccelBoostLatch
+from selfdrive.controls.lib.curve_speed_limiter import CurveSpeedLimiter, CURVE_SPEED_DISABLED
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
@@ -179,6 +179,7 @@ class Controls:
         self.v_cruise_kph_last = 0
         self.max_speed_clu = 0.
         self.curve_speed_ms = 0.
+        self.curve_speed_limiter = CurveSpeedLimiter()
         self.v_cruise_kph_limit = 0
         self.applyMaxSpeed = 0
         self.roadLimitSpeedActive = 0
@@ -275,6 +276,7 @@ class Controls:
     def reset(self):
         self.max_speed_clu = 0.
         self.curve_speed_ms = 0.
+        self.curve_speed_limiter.reset()
         self.slowing_down = False
         self.slowing_down_alert = False
         self.slowing_down_sound_alert = False
@@ -324,32 +326,37 @@ class Controls:
         return 0
 
     def cal_curve_speed(self, sm, v_ego, frame):
-
         lateralPlan = sm['lateralPlan']
-        if len(lateralPlan.curvatures) == CONTROL_N:
-            curv = lateralPlan.curvatures[-1]
-            a_y_max = 2.975 - v_ego * 0.0375  # ~1.85 @ 75mph, ~2.6 @ 25mph
-            v_curvature = sqrt(a_y_max / max(abs(curv), 1e-4))
-            model_speed = v_curvature * 0.85 * ntune_scc_get("sccCurvatureFactor")
+        if not self.slow_on_curves:
+            self.curve_speed_limiter.reset()
+            self.curve_speed_ms = CURVE_SPEED_DISABLED
+            return
 
-            if model_speed < v_ego:
-                self.curve_speed_ms = float(max(model_speed, MIN_CURVE_SPEED))
-            else:
-                self.curve_speed_ms = 255.
+        # lateralPlan is produced at 20 Hz while controlsd runs at 100 Hz.
+        # Update the confirmation/filter only for a fresh plan so the timing is
+        # independent of the faster control loop.
+        if not sm.updated['lateralPlan']:
+            return
 
-            if np.isnan(self.curve_speed_ms):
-                self.curve_speed_ms = 255.
-        else:
-            self.curve_speed_ms = 255.
+        cruise_speed_ms = self.v_cruise_kph * CV.KPH_TO_MS
+        plan_valid = bool(sm.valid['lateralPlan'] and lateralPlan.mpcSolutionValid and
+                          len(lateralPlan.curvatures) == CONTROL_N)
+        curvature_factor = 0.85 * ntune_scc_get("sccCurvatureFactor")
+        self.curve_speed_ms = self.curve_speed_limiter.update(
+          lateralPlan.curvatures, v_ego, cruise_speed_ms, MIN_CURVE_SPEED,
+          curvature_factor, plan_valid=plan_valid)
 
 
     # [크루즈 MAX 속도 설정] #
     def cal_max_speed(self, frame: int, vEgo, sm, CS):
 
         road_speed_limiter = get_road_speed_limiter()
+        # CS.vEgo is m/s; RoadSpeedLimiter and max_speed_clu use the active
+        # cluster unit (km/h or mph).
+        v_ego_clu = vEgo * self.speed_conv_to_clu
 
         apply_limit_speed, road_limit_speed, left_dist, first_started, max_speed_log = \
-            road_speed_limiter_get_max_speed(vEgo, self.is_metric)
+            road_speed_limiter_get_max_speed(v_ego_clu, self.is_metric)
 
         # print("apply_limit_speed : ", apply_limit_speed)
         # print("road_limit_speed : ", road_limit_speed)
@@ -359,7 +366,9 @@ class Controls:
 
         curv_limit = 0
         self.cal_curve_speed(sm, vEgo, frame)
-        if self.slow_on_curves and self.curve_speed_ms >= MIN_CURVE_SPEED:
+        cruise_speed_ms = self.v_cruise_kph * CV.KPH_TO_MS
+        if (self.slow_on_curves and MIN_CURVE_SPEED <= self.curve_speed_ms <
+                min(CURVE_SPEED_DISABLED, cruise_speed_ms)):
             max_speed_clu = min(self.v_cruise_kph * CV.KPH_TO_MS, self.curve_speed_ms) * self.speed_conv_to_clu
             curv_limit = int(max_speed_clu)
         else:
@@ -368,7 +377,7 @@ class Controls:
         if road_speed_limiter.roadLimitSpeed is not None:
             camSpeedFactor = clip(road_speed_limiter.roadLimitSpeed.camSpeedFactor, 1.0, 1.1)
             self.over_speed_limit = road_speed_limiter.roadLimitSpeed.camLimitSpeedLeftDist > 0 and \
-                                    0 < road_limit_speed * camSpeedFactor < vEgo + 2
+                                    0 < road_limit_speed * camSpeedFactor < v_ego_clu + 2
         else:
             self.over_speed_limit = False
 
@@ -379,13 +388,13 @@ class Controls:
             # 크루즈 초기 설정 속도 (PSK)
             # controls.v_cruise_kph : 크루즈 설정 속도
             if first_started:
-                self.max_speed_clu = vEgo
+                self.max_speed_clu = v_ego_clu
                 # self.max_speed_clu = self.v_cruise_kph
 
             max_speed_clu = min(max_speed_clu, apply_limit_speed)
 
             # if self.v_cruise_kph > apply_limit_speed:
-            if vEgo > apply_limit_speed:
+            if v_ego_clu > apply_limit_speed:
                 if not self.slowing_down_alert and not self.slowing_down:
                     self.slowing_down_sound_alert = True
                     self.slowing_down = True
