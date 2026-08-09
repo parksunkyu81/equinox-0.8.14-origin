@@ -3,6 +3,7 @@ from common.numpy_fast import clip, interp
 from common.realtime import DT_CTRL
 from selfdrive.controls.lib.drive_helpers import CONTROL_N, apply_deadzone
 from selfdrive.controls.lib.pid import PIDController
+from selfdrive.controls.lib.stop_accel_boost import apply_stop_accel_boost
 from selfdrive.modeld.constants import T_IDXS
 
 LongCtrlState = car.CarControl.Actuators.LongControlState
@@ -11,16 +12,17 @@ LongCtrlState = car.CarControl.Actuators.LongControlState
 ACCEL_MIN_ISO = -3.5  # m/s^2
 ACCEL_MAX_ISO = 2.0  # m/s^2
 
-
 def long_control_state_trans(CP, active, long_control_state, v_ego, v_target,
-                             v_target_future, brake_pressed, cruise_standstill):
+                             v_target_future, brake_pressed, cruise_standstill,
+                             stop_accel_boost_active=False):
   """Update longitudinal control state machine"""
   accelerating = v_target_future > v_target
-  stopping_condition = (v_ego < 2.0 and cruise_standstill) or \
+  stopping_condition = not stop_accel_boost_active and ((v_ego < 2.0 and cruise_standstill) or \
                        (v_ego < CP.vEgoStopping and
-                        (v_target_future < CP.vEgoStopping and not accelerating))
+                        (v_target_future < CP.vEgoStopping and not accelerating)))
 
-  starting_condition = v_target_future > CP.vEgoStarting and accelerating and not cruise_standstill
+  starting_condition = stop_accel_boost_active or \
+                       (v_target_future > CP.vEgoStarting and accelerating and not cruise_standstill)
 
   if not active:
     long_control_state = LongCtrlState.off
@@ -55,7 +57,8 @@ class LongControl:
     self.pid.reset()
     self.v_pid = v_pid
 
-  def update(self, active, CS, long_plan, accel_limits, t_since_plan):
+  def update(self, active, CS, long_plan, accel_limits, t_since_plan,
+             stop_accel_boost_active=False):
     """Update longitudinal control. This updates the state machine and runs a PID loop"""
     # Interp control trajectory
     speeds = long_plan.speeds
@@ -86,7 +89,8 @@ class LongControl:
     output_accel = self.last_output_accel
     self.long_control_state = long_control_state_trans(self.CP, active, self.long_control_state, CS.vEgo,
                                                        v_target, v_target_future, CS.brakePressed,
-                                                       CS.cruiseState.standstill)
+                                                       CS.cruiseState.standstill,
+                                                       stop_accel_boost_active)
 
     # 운전자가 가속페달을 밟으면 자동 가속을 즉시 중지하고 PID 누적값을 지워, 운전자가 페달을 놓은 뒤 갑자기 자동 가속하는 것을 방지하는 코드입니다.
     gas_override = bool(CS.gasPressed)
@@ -100,7 +104,8 @@ class LongControl:
 
       # Toyota starts braking more when it thinks you want to stop
       # Freeze the integrator so we don't accelerate to compensate, and don't allow positive acceleration
-      prevent_overshoot = not self.CP.stoppingControl and CS.vEgo < 1.5 and v_target_future < 0.7 and v_target_future < self.v_pid
+      prevent_overshoot = not stop_accel_boost_active and not self.CP.stoppingControl and \
+                          CS.vEgo < 1.5 and v_target_future < 0.7 and v_target_future < self.v_pid
       deadzone = interp(CS.vEgo, self.CP.longitudinalTuning.deadzoneBP, self.CP.longitudinalTuning.deadzoneV)
       freeze_integrator = prevent_overshoot
 
@@ -135,7 +140,8 @@ class LongControl:
       output_accel = clip(output_accel, accel_limits[0], accel_limits[1])
       self.reset(CS.vEgo)
 
-    self.last_output_accel = output_accel
-    final_accel = clip(output_accel, accel_limits[0], accel_limits[1])
+    boost_allowed = stop_accel_boost_active and active and not gas_override and not CS.brakePressed
+    final_accel = apply_stop_accel_boost(output_accel, CS.vEgo, boost_allowed, accel_limits)
+    self.last_output_accel = final_accel
 
     return final_accel

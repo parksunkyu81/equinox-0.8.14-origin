@@ -202,7 +202,10 @@ class DynamicFollow:
       dat = messaging.new_message('dynamicFollowData')
       dat.dynamicFollowData.mpcTR = self.TR
       dat.dynamicFollowData.profilePred = self.model_profile
-      dat.dynamicFollowData.leadCatchupActive = self.lead_launch_state == LEAD_LAUNCH_ACTIVE and self.lead_launch_blend > 0.0
+      # Publish the confirmed launch immediately, including below 1 km/h. The
+      # controller needs this phase to release its stopped state; catchupFactor
+      # remains zero until the speed-dependent TR blend actually starts.
+      dat.dynamicFollowData.leadCatchupActive = self.stop_accel_boost_enabled and self.lead_launch_state == LEAD_LAUNCH_ACTIVE
       dat.dynamicFollowData.catchupFactor = self.lead_launch_blend
       dat.dynamicFollowData.baseTR = self.base_TR
       #print("dat.dynamicFollowData.mpcTR ======================================== : ", dat.dynamicFollowData.mpcTR)
@@ -261,6 +264,12 @@ class DynamicFollow:
     v_ego_kph = v_ego * CV.MS_TO_KPH
     v_lead = float(self.lead_data.v_lead) if self.lead_data.v_lead is not None else 0.0
     x_lead = float(self.lead_data.x_lead) if self.lead_data.x_lead is not None else 0.0
+
+    if not self.stop_accel_boost_enabled:
+      self._reset_lead_launch(immediate=True)
+      self.last_launch_lead_status = lead_status
+      self.last_launch_lead_distance = x_lead if lead_status and math.isfinite(x_lead) else None
+      return float(base_TR)
 
     lead_values_valid = math.isfinite(v_lead) and math.isfinite(x_lead)
     lead_changed = bool(self.lead_data.new_lead)
@@ -480,12 +489,17 @@ class DynamicFollow:
     #self.car_data.cruise_enabled = CS.adaptive_Cruise
 
   def _get_live_params(self):
+    # ParamControl writes ASCII "0"/"1" values. Read it live so the menu
+    # switch takes effect without restarting controls.
+    params = Params()
+    self.stop_accel_boost_enabled = params.get_bool("ActiveStopAccelBoost")
+
     #self.global_df_mod = self.op_params.get('global_df_mod')
-    self.global_df_mod = float(Params().get("globalDfMod", encoding="utf8"))
+    self.global_df_mod = float(params.get("globalDfMod", encoding="utf8"))
     if self.global_df_mod != 1.:
       self.global_df_mod = clip(self.global_df_mod, 0.85, 2.5)
 
     #self.min_TR = self.op_params.get('min_TR')
-    self.min_TR = float(Params().get("minTR", encoding="utf8"))
+    self.min_TR = float(params.get("minTR", encoding="utf8"))
     if self.min_TR != 1.:
       self.min_TR = clip(self.min_TR, 0.85, 2.7)

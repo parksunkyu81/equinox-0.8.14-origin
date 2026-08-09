@@ -185,8 +185,6 @@ class Controls:
         self.roadLimitSpeedLeftDist = 0
 
         self.slow_on_curves = Params().get_bool('SccSmootherSlowOnCurves')
-        #self.safe_distance_speed = Params().get_bool('SafeDistanceSpeed')
-
         self.min_set_speed_clu = self.kph_to_clu(MIN_SET_SPEED_KPH)
         self.max_set_speed_clu = self.kph_to_clu(MAX_SET_SPEED_KPH)
 
@@ -830,12 +828,22 @@ class Controls:
         if not CS.cruiseState.enabled:
             self.LoC.reset(v_pid=CS.vEgo)
 
+        # A launch request is valid only in normal closed-loop control on a GM
+        # gas-interceptor vehicle. Invalid/stale dynamic-follow messages,
+        # overrides, soft-disable, and joystick mode all fail closed.
+        self.stop_accel_boost_active = bool(not self.joystick_mode and
+                                            self.CP.carName == 'gm' and self.CP.enableGasInterceptor and
+                                            self.active and self.state == State.enabled and
+                                            self.sm.valid['dynamicFollowData'] and
+                                            self.sm['dynamicFollowData'].leadCatchupActive)
+
         if not self.joystick_mode:
             # accel PID loop
             pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, CS.vEgo, self.v_cruise_kph * CV.KPH_TO_MS)
             t_since_plan = (self.sm.frame - self.sm.rcv_frame['longitudinalPlan']) * DT_CTRL
 
-            actuators.accel = self.LoC.update(self.active, CS, long_plan, pid_accel_limits, t_since_plan)
+            actuators.accel = self.LoC.update(self.active, CS, long_plan, pid_accel_limits, t_since_plan,
+                                              self.stop_accel_boost_active)
 
             # Steering PID loop and lateral MPC
             # lat_active = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \

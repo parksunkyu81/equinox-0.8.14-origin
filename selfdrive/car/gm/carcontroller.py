@@ -8,6 +8,7 @@ from selfdrive.car.gm.steering_limits import steer_delta_limits_ms
 from selfdrive.car.gm.values import DBC, NO_ASCM, CanBus, CarControllerParams
 from opendbc.can.packer import CANPacker
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
+from selfdrive.controls.lib.stop_accel_boost import pedal_command_allowed
 
 VisualAlert = car.CarControl.HUDControl.VisualAlert
 GearShifter = car.CarState.GearShifter
@@ -92,7 +93,13 @@ class CarController():
 
     if CS.CP.enableGasInterceptor:
       # 이것이 없으면 저속에서 너무 공격적입니다.
-      pedal_speed_allowed = CS.out.vEgo > V_CRUISE_ENABLE_MIN / CV.MS_TO_KPH
+      # Normally the interceptor is enabled above 1 km/h. A confirmed lead
+      # launch is the only exception: it permits the non-boosted release
+      # command from standstill so the car can actually cross 1 km/h. The 10%
+      # boost itself is applied by LongControl only at/above 1 km/h.
+      stop_accel_boost_active = bool(getattr(controls, 'stop_accel_boost_active', False))
+      pedal_speed_allowed = pedal_command_allowed(CS.out.vEgo, stop_accel_boost_active,
+                                                  V_CRUISE_ENABLE_MIN)
       if CS.adaptive_Cruise and not brake_pressed and not CS.out.gasPressed and \
          pedal_speed_allowed:
 

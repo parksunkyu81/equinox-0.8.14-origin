@@ -65,6 +65,7 @@ def manager_init() -> None:
     ("IsLiveTorque", "1"),
     ("IsLowSpeedFactor", "1"),
     ("closeToRoadEdge", "0"),
+    ("ActiveStopAccelBoost", "0"),
     ("E2ELong", "0"),
 
     ("TorqueFriction", "120"),
