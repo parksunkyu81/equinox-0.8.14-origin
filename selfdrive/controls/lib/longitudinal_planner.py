@@ -12,7 +12,7 @@ from selfdrive.controls.lib.longcontrol import LongCtrlState
 from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
 from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, CONTROL_N
-from selfdrive.controls.lib.lead_dropout_recovery import LEAD_DROPOUT_ACCEL_FLOOR, LeadDropoutRecovery
+from selfdrive.controls.lib.lead_dropout_recovery import LeadDropoutRecovery
 from selfdrive.swaglog import cloudlog
 
 
@@ -77,18 +77,12 @@ class Planner:
     reset_state = long_control_off if self.CP.openpilotLongitudinalControl else not sm['controlsState'].enabled
 
     lead_present = bool(sm['radarState'].leadOne.status or sm['radarState'].leadTwo.status)
-    recovery_turn_limit = limit_accel_in_turns(
-      v_ego, sm['carState'].steeringAngleDeg, calc_cruise_accel_limits(v_ego), self.CP)[1]
+    lead_was_constraining = self.mpc.source in ('lead0', 'lead1')
     recovery_active = self.lead_dropout_recovery.update(
       not reset_state and self.CP.enableGasInterceptor and not self.fcw,
-      # EQUINOX_NR is vision-only. radarState is only the transport message;
-      # mdMonoTime identifies the actual modelV2 lead observation and prevents
-      # counting a republished vision result as a second disappearance sample.
-      lead_present, sm['radarState'].mdMonoTime,
+      lead_present, lead_was_constraining,
       v_ego, v_cruise, sm['carState'].brakePressed, sm['carState'].gasPressed,
-      sm['carState'].standstill,
-      force_slow_decel or sm['controlsState'].curvDriving or
-      recovery_turn_limit < LEAD_DROPOUT_ACCEL_FLOOR)
+      sm['carState'].standstill, force_slow_decel)
 
     prev_accel_constraint = not (reset_state or sm['carState'].standstill or recovery_active)
 

@@ -73,9 +73,7 @@ class CarInterface(CarInterfaceBase):
         ret.alternativeExperience = 1  # UNSAFE_DISABLE_DISENGAGE_ON_GAS
         ret.pcmCruise = False  # stock cruise control is kept off
         ret.openpilotLongitudinalControl = True  # ASCM vehicles use OP for long
-        # NO_ASCM cars such as EQUINOX_NR have no physical radar objects on
-        # CAN. radard still publishes vision leads under the radarState name.
-        ret.radarOffCan = candidate in NO_ASCM
+        ret.radarOffCan = False  # ASCM vehicles (typically) have radar
 
         # Default to normal torque limits
         ret.safetyConfigs[0].safetyParam = 0
