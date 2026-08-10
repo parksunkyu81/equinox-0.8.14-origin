@@ -1,4 +1,5 @@
 import math
+from collections import deque
 import numpy as np
 import cereal.messaging as messaging
 from common.realtime import sec_since_boot, DT_MDL
@@ -38,6 +39,9 @@ LEAD_LAUNCH_MAX_ARM_DISTANCE_M = 30.0
 LEAD_LAUNCH_DISTANCE_JUMP_M = 8.0
 LEAD_STOP_CONFIRM_S = 0.8
 LEAD_START_CONFIRM_S = 0.05
+LEAD_LAUNCH_VISION_DROPOUT_FRAMES = 3
+LEAD_LAUNCH_ARM_HOLD_S = 2.0
+LEAD_LAUNCH_SPEED_FILTER_SAMPLES = 3
 LEAD_LAUNCH_MAX_ACTIVE_S = 6.0
 LEAD_LAUNCH_BLEND_IN_S = 0.15
 LEAD_LAUNCH_BLEND_OUT_S = 1.5
@@ -139,6 +143,10 @@ class DynamicFollow:
     self.lead_launch_stopped_since = None
     self.lead_launch_start_since = None
     self.lead_launch_started_at = None
+    self.lead_launch_armed_until = None
+    self.lead_launch_dropout_frames = 0
+    self.lead_launch_speed_samples = deque(maxlen=LEAD_LAUNCH_SPEED_FILTER_SAMPLES)
+    self.lead_launch_filtered_speed = None
     self.last_launch_lead_status = False
     self.last_launch_lead_distance = None
 
@@ -213,8 +221,10 @@ class DynamicFollow:
       dat.dynamicFollowData.baseTR = self.base_TR
       dat.dynamicFollowData.leadLaunchState = self.lead_launch_state
       dat.dynamicFollowData.stopAccelBoostEnabled = self.stop_accel_boost_enabled
-      dat.dynamicFollowData.leadSpeed = float(self.lead_data.v_lead or 0.0)
-      dat.dynamicFollowData.leadRelativeSpeed = float((self.lead_data.v_lead or 0.0) - self.car_data.v_ego)
+      filtered_lead_speed = (self.lead_launch_filtered_speed if self.lead_launch_filtered_speed is not None
+                             else float(self.lead_data.v_lead or 0.0))
+      dat.dynamicFollowData.leadSpeed = float(filtered_lead_speed)
+      dat.dynamicFollowData.leadRelativeSpeed = float(filtered_lead_speed - self.car_data.v_ego)
       dat.dynamicFollowData.leadDistance = float(self.lead_data.x_lead or 0.0)
       dat.dynamicFollowData.egoSpeed = float(self.car_data.v_ego)
       #print("dat.dynamicFollowData.mpcTR ======================================== : ", dat.dynamicFollowData.mpcTR)
@@ -262,6 +272,10 @@ class DynamicFollow:
     self.lead_launch_stopped_since = None
     self.lead_launch_start_since = None
     self.lead_launch_started_at = None
+    self.lead_launch_armed_until = None
+    self.lead_launch_dropout_frames = 0
+    self.lead_launch_speed_samples.clear()
+    self.lead_launch_filtered_speed = None
     if immediate:
       self.lead_launch_blend = 0.0
 
@@ -280,58 +294,87 @@ class DynamicFollow:
       self.last_launch_lead_distance = x_lead if lead_status and math.isfinite(x_lead) else None
       return float(base_TR)
 
-    lead_values_valid = math.isfinite(v_lead) and math.isfinite(x_lead)
-    lead_changed = bool(self.lead_data.new_lead)
-    if lead_status and self.last_launch_lead_status and self.last_launch_lead_distance is not None:
-      lead_changed |= abs(x_lead - self.last_launch_lead_distance) > LEAD_LAUNCH_DISTANCE_JUMP_M
+    lead_values_valid = bool(lead_status and math.isfinite(v_lead) and math.isfinite(x_lead))
+    control_cancel = not self.car_data.cruise_enabled or self.car_data.brake_pressed
 
-    v_rel = v_lead - v_ego
-    hard_cancel = (not lead_status or not lead_values_valid or
-                   not self.car_data.cruise_enabled or self.car_data.brake_pressed or
-                   x_lead <= LEAD_LAUNCH_MIN_DISTANCE_M or
-                   v_rel <= LEAD_LAUNCH_CLOSING_REL_SPEED_MS)
-
-    if hard_cancel or lead_changed:
+    if control_cancel:
       self._reset_lead_launch(immediate=True)
-    else:
-      lead_stopped = v_lead <= LEAD_STOP_SPEED_MS
-      arm_conditions = (lead_stopped and
-                        v_ego_kph <= LEAD_LAUNCH_ARM_MAX_EGO_KPH and
-                        LEAD_LAUNCH_MIN_DISTANCE_M < x_lead <= LEAD_LAUNCH_MAX_ARM_DISTANCE_M)
-
-      # A lead stopping again is a safety-critical cancellation. It may arm a
-      # fresh launch only after another complete stop confirmation.
-      if self.lead_launch_state == LEAD_LAUNCH_ACTIVE and lead_stopped:
+    elif not lead_values_valid:
+      # Vision-only leads can disappear for one or two model frames at a stop.
+      # Preserve the confirmed stop/launch state for up to three frames, but
+      # never extend the ARMED deadline because of missing observations.
+      self.lead_launch_dropout_frames += 1
+      if self.lead_launch_dropout_frames > LEAD_LAUNCH_VISION_DROPOUT_FRAMES:
         self._reset_lead_launch(immediate=True)
+        self.last_launch_lead_status = False
+        self.last_launch_lead_distance = None
+    else:
+      self.lead_launch_dropout_frames = 0
+      self.lead_launch_speed_samples.append(v_lead)
+      self.lead_launch_filtered_speed = float(np.median(self.lead_launch_speed_samples))
 
-      if arm_conditions:
-        if self.lead_launch_stopped_since is None:
-          self.lead_launch_stopped_since = now
-        elif (now - self.lead_launch_stopped_since >= LEAD_STOP_CONFIRM_S and
-              self.lead_launch_state in (LEAD_LAUNCH_IDLE, LEAD_LAUNCH_RELEASING)):
-          self.lead_launch_state = LEAD_LAUNCH_ARMED
-          self.lead_launch_start_since = None
-          self.lead_launch_blend = 0.0
+      lead_changed = bool(self.lead_data.new_lead)
+      if self.last_launch_lead_status and self.last_launch_lead_distance is not None:
+        lead_changed |= abs(x_lead - self.last_launch_lead_distance) > LEAD_LAUNCH_DISTANCE_JUMP_M
+
+      filtered_v_lead = self.lead_launch_filtered_speed
+      filtered_v_rel = filtered_v_lead - v_ego
+      hard_cancel = (x_lead <= LEAD_LAUNCH_MIN_DISTANCE_M or
+                     filtered_v_rel <= LEAD_LAUNCH_CLOSING_REL_SPEED_MS)
+
+      if hard_cancel or lead_changed:
+        self._reset_lead_launch(immediate=True)
       else:
-        self.lead_launch_stopped_since = None
+        lead_stopped = filtered_v_lead <= LEAD_STOP_SPEED_MS
+        arm_conditions = (lead_stopped and
+                          v_ego_kph <= LEAD_LAUNCH_ARM_MAX_EGO_KPH and
+                          LEAD_LAUNCH_MIN_DISTANCE_M < x_lead <= LEAD_LAUNCH_MAX_ARM_DISTANCE_M)
 
-      if self.lead_launch_state == LEAD_LAUNCH_ARMED:
-        launch_detected = v_lead >= LEAD_START_SPEED_MS and v_rel >= LEAD_START_REL_SPEED_MS
-        if launch_detected:
-          if self.lead_launch_start_since is None:
-            self.lead_launch_start_since = now
-          elif now - self.lead_launch_start_since >= LEAD_START_CONFIRM_S:
-            self.lead_launch_state = LEAD_LAUNCH_ACTIVE
-            self.lead_launch_started_at = now
+        # A lead stopping again is a safety-critical cancellation. It may arm a
+        # fresh launch only after another complete stop confirmation.
+        if self.lead_launch_state == LEAD_LAUNCH_ACTIVE and lead_stopped:
+          self._reset_lead_launch(immediate=True)
+
+        if arm_conditions:
+          if self.lead_launch_stopped_since is None:
+            self.lead_launch_stopped_since = now
+          elif (now - self.lead_launch_stopped_since >= LEAD_STOP_CONFIRM_S and
+                self.lead_launch_state in (LEAD_LAUNCH_IDLE, LEAD_LAUNCH_RELEASING)):
+            self.lead_launch_state = LEAD_LAUNCH_ARMED
             self.lead_launch_start_since = None
+            self.lead_launch_armed_until = now + LEAD_LAUNCH_ARM_HOLD_S
+            self.lead_launch_blend = 0.0
+          elif self.lead_launch_state == LEAD_LAUNCH_ARMED:
+            self.lead_launch_armed_until = now + LEAD_LAUNCH_ARM_HOLD_S
         else:
-          self.lead_launch_start_since = None
+          self.lead_launch_stopped_since = None
 
-      elif self.lead_launch_state == LEAD_LAUNCH_ACTIVE:
-        active_timed_out = (self.lead_launch_started_at is not None and
-                            now - self.lead_launch_started_at >= LEAD_LAUNCH_MAX_ACTIVE_S)
-        if v_ego_kph > LEAD_LAUNCH_MAX_EGO_KPH or active_timed_out:
-          self._reset_lead_launch(immediate=False)
+        if self.lead_launch_state == LEAD_LAUNCH_ARMED:
+          launch_detected = (filtered_v_lead >= LEAD_START_SPEED_MS and
+                             filtered_v_rel >= LEAD_START_REL_SPEED_MS)
+          if launch_detected:
+            if self.lead_launch_start_since is None:
+              self.lead_launch_start_since = now
+            elif now - self.lead_launch_start_since >= LEAD_START_CONFIRM_S:
+              self.lead_launch_state = LEAD_LAUNCH_ACTIVE
+              self.lead_launch_started_at = now
+              self.lead_launch_start_since = None
+              self.lead_launch_armed_until = None
+          else:
+            self.lead_launch_start_since = None
+
+        elif self.lead_launch_state == LEAD_LAUNCH_ACTIVE:
+          active_timed_out = (self.lead_launch_started_at is not None and
+                              now - self.lead_launch_started_at >= LEAD_LAUNCH_MAX_ACTIVE_S)
+          if v_ego_kph > LEAD_LAUNCH_MAX_EGO_KPH or active_timed_out:
+            self._reset_lead_launch(immediate=False)
+
+      self.last_launch_lead_status = True
+      self.last_launch_lead_distance = x_lead
+
+    if (self.lead_launch_state == LEAD_LAUNCH_ARMED and
+        self.lead_launch_armed_until is not None and now > self.lead_launch_armed_until):
+      self._reset_lead_launch(immediate=True)
 
     blend_target = float(self.lead_launch_state == LEAD_LAUNCH_ACTIVE and
                          LEAD_LAUNCH_MIN_EGO_KPH <= v_ego_kph <= LEAD_LAUNCH_MAX_EGO_KPH)
@@ -344,9 +387,6 @@ class DynamicFollow:
 
     if self.lead_launch_state == LEAD_LAUNCH_RELEASING and self.lead_launch_blend <= 0.0:
       self.lead_launch_state = LEAD_LAUNCH_IDLE
-
-    self.last_launch_lead_status = lead_status
-    self.last_launch_lead_distance = x_lead if lead_status and lead_values_valid else None
 
     base_TR = float(base_TR)
     launch_TR = min(base_TR, max(LEAD_LAUNCH_TR, float(self.min_TR)))
