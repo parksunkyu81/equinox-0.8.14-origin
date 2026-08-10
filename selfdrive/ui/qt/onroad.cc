@@ -624,6 +624,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   float bg_alpha;
   QColor textColor = QColor(255, 255, 255, 200);
 
+  /*
+  // Previous steering-angle display (kept for easy restoration).
   float steer_angle = car_state.getSteeringAngleDeg();
   float desire_angle = car_control.getActuators().getSteeringAngleDeg();
 
@@ -644,6 +646,45 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   textColor = QColor(155, 255, 155, 200);
   drawTextWithColor(p, x, y1 + 50, str2, textColor);
   p.setOpacity(1.0);
+  */
+
+  // 1. PEDAL MAX
+  // GM CarController clips the command sent to the comma pedal to 0.00..0.85.
+  // actuatorsOutput.gas is the post-controller value that matches the CAN output.
+  constexpr float comma_pedal_min = 0.0f;
+  constexpr float comma_pedal_max = 0.85f;
+  const float comma_pedal = std::clamp(car_control.getActuatorsOutput().getGas(),
+                                        comma_pedal_min, comma_pedal_max);
+  const float comma_pedal_ratio = (comma_pedal - comma_pedal_min) /
+                                  (comma_pedal_max - comma_pedal_min);
+  const QRectF pedal_ring(x - radius / 2 + 10, y1 - radius / 2 + 10,
+                          radius - 20, radius - 20);
+
+  p.setPen(QPen(QColor(55, 61, 74, 255), 4));
+  p.setBrush(QColor(55, 61, 74, 235));
+  p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
+
+  // Full-scale background ring and clockwise live comma-pedal command ring.
+  p.setBrush(Qt::NoBrush);
+  p.setPen(QPen(QColor(118, 126, 139, 180), 13, Qt::SolidLine, Qt::FlatCap));
+  p.drawEllipse(pedal_ring);
+  p.setPen(QPen(QColor(255, 0, 0, 255), 13, Qt::SolidLine, Qt::FlatCap));
+  p.drawArc(pedal_ring, 90 * 16,
+            -static_cast<int>(comma_pedal_ratio * 360.0f * 16.0f));
+
+  str = "PEDAL MAX";
+  configFont(p, "Open Sans", 28, "Bold");
+  drawText(p, x, y1 - 24, str, 230);
+
+  str2.sprintf("%.0f", comma_pedal * 100.0f);
+  textColor = QColor(255, 255, 255, 245);
+  configFont(p, "Open Sans", 52, "Bold");
+  drawTextWithColor(p, x, y1 + 30, str2, textColor);
+  p.setOpacity(1.0);
+  p.setBrush(Qt::NoBrush);
+  p.setPen(Qt::NoPen);
+
+  float textSize = 48.f;
 
   // 2. VISION DIST
   x = icon_start_x + (icon_step * 4);
@@ -764,47 +805,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   x = 140;
   x = icon_start_x;
 
-  // Immediate forced-acceleration recovery warning. Keep it attached to the
-  // PEDAL gauge so it does not look like an unrelated system-wide alert.
-  const bool pedal_force_recovery_active = controls_state.getPedalForceRecoveryActive();
-  if (pedal_force_recovery_active) {
-    const int pedal_x = icon_start_x + icon_step;
-    const int alert_w = 600;
-    const int alert_h = 120;
-    const int alert_x = pedal_x - alert_w / 2;
-    const int alert_y = y2 - radius / 2 - alert_h - 18;
-    const QColor alert_border(255, 194, 71, 255);
-    const QColor alert_bg(23, 18, 8, 237);
-
-    p.setPen(QPen(alert_border, 6));
-    p.setBrush(alert_bg);
-    p.drawRoundedRect(QRect(alert_x, alert_y, alert_w, alert_h), 18, 18);
-
-    const QPoint pointer[] = {
-      QPoint(pedal_x - 25, alert_y + alert_h),
-      QPoint(pedal_x + 25, alert_y + alert_h),
-      QPoint(pedal_x, alert_y + alert_h + 25),
-    };
-    p.setPen(Qt::NoPen);
-    p.setBrush(alert_border);
-    p.drawPolygon(pointer, 3);
-
-    QString recovery_title = "강제 가속 복구";
-    QColor recovery_title_color(255, 242, 211, 255);
-    configFont(p, "Open Sans", 42, "Bold");
-    drawTextWithColor(p, pedal_x, alert_y + 43, recovery_title, recovery_title_color);
-
-    QString recovery_detail;
-    recovery_detail.sprintf("ACCEL 0→%.2f  PEDAL≥%.3f  %.1fs",
-                            controls_state.getPedalForceRecoveryAccel(),
-                            controls_state.getPedalForceRecoveryPedalFloor(),
-                            controls_state.getPedalForceRecoveryDuration());
-    QColor recovery_detail_color(231, 211, 169, 255);
-    configFont(p, "Open Sans", 25, "Regular");
-    drawTextWithColor(p, pedal_x, alert_y + 88, recovery_detail, recovery_detail_color);
-  }
-
-  // 1.TR Value
+  // 2. TR Value
+  x = icon_start_x + icon_step;
   float tr_value = controls_state.getDynamicTRValue();
   auto tr_mode = controls_state.getDynamicTRMode();
   //int cruise_gap = car_state.getCruiseGap();
@@ -858,22 +860,17 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   drawTextWithColor(p, x, y2+50, str, textColor);
   p.setOpacity(1.0);*/
 
-  // 2. PEDAL
-  x = icon_start_x + (icon_step * 1);
+  // 1. PEDAL
+  x = icon_start_x;
   float accel = car_control.getActuators().getAccel();
 
   p.setPen(Qt::NoPen);
-  p.setBrush(pedal_force_recovery_active ? QColor(255, 127, 0, 235) :
-             (stop_accel_boost_active ? QColor(0, 170, 90, 235) : blackColor(200)));
+  p.setBrush(stop_accel_boost_active ? QColor(0, 170, 90, 235) : blackColor(200));
   p.drawEllipse(x - radius / 2, y2 - radius / 2, radius, radius);
 
   textColor = QColor(255, 255, 255, 200);
 
-  if(pedal_force_recovery_active) {
-    str = "복구중";
-    textColor = QColor(255, 255, 255, 235);
-  }
-  else if(accel > 0) {
+  if(accel > 0) {
     //str = "ACCEL";
     str = "가속";
     textColor = QColor(120, 255, 120, 200);
@@ -891,14 +888,13 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
   // Keep the existing PEDAL gauge layout. Only its active color and state
   // text change while the confirmed stop-and-go launch assist is operating.
-  // Forced-acceleration recovery remains the higher-priority indication.
-  if(stop_accel_boost_active && !pedal_force_recovery_active) {
+  if(stop_accel_boost_active) {
     str = "BOOST";
     textColor = QColor(225, 255, 239, 255);
   }
 
   configFont(p, "Open Sans", 38, "Bold");
-  drawText(p, x, y2-20, "PEDAL", 200);
+  drawText(p, x, y2-20, "PEDAL STATUS", 180);
 
   configFont(p, "Open Sans", textSize, "Bold");
   drawTextWithColor(p, x, y2+50, str, textColor);

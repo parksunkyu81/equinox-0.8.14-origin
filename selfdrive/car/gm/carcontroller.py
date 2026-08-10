@@ -116,7 +116,7 @@ class CarController():
                           )
 
         # 연비 향상을 위해 클리핑
-        self.comma_pedal = clip(acc_mult * actuators.accel, 0.0, 0.85)  # 최대 0.8까지만 허용하여 연비 개선
+        self.comma_pedal = clip(acc_mult * actuators.accel, 0.0, 0.85)  # Actual comma-pedal command range: 0.00..0.85
 
         # self.comma_pedal = pedal_command
       else:
