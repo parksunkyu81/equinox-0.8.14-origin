@@ -40,6 +40,8 @@ from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.stop_accel_boost import STOP_ACCEL_BOOST_FACTOR, StopAccelBoostLatch
 from selfdrive.controls.lib.curve_speed_limiter import CurveSpeedLimiter, CURVE_SPEED_DISABLED
 from selfdrive.controls.lib.panda_safety import panda_safety_config_matches, update_panda_safety_readiness
+from selfdrive.controls.lib.process_health import expected_not_running_processes, update_process_not_running_state
+from selfdrive.process_diagnostics import append_process_diagnostic
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
@@ -49,6 +51,7 @@ SOFT_DISABLE_TIME = 3  # seconds
 # debounce only the short controlsAllowed message skew; safety configuration changes stay immediate.
 PANDA_SAFETY_MATCH_FRAMES = 10  # 100 ms at 100 Hz
 CONTROLS_ALLOWED_MISMATCH_FRAMES = 25  # 250 ms at 100 Hz
+PROCESS_NOT_RUNNING_CONSECUTIVE_UPDATES = 3
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
@@ -210,6 +213,10 @@ class Controls:
         self.panda_safety_match_counter = 0
         self.last_safety_mismatch_log_frame = -1000000
         self.last_controls_allowed_mismatch_log_frame = -1000000
+        self.process_not_running_counter = 0
+        self.process_not_running_candidates = set()
+        self.process_not_running_active = False
+        self.process_not_running_logged_names = ()
         self.cruise_mismatch_counter = 0
         self.can_rcv_error_counter = 0
         self.last_blinker_frame = 0
@@ -658,8 +665,46 @@ class Controls:
                 self.events.add(EventName.localizerMalfunction)
 
             # Check if all manager processes are running
-            not_running = {p.name for p in self.sm['managerState'].processes if not p.running}
-            if self.sm.rcv_frame['managerState'] and (not_running - IGNORE_PROCESSES):
+            if self.sm.updated['managerState']:
+                manager_processes = self.sm['managerState'].processes
+                not_running = expected_not_running_processes(manager_processes, IGNORE_PROCESSES)
+                was_active = self.process_not_running_active
+                previous_names = tuple(sorted(self.process_not_running_candidates))
+                self.process_not_running_counter, self.process_not_running_candidates, \
+                    self.process_not_running_active = update_process_not_running_state(
+                        self.process_not_running_counter,
+                        self.process_not_running_candidates,
+                        not_running,
+                        PROCESS_NOT_RUNNING_CONSECUTIVE_UPDATES)
+
+                names = tuple(sorted(self.process_not_running_candidates))
+                if self.process_not_running_active and names != self.process_not_running_logged_names:
+                    cloudlog.error(
+                        "processNotRunning persistent: "
+                        f"names={list(names)} consecutiveUpdates={self.process_not_running_counter}"
+                    )
+                    append_process_diagnostic(
+                        "controlsd_process_not_running",
+                        processes=list(names),
+                        consecutive_updates=self.process_not_running_counter,
+                        manager_processes=[{
+                            "name": p.name,
+                            "running": bool(p.running),
+                            "should_be_running": bool(p.shouldBeRunning),
+                            "pid": int(p.pid),
+                            "exit_code": int(p.exitCode),
+                        } for p in manager_processes],
+                    )
+                    self.process_not_running_logged_names = names
+                elif was_active and not self.process_not_running_active:
+                    cloudlog.info(f"processNotRunning recovered: names={list(previous_names)}")
+                    append_process_diagnostic(
+                        "controlsd_process_recovered",
+                        processes=list(previous_names),
+                    )
+                    self.process_not_running_logged_names = ()
+
+            if self.process_not_running_active:
                 self.events.add(EventName.processNotRunning)
 
         # Only allow engagement with brake pressed when stopped behind another stopped car
