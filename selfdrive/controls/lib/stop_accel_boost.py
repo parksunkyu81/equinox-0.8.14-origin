@@ -2,7 +2,7 @@ STOP_ACCEL_BOOST_MIN_SPEED_KPH = 1.0
 STOP_ACCEL_BOOST_MIN_SPEED_MS = STOP_ACCEL_BOOST_MIN_SPEED_KPH / 3.6
 STOP_ACCEL_BOOST_MAX_SPEED_KPH = 25.0
 STOP_ACCEL_BOOST_MAX_SPEED_MS = STOP_ACCEL_BOOST_MAX_SPEED_KPH / 3.6
-STOP_ACCEL_BOOST_FACTOR = 1.20
+STOP_ACCEL_BOOST_FACTOR = 1.30
 STOP_ACCEL_ZERO_EPS = 1e-3
 
 # Cancel a latched launch if the same lead stops again or the ego vehicle is
@@ -46,7 +46,7 @@ class StopAccelBoostLatch:
 
 
 def apply_stop_accel_boost(requested_accel, v_ego, boost_active, accel_limits):
-  """Apply 20% boost only in the measured 1-25 km/h launch window."""
+  """Apply 30% boost only in the measured 1-25 km/h launch window."""
   accel = float(requested_accel)
   if (boost_active and
       STOP_ACCEL_BOOST_MIN_SPEED_MS <= v_ego < STOP_ACCEL_BOOST_MAX_SPEED_MS and
