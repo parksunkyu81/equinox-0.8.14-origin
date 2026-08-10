@@ -253,6 +253,34 @@ CLEAN_LAT_FACTOR_MAX_STEP = 0.004
 CLEAN_FRICTION_DEADBAND = 0.003
 CLEAN_FRICTION_MAX_STEP = 0.0015
 
+# Equinox fast-converge / safe-apply policy. Estimation uses matched left/right
+# steering buckets, while application remains bounded by the confidence-based
+# safety envelope below. This prevents a route with many turns in one direction
+# from dominating the fit.
+EQUINOX_PAIRED_MIN_ABS_STEER = 0.20
+EQUINOX_PAIRED_MAX_ABS_STEER = 0.70
+EQUINOX_PAIRED_MIN_POINTS = 15
+EQUINOX_PAIRED_MIN_BUCKETS = 3
+EQUINOX_PAIRED_MIN_TOTAL = 90
+EQUINOX_PAIRED_DIRECTION_BALANCE_MIN = 0.65
+EQUINOX_PAIRED_FACTOR_REL_MAD_MAX = 0.15
+EQUINOX_PAIRED_MIN_ERROR_IMPROVEMENT = 0.02
+
+EQUINOX_CANDIDATE_HISTORY = 3
+EQUINOX_CANDIDATE_CONFIRMATIONS = 2
+EQUINOX_CANDIDATE_FACTOR_SPREAD_MAX = 0.03
+EQUINOX_CANDIDATE_FRICTION_SPREAD_MAX = 0.01
+EQUINOX_CONVERGED_FACTOR_SPREAD = 0.01
+EQUINOX_CONVERGED_FRICTION_SPREAD = 0.004
+EQUINOX_CONVERGED_NEW_POINTS = 90
+
+EQUINOX_FAST_NEW_POINTS_LOW_CONF = 30
+EQUINOX_FAST_NEW_POINTS_HIGH_CONF = 20
+EQUINOX_FAST_CONFIDENCE_THRESHOLD = 0.60
+EQUINOX_MED_CONFIDENCE_THRESHOLD = 0.25
+EQUINOX_MED_LAT_FACTOR_MAX_STEP = 0.006
+EQUINOX_MED_FRICTION_MAX_STEP = 0.002
+
 # --- B안 Offset Update Presets ---
 # env: LTP_OFFSET_PRESET = conservative | balanced | aggressive
 #  - conservative: 안전 최우선(느리게)
@@ -287,7 +315,7 @@ SOFT_LIVEVALID_MIN_POINTS_MIDSPD = 450
 SOFT_LIVEVALID_MIN_POINTS_HISPD = 700
 
 # Warm start(재시작 복원) 상태 파일
-LTP_STATE_VERSION = 3
+LTP_STATE_VERSION = 4
 LTP_STATE_SAVE_INTERVAL_S = 15.0  # faster warm-state persistence
 LTP_STATE_PATH = os.path.join(LTP_LOG_DIR, "ltp_state.json")
 LTP_STATE_PATH_PKL = os.path.join(LTP_LOG_DIR, "ltp_state.pkl")
@@ -1055,6 +1083,13 @@ class TorqueEstimator:
         self._last_allowed_torque = 0.0
         self._last_steer_out_can = 0.0
         self._last_steer_max = 0.0
+        self._ltp_paired_diag = {}
+        self._ltp_candidate_history = deque(maxlen=EQUINOX_CANDIDATE_HISTORY)
+        self._ltp_candidate_status = "idle"
+        self._ltp_learning_converged = False
+        self._ltp_update_min_points = int(CLEAN_PARAM_UPDATE_MIN_NEW_POINTS)
+        self._ltp_update_factor_step = float(CLEAN_LAT_FACTOR_MAX_STEP)
+        self._ltp_update_friction_step = float(CLEAN_FRICTION_MAX_STEP)
         self._latAF_assist_active = False
         self._latAF_assist_base = 0.0
         self._latAF_assist_scale = 1.0
@@ -1607,6 +1642,9 @@ class TorqueEstimator:
                 # 버전 차이로 버킷 복원을 스킵했을 때도, 필터 값만으로 빠른 liveValid를 지원
                 pass
 
+            learning_state = st.get("learningState", {}) or {}
+            self._ltp_learning_converged = bool(learning_state.get("converged", False))
+
             cloudlog.warning(
                 f"LiveTorque: warm state restored ({src})" + (" [filtered-only]" if not restore_buckets else ""))
             self._warm_restored = True
@@ -1658,6 +1696,10 @@ class TorqueEstimator:
                     "win_s": float(self._straight_bias_win_s),
                     "samples": [],
                 },
+                "learningState": {
+                    "converged": bool(getattr(self, "_ltp_learning_converged", False)),
+                    "candidateStatus": str(getattr(self, "_ltp_candidate_status", "idle")),
+                },
             }
 
             d = os.path.dirname(LTP_STATE_PATH)
@@ -1705,6 +1747,14 @@ class TorqueEstimator:
             self._last_clean_param_update_t = -1e9
             self._clean_points_accepted_total = 0
             self._last_clean_param_update_evidence = 0
+            if hasattr(self, '_ltp_candidate_history'):
+                self._ltp_candidate_history.clear()
+            self._ltp_candidate_status = "idle"
+            self._ltp_paired_diag = {}
+            self._ltp_learning_converged = False
+            self._ltp_update_min_points = int(CLEAN_PARAM_UPDATE_MIN_NEW_POINTS)
+            self._ltp_update_factor_step = float(CLEAN_LAT_FACTOR_MAX_STEP)
+            self._ltp_update_friction_step = float(CLEAN_FRICTION_MAX_STEP)
             self._steer_pressed_cnt = 0
             self._last_steer_override_db = False
 
@@ -1802,6 +1852,248 @@ class TorqueEstimator:
         moments = self.corner_points.aggregate_moments()
         return self._estimate_params_from_moments(*moments)
 
+    @staticmethod
+    def _moments_scaled(bm, scale):
+        s = float(scale)
+        return (
+            float(bm.n) * s, float(bm.sx) * s, float(bm.sy) * s,
+            float(bm.sxx) * s, float(bm.syy) * s, float(bm.sxy) * s,
+        )
+
+    def _estimate_params_equinox_paired(self):
+        """Robust Equinox fit from magnitude-matched left/right corner buckets.
+
+        Weak steering bins are intentionally excluded from factor estimation:
+        friction and road crown dominate their signal. Each direction in a pair
+        receives the same effective weight, so route direction cannot bias the
+        fit merely by contributing more samples.
+        """
+        diag = {
+            "valid": False,
+            "pair_count": 0,
+            "inlier_pair_count": 0,
+            "paired_points": 0,
+            "direction_balance": 0.0,
+            "factor_median": None,
+            "factor_rel_mad": None,
+            "error_improvement": None,
+            "reason": "no_pairs",
+        }
+        try:
+            candidates = []
+            neg_total = 0.0
+            pos_total = 0.0
+            for (low, high), neg_bm in self.corner_points.buckets.items():
+                if high > 0.0:
+                    continue
+                mag_low = abs(float(high))
+                mag_high = abs(float(low))
+                if (mag_low + 1e-9) < float(EQUINOX_PAIRED_MIN_ABS_STEER):
+                    continue
+                if mag_high > float(EQUINOX_PAIRED_MAX_ABS_STEER) + 1e-9:
+                    continue
+
+                pos_bounds = (float(-high), float(-low))
+                pos_bm = self.corner_points.buckets.get(pos_bounds, None)
+                if pos_bm is None:
+                    continue
+
+                neg_n = float(neg_bm.n)
+                pos_n = float(pos_bm.n)
+                neg_total += neg_n
+                pos_total += pos_n
+                if min(neg_n, pos_n) < float(EQUINOX_PAIRED_MIN_POINTS):
+                    continue
+
+                neg_x = float(neg_bm.sx) / neg_n
+                pos_x = float(pos_bm.sx) / pos_n
+                dx = pos_x - neg_x
+                if abs(dx) < 0.05:
+                    continue
+                candidates.append({
+                    "neg": neg_bm,
+                    "pos": pos_bm,
+                    "weight": min(neg_n, pos_n),
+                })
+
+            diag["pair_count"] = int(len(candidates))
+            diag["direction_balance"] = float(
+                min(neg_total, pos_total) / max(max(neg_total, pos_total), 1.0))
+            if len(candidates) < int(EQUINOX_PAIRED_MIN_BUCKETS):
+                diag["reason"] = "pair_coverage"
+                return np.nan, np.nan, np.nan, diag
+            if diag["direction_balance"] < float(EQUINOX_PAIRED_DIRECTION_BALANCE_MIN):
+                diag["reason"] = "direction_balance"
+                return np.nan, np.nan, np.nan, diag
+
+            paired_points = float(sum(c["weight"] for c in candidates))
+            diag["inlier_pair_count"] = int(len(candidates))
+            diag["paired_points"] = int(round(paired_points))
+            if paired_points < float(EQUINOX_PAIRED_MIN_TOTAL):
+                diag["reason"] = "paired_points"
+                return np.nan, np.nan, np.nan, diag
+
+            # Fit each direction independently across steering magnitudes. In
+            # the physical torque model the two lines share a slope (factor),
+            # while their intercept separation represents friction. Requiring
+            # those slopes to agree is the key protection against an apparently
+            # balanced point count that still contains route/camber bias.
+            def _fit_side(key):
+                xs = np.asarray([
+                    float(c[key].sx) / max(float(c[key].n), 1.0) for c in candidates
+                ], dtype=np.float64)
+                ys = np.asarray([
+                    float(c[key].sy) / max(float(c[key].n), 1.0) for c in candidates
+                ], dtype=np.float64)
+                x_mean = float(np.mean(xs))
+                y_mean = float(np.mean(ys))
+                denom = float(np.sum((xs - x_mean) ** 2))
+                if denom < 1e-6:
+                    return np.nan, np.nan
+                slope = float(np.sum((xs - x_mean) * (ys - y_mean)) / denom)
+                intercept = float(y_mean - slope * x_mean)
+                return slope, intercept
+
+            neg_factor, neg_intercept = _fit_side("neg")
+            pos_factor, pos_intercept = _fit_side("pos")
+            if (not _finite(neg_factor) or not _finite(pos_factor) or
+                    neg_factor <= 0.5 or pos_factor <= 0.5):
+                diag["reason"] = "direction_slope_invalid"
+                return np.nan, np.nan, np.nan, diag
+
+            factor = 0.5 * (float(neg_factor) + float(pos_factor))
+            direction_factor_delta = abs(float(neg_factor) - float(pos_factor)) / max(abs(factor), 1e-6)
+            diag["factor_median"] = float(factor)
+            diag["factor_rel_mad"] = float(direction_factor_delta)
+            diag["neg_factor"] = float(neg_factor)
+            diag["pos_factor"] = float(pos_factor)
+            if direction_factor_delta > float(EQUINOX_PAIRED_FACTOR_REL_MAD_MAX):
+                diag["reason"] = "direction_slope_disagreement"
+                return np.nan, np.nan, np.nan, diag
+
+            offset = 0.5 * (float(neg_intercept) + float(pos_intercept))
+            friction = (float(neg_intercept) - float(pos_intercept)) / max(2.0 * factor, 1e-6)
+            if friction < 0.0:
+                diag["reason"] = "friction_sign"
+                return np.nan, np.nan, np.nan, diag
+
+            def _model_mse(model_factor, model_friction, model_offset):
+                sse = 0.0
+                total_n = 0.0
+                for c in candidates:
+                    w = float(c["weight"])
+                    for sign, key in ((-1.0, "neg"), (1.0, "pos")):
+                        bm = c[key]
+                        scale = w / max(float(bm.n), 1.0)
+                        n, sx, sy, sxx, syy, sxy = self._moments_scaled(bm, scale)
+                        intercept = float(model_offset) - float(model_factor) * float(model_friction) * sign
+                        sse += (
+                            syy + float(model_factor) ** 2 * sxx + intercept ** 2 * n +
+                            2.0 * float(model_factor) * intercept * sx -
+                            2.0 * float(model_factor) * sxy - 2.0 * intercept * sy)
+                        total_n += n
+                return float(max(0.0, sse / max(total_n, 1.0)))
+
+            candidate_mse = _model_mse(factor, friction, offset)
+            current_factor = float(_sanitize_num(
+                self.filtered_params['latAccelFactor'].x, self.offline_latAccelFactor))
+            current_friction = float(_sanitize_num(
+                self.filtered_params['frictionCoefficient'].x, self.offline_friction))
+            offset_filter = self.filtered_params.get('latAccelOffset', None)
+            current_offset = float(_sanitize_num(getattr(offset_filter, 'x', 0.0), 0.0))
+            current_mse = _model_mse(current_factor, current_friction, current_offset)
+            improvement = 0.0
+            if np.isfinite(current_mse) and current_mse > 1e-9:
+                improvement = 1.0 - float(candidate_mse) / float(current_mse)
+            diag["error_improvement"] = float(improvement)
+
+            # Do not chase a materially different candidate unless it actually
+            # explains the balanced left/right evidence better than the current
+            # applied value. Near convergence, the normal parameter deadband is
+            # sufficient and a positive improvement is no longer required.
+            materially_different = abs(factor - current_factor) >= float(CLEAN_LAT_FACTOR_DEADBAND)
+            if materially_different and improvement < float(EQUINOX_PAIRED_MIN_ERROR_IMPROVEMENT):
+                diag["reason"] = "no_error_improvement"
+                return np.nan, np.nan, np.nan, diag
+
+            if not (_finite(factor) and _finite(offset) and _finite(friction)):
+                diag["reason"] = "non_finite"
+                return np.nan, np.nan, np.nan, diag
+
+            diag["valid"] = True
+            diag["reason"] = "ok"
+            return float(factor), float(offset), float(friction), diag
+        except Exception:
+            cloudlog.exception("live torque: Equinox paired fit failed")
+            diag["reason"] = "exception"
+            return np.nan, np.nan, np.nan, diag
+
+    def _equinox_update_policy(self, confidence):
+        conf = float(np.clip(_sanitize_num(confidence, 0.0), 0.0, 1.0))
+        if bool(getattr(self, "_ltp_learning_converged", False)):
+            return (int(EQUINOX_CONVERGED_NEW_POINTS),
+                    float(EQUINOX_MED_LAT_FACTOR_MAX_STEP),
+                    float(EQUINOX_MED_FRICTION_MAX_STEP))
+        if conf >= float(EQUINOX_FAST_CONFIDENCE_THRESHOLD):
+            return (int(EQUINOX_FAST_NEW_POINTS_HIGH_CONF),
+                    float(EQUINOX_MED_LAT_FACTOR_MAX_STEP),
+                    float(EQUINOX_MED_FRICTION_MAX_STEP))
+        if conf >= float(EQUINOX_MED_CONFIDENCE_THRESHOLD):
+            return (int(EQUINOX_FAST_NEW_POINTS_LOW_CONF),
+                    float(EQUINOX_MED_LAT_FACTOR_MAX_STEP),
+                    float(EQUINOX_MED_FRICTION_MAX_STEP))
+        return (int(EQUINOX_FAST_NEW_POINTS_LOW_CONF),
+                float(CLEAN_LAT_FACTOR_MAX_STEP),
+                float(CLEAN_FRICTION_MAX_STEP))
+
+    def _confirm_equinox_candidate(self, factor, friction):
+        if not (_finite(factor) and _finite(friction)):
+            return None
+        self._ltp_candidate_history.append((float(factor), float(friction)))
+        need = int(EQUINOX_CANDIDATE_CONFIRMATIONS)
+        if len(self._ltp_candidate_history) < need:
+            self._ltp_candidate_status = "await_confirmation"
+            return None
+
+        recent = list(self._ltp_candidate_history)[-need:]
+        factors = [v[0] for v in recent]
+        frictions = [v[1] for v in recent]
+        cur_f = float(_sanitize_num(self.filtered_params['latAccelFactor'].x, self.offline_latAccelFactor))
+        cur_r = float(_sanitize_num(self.filtered_params['frictionCoefficient'].x, self.offline_friction))
+
+        def _direction(v, cur, deadband):
+            d = float(v) - float(cur)
+            return 0 if abs(d) < float(deadband) else (1 if d > 0.0 else -1)
+
+        f_dirs = [_direction(v, cur_f, CLEAN_LAT_FACTOR_DEADBAND) for v in factors]
+        r_dirs = [_direction(v, cur_r, CLEAN_FRICTION_DEADBAND) for v in frictions]
+        if ((min(f_dirs) < 0 < max(f_dirs)) or (min(r_dirs) < 0 < max(r_dirs))):
+            self._ltp_candidate_status = "direction_flip"
+            return None
+        if (max(factors) - min(factors)) > float(EQUINOX_CANDIDATE_FACTOR_SPREAD_MAX):
+            self._ltp_candidate_status = "factor_spread"
+            return None
+        if (max(frictions) - min(frictions)) > float(EQUINOX_CANDIDATE_FRICTION_SPREAD_MAX):
+            self._ltp_candidate_status = "friction_spread"
+            return None
+
+        target_f = float(np.median(factors))
+        target_r = float(np.median(frictions))
+        self._ltp_candidate_status = "confirmed"
+
+        hist = list(self._ltp_candidate_history)
+        if len(hist) >= int(EQUINOX_CANDIDATE_HISTORY):
+            hist_f = [v[0] for v in hist]
+            hist_r = [v[1] for v in hist]
+            stable = bool(
+                (max(hist_f) - min(hist_f)) <= float(EQUINOX_CONVERGED_FACTOR_SPREAD) and
+                (max(hist_r) - min(hist_r)) <= float(EQUINOX_CONVERGED_FRICTION_SPREAD) and
+                abs(cur_f - target_f) <= float(EQUINOX_CONVERGED_FACTOR_SPREAD) and
+                abs(cur_r - target_r) <= float(EQUINOX_CONVERGED_FRICTION_SPREAD))
+            if stable:
+                self._ltp_learning_converged = True
+        return target_f, target_r
+
     def _estimate_straight_offset_from_window(self):
         win = list(self._straight_bias) if hasattr(self, "_straight_bias") else []
         if len(win) == 0:
@@ -1845,9 +2137,14 @@ class TorqueEstimator:
         else:
             self.decay = min(self.decay + DT_MDL, MAX_FILTER_DECAY)
 
-    def update_params(self, params):
+    def update_params(self, params, lat_factor_max_step=None, friction_max_step=None):
         self._update_decay()
         base_decay = self.decay
+
+        lat_factor_step = float(
+            CLEAN_LAT_FACTOR_MAX_STEP if lat_factor_max_step is None else lat_factor_max_step)
+        friction_step = float(
+            CLEAN_FRICTION_MAX_STEP if friction_max_step is None else friction_max_step)
 
         yaw = abs(self.last_yaw_rate) if self.last_yaw_rate is not None else 0.0
         v = self.last_vego if self.last_vego is not None else 0.0
@@ -1880,7 +2177,7 @@ class TorqueEstimator:
                 if abs(delta) < float(CLEAN_LAT_FACTOR_DEADBAND):
                     continue
                 self.filtered_params[param].x = float(cur) + float(np.clip(
-                    delta, -float(CLEAN_LAT_FACTOR_MAX_STEP), float(CLEAN_LAT_FACTOR_MAX_STEP)))
+                    delta, -lat_factor_step, lat_factor_step))
                 continue
 
             if param == 'frictionCoefficient':
@@ -1888,7 +2185,7 @@ class TorqueEstimator:
                 if abs(delta) < float(CLEAN_FRICTION_DEADBAND):
                     continue
                 self.filtered_params[param].x = float(cur) + float(np.clip(
-                    delta, -float(CLEAN_FRICTION_MAX_STEP), float(CLEAN_FRICTION_MAX_STEP)))
+                    delta, -friction_step, friction_step))
                 continue
 
             # SAFETY: do not dynamically lower latAccelFactor faster in curves.
@@ -3263,6 +3560,28 @@ class TorqueEstimator:
                 "adaptive_band_confidence": round(float(getattr(self, "_adaptive_band_confidence", 0.0)), 5),
                 "adaptive_band_limits": (None if self._adaptive_band_limits is None else
                                          [round(float(v), 6) for v in self._adaptive_band_limits]),
+                "paired_fit_valid": bool(getattr(self, "_ltp_paired_diag", {}).get("valid", False)),
+                "paired_fit_reason": str(getattr(self, "_ltp_paired_diag", {}).get("reason", "none")),
+                "paired_fit_pairs": int(getattr(self, "_ltp_paired_diag", {}).get("pair_count", 0) or 0),
+                "paired_fit_inliers": int(getattr(self, "_ltp_paired_diag", {}).get("inlier_pair_count", 0) or 0),
+                "paired_fit_points": int(getattr(self, "_ltp_paired_diag", {}).get("paired_points", 0) or 0),
+                "paired_direction_balance": round(float(
+                    getattr(self, "_ltp_paired_diag", {}).get("direction_balance", 0.0) or 0.0), 4),
+                "paired_factor_rel_mad": (None if getattr(self, "_ltp_paired_diag", {}).get(
+                    "factor_rel_mad", None) is None else round(float(
+                    getattr(self, "_ltp_paired_diag", {}).get("factor_rel_mad")), 5)),
+                "paired_error_improvement": (None if getattr(self, "_ltp_paired_diag", {}).get(
+                    "error_improvement", None) is None else round(float(
+                    getattr(self, "_ltp_paired_diag", {}).get("error_improvement")), 5)),
+                "candidate_status": str(getattr(self, "_ltp_candidate_status", "idle")),
+                "candidate_history": int(len(getattr(self, "_ltp_candidate_history", []))),
+                "learning_converged": bool(getattr(self, "_ltp_learning_converged", False)),
+                "update_min_points": int(getattr(
+                    self, "_ltp_update_min_points", CLEAN_PARAM_UPDATE_MIN_NEW_POINTS)),
+                "update_factor_step": round(float(getattr(
+                    self, "_ltp_update_factor_step", CLEAN_LAT_FACTOR_MAX_STEP)), 5),
+                "update_friction_step": round(float(getattr(
+                    self, "_ltp_update_friction_step", CLEAN_FRICTION_MAX_STEP)), 5),
                 "offset_learning_enabled": bool(self._offset_learning_enabled),
                 "dyn_latAF_eff_est": round(float(dyn_latAF), 5),
                 "dyn_fric_eff_est": round(float(dyn_fric), 5),
@@ -3572,8 +3891,20 @@ class TorqueEstimator:
 
         qual_freeze_now = bool(t_now < float(getattr(self, "_qual_freeze_until", 0.0) or 0.0))
 
-        if self.corner_points.is_valid():
-            latFactor_c, latOffset_c, friction_c = self.estimate_params_corner()
+        paired_fit = None
+        if self._is_equinox_torque_profile:
+            latFactor_p, latOffset_p, friction_p, paired_diag = self._estimate_params_equinox_paired()
+            self._ltp_paired_diag = dict(paired_diag)
+            if bool(paired_diag.get("valid", False)):
+                paired_fit = (latFactor_p, latOffset_p, friction_p)
+
+        corner_fit_valid = bool(
+            paired_fit is not None if self._is_equinox_torque_profile else self.corner_points.is_valid())
+        if corner_fit_valid:
+            if paired_fit is not None:
+                latFactor_c, latOffset_c, friction_c = paired_fit
+            else:
+                latFactor_c, latOffset_c, friction_c = self.estimate_params_corner()
 
             latFactor_s = np.nan
             latOffset_s, win_ok_n, win_total_n, win_ratio = self._estimate_straight_offset_from_window()
@@ -3639,9 +3970,18 @@ class TorqueEstimator:
                     getattr(self, "_last_clean_param_update_evidence", 0) or 0))
                 clean_update_interval = t_now - float(
                     getattr(self, "_last_clean_param_update_t", -1e9) or -1e9)
+                update_min_points = int(CLEAN_PARAM_UPDATE_MIN_NEW_POINTS)
+                factor_max_step = float(CLEAN_LAT_FACTOR_MAX_STEP)
+                friction_max_step = float(CLEAN_FRICTION_MAX_STEP)
+                if self._is_equinox_torque_profile:
+                    update_min_points, factor_max_step, friction_max_step = self._equinox_update_policy(
+                        self._equinox_learning_confidence())
+                self._ltp_update_min_points = int(update_min_points)
+                self._ltp_update_factor_step = float(factor_max_step)
+                self._ltp_update_friction_step = float(friction_max_step)
                 clean_param_update_ready = bool(
                     (not freeze_update_total) and
-                    new_clean_points >= int(CLEAN_PARAM_UPDATE_MIN_NEW_POINTS) and
+                    new_clean_points >= int(update_min_points) and
                     clean_update_interval >= float(CLEAN_PARAM_UPDATE_MIN_INTERVAL_S))
 
                 # -----------------------------
@@ -3715,8 +4055,17 @@ class TorqueEstimator:
                     # 기본 업데이트 값
                     upd = {}
                     if clean_param_update_ready:
-                        upd['latAccelFactor'] = latF_use
-                        upd['frictionCoefficient'] = fric_use
+                        if self._is_equinox_torque_profile:
+                            confirmed = self._confirm_equinox_candidate(latFactor_blend, friction_use)
+                            if confirmed is not None:
+                                confirmed_f, confirmed_r = confirmed
+                                confirmed_f, _, confirmed_r = self._coerce_params(
+                                    confirmed_f, latOffset_blend, confirmed_r)
+                                upd['latAccelFactor'] = confirmed_f
+                                upd['frictionCoefficient'] = confirmed_r
+                        else:
+                            upd['latAccelFactor'] = latF_use
+                            upd['frictionCoefficient'] = fric_use
 
                     if offset_gate_pass:
                         try:
@@ -3729,7 +4078,10 @@ class TorqueEstimator:
                         except Exception:
                             pass
                     if len(upd) > 0:
-                        self.update_params(upd)
+                        self.update_params(
+                            upd,
+                            lat_factor_max_step=factor_max_step,
+                            friction_max_step=friction_max_step)
                     if clean_param_update_ready:
                         self._last_clean_param_update_t = float(t_now)
                         self._last_clean_param_update_evidence = int(clean_evidence_now)
@@ -3856,10 +4208,23 @@ class TorqueEstimator:
         liveTorqueParameters.frictionCoefficientFiltered = fR
         liveTorqueParameters.totalBucketPoints = len(self.corner_points) + len(self.straight_points) + len(
             self.limited_corner_points)
+        paired_status = ""
+        if self._is_equinox_torque_profile:
+            pd = getattr(self, "_ltp_paired_diag", {}) or {}
+            paired_status = (
+                "[Equinox-Paired]\n"
+                f"valid={bool(pd.get('valid', False))} reason={pd.get('reason', 'none')} "
+                f"pairs={int(pd.get('pair_count', 0) or 0)} "
+                f"inliers={int(pd.get('inlier_pair_count', 0) or 0)} "
+                f"points={int(pd.get('paired_points', 0) or 0)} "
+                f"candidate={getattr(self, '_ltp_candidate_status', 'idle')} "
+                f"converged={bool(getattr(self, '_ltp_learning_converged', False))}\n"
+            )
         liveTorqueParameters.bucketPoints = (
                 "[Corner]\n" + self.corner_points.show_bucket_status() +
                 "[Corner-Limited]\n" + self.limited_corner_points.show_bucket_status() +
-                "[Straight]\n" + self.straight_points.show_bucket_status()
+                "[Straight]\n" + self.straight_points.show_bucket_status() +
+                paired_status
         )
         liveTorqueParameters.decay = self.decay
         liveTorqueParameters.maxResets = self.resets
