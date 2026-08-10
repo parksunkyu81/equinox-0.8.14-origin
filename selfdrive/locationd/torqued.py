@@ -87,7 +87,7 @@ def center_offset_residual(lateral_accel, applied_steer, lat_accel_factor):
 
 
 def equinox_learning_confidence(normal_counts, limited_counts, min_points,
-                                 start_points=1800.0, full_points=10000.0):
+                                 start_points=500.0, full_points=3000.0):
     """Return persistent data confidence for the Equinox learning envelope.
 
     Recent clip/rate/driver ratios gate parameter updates separately. They must
@@ -147,7 +147,8 @@ def adaptive_equinox_bands(lat_accel_anchor, friction_anchor, confidence):
 # -----------------------------
 LTP_LOG_DIR = "/data/openpilot/ltp_logs"
 KST = timezone(timedelta(hours=9))
-LTP_FILE_LOGGING_ENABLED = False
+LTP_FILE_LOGGING_ENABLED = True
+LTP_FILE_LOG_INTERVAL_S = 1.0
 
 # EPS proxy thresholds used by ltp_log snapshot/burst diagnostics
 LTP_EPS_ERR_NEAR_MAX = LTP_EPS_SAT_RATIO
@@ -244,9 +245,9 @@ LAT_ACCEL_FACTOR_ASSIST_RATE_STRONG_LIMIT = 0.18
 # ===== B-plan / Safety knobs =====
 # Clean-only, event-driven parameter updates. Targets are accepted only after
 # meaningful new non-limited corner evidence, so values do not drift every frame.
-CLEAN_PARAM_UPDATE_MIN_NEW_POINTS = 120
-CLEAN_PARAM_UPDATE_MIN_INTERVAL_S = 15.0
-CLEAN_PARAM_UPDATE_SETTLE_S = 2.0
+CLEAN_PARAM_UPDATE_MIN_NEW_POINTS = 60
+CLEAN_PARAM_UPDATE_MIN_INTERVAL_S = 8.0
+CLEAN_PARAM_UPDATE_SETTLE_S = 0.75
 CLEAN_LAT_FACTOR_DEADBAND = 0.006
 CLEAN_LAT_FACTOR_MAX_STEP = 0.004
 CLEAN_FRICTION_DEADBAND = 0.003
@@ -287,21 +288,21 @@ SOFT_LIVEVALID_MIN_POINTS_HISPD = 700
 
 # Warm start(재시작 복원) 상태 파일
 LTP_STATE_VERSION = 3
-LTP_STATE_SAVE_INTERVAL_S = 20.0  # faster warm-state persistence
+LTP_STATE_SAVE_INTERVAL_S = 15.0  # faster warm-state persistence
 LTP_STATE_PATH = os.path.join(LTP_LOG_DIR, "ltp_state.json")
 LTP_STATE_PATH_PKL = os.path.join(LTP_LOG_DIR, "ltp_state.pkl")
 
 # Warm restore compatibility
 LTP_WARM_COMPAT_MAX_VERSION_GAP = 0  # strict reset: VERSION mismatch must not restore old live-torque state
-LTP_STATE_SAVE_MIN_DELTA_PTS = 300  # save sooner when many new points are added
+LTP_STATE_SAVE_MIN_DELTA_PTS = 150  # save sooner when many new points are added
 
 # Tunables
 # -----------------------------
 HISTORY = 5  # secs
 POINTS_PER_BUCKET = 1500
-MIN_POINTS_TOTAL = 1500
+MIN_POINTS_TOTAL = 900
 MIN_POINTS_TOTAL_QLOG = 500
-FIT_POINTS_TOTAL = 2000
+FIT_POINTS_TOTAL = 1200
 FIT_POINTS_TOTAL_QLOG = 600
 
 # Velocity thresholds (m/s). 10 km/h ≈ 2.78 m/s
@@ -328,7 +329,7 @@ PARK_VEL_MS = 0.30  # 정지/파킹 판정
 FREEZE_AFTER_STOP_S = 2.0  # 정지 후 추가 홀드
 
 # Sample decimation (버킷 폭증 억제)
-CORNER_KEEP_PROB = 0.18  # 기본 코너 포인트 채택 확률
+CORNER_KEEP_PROB = 0.55  # clean/stable corner sample acceptance
 STRAIGHT_KEEP_PROB = 0.04  # 기본 직선 포인트 채택 확률: 고속 직선 과학습 방지
 
 # --- Context-aware learning policy ---
@@ -350,8 +351,8 @@ MID_CURVE_YAW_MAX = 0.18
 MID_CURVE_LATACC_MIN = 0.25
 MID_CURVE_LATACC_MAX = 2.20
 MID_CURVE_STEER_MIN = 0.08
-MID_CURVE_KEEP_MULT = 1.70  # 0.18 -> 약 0.31
-S_CURVE_KEEP_MULT = 1.25    # S자 반복이면 약 0.39까지
+MID_CURVE_KEEP_MULT = 1.35
+S_CURVE_KEEP_MULT = 1.15
 S_CURVE_LOOKBACK_S = 8.0
 S_CURVE_MIN_SIGN_GAP_S = 0.8
 MID_CURVE_TIMES_BONUS = 1
@@ -359,6 +360,14 @@ S_CURVE_TIMES_BONUS = 1
 
 # Point replication cap (times)
 MAX_POINT_TIMES = 8
+
+# Reject curve-entry/exit samples where commanded torque and measured vehicle
+# response still point in different directions. These samples dominated the
+# previous fast fit and pulled the Equinox factor far below its physical band.
+CORNER_COHERENCE_MIN_STEER = 0.03
+CORNER_COHERENCE_MIN_LATACC = 0.08
+CORNER_COHERENCE_MIN_YAWRATE = 0.012
+CORNER_COHERENCE_SETTLE_S = 0.20
 
 # --- 고조향/리밋 샘플 수집 옵션 ---
 RATE_LIMITED_MIX_ENABLED = False
@@ -537,7 +546,7 @@ QUALITY_STEER_PRESSED_LOW_SPEED_KPH = 30.0
 QUALITY_STEER_PRESSED_EXTEND_GUARD_KPH = 30.0
 QUALITY_FREEZE_HOLD_S = 0.65
 
-VERSION = 38  # Clean-corner-only learning; discard pre-v38 mixed limited state
+VERSION = 39  # Direction-coherent fast learning; discard pre-v39 contaminated state
 
 
 def slope2rot(slope):
@@ -560,6 +569,26 @@ def _finite(val):
 
 def _sanitize_num(val, fallback):
     return float(val) if _finite(val) else float(fallback)
+
+
+def corner_sample_direction(steer, lateral_accel, yaw_rate):
+    """Return a coherent turn direction, or zero for transition/noise data."""
+    try:
+        steer = float(steer)
+        lateral_accel = float(lateral_accel)
+        yaw_rate = float(yaw_rate)
+        if not (np.isfinite(steer) and np.isfinite(lateral_accel) and np.isfinite(yaw_rate)):
+            return 0
+        if (abs(steer) < CORNER_COHERENCE_MIN_STEER or
+                abs(lateral_accel) < CORNER_COHERENCE_MIN_LATACC or
+                abs(yaw_rate) < CORNER_COHERENCE_MIN_YAWRATE):
+            return 0
+        steer_sign = 1 if steer > 0.0 else -1
+        if (steer * lateral_accel) <= 0.0 or (steer * yaw_rate) <= 0.0:
+            return 0
+        return steer_sign
+    except Exception:
+        return 0
 
 
 def _median_safe(vals):
@@ -947,6 +976,12 @@ class TorqueEstimator:
         self._ltp_corner_times_last = 1
         self._ltp_straight_prob_last = 0.0
         self._s_curve_sign_hist = deque(maxlen=48)
+        self._corner_coherent_sign = 0
+        self._corner_coherent_since = None
+        self._ltp_corner_direction_coherent = False
+        self._ltp_corner_direction_settled = False
+        self._ltp_direction_rejected = 0
+        self._ltp_limited_discarded = 0
 
         self.last_lat_active = False
         self.last_steer_desired = None
@@ -989,6 +1024,7 @@ class TorqueEstimator:
         self._log_dir = LTP_LOG_DIR
         self._log_date = None
         self._log_path = None
+        self._last_file_log_mono = -1e9
 
         # snapshot + burst/event trace state
         self._burst_dir = LTP_BURST_LOG_DIR
@@ -1184,6 +1220,28 @@ class TorqueEstimator:
             )
         except Exception:
             return False
+
+    def _corner_direction_ready(self, t: float, steer: float, lateral_acc: float, yaw_rate: float) -> bool:
+        """Require one stable response direction before admitting fit samples."""
+        direction = corner_sample_direction(steer, lateral_acc, yaw_rate)
+        coherent = direction != 0
+        self._ltp_corner_direction_coherent = bool(coherent)
+
+        if not coherent:
+            self._corner_coherent_sign = 0
+            self._corner_coherent_since = None
+            self._ltp_corner_direction_settled = False
+            return False
+
+        now = float(t)
+        if direction != int(getattr(self, "_corner_coherent_sign", 0) or 0):
+            self._corner_coherent_sign = int(direction)
+            self._corner_coherent_since = now
+
+        since = self._corner_coherent_since
+        settled = bool(since is not None and (now - float(since)) >= float(CORNER_COHERENCE_SETTLE_S))
+        self._ltp_corner_direction_settled = settled
+        return settled
 
     def _mid_curve_good(self, v_kph: float, yaw_rate: float, lateral_acc: float, steer: float) -> bool:
         try:
@@ -1653,6 +1711,12 @@ class TorqueEstimator:
             self._rate_transient_until = 0.0
             self._last_desired_delta = 0.0
             self._last_applied_delta = 0.0
+            self._corner_coherent_sign = 0
+            self._corner_coherent_since = None
+            self._ltp_corner_direction_coherent = False
+            self._ltp_corner_direction_settled = False
+            self._ltp_direction_rejected = 0
+            self._ltp_limited_discarded = 0
         except Exception:
             pass
         self.corner_points = PointBuckets(
@@ -2468,20 +2532,44 @@ class TorqueEstimator:
 
                 self._update_straight_window_stats()
 
-                min_steer = 0.005
+                min_steer = float(CORNER_COHERENCE_MIN_STEER)
                 max_latacc = LAT_ACC_THRESHOLD + 1.0
 
                 # === 코너 데이터 수집 (20 km/h부터) ===
-                if (not any(steer_override)) and (lat_active) and (vego > MIN_VEL_CURVE_MS) and (
-                        abs(steer) > min_steer) and (abs(lateral_acc) <= max_latacc) and (not is_frozen):
+                corner_context_ok = bool(
+                    (not any(steer_override)) and lat_active and (vego > MIN_VEL_CURVE_MS) and
+                    (abs(steer) > min_steer) and (abs(lateral_acc) <= max_latacc) and (not is_frozen)
+                )
+                actuator_limited_now = bool(
+                    self.last_steer_clip or self.last_max_limited or
+                    self.last_rate_limited or self.last_rate_limited_strong)
+                if corner_context_ok and actuator_limited_now:
+                    self._clean_learning_block_until = max(
+                        float(getattr(self, "_clean_learning_block_until", 0.0) or 0.0),
+                        float(self.last_time or 0.0) + float(CLEAN_PARAM_UPDATE_SETTLE_S))
+                response_settling_now = bool(
+                    float(self.last_time or 0.0) <
+                    float(getattr(self, "_clean_learning_block_until", 0.0) or 0.0))
+
+                if corner_context_ok:
+                    direction_ready = self._corner_direction_ready(
+                        float(t), float(steer), float(lateral_acc), float(yaw_rate))
+                else:
+                    direction_ready = self._corner_direction_ready(float(t), 0.0, 0.0, 0.0)
+
+                if corner_context_ok and not direction_ready:
+                    self._ltp_direction_rejected = int(
+                        getattr(self, "_ltp_direction_rejected", 0) or 0) + 1
+
+                if corner_context_ok and direction_ready:
                     abs_s = abs(steer)
 
                     if abs_s >= 0.9:
-                        keep_prob = 0.65
+                        keep_prob = 0.85
                     elif abs_s >= 0.7:
-                        keep_prob = 0.45
+                        keep_prob = 0.75
                     elif abs_s >= 0.5:
-                        keep_prob = 0.28
+                        keep_prob = 0.65
                     else:
                         keep_prob = CORNER_KEEP_PROB
 
@@ -2498,19 +2586,7 @@ class TorqueEstimator:
 
                         keep_prob = float(np.clip(keep_prob, 0.05, 0.95))
 
-                    is_clip = bool(self.last_steer_clip)
-                    is_max_limited = bool(self.last_max_limited)
-                    is_rate_limited_strong = bool(self.last_rate_limited_strong)
-                    is_rate_limited = bool(self.last_rate_limited) or is_rate_limited_strong
-                    actuator_limited = bool(is_clip or is_max_limited or is_rate_limited)
-                    if actuator_limited:
-                        self._clean_learning_block_until = max(
-                            float(getattr(self, "_clean_learning_block_until", 0.0) or 0.0),
-                            float(self.last_time or 0.0) + float(CLEAN_PARAM_UPDATE_SETTLE_S))
-                    response_settling = bool(
-                        float(self.last_time or 0.0) <
-                        float(getattr(self, "_clean_learning_block_until", 0.0) or 0.0))
-                    is_limited = bool(actuator_limited or response_settling)
+                    is_limited = bool(actuator_limited_now or response_settling_now)
 
                     times_lat = 1
                     if abs(lateral_acc) > 1.2:
@@ -3050,6 +3126,12 @@ class TorqueEstimator:
         if not LTP_FILE_LOGGING_ENABLED:
             return
         try:
+            log_mono = (float(self.last_time) if self.last_time is not None and np.isfinite(self.last_time)
+                        else float(time.monotonic()))
+            if (log_mono - float(getattr(self, "_last_file_log_mono", -1e9))) < float(LTP_FILE_LOG_INTERVAL_S):
+                return
+            self._last_file_log_mono = float(log_mono)
+
             os.makedirs(self._log_dir, exist_ok=True)
             now = datetime.now(KST)
             date_str = now.strftime("%Y_%m_%d")
@@ -3190,6 +3272,12 @@ class TorqueEstimator:
                 "dyn_mid_gate_est": round(float(dyn_mid_gate), 4),
                 "dyn_high_gate_est": round(float(dyn_high_gate), 4),
                 "total_pts": int(ltp.totalBucketPoints),
+                "clean_corner_pts": int(len(self.corner_points)),
+                "clean_accepted_run": int(getattr(self, "_clean_points_accepted_total", 0) or 0),
+                "direction_coherent": bool(getattr(self, "_ltp_corner_direction_coherent", False)),
+                "direction_settled": bool(getattr(self, "_ltp_corner_direction_settled", False)),
+                "direction_rejected_run": int(getattr(self, "_ltp_direction_rejected", 0) or 0),
+                "limited_discarded_run": int(getattr(self, "_ltp_limited_discarded", 0) or 0),
                 "decay": round(float(ltp.decay), 3),
                 "resets": int(self.resets),
 
