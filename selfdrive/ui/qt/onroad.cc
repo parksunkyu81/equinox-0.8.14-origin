@@ -893,8 +893,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     textColor = QColor(225, 255, 239, 255);
   }
 
-  configFont(p, "Open Sans", 38, "Bold");
-  drawText(p, x, y2-20, "PEDAL STATUS", 52);
+  configFont(p, "Open Sans", 28, "Bold");
+  drawText(p, x, y2-20, "PEDAL STATUS", 200);
 
   configFont(p, "Open Sans", textSize, "Bold");
   drawTextWithColor(p, x, y2+50, str, textColor);
