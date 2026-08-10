@@ -782,6 +782,12 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                           "../assets/offroad/icon_road.png",
                                           this));
 
+  toggles.append(new ParamControl("DrivingStyleAI",
+                                          "Driving Style AI Integration",
+                                          "Learn the driver's acceleration, braking, and following preferences and apply bounded adjustments to pedal response and following distance.",
+                                          "../assets/offroad/icon_road.png",
+                                          this));
+
   for(ParamControl *toggle : toggles) {
     if(main_layout->count() != 0) {
       toggleLayout->addWidget(horizontal_line());

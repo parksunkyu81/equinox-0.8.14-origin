@@ -677,6 +677,13 @@ struct ControlsState @0x97ff69c53601abf1 {
   stopAccelBoostRawAccel @134 :Float32;
   stopAccelBoostFinalAccel @135 :Float32;
   stopAccelBoostFactor @136 :Float32;
+  drivingStyleAIActive @137 :Bool;
+  drivingStyleAIGain @138 :Float32;
+  drivingStyleAITrOffset @139 :Float32;
+  drivingStyleAIConfidence @140 :Float32;
+  drivingStyleAIGasEvents @141 :UInt32;
+  drivingStyleAIBrakeEvents @142 :UInt32;
+  drivingStyleAIStableFollowSec @143 :Float32;
 
 
 

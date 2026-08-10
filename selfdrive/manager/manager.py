@@ -66,6 +66,10 @@ def manager_init() -> None:
     ("IsLowSpeedFactor", "1"),
     ("closeToRoadEdge", "0"),
     ("ActiveStopAccelBoost", "0"),
+    ("DrivingStyleAI", "0"),
+    ("DrivingStyleAIGain", "1.0"),
+    ("DrivingStyleAITrOffset", "0.0"),
+    ("DrivingStyleAIConfidence", "0.0"),
     ("E2ELong", "0"),
 
     ("TorqueFriction", "120"),

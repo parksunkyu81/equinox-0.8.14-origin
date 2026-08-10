@@ -137,6 +137,7 @@ class DynamicFollow:
     self.lead_data = LeadData()
     self.df_data = dfData()  # dynamic follow data
     self.base_TR = DEFAULT_TR
+    self.base_TR_unadjusted = DEFAULT_TR
 
     self.lead_launch_state = LEAD_LAUNCH_IDLE
     self.lead_launch_blend = 0.0
@@ -164,13 +165,14 @@ class DynamicFollow:
       self._gather_data()
 
     if not self.lead_data.status:
-      self.base_TR = DEFAULT_TR
+      self.base_TR_unadjusted = DEFAULT_TR
       #print("if not self.lead_data.status: ======================================== : ", self.TR)
     else:
       self._store_df_data()
-      self.base_TR = self._get_TR()
+      self.base_TR_unadjusted = self._get_TR()
       #print("if self.lead_data.status: ======================================== : ", self.TR)
 
+    self.base_TR = self._apply_driving_style_tr(self.base_TR_unadjusted)
     self.TR = self._update_lead_launch_TR(self.base_TR)
 
     if not travis:
@@ -184,6 +186,11 @@ class DynamicFollow:
     self.user_profile = df_out.user_profile
     if df_out.is_auto:  # todo: find some way to share prediction between the two mpcs to reduce processing overhead
       self._get_pred()  # sets self.model_profile, all other checks are inside function
+
+  def _apply_driving_style_tr(self, base_tr):
+    if not self.driving_style_ai_enabled:
+      return float(base_tr)
+    return float(clip(float(base_tr) + self.driving_style_tr_offset, self.min_TR, 2.7))
 
   def _gather_data(self):
     self.sm_collector.update(0)
@@ -542,6 +549,14 @@ class DynamicFollow:
     # switch takes effect without restarting controls.
     params = Params()
     self.stop_accel_boost_enabled = params.get_bool("ActiveStopAccelBoost")
+    self.driving_style_ai_enabled = params.get_bool("DrivingStyleAI")
+    try:
+      self.driving_style_tr_offset = float(params.get("DrivingStyleAITrOffset", encoding="utf8") or 0.0)
+    except (TypeError, ValueError):
+      self.driving_style_tr_offset = 0.0
+    if not math.isfinite(self.driving_style_tr_offset):
+      self.driving_style_tr_offset = 0.0
+    self.driving_style_tr_offset = float(clip(self.driving_style_tr_offset, -0.20, 0.40))
 
     #self.global_df_mod = self.op_params.get('global_df_mod')
     self.global_df_mod = float(params.get("globalDfMod", encoding="utf8"))

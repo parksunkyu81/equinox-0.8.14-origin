@@ -116,7 +116,11 @@ class CarController():
                           )
 
         # 연비 향상을 위해 클리핑
-        self.comma_pedal = clip(acc_mult * actuators.accel, 0.0, 0.85)  # Actual comma-pedal command range: 0.00..0.85
+        # Driving-style gain is neutral (1.0) while disabled and is independently
+        # bounded by the learner. Keep a second local clamp as a controller-side
+        # defense and preserve the existing absolute comma-pedal ceiling.
+        learned_gain = clip(float(getattr(controls, 'driving_style_gain', 1.0)), 0.90, 1.12)
+        self.comma_pedal = clip(acc_mult * actuators.accel * learned_gain, 0.0, 0.85)  # Actual comma-pedal command range: 0.00..0.85
 
         # self.comma_pedal = pedal_command
       else:

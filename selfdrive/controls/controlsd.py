@@ -45,6 +45,7 @@ from selfdrive.controls.lib.curve_speed_limiter import (
 )
 from selfdrive.controls.lib.panda_safety import panda_safety_config_matches, update_panda_safety_readiness
 from selfdrive.controls.lib.process_health import expected_not_running_processes, update_process_not_running_state
+from selfdrive.controls.lib.driving_style_learner import DrivingStyleLearner
 from selfdrive.process_diagnostics import append_process_diagnostic
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
@@ -251,6 +252,9 @@ class Controls:
         self.right_lane_visible = False
         self.stop_accel_boost_latch = StopAccelBoostLatch()
         self.stop_accel_boost_active = False
+        self.driving_style_learner = DrivingStyleLearner(params=params)
+        self.driving_style_status = self.driving_style_learner.status(0.0)
+        self.driving_style_gain = 1.0
 
         self.wide_camera = TICI and params.get_bool('EnableWideCamera')
         self.disable_op_fcw = params.get_bool('DisableOpFcw')
@@ -1117,6 +1121,38 @@ class Controls:
                 lac_log.output = steer
                 lac_log.saturated = abs(steer) >= 0.9
 
+        # Event-based driver-style learning. Inputs are evaluated only in clean,
+        # straight, stable-control context. Curve slowdown, lane changes, FCW,
+        # and stop-launch boost are excluded so those safety/context responses
+        # are not mistaken for driver preference.
+        lane_change_active = lat_plan.laneChangeState != LaneChangeState.off
+        style_unsafe_context = bool(self.joystick_mode or not self.CP.enableGasInterceptor or
+                                    CS.leftBlinker or CS.rightBlinker or lane_change_active or
+                                    self.is_curv_driving or long_plan.fcw or
+                                    self.stop_accel_boost_active)
+        style_lead_valid = bool(dynamic_follow_valid and dynamic_follow.leadDistance > 0.0)
+        self.driving_style_status = self.driving_style_learner.update(
+          v_ego=CS.vEgo,
+          a_ego=CS.aEgo,
+          gas=CS.gas,
+          gas_pressed=CS.gasPressed,
+          brake=CS.brake,
+          brake_pressed=CS.brakePressed,
+          cruise_enabled=CS.cruiseState.enabled,
+          control_active=self.active and self.CP.enableGasInterceptor,
+          requested_accel=actuators.accel,
+          lead_valid=style_lead_valid,
+          lead_distance=dynamic_follow.leadDistance if style_lead_valid else 0.0,
+          lead_rel_speed=dynamic_follow.leadRelativeSpeed if style_lead_valid else 0.0,
+          base_tr=dynamic_follow.mpcTR if dynamic_follow_valid else 1.3,
+          unsafe_context=style_unsafe_context,
+          can_valid=CS.canValid,
+          dt=DT_CTRL)
+        # Never stack learned pedal gain on top of the dedicated 30% lead-launch
+        # boost. The learner remains bounded, but the two features serve
+        # different purposes and must not compound each other.
+        self.driving_style_gain = 1.0 if self.stop_accel_boost_active else self.driving_style_status.gain
+
         # Send a "steering required alert" if saturation count has reached the limit (조향 제어 초과)
         if lac_log.active and lac_log.saturated and not CS.steeringPressed:
             dpath_points = lat_plan.dPathPoints
@@ -1323,6 +1359,13 @@ class Controls:
         controlsState.stopAccelBoostRawAccel = float(self.LoC.stop_accel_boost_raw_accel)
         controlsState.stopAccelBoostFinalAccel = float(self.LoC.stop_accel_boost_final_accel)
         controlsState.stopAccelBoostFactor = float(STOP_ACCEL_BOOST_FACTOR)
+        controlsState.drivingStyleAIActive = bool(self.driving_style_status.enabled)
+        controlsState.drivingStyleAIGain = float(self.driving_style_gain)
+        controlsState.drivingStyleAITrOffset = float(self.driving_style_status.tr_offset)
+        controlsState.drivingStyleAIConfidence = float(self.driving_style_status.confidence)
+        controlsState.drivingStyleAIGasEvents = int(self.driving_style_status.gas_events)
+        controlsState.drivingStyleAIBrakeEvents = int(self.driving_style_status.brake_events)
+        controlsState.drivingStyleAIStableFollowSec = float(self.driving_style_status.stable_follow_s)
 
         controlsState.totalCameraOffset = totalCameraOffset
 
