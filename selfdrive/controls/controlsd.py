@@ -39,14 +39,16 @@ from selfdrive.car.gm.values import MIN_CURVE_SPEED
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.stop_accel_boost import STOP_ACCEL_BOOST_FACTOR, StopAccelBoostLatch
 from selfdrive.controls.lib.curve_speed_limiter import CurveSpeedLimiter, CURVE_SPEED_DISABLED
+from selfdrive.controls.lib.panda_safety import panda_safety_config_matches, update_panda_safety_readiness
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
 
 SOFT_DISABLE_TIME = 3  # seconds
-# controlsAllowed mismatch는 CAN/pandaState 수신 타이밍 차이로 순간 발생할 수 있으므로
-# 연속 mismatch만 controlsMismatch로 처리한다. 100Hz 기준 10프레임 = 약 100ms.
-CONTROLS_ALLOWED_MISMATCH_FRAMES = 10
+# Gate engagement until the final Panda safety configuration is stable. After engagement,
+# debounce only the short controlsAllowed message skew; safety configuration changes stay immediate.
+PANDA_SAFETY_MATCH_FRAMES = 10  # 100 ms at 100 Hz
+CONTROLS_ALLOWED_MISMATCH_FRAMES = 25  # 250 ms at 100 Hz
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
@@ -204,6 +206,8 @@ class Controls:
         self.applyMaxSpeed = 0
 
         self.mismatch_counter = 0
+        self.panda_safety_ready = False
+        self.panda_safety_match_counter = 0
         self.last_safety_mismatch_log_frame = -1000000
         self.last_controls_allowed_mismatch_log_frame = -1000000
         self.cruise_mismatch_counter = 0
@@ -445,6 +449,22 @@ class Controls:
             self.events.add(EventName.controlsInitializing)
             return
 
+        panda_states_valid = self.sm.valid["pandaStates"]
+        panda_safety_matches = panda_states_valid and panda_safety_config_matches(
+            self.sm['pandaStates'], self.CP.safetyConfigs, self.CP.alternativeExperience,
+            IGNORED_SAFETY_MODES)
+
+        # ControlsReady lets boardd apply CarParams. Do not allow engagement until the
+        # resulting Panda safety configuration has remained correct for a short period.
+        if not self.panda_safety_ready:
+            self.panda_safety_ready, self.panda_safety_match_counter = update_panda_safety_readiness(
+                self.panda_safety_ready, self.panda_safety_match_counter,
+                panda_safety_matches, PANDA_SAFETY_MATCH_FRAMES)
+            if self.panda_safety_ready:
+                cloudlog.info("Panda safety configuration ready")
+            else:
+                self.events.add(EventName.controlsInitializing)
+
         self.events.add_from_msg(CS.events)
         self.events.add_from_msg(self.sm['driverMonitoringState'].events)
 
@@ -519,7 +539,8 @@ class Controls:
                                       pandaState.safetyParam != expected_safety.safetyParam or \
                                       pandaState.alternativeExperience != self.CP.alternativeExperience
 
-                    if safety_mismatch and (self.sm.frame - self.last_safety_mismatch_log_frame) > int(1. / DT_CTRL):
+                    if self.panda_safety_ready and safety_mismatch and \
+                            (self.sm.frame - self.last_safety_mismatch_log_frame) > int(1. / DT_CTRL):
                         cloudlog.warning(
                             "controlsMismatch safety mismatch: "
                             f"idx={i} "
@@ -531,18 +552,30 @@ class Controls:
                 else:
                     safety_mismatch = pandaState.safetyModel not in IGNORED_SAFETY_MODES
 
-                    if safety_mismatch and (self.sm.frame - self.last_safety_mismatch_log_frame) > int(1. / DT_CTRL):
+                    if self.panda_safety_ready and safety_mismatch and \
+                            (self.sm.frame - self.last_safety_mismatch_log_frame) > int(1. / DT_CTRL):
                         cloudlog.warning(
                             "controlsMismatch extra panda not ignored: "
                             f"idx={i} pandaModel={pandaState.safetyModel}"
                         )
                         self.last_safety_mismatch_log_frame = self.sm.frame
 
-                if safety_mismatch:
+                if self.panda_safety_ready and safety_mismatch:
                     self.events.add(EventName.controlsMismatch)
 
                 if log.PandaState.FaultType.relayMalfunction in pandaState.faults:
                     self.events.add(EventName.relayMalfunction)
+
+            # Catch a missing expected Panda, which cannot be represented by the per-item loop.
+            if self.panda_safety_ready and not panda_safety_matches:
+                if len(self.sm['pandaStates']) < len(self.CP.safetyConfigs) and \
+                        (self.sm.frame - self.last_safety_mismatch_log_frame) > int(1. / DT_CTRL):
+                    cloudlog.warning(
+                        "controlsMismatch missing panda: "
+                        f"actualCount={len(self.sm['pandaStates'])} expectedCount={len(self.CP.safetyConfigs)}"
+                    )
+                    self.last_safety_mismatch_log_frame = self.sm.frame
+                self.events.add(EventName.controlsMismatch)
 
         # controlsAllowed mismatch는 순간값 누적이 아니라 연속 프레임만 카운트한다.
         if self.mismatch_counter >= CONTROLS_ALLOWED_MISMATCH_FRAMES:
