@@ -189,6 +189,8 @@ class Controls:
         self.max_speed_clu = 0.
         self.curve_speed_ms = 0.
         self.curve_speed_limiter = CurveSpeedLimiter()
+        self.is_curv_driving = False
+        self.curv_speed = 0.0
         self._curve_log_last_t = -1e9
         self._curve_log_date = None
         self._curve_log_path = None
@@ -515,6 +517,14 @@ class Controls:
             curv_limit = int(max_speed_clu)
         else:
             max_speed_clu = self.kph_to_clu(self.v_cruise_kph)
+
+        # onroad CURV indicator: show the configured curve target while curve
+        # slowdown is actively available to the engaged cruise controller.
+        self.is_curv_driving = bool(curv_limit > 0 and CS.cruiseState.enabled)
+        # The configured curve target is fixed at MIN_CURVE_SPEED. The applied
+        # speed still approaches it through the safety filters above.
+        self.curv_speed = (float(MIN_CURVE_SPEED) * CV.MS_TO_KPH
+                           if self.is_curv_driving else 0.0)
 
         if road_speed_limiter.roadLimitSpeed is not None:
             camSpeedFactor = clip(road_speed_limiter.roadLimitSpeed.camSpeedFactor, 1.0, 1.1)
@@ -1286,6 +1296,10 @@ class Controls:
         controlsState.sccGasFactor = ntune_scc_get('sccGasFactor')
         controlsState.sccBrakeFactor = ntune_scc_get('sccBrakeFactor')
         controlsState.sccCurvatureFactor = ntune_scc_get('sccCurvatureFactor')
+
+        # Curve slowdown state consumed by the onroad CURV indicator.
+        controlsState.curvDriving = bool(self.is_curv_driving)
+        controlsState.curvSpeed = float(self.curv_speed)
 
         # Live Torque
         controlsState.latAccelFactor = self.torque_latAccelFactor

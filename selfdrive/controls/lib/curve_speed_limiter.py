@@ -5,7 +5,10 @@ from selfdrive.modeld.constants import T_IDXS
 
 
 CURVE_SPEED_DISABLED = 255.0
-CURVE_DECEL_MPS2 = 1.2
+# A lower assumed deceleration starts reducing the speed target farther ahead
+# of a curve. 0.8 m/s^2 keeps the approach comfortable while the confirmation
+# and output filters below continue to reject abrupt model changes.
+CURVE_DECEL_MPS2 = 0.8
 CURVE_ACTIVATION_MARGIN_MS = 0.5
 CURVE_CONFIRM_FRAMES = 2
 CURVE_INVALID_HOLD_FRAMES = 4
@@ -149,7 +152,12 @@ def calculate_curve_speed_details(curvatures, v_ego, cruise_speed, min_curve_spe
   diag["values_valid"] = True
   if allowed_now >= cruise_speed - CURVE_ACTIVATION_MARGIN_MS:
     return CURVE_SPEED_DISABLED, True, diag
-  raw_speed = max(min_curve_speed, allowed_now)
+
+  # This Equinox uses a gas interceptor without openpilot brake actuation.
+  # Once a real curve has crossed the slowdown threshold, command the fixed
+  # curve target so longitudinal control releases throttle early; the driver
+  # remains responsible for any braking needed to reach that speed.
+  raw_speed = min_curve_speed
   diag["raw_speed_ms"] = float(raw_speed)
   return float(raw_speed), True, diag
 
