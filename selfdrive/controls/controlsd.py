@@ -1,6 +1,8 @@
  #!/usr/bin/env python3
 import os
 import math
+import json
+import time
 import numpy as np
 from numbers import Number
 
@@ -38,7 +40,9 @@ from selfdrive.car.gm.values import MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.stop_accel_boost import STOP_ACCEL_BOOST_FACTOR, StopAccelBoostLatch
-from selfdrive.controls.lib.curve_speed_limiter import CurveSpeedLimiter, CURVE_SPEED_DISABLED
+from selfdrive.controls.lib.curve_speed_limiter import (
+  CurveSpeedLimiter, CURVE_SPEED_DISABLED, build_model_curve_profile, calculate_curve_speed,
+)
 from selfdrive.controls.lib.panda_safety import panda_safety_config_matches, update_panda_safety_readiness
 from selfdrive.controls.lib.process_health import expected_not_running_processes, update_process_not_running_state
 from selfdrive.process_diagnostics import append_process_diagnostic
@@ -185,6 +189,9 @@ class Controls:
         self.max_speed_clu = 0.
         self.curve_speed_ms = 0.
         self.curve_speed_limiter = CurveSpeedLimiter()
+        self._curve_log_last_t = -1e9
+        self._curve_log_date = None
+        self._curve_log_path = None
         self.v_cruise_kph_limit = 0
         self.applyMaxSpeed = 0
         self.roadLimitSpeedActive = 0
@@ -336,30 +343,154 @@ class Controls:
 
         return 0
 
-    def cal_curve_speed(self, sm, v_ego, frame):
+    def cal_curve_speed(self, sm, v_ego, frame, measured_curvature):
         lateralPlan = sm['lateralPlan']
         if not self.slow_on_curves:
             self.curve_speed_limiter.reset()
             self.curve_speed_ms = CURVE_SPEED_DISABLED
             return
 
-        # lateralPlan is produced at 20 Hz while controlsd runs at 100 Hz.
-        # Update the confirmation/filter only for a fresh plan so the timing is
-        # independent of the faster control loop.
-        if not sm.updated['lateralPlan']:
+        # modelV2 and lateralPlan are produced at 20 Hz while controlsd runs at
+        # 100 Hz. Prefer each fresh model frame and do not count the same model
+        # again when its derived lateralPlan arrives on a later control tick.
+        model_updated = bool(sm.updated['modelV2'])
+        lateral_plan_updated = bool(sm.updated['lateralPlan'])
+        if not (model_updated or lateral_plan_updated):
             return
 
         cruise_speed_ms = self.v_cruise_kph * CV.KPH_TO_MS
-        plan_valid = bool(sm.valid['lateralPlan'] and lateralPlan.mpcSolutionValid and
-                          len(lateralPlan.curvatures) == CONTROL_N)
         curvature_factor = 0.85 * ntune_scc_get("sccCurvatureFactor")
+
+        model = sm['modelV2']
+        model_curvatures, model_times, model_distances, model_profile_valid = build_model_curve_profile(
+          model.position.t,
+          model.orientationRate.z,
+          model.velocity.x, model.velocity.y, model.velocity.z,
+          model.position.x, model.position.y, model.position.z,
+          measured_curvature)
+        model_valid = bool(sm.valid['modelV2'] and model_profile_valid)
+        mpc_valid = bool(sm.valid['lateralPlan'] and lateralPlan.mpcSolutionValid and
+                         len(lateralPlan.curvatures) == CONTROL_N)
+
+        # A healthy model is the primary 20 Hz clock. lateralPlan is used only
+        # while the model itself is invalid, avoiding duplicate confirmation and
+        # filter updates from one piece of model evidence.
+        if not model_updated and model_valid:
+            return
+
+        if model_updated and model_valid:
+            curvatures = model_curvatures
+            time_idxs = model_times
+            distances = model_distances
+            source = "modelV2_33"
+            input_valid = True
+        elif lateral_plan_updated and mpc_valid:
+            curvatures = list(lateralPlan.curvatures)
+            if len(curvatures) > 0 and np.isfinite(measured_curvature):
+                curvatures[0] = math.copysign(
+                  max(abs(float(curvatures[0])), abs(float(measured_curvature))),
+                  float(curvatures[0]) if abs(float(curvatures[0])) > 1e-9 else float(measured_curvature))
+            time_idxs = None
+            distances = None
+            source = "lateralPlan_17_fallback"
+            input_valid = True
+        elif np.isfinite(measured_curvature) and calculate_curve_speed(
+              [measured_curvature], v_ego, cruise_speed_ms, MIN_CURVE_SPEED,
+              curvature_factor, time_idxs=[0.0])[0] < CURVE_SPEED_DISABLED:
+            # Keep an already-entered, physically measured curve recognized
+            # through a model/MPC dropout. A straight measurement is not treated
+            # as new evidence, so the previous safe limit is held briefly.
+            curvatures = [float(measured_curvature)]
+            time_idxs = [0.0]
+            distances = [0.0]
+            source = "measured_fallback"
+            input_valid = True
+        else:
+            curvatures = []
+            time_idxs = []
+            distances = []
+            source = "invalid"
+            input_valid = False
+
+        update_kwargs = {
+          "plan_valid": input_valid,
+          "distances": distances,
+          "source": source,
+        }
+        if time_idxs is not None:
+            update_kwargs["time_idxs"] = time_idxs
         self.curve_speed_ms = self.curve_speed_limiter.update(
-          lateralPlan.curvatures, v_ego, cruise_speed_ms, MIN_CURVE_SPEED,
-          curvature_factor, plan_valid=plan_valid)
+          curvatures, v_ego, cruise_speed_ms, MIN_CURVE_SPEED,
+          curvature_factor, **update_kwargs)
+        self.curve_speed_limiter.last_diag.update({
+          "model_valid": bool(model_valid),
+          "model_profile_points": int(len(model_curvatures)),
+          "mpc_valid": bool(mpc_valid),
+          "measured_curvature": float(measured_curvature) if np.isfinite(measured_curvature) else None,
+          "curvature_factor": float(curvature_factor),
+        })
+
+    def _log_curve_speed(self, v_ego, target_speed_clu, road_limit_speed,
+                         apply_limit_speed, curv_limit):
+        now_mono = sec_since_boot()
+        if v_ego < 1.0 or (now_mono - self._curve_log_last_t) < 1.0:
+            return
+        self._curve_log_last_t = float(now_mono)
+        try:
+            date_key = time.strftime("%Y_%m_%d", time.localtime())
+            if self._curve_log_date != date_key:
+                log_dir = "/data/curve_speed_logs"
+                os.makedirs(log_dir, exist_ok=True)
+                self._curve_log_date = date_key
+                self._curve_log_path = os.path.join(log_dir, "curve_speed_%s.log" % date_key)
+
+            diag = dict(getattr(self.curve_speed_limiter, "last_diag", {}) or {})
+            def _kph_from_ms(value):
+                try:
+                    return None if float(value) >= CURVE_SPEED_DISABLED else round(float(value) * 3.6, 3)
+                except (TypeError, ValueError):
+                    return None
+            def _number(value, default=0.0):
+                try:
+                    value = float(value)
+                    return value if np.isfinite(value) else float(default)
+                except (TypeError, ValueError):
+                    return float(default)
+
+            final_max_kph = float(self.max_speed_clu) * self.speed_conv_to_ms * CV.MS_TO_KPH
+            rec = {
+              "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+              "mono": round(float(now_mono), 3),
+              "v_kph": round(float(v_ego) * 3.6, 3),
+              "cruise_kph": round(float(self.v_cruise_kph), 3),
+              "source": str(diag.get("source", "unknown")),
+              "model_valid": bool(diag.get("model_valid", False)),
+              "model_profile_points": int(diag.get("model_profile_points", 0) or 0),
+              "mpc_valid": bool(diag.get("mpc_valid", False)),
+              "measured_curvature": diag.get("measured_curvature", None),
+              "max_curvature": diag.get("max_curvature", None),
+              "selected_curvature": diag.get("selected_curvature", None),
+              "selected_time_s": diag.get("selected_time_s", None),
+              "selected_distance_m": diag.get("selected_distance_m", None),
+              "raw_curve_kph": _kph_from_ms(diag.get("raw_speed_ms", CURVE_SPEED_DISABLED)),
+              "filtered_curve_kph": _kph_from_ms(diag.get("filtered_speed_ms", CURVE_SPEED_DISABLED)),
+              "confirmed": bool(diag.get("confirmed", False)),
+              "invalid_hold": bool(diag.get("invalid_hold", False)),
+              "curve_target_kph": round(float(target_speed_clu) * self.speed_conv_to_ms * CV.MS_TO_KPH, 3),
+              "curv_limit_clu": int(curv_limit),
+              "road_limit_speed": _number(road_limit_speed),
+              "apply_limit_speed": _number(apply_limit_speed),
+              "final_apply_max_kph": round(float(clip(
+                self.v_cruise_kph, MIN_SET_SPEED_KPH, final_max_kph)), 3),
+            }
+            with open(self._curve_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n")
+        except Exception:
+            cloudlog.exception("curve speed diagnostic logging failed")
 
 
     # [크루즈 MAX 속도 설정] #
-    def cal_max_speed(self, frame: int, vEgo, sm, CS):
+    def cal_max_speed(self, frame: int, vEgo, sm, CS, measured_curvature):
 
         road_speed_limiter = get_road_speed_limiter()
         # CS.vEgo is m/s; RoadSpeedLimiter and max_speed_clu use the active
@@ -376,7 +507,7 @@ class Controls:
         # print("max_speed_log : ", max_speed_log)
 
         curv_limit = 0
-        self.cal_curve_speed(sm, vEgo, frame)
+        self.cal_curve_speed(sm, vEgo, frame, measured_curvature)
         cruise_speed_ms = self.v_cruise_kph * CV.KPH_TO_MS
         if (self.slow_on_curves and MIN_CURVE_SPEED <= self.curve_speed_ms <
                 min(CURVE_SPEED_DISABLED, cruise_speed_ms)):
@@ -429,6 +560,7 @@ class Controls:
 
         self.update_max_speed(int(max_speed_clu + 0.5), CS,
                               curv_limit != 0 and curv_limit == int(max_speed_clu))
+        self._log_curve_speed(vEgo, max_speed_clu, road_limit_speed, apply_limit_speed, curv_limit)
         # print("update_max_speed() value : ", self.max_speed_clu)
 
         return road_limit_speed, left_dist, max_speed_log
@@ -1096,7 +1228,8 @@ class Controls:
         curvature = -self.VM.calc_curvature(steer_angle_without_offset, CS.vEgo, params.roll)
 
         # NDA Add.. (PSK)
-        road_limit_speed, left_dist, max_speed_log = self.cal_max_speed(self.sm.frame, CS.vEgo, self.sm, CS)
+        road_limit_speed, left_dist, max_speed_log = self.cal_max_speed(
+            self.sm.frame, CS.vEgo, self.sm, CS, curvature)
 
         # controlsState
         dat = messaging.new_message('controlsState')
