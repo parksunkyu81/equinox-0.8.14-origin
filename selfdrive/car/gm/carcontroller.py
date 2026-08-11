@@ -39,9 +39,9 @@ class CarController():
 
     P = self.params
 
-    # Panda keeps the absolute low-speed ceiling at 12/20. Apply the actual
-    # speed-dependent envelope here so high-speed lane changes and curves
-    # progressively return to the stock 7/17 response.
+    # Panda keeps the absolute low-speed ceiling at 14/20. Apply the actual
+    # speed-dependent envelope here so highway lane changes and curves return
+    # early to the stable 7/17 response.
     delta_up, delta_down = steer_delta_limits_ms(CS.out.vEgo)
     P.STEER_DELTA_UP = float(delta_up)
     P.STEER_DELTA_DOWN = float(delta_down)

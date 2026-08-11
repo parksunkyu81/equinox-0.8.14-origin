@@ -1,13 +1,14 @@
 import math
 
 
-# Panda enforces these as absolute ceilings. The controller tapers the actual
-# command rate back to the stock 7/17 envelope as vehicle speed rises.
-STEER_DELTA_BP_KPH = (0.0, 10.0, 35.0, 45.0, 60.0, 80.0, 130.0)
-STEER_DELTA_UP_V = (7.0, 12.0, 12.0, 10.0, 8.0, 7.0, 7.0)
-STEER_DELTA_DOWN_V = (17.0, 20.0, 20.0, 19.0, 18.0, 17.0, 17.0)
+# Panda enforces 14/20 as absolute ceilings. Use that extra response only in
+# the 11-35 kph low-speed cornering band, then taper early so highway steering
+# stays inside the stable 7/17 envelope.
+STEER_DELTA_BP_KPH = (0.0, 10.0, 11.0, 35.0, 45.0, 60.0, 70.0, 130.0)
+STEER_DELTA_UP_V = (7.0, 12.0, 14.0, 14.0, 11.0, 8.0, 7.0, 7.0)
+STEER_DELTA_DOWN_V = (17.0, 19.0, 20.0, 20.0, 19.0, 18.0, 17.0, 17.0)
 
-STEER_DELTA_UP_MAX = 12.0
+STEER_DELTA_UP_MAX = 14.0
 STEER_DELTA_DOWN_MAX = 20.0
 STEER_DELTA_UP_SAFE = 7.0
 STEER_DELTA_DOWN_SAFE = 17.0
