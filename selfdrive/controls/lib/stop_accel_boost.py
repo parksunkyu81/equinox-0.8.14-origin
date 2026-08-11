@@ -10,7 +10,7 @@ STOP_ACCEL_ZERO_EPS = 1e-3
 # lead; in that case the normal longitudinal planner remains authoritative.
 STOP_ACCEL_BOOST_LEAD_STOP_SPEED_MS = 0.20
 STOP_ACCEL_BOOST_CLOSING_REL_SPEED_MS = -0.30
-STOP_ACCEL_BOOST_MIN_LEAD_DISTANCE_M = 3.0
+STOP_ACCEL_BOOST_MIN_LEAD_DISTANCE_M = 1.5
 
 
 class StopAccelBoostLatch:
@@ -28,9 +28,12 @@ class StopAccelBoostLatch:
     lead_distance = float(lead_distance)
 
     lead_valid = lead_distance > 0.0
-    lead_stopped_again = lead_valid and lead_speed <= STOP_ACCEL_BOOST_LEAD_STOP_SPEED_MS
-    unsafe_approach = lead_valid and (lead_distance <= STOP_ACCEL_BOOST_MIN_LEAD_DISTANCE_M or
-                                      lead_relative_speed <= STOP_ACCEL_BOOST_CLOSING_REL_SPEED_MS)
+    lead_stopped_again = (lead_valid and
+                          lead_speed <= STOP_ACCEL_BOOST_LEAD_STOP_SPEED_MS and
+                          lead_relative_speed <= 0.0)
+    unsafe_approach = lead_valid and (
+      (lead_distance <= STOP_ACCEL_BOOST_MIN_LEAD_DISTANCE_M and lead_relative_speed <= 0.0) or
+      lead_relative_speed <= STOP_ACCEL_BOOST_CLOSING_REL_SPEED_MS)
 
     if (not system_ready or brake_pressed or
         v_ego >= STOP_ACCEL_BOOST_MAX_SPEED_MS or

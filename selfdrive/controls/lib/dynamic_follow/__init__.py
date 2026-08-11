@@ -27,21 +27,28 @@ LEAD_LAUNCH_TR = 1.0
 LEAD_LAUNCH_MIN_EGO_KPH = 1.0
 LEAD_LAUNCH_MAX_EGO_KPH = 25.0
 LEAD_LAUNCH_ARM_MAX_EGO_KPH = 5.0
-LEAD_STOP_SPEED_MS = 0.20
-# Start reacting as soon as a previously-confirmed stopped lead is clearly
-# rolling.  Keep a small hysteresis above LEAD_STOP_SPEED_MS to reject radar
-# zero-speed noise without waiting for the lead to reach 2.9 km/h.
+LEAD_STOP_SPEED_MS = 0.50
+LEAD_RESTOP_SPEED_MS = 0.20
+# A stopped GM radar lead can report up to roughly 0.5 m/s. Confirm that its
+# distance is stable before arming, then require either a measurable distance
+# increase or a stronger speed signal before declaring a launch.
 LEAD_START_SPEED_MS = 0.30
+LEAD_START_STRONG_SPEED_MS = 0.65
 LEAD_START_REL_SPEED_MS = 0.05
+LEAD_START_DISTANCE_DELTA_M = 0.20
 LEAD_LAUNCH_CLOSING_REL_SPEED_MS = -0.3
-LEAD_LAUNCH_MIN_DISTANCE_M = 3.0
+LEAD_LAUNCH_MIN_DISTANCE_M = 1.5
 LEAD_LAUNCH_MAX_ARM_DISTANCE_M = 30.0
 LEAD_LAUNCH_DISTANCE_JUMP_M = 8.0
-LEAD_STOP_CONFIRM_S = 0.8
+LEAD_LAUNCH_CONTINUOUS_NEW_LEAD_M = 2.0
+LEAD_STOP_DISTANCE_STABILITY_M = 0.60
+LEAD_STOP_CONFIRM_S = 0.5
 LEAD_START_CONFIRM_S = 0.05
-LEAD_LAUNCH_VISION_DROPOUT_FRAMES = 3
+LEAD_LAUNCH_VISION_DROPOUT_FRAMES = 6
 LEAD_LAUNCH_ARM_HOLD_S = 2.0
+LEAD_LAUNCH_BRAKE_ARM_HOLD_S = 3.0
 LEAD_LAUNCH_SPEED_FILTER_SAMPLES = 3
+LEAD_LAUNCH_DISTANCE_FILTER_SAMPLES = 5
 LEAD_LAUNCH_MAX_ACTIVE_S = 6.0
 LEAD_LAUNCH_BLEND_IN_S = 0.15
 LEAD_LAUNCH_BLEND_OUT_S = 1.5
@@ -145,8 +152,10 @@ class DynamicFollow:
     self.lead_launch_start_since = None
     self.lead_launch_started_at = None
     self.lead_launch_armed_until = None
+    self.lead_launch_armed_distance = None
     self.lead_launch_dropout_frames = 0
     self.lead_launch_speed_samples = deque(maxlen=LEAD_LAUNCH_SPEED_FILTER_SAMPLES)
+    self.lead_launch_distance_samples = deque(maxlen=LEAD_LAUNCH_DISTANCE_FILTER_SAMPLES)
     self.lead_launch_filtered_speed = None
     self.last_launch_lead_status = False
     self.last_launch_lead_distance = None
@@ -280,8 +289,10 @@ class DynamicFollow:
     self.lead_launch_start_since = None
     self.lead_launch_started_at = None
     self.lead_launch_armed_until = None
+    self.lead_launch_armed_distance = None
     self.lead_launch_dropout_frames = 0
     self.lead_launch_speed_samples.clear()
+    self.lead_launch_distance_samples.clear()
     self.lead_launch_filtered_speed = None
     if immediate:
       self.lead_launch_blend = 0.0
@@ -302,13 +313,17 @@ class DynamicFollow:
       return float(base_TR)
 
     lead_values_valid = bool(lead_status and math.isfinite(v_lead) and math.isfinite(x_lead))
-    control_cancel = not self.car_data.cruise_enabled or self.car_data.brake_pressed
+    # Preserve a confirmed stationary lead while the driver holds the brake.
+    # Brake still blocks the controller latch and all acceleration output. If
+    # the brake is pressed after boost starts, cancel immediately as before.
+    control_cancel = not self.car_data.cruise_enabled
 
-    if control_cancel:
+    if control_cancel or (self.car_data.brake_pressed and
+                          self.lead_launch_state == LEAD_LAUNCH_ACTIVE):
       self._reset_lead_launch(immediate=True)
     elif not lead_values_valid:
       # Vision-only leads can disappear for one or two model frames at a stop.
-      # Preserve the confirmed stop/launch state for up to three frames, but
+      # Preserve the confirmed stop/launch state for a short dropout, but
       # never extend the ARMED deadline because of missing observations.
       self.lead_launch_dropout_frames += 1
       if self.lead_launch_dropout_frames > LEAD_LAUNCH_VISION_DROPOUT_FRAMES:
@@ -318,28 +333,40 @@ class DynamicFollow:
     else:
       self.lead_launch_dropout_frames = 0
       self.lead_launch_speed_samples.append(v_lead)
+      self.lead_launch_distance_samples.append(x_lead)
       self.lead_launch_filtered_speed = float(np.median(self.lead_launch_speed_samples))
 
-      lead_changed = bool(self.lead_data.new_lead)
+      distance_jump = False
       if self.last_launch_lead_status and self.last_launch_lead_distance is not None:
-        lead_changed |= abs(x_lead - self.last_launch_lead_distance) > LEAD_LAUNCH_DISTANCE_JUMP_M
+        distance_jump = abs(x_lead - self.last_launch_lead_distance) > LEAD_LAUNCH_DISTANCE_JUMP_M
 
       filtered_v_lead = self.lead_launch_filtered_speed
       filtered_v_rel = filtered_v_lead - v_ego
-      hard_cancel = (x_lead <= LEAD_LAUNCH_MIN_DISTANCE_M or
+      continuous_new_lead = bool(self.lead_data.new_lead and
+                                 self.last_launch_lead_status and
+                                 self.last_launch_lead_distance is not None and
+                                 v_ego_kph <= LEAD_LAUNCH_ARM_MAX_EGO_KPH and
+                                 abs(x_lead - self.last_launch_lead_distance) <= LEAD_LAUNCH_CONTINUOUS_NEW_LEAD_M)
+      lead_changed = bool(distance_jump or (self.lead_data.new_lead and not continuous_new_lead))
+      hard_cancel = ((x_lead <= LEAD_LAUNCH_MIN_DISTANCE_M and filtered_v_rel <= 0.0) or
                      filtered_v_rel <= LEAD_LAUNCH_CLOSING_REL_SPEED_MS)
 
       if hard_cancel or lead_changed:
         self._reset_lead_launch(immediate=True)
       else:
-        lead_stopped = filtered_v_lead <= LEAD_STOP_SPEED_MS
+        distance_stable = bool(len(self.lead_launch_distance_samples) == LEAD_LAUNCH_DISTANCE_FILTER_SAMPLES and
+                               max(self.lead_launch_distance_samples) - min(self.lead_launch_distance_samples) <=
+                               LEAD_STOP_DISTANCE_STABILITY_M)
+        lead_stopped = filtered_v_lead <= LEAD_STOP_SPEED_MS and distance_stable
         arm_conditions = (lead_stopped and
                           v_ego_kph <= LEAD_LAUNCH_ARM_MAX_EGO_KPH and
                           LEAD_LAUNCH_MIN_DISTANCE_M < x_lead <= LEAD_LAUNCH_MAX_ARM_DISTANCE_M)
 
         # A lead stopping again is a safety-critical cancellation. It may arm a
         # fresh launch only after another complete stop confirmation.
-        if self.lead_launch_state == LEAD_LAUNCH_ACTIVE and lead_stopped:
+        lead_stopped_again = (filtered_v_lead <= LEAD_RESTOP_SPEED_MS and
+                              filtered_v_rel <= 0.0)
+        if self.lead_launch_state == LEAD_LAUNCH_ACTIVE and lead_stopped_again:
           self._reset_lead_launch(immediate=True)
 
         if arm_conditions:
@@ -350,6 +377,7 @@ class DynamicFollow:
             self.lead_launch_state = LEAD_LAUNCH_ARMED
             self.lead_launch_start_since = None
             self.lead_launch_armed_until = now + LEAD_LAUNCH_ARM_HOLD_S
+            self.lead_launch_armed_distance = x_lead
             self.lead_launch_blend = 0.0
           elif self.lead_launch_state == LEAD_LAUNCH_ARMED:
             self.lead_launch_armed_until = now + LEAD_LAUNCH_ARM_HOLD_S
@@ -357,12 +385,18 @@ class DynamicFollow:
           self.lead_launch_stopped_since = None
 
         if self.lead_launch_state == LEAD_LAUNCH_ARMED:
-          launch_detected = (filtered_v_lead >= LEAD_START_SPEED_MS and
-                             filtered_v_rel >= LEAD_START_REL_SPEED_MS)
+          if self.car_data.brake_pressed:
+            self.lead_launch_armed_until = now + LEAD_LAUNCH_BRAKE_ARM_HOLD_S
+          distance_opening = bool(self.lead_launch_armed_distance is not None and
+                                  x_lead - self.lead_launch_armed_distance >= LEAD_START_DISTANCE_DELTA_M)
+          launch_detected = (filtered_v_rel >= LEAD_START_REL_SPEED_MS and
+                             ((filtered_v_lead >= LEAD_START_SPEED_MS and distance_opening) or
+                              filtered_v_lead >= LEAD_START_STRONG_SPEED_MS))
           if launch_detected:
             if self.lead_launch_start_since is None:
               self.lead_launch_start_since = now
-            elif now - self.lead_launch_start_since >= LEAD_START_CONFIRM_S:
+            elif (now - self.lead_launch_start_since >= LEAD_START_CONFIRM_S and
+                  not self.car_data.brake_pressed):
               self.lead_launch_state = LEAD_LAUNCH_ACTIVE
               self.lead_launch_started_at = now
               self.lead_launch_start_since = None
