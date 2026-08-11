@@ -10,7 +10,13 @@ CURVE_SPEED_DISABLED = 255.0
 # and output filters below continue to reject abrupt model changes.
 CURVE_DECEL_MPS2 = 0.8
 CURVE_ACTIVATION_MARGIN_MS = 0.5
-CURVE_CONFIRM_FRAMES = 2
+# Do not turn a modest cruise-speed reduction into the fixed 40 km/h curve
+# target. A curve must first be tight enough that its calculated traversal
+# speed is within about 5 km/h of the configured curve target.
+CURVE_DEEP_SPEED_MARGIN_MS = 1.5
+# modelV2 is evaluated at 20 Hz, so this requires roughly 0.3 seconds of
+# consistent deep-curve evidence before CURV is allowed to engage.
+CURVE_CONFIRM_FRAMES = 6
 CURVE_INVALID_HOLD_FRAMES = 4
 CURVE_TIGHTEN_RC = 0.20
 CURVE_RELEASE_RC = 1.50
@@ -120,6 +126,8 @@ def calculate_curve_speed_details(curvatures, v_ego, cruise_speed, min_curve_spe
     "selected_distance_m": None,
     "selected_curvature": 0.0,
     "max_curvature": 0.0,
+    "deep_curve_points": 0,
+    "deep_speed_threshold_ms": None,
   }
   if values is not None and times is not None and len(times) >= len(values):
     times = times[:len(values)]
@@ -134,11 +142,17 @@ def calculate_curve_speed_details(curvatures, v_ego, cruise_speed, min_curve_spe
   a_y_max = clip(2.975 - v_ego * 0.0375, 1.85, 2.975)
   smoothed_curvatures = _smoothed_abs_curvatures(values)
   diag["max_curvature"] = float(max(smoothed_curvatures, default=0.0))
+  deep_speed_threshold = min_curve_speed + CURVE_DEEP_SPEED_MARGIN_MS
+  diag["deep_speed_threshold_ms"] = float(deep_speed_threshold)
 
   allowed_now = CURVE_SPEED_DISABLED
   for i, (curvature, t) in enumerate(zip(smoothed_curvatures, times)):
-    curve_speed = math.sqrt(a_y_max / max(curvature, CURVATURE_FLOOR)) * curvature_factor
-    curve_speed = max(curve_speed, min_curve_speed)
+    calculated_curve_speed = math.sqrt(a_y_max / max(curvature, CURVATURE_FLOOR)) * curvature_factor
+    if calculated_curve_speed > deep_speed_threshold:
+      continue
+
+    diag["deep_curve_points"] += 1
+    curve_speed = max(calculated_curve_speed, min_curve_speed)
     distance = (max(v_ego, 1.0) * max(float(t), 0.0)
                 if dists is None else max(float(dists[i]), 0.0))
     speed_now = math.sqrt(curve_speed ** 2 + 2.0 * CURVE_DECEL_MPS2 * distance)
