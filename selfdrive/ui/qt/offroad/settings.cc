@@ -788,6 +788,12 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                           "../assets/offroad/icon_road.png",
                                           this));
 
+  toggles.append(new ParamControl("AutoShutdown",
+                                          "Enable auto shutdown",
+                                          "Automatically power off the EON 180 seconds after external power is disconnected and driving has stopped.",
+                                          "../assets/offroad/icon_shell.png",
+                                          this));
+
   for(ParamControl *toggle : toggles) {
     if(main_layout->count() != 0) {
       toggleLayout->addWidget(horizontal_line());

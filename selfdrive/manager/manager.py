@@ -70,6 +70,7 @@ def manager_init() -> None:
     ("DrivingStyleAIGain", "1.0"),
     ("DrivingStyleAITrOffset", "0.0"),
     ("DrivingStyleAIConfidence", "0.0"),
+    ("AutoShutdown", "1"),
     ("E2ELong", "0"),
 
     ("TorqueFriction", "120"),
