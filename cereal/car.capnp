@@ -138,6 +138,8 @@ struct CarEvent @0x9b1657f34caf3ad3 {
     autoLaneChange @109;
     slowingDownSpeed @110;
     slowingDownSpeedSound @111;
+    predictiveBrakeNeeded @117;
+    curveEntry @118;
   }
 }
 
@@ -420,6 +422,8 @@ struct CarControl {
       promptDistracted @8;
       
       slowingDownSpeed @9;
+      brakeReady @10;
+      cornerEntry @11;
     }
   }
 

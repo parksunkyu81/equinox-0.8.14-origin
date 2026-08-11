@@ -1036,6 +1036,20 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
     ET.WARNING: auto_lane_change_alert,
   },
 
+  EventName.predictiveBrakeNeeded: {
+    ET.WARNING: Alert(
+      "BRAKE 준비", "탄력주행만으로 감속이 부족합니다",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.HIGH, VisualAlert.none, AudibleAlert.brakeReady, .4),
+  },
+
+  EventName.curveEntry: {
+    ET.WARNING: Alert(
+      "코너 진입", "탄력주행만으로 감속이 부족합니다",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.HIGH, VisualAlert.none, AudibleAlert.cornerEntry, .4),
+  },
+
   EventName.slowingDownSpeed: {
     #ET.PERMANENT: Alert("Slowing down","", AlertStatus.normal, AlertSize.small,
     ET.PERMANENT: Alert("속도를 줄이고 있습니다","", AlertStatus.normal, AlertSize.small,

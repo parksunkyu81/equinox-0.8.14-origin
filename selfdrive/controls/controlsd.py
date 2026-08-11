@@ -44,6 +44,8 @@ from selfdrive.controls.lib.curve_speed_limiter import (
   CurveSpeedLimiter, CURVE_SPEED_DISABLED, build_model_curve_profile, calculate_curve_speed,
 )
 from selfdrive.controls.lib.curve_pedal_coordinator import CurvePedalCoordinator
+from selfdrive.controls.lib.predictive_coasting import PredictiveCoastingCoordinator
+from selfdrive.controls.lib.natural_decel_learner import NaturalDecelLearner
 from selfdrive.controls.lib.panda_safety import panda_safety_config_matches, update_panda_safety_readiness
 from selfdrive.controls.lib.process_health import expected_not_running_processes, update_process_not_running_state
 from selfdrive.controls.lib.driving_style_learner import DrivingStyleLearner
@@ -192,6 +194,14 @@ class Controls:
         self.curve_speed_ms = 0.
         self.curve_speed_limiter = CurveSpeedLimiter()
         self.curve_pedal_coordinator = CurvePedalCoordinator(DT_CTRL)
+        self.predictive_coasting = PredictiveCoastingCoordinator(DT_CTRL)
+        self.predictive_coast_pedal_scale = 1.0
+        self.natural_decel_learner = NaturalDecelLearner(params=params)
+        self.natural_decel_status = self.natural_decel_learner.status(0.0)
+        self.predictive_brake_alert_enabled = params.get_bool("PredictiveBrakeAlert")
+        self.speed_limit_coast_active = False
+        self.speed_limit_coast_target_ms = 0.0
+        self.speed_limit_coast_distance_m = math.inf
         self.curve_plan_speed_ms = CURVE_SPEED_DISABLED
         self.curve_pedal_raw_accel = 0.0
         self.curve_pedal_final_accel = 0.0
@@ -307,6 +317,11 @@ class Controls:
         self.curve_speed_ms = 0.
         self.curve_speed_limiter.reset()
         self.curve_pedal_coordinator.reset()
+        self.predictive_coasting.reset()
+        self.predictive_coast_pedal_scale = 1.0
+        self.speed_limit_coast_active = False
+        self.speed_limit_coast_target_ms = 0.0
+        self.speed_limit_coast_distance_m = math.inf
         self.curve_plan_speed_ms = CURVE_SPEED_DISABLED
         self.curve_pedal_raw_accel = 0.0
         self.curve_pedal_final_accel = 0.0
@@ -453,6 +468,7 @@ class Controls:
         curve_transition_active = bool(
           self.curve_pedal_coordinator.engaged or
           self.curve_pedal_coordinator.pedal_intervening or
+          self.predictive_coasting.intervening or
           self.curve_plan_speed_ms < CURVE_SPEED_DISABLED)
         log_interval = 0.2 if curve_transition_active else 1.0
         if v_ego < 1.0 or (now_mono - self._curve_log_last_t) < log_interval:
@@ -506,6 +522,46 @@ class Controls:
               "curve_pedal_lift_ratio": round(float(self.curve_pedal_coordinator.last_lift_ratio), 4),
               "curve_raw_accel": round(float(self.curve_pedal_raw_accel), 4),
               "curve_final_accel": round(float(self.curve_pedal_final_accel), 4),
+              "predictive_coast_phase": self.predictive_coasting.phase,
+              "predictive_coast_intervening": bool(self.predictive_coasting.intervening),
+              "predictive_coast_pedal_scale": round(float(self.predictive_coast_pedal_scale), 4),
+              "predictive_coast_desired_gap_m": round(float(self.predictive_coasting.desired_gap_m), 3),
+              "predictive_coast_margin_m": round(float(self.predictive_coasting.distance_margin_m), 3),
+              "predictive_coast_time_to_gap_s": (round(float(self.predictive_coasting.time_to_gap_s), 3)
+                                                   if math.isfinite(self.predictive_coasting.time_to_gap_s) else None),
+              "predictive_coast_ttc_s": (round(float(self.predictive_coasting.ttc_s), 3)
+                                           if math.isfinite(self.predictive_coasting.ttc_s) else None),
+              "predictive_coast_lead_drel_m": round(float(self.predictive_coasting.lead_distance_m), 3),
+              "predictive_coast_lead_vrel_ms": round(float(self.predictive_coasting.lead_rel_speed_ms), 3),
+              "predictive_coast_lead_accel_ms2": round(float(self.predictive_coasting.lead_accel_ms2), 3),
+              "predictive_coast_lead_prob": round(float(self.predictive_coasting.lead_model_prob), 4),
+              "predictive_coast_ai_gain": round(float(self.driving_style_gain), 4),
+              "predictive_coast_last_pedal": round(float(self.last_actuators.gas), 5),
+              "predictive_coast_source": self.predictive_coasting.dominant_source,
+              "predictive_coast_source_pressures": {
+                key: round(float(value), 4)
+                for key, value in self.predictive_coasting.source_pressures.items()
+              },
+              "predictive_coast_required_decel_ms2": round(
+                float(self.predictive_coasting.required_decel_ms2), 4),
+              "predictive_brake_shadow": bool(self.predictive_coasting.brake_needed_shadow),
+              "predictive_brake_alert_enabled": bool(self.predictive_brake_alert_enabled),
+              "predictive_brake_advisory": bool(self.predictive_coasting.brake_advisory),
+              "predictive_brake_shadow_events": int(self.predictive_coasting.brake_shadow_events),
+              "predictive_brake_shadow_brake_responses": int(
+                self.predictive_coasting.brake_shadow_brake_responses),
+              "predictive_brake_shadow_no_brake_resolutions": int(
+                self.predictive_coasting.brake_shadow_no_brake_resolutions),
+              "driver_brake_pressed": bool(self.predictive_coasting.driver_brake_pressed),
+              "natural_decel_shadow_only": True,
+              "natural_decel_bin": int(self.natural_decel_status.bin_index),
+              "natural_decel_ms2": round(float(self.natural_decel_status.decel_ms2), 4),
+              "natural_decel_confidence": round(float(self.natural_decel_status.confidence), 4),
+              "natural_decel_ready": bool(self.natural_decel_status.ready),
+              "natural_decel_eligible": bool(self.natural_decel_status.eligible),
+              "natural_decel_duration_s": round(float(self.natural_decel_status.duration_s), 2),
+              "natural_decel_events": int(self.natural_decel_status.events),
+              "natural_decel_bins": self.natural_decel_learner.bins_snapshot(),
               "curve_target_kph": round(float(target_speed_clu) * self.speed_conv_to_ms * CV.MS_TO_KPH, 3),
               "curv_limit_clu": int(curv_limit),
               "road_limit_speed": _number(road_limit_speed),
@@ -595,6 +651,11 @@ class Controls:
                 # self.max_speed_clu = self.v_cruise_kph
 
             max_speed_clu = min(max_speed_clu, apply_limit_speed)
+            self.speed_limit_coast_active = bool(left_dist > 0.0)
+            self.speed_limit_coast_target_ms = max(
+              0.0, float(apply_limit_speed) * self.speed_conv_to_ms)
+            self.speed_limit_coast_distance_m = (
+              max(0.0, float(left_dist)) if left_dist > 0.0 else math.inf)
 
             # if self.v_cruise_kph > apply_limit_speed:
             if v_ego_clu > apply_limit_speed:
@@ -607,6 +668,9 @@ class Controls:
         else:
             self.slowing_down_alert = False
             self.slowing_down = False
+            self.speed_limit_coast_active = False
+            self.speed_limit_coast_target_ms = 0.0
+            self.speed_limit_coast_distance_m = math.inf
 
         '''lead_speed = self.get_long_lead_safe_speed(sm, CS, vEgo)
         if self.safe_distance_speed and lead_speed >= self.min_set_speed_clu:
@@ -1140,21 +1204,79 @@ class Controls:
                                               self.stop_accel_boost_active)
             self.curve_pedal_raw_accel = float(actuators.accel)
             lead_one = self.sm['radarState'].leadOne
-            lead_ttc = (float(lead_one.dRel) / max(-float(lead_one.vRel), 0.1)
-                        if lead_one.status and lead_one.vRel < -0.3 else 1e9)
-            urgent_longitudinal = bool(
-              long_plan.fcw or
-              (lead_one.status and lead_one.vRel < -0.3 and
-               (lead_one.dRel < 8.0 or lead_ttc < 3.0)))
-            if self.CP.enableGasInterceptor:
-                actuators.accel = self.curve_pedal_coordinator.update_accel(
-                  actuators.accel,
-                  self.active,
-                  CS.vEgo,
-                  CS.brakePressed,
-                  CS.gasPressed,
-                  urgent_safety=urgent_longitudinal)
+            # Curve target shaping remains in the longitudinal plan. Lead,
+            # curve, and speed-limit pedal lift are arbitrated once below so
+            # independent smoothers cannot multiply each other.
             self.curve_pedal_final_accel = float(actuators.accel)
+
+            # Driving-style gain is applied later in CarController. Predictive
+            # coasting supplies a final 0..1 pedal ceiling so learned response
+            # cannot add back pedal while a lead is consuming the desired gap.
+            predictive_enabled = bool(self.CP.enableGasInterceptor and
+                                      self.driving_style_status.enabled)
+            radar_valid = bool(self.sm.valid['radarState'] and
+                               len(self.sm['radarState'].radarErrors) == 0)
+            effective_tr = (dynamic_follow.mpcTR if dynamic_follow_valid else 1.3)
+            curve_diag = dict(getattr(self.curve_speed_limiter, "last_diag", {}) or {})
+            curve_target_ms = (self.curve_pedal_coordinator.plan_speed_kph * CV.KPH_TO_MS
+                               if self.curve_pedal_coordinator.plan_speed_kph > 0.0 else CS.vEgo)
+            self.predictive_coast_pedal_scale = self.predictive_coasting.update(
+              enabled=predictive_enabled,
+              control_active=self.active,
+              requested_accel=actuators.accel,
+              v_ego=CS.vEgo,
+              a_ego=CS.aEgo,
+              brake_pressed=CS.brakePressed,
+              gas_pressed=CS.gasPressed,
+              lead_valid=lead_one.status,
+              lead_distance=lead_one.dRel if lead_one.status else 0.0,
+              lead_rel_speed=lead_one.vRel if lead_one.status else 0.0,
+              lead_accel=lead_one.aLeadK if lead_one.status else 0.0,
+              lead_model_prob=lead_one.modelProb if lead_one.status else 0.0,
+              effective_tr=effective_tr,
+              fcw=long_plan.fcw,
+              radar_valid=radar_valid,
+              can_valid=CS.canValid,
+              curve_active=self.curve_pedal_coordinator.curve_active,
+              curve_target_speed=curve_target_ms,
+              curve_time_s=curve_diag.get("selected_time_s", math.inf),
+              curve_distance_m=curve_diag.get("selected_distance_m", math.inf),
+              speed_limit_active=self.speed_limit_coast_active,
+              speed_limit_target=self.speed_limit_coast_target_ms,
+              speed_limit_distance_m=self.speed_limit_coast_distance_m,
+              natural_decel_ms2=self.natural_decel_status.decel_ms2,
+              natural_decel_confidence=self.natural_decel_status.confidence,
+              brake_alert_enabled=self.predictive_brake_alert_enabled)
+
+            coast_lane_change = lat_plan.laneChangeState != LaneChangeState.off
+            coast_orientation = self.sm['liveLocationKalman'].calibratedOrientationNED
+            coast_orientation_values = coast_orientation.value
+            coast_pitch_valid = bool(
+              self.sm.valid['liveLocationKalman'] and coast_orientation.valid and
+              len(coast_orientation_values) > 1 and
+              math.isfinite(float(coast_orientation_values[1])))
+            coast_pitch_deg = (math.degrees(float(coast_orientation_values[1]))
+                               if coast_pitch_valid else 0.0)
+            natural_context_ok = bool(
+              predictive_enabled and self.active and
+              not self.curve_pedal_coordinator.engaged and
+              not CS.leftBlinker and not CS.rightBlinker and not coast_lane_change and
+              CS.canValid)
+            self.natural_decel_status = self.natural_decel_learner.update(
+              v_ego=CS.vEgo,
+              a_ego=CS.aEgo,
+              pedal_output=self.last_actuators.gas,
+              brake_pressed=CS.brakePressed,
+              gas_pressed=CS.gasPressed,
+              context_ok=natural_context_ok,
+              pitch_deg=coast_pitch_deg,
+              pitch_valid=coast_pitch_valid,
+              dt=DT_CTRL)
+
+            if self.is_curv_driving:
+                self.events.add(EventName.curveEntry)
+            elif self.predictive_coasting.brake_advisory:
+                self.events.add(EventName.predictiveBrakeNeeded)
 
             # Steering PID loop and lateral MPC
             # lat_active = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
@@ -1172,6 +1294,8 @@ class Controls:
                                                                                    self.desired_curvature_rate,
                                                                                    self.sm['liveLocationKalman'])
         else:
+            self.predictive_coasting.reset()
+            self.predictive_coast_pedal_scale = 1.0
             lac_log = log.ControlsState.LateralDebugState.new_message()
             if self.sm.rcv_frame['testJoystick'] > 0 and self.active:
                 actuators.accel = 4.0 * clip(self.sm['testJoystick'].axes[0], -1, 1)
@@ -1193,7 +1317,8 @@ class Controls:
         style_unsafe_context = bool(self.joystick_mode or not self.CP.enableGasInterceptor or
                                     CS.leftBlinker or CS.rightBlinker or lane_change_active or
                                     self.is_curv_driving or long_plan.fcw or
-                                    self.stop_accel_boost_active)
+                                    self.stop_accel_boost_active or
+                                    self.predictive_coasting.learning_blocked)
         style_lead_valid = bool(dynamic_follow_valid and dynamic_follow.leadDistance > 0.0)
         self.driving_style_status = self.driving_style_learner.update(
           v_ego=CS.vEgo,

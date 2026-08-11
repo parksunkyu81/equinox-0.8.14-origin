@@ -17,6 +17,18 @@ from common.data_collector import DataCollector
 travis = False
 DEFAULT_TR = 1.3   #1.45
 
+# Preserve tight low-speed traffic behavior, then widen only the high-speed
+# minimum. This floor is applied after the learned TR offset, so AI preference
+# cannot shorten the gap below the speed-appropriate bound.
+HIGH_SPEED_TR_BP_KPH = (0.0, 60.0, 80.0, 100.0, 120.0, 140.0)
+HIGH_SPEED_TR_FLOOR = (0.0, 0.95, 1.00, 1.10, 1.20, 1.30)
+
+
+def speed_based_min_tr(v_ego):
+  v_ego = float(v_ego)
+  speed_kph = max(0.0, v_ego if math.isfinite(v_ego) else 0.0) * CV.MS_TO_KPH
+  return float(interp(speed_kph, HIGH_SPEED_TR_BP_KPH, HIGH_SPEED_TR_FLOOR))
+
 # Stop-and-go lead launch assist. This only lowers the MPC time gap; it does not
 # bypass the longitudinal acceleration, jerk, or safety limits.
 LEAD_LAUNCH_IDLE = 0
@@ -198,10 +210,12 @@ class DynamicFollow:
       self._get_pred()  # sets self.model_profile, all other checks are inside function
 
   def _apply_driving_style_tr(self, base_tr):
-    if not self.driving_style_ai_enabled:
-      return float(base_tr)
-    applied_offset = applied_driving_style_tr_offset(self.driving_style_tr_offset, self.car_data.v_ego)
-    return float(clip(float(base_tr) + applied_offset, self.min_TR, 2.7))
+    applied_offset = (applied_driving_style_tr_offset(
+      self.driving_style_tr_offset, self.car_data.v_ego)
+      if self.driving_style_ai_enabled else 0.0)
+    dynamic_floor = max(float(self.min_TR), speed_based_min_tr(self.car_data.v_ego))
+    return float(clip(max(float(base_tr) + applied_offset, dynamic_floor),
+                      dynamic_floor, 2.7))
 
   def _gather_data(self):
     self.sm_collector.update(0)

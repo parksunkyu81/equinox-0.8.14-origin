@@ -17,6 +17,8 @@ class CarController():
   def __init__(self, dbc_name, CP, VM):
     self.apply_steer_last = 0
     self.comma_pedal = 0.0
+    self.predictive_coast_styled_pedal = 0.0
+    self.predictive_coast_pedal_scale = 1.0
 
     # Dynamic steering delta diagnostics/state
     self._dyn_steer_limited_prev = False
@@ -120,13 +122,24 @@ class CarController():
         # bounded by the learner. Keep a second local clamp as a controller-side
         # defense and preserve the existing absolute comma-pedal ceiling.
         learned_gain = clip(float(getattr(controls, 'driving_style_gain', 1.0)), 0.90, 1.12)
-        self.comma_pedal = clip(acc_mult * actuators.accel * learned_gain, 0.0, 0.85)  # Actual comma-pedal command range: 0.00..0.85
+        # Apply learned response first, then predictive coasting as the final
+        # positive-pedal ceiling. Coasting can only remove pedal; it can never
+        # create acceleration or override brake/FCW/longitudinal zero requests.
+        styled_pedal = clip(acc_mult * actuators.accel * learned_gain, 0.0, 0.85)
+        coast_scale = clip(float(getattr(controls, 'predictive_coast_pedal_scale', 1.0)), 0.0, 1.0)
+        self.predictive_coast_styled_pedal = float(styled_pedal)
+        self.predictive_coast_pedal_scale = float(coast_scale)
+        self.comma_pedal = float(styled_pedal * coast_scale)  # Actual comma-pedal command range: 0.00..0.85
 
         # self.comma_pedal = pedal_command
       else:
         self.comma_pedal = 0.0
+        self.predictive_coast_styled_pedal = 0.0
+        self.predictive_coast_pedal_scale = 1.0
     else:
       self.comma_pedal = 0.0
+      self.predictive_coast_styled_pedal = 0.0
+      self.predictive_coast_pedal_scale = 1.0
 
 
 
