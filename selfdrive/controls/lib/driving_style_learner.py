@@ -11,6 +11,17 @@ GAIN_MAX = 1.12
 TR_OFFSET_MIN = -0.20
 TR_OFFSET_MAX = 0.40
 
+# Make a learned preference perceptible without widening the learner's raw
+# safety bounds. Low/mid-speed acceleration gets the clearest response, while
+# highway gain and time-gap shortening stay deliberately conservative.
+STYLE_RESPONSE_BP_KPH = (0.0, 30.0, 60.0, 100.0, 130.0)
+GAIN_RESPONSE_V = (2.0, 2.0, 1.7, 1.4, 1.2)
+GAIN_APPLIED_MAX_V = (1.08, 1.08, 1.065, 1.045, 1.04)
+GAIN_APPLIED_MIN = 0.94
+TR_RESPONSE_V = (4.0, 3.8, 3.2, 2.5, 2.0)
+TR_APPLIED_MIN_V = (-0.12, -0.12, -0.10, -0.08, -0.06)
+TR_APPLIED_MAX_V = (0.25, 0.25, 0.28, 0.30, 0.30)
+
 SPEED_BIN_CENTERS_KPH = (5.0, 20.0, 45.0, 80.0, 115.0)
 SPEED_BIN_EDGES_KPH = (10.0, 30.0, 60.0, 100.0)
 
@@ -54,6 +65,22 @@ def _interp(value, xp, fp):
       ratio = (value - xp[i - 1]) / (xp[i] - xp[i - 1])
       return fp[i - 1] + ratio * (fp[i] - fp[i - 1])
   return fp[-1]
+
+
+def applied_driving_style_gain(raw_gain, v_ego):
+  speed_kph = max(0.0, _finite(v_ego)) * 3.6
+  response = _interp(speed_kph, STYLE_RESPONSE_BP_KPH, GAIN_RESPONSE_V)
+  upper = _interp(speed_kph, STYLE_RESPONSE_BP_KPH, GAIN_APPLIED_MAX_V)
+  gain = 1.0 + (_finite(raw_gain, 1.0) - 1.0) * response
+  return _clip(gain, GAIN_APPLIED_MIN, upper)
+
+
+def applied_driving_style_tr_offset(raw_offset, v_ego):
+  speed_kph = max(0.0, _finite(v_ego)) * 3.6
+  response = _interp(speed_kph, STYLE_RESPONSE_BP_KPH, TR_RESPONSE_V)
+  lower = _interp(speed_kph, STYLE_RESPONSE_BP_KPH, TR_APPLIED_MIN_V)
+  upper = _interp(speed_kph, STYLE_RESPONSE_BP_KPH, TR_APPLIED_MAX_V)
+  return _clip(_finite(raw_offset) * response, lower, upper)
 
 
 @dataclass(frozen=True)
@@ -245,7 +272,8 @@ class DrivingStyleLearner:
       return 1.0
     speed_kph = max(0.0, _finite(v_ego)) * 3.6
     gains = [_clip(self.global_gain + offset, GAIN_MIN, GAIN_MAX) for offset in self.bin_offsets]
-    return _clip(_interp(speed_kph, SPEED_BIN_CENTERS_KPH, gains), GAIN_MIN, GAIN_MAX)
+    raw_gain = _clip(_interp(speed_kph, SPEED_BIN_CENTERS_KPH, gains), GAIN_MIN, GAIN_MAX)
+    return applied_driving_style_gain(raw_gain, v_ego)
 
   def confidence(self):
     gain_confidence = min(1.0, self.gain_evidence_events / 20.0)
@@ -257,7 +285,7 @@ class DrivingStyleLearner:
     return DrivingStyleStatus(
       enabled=self.enabled,
       gain=self.gain_for_speed(v_ego),
-      tr_offset=self.tr_offset if self.enabled else 0.0,
+      tr_offset=applied_driving_style_tr_offset(self.tr_offset, v_ego) if self.enabled else 0.0,
       confidence=self.confidence(),
       gas_events=self.gas_events,
       brake_events=self.brake_events,

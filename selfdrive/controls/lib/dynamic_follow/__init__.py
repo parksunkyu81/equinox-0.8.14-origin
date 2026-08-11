@@ -11,6 +11,7 @@ from common.params import Params
 from selfdrive.controls.lib.dynamic_follow.auto_df import predict
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.dynamic_follow.support import LeadData, CarData, dfData, dfProfiles
+from selfdrive.controls.lib.driving_style_learner import applied_driving_style_tr_offset
 from common.data_collector import DataCollector
 
 travis = False
@@ -199,7 +200,8 @@ class DynamicFollow:
   def _apply_driving_style_tr(self, base_tr):
     if not self.driving_style_ai_enabled:
       return float(base_tr)
-    return float(clip(float(base_tr) + self.driving_style_tr_offset, self.min_TR, 2.7))
+    applied_offset = applied_driving_style_tr_offset(self.driving_style_tr_offset, self.car_data.v_ego)
+    return float(clip(float(base_tr) + applied_offset, self.min_TR, 2.7))
 
   def _gather_data(self):
     self.sm_collector.update(0)
