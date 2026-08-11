@@ -74,6 +74,7 @@ from common.filter_simple import FirstOrderFilter
 from selfdrive.swaglog import cloudlog
 from selfdrive.car.gm.steering_limits import steer_delta_limits_kph
 from selfdrive.controls.lib.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
+from selfdrive.locationd.torque_paired_fit import fit_balanced_common_torque_model
 from common.numpy_fast import interp, clip
 
 
@@ -262,8 +263,6 @@ EQUINOX_PAIRED_MAX_ABS_STEER = 0.70
 EQUINOX_PAIRED_MIN_POINTS = 15
 EQUINOX_PAIRED_MIN_BUCKETS = 3
 EQUINOX_PAIRED_MIN_TOTAL = 90
-EQUINOX_PAIRED_DIRECTION_BALANCE_MIN = 0.65
-EQUINOX_PAIRED_FACTOR_REL_MAD_MAX = 0.15
 EQUINOX_PAIRED_MIN_ERROR_IMPROVEMENT = 0.02
 
 EQUINOX_CANDIDATE_HISTORY = 3
@@ -1852,14 +1851,6 @@ class TorqueEstimator:
         moments = self.corner_points.aggregate_moments()
         return self._estimate_params_from_moments(*moments)
 
-    @staticmethod
-    def _moments_scaled(bm, scale):
-        s = float(scale)
-        return (
-            float(bm.n) * s, float(bm.sx) * s, float(bm.sy) * s,
-            float(bm.sxx) * s, float(bm.syy) * s, float(bm.sxy) * s,
-        )
-
     def _estimate_params_equinox_paired(self):
         """Robust Equinox fit from magnitude-matched left/right corner buckets.
 
@@ -1870,6 +1861,7 @@ class TorqueEstimator:
         """
         diag = {
             "valid": False,
+            "fit_method": "balanced_common",
             "pair_count": 0,
             "inlier_pair_count": 0,
             "paired_points": 0,
@@ -1922,9 +1914,6 @@ class TorqueEstimator:
             if len(candidates) < int(EQUINOX_PAIRED_MIN_BUCKETS):
                 diag["reason"] = "pair_coverage"
                 return np.nan, np.nan, np.nan, diag
-            if diag["direction_balance"] < float(EQUINOX_PAIRED_DIRECTION_BALANCE_MIN):
-                diag["reason"] = "direction_balance"
-                return np.nan, np.nan, np.nan, diag
 
             paired_points = float(sum(c["weight"] for c in candidates))
             diag["inlier_pair_count"] = int(len(candidates))
@@ -1933,85 +1922,51 @@ class TorqueEstimator:
                 diag["reason"] = "paired_points"
                 return np.nan, np.nan, np.nan, diag
 
-            # Fit each direction independently across steering magnitudes. In
-            # the physical torque model the two lines share a slope (factor),
-            # while their intercept separation represents friction. Requiring
-            # those slopes to agree is the key protection against an apparently
-            # balanced point count that still contains route/camber bias.
-            def _fit_side(key):
-                xs = np.asarray([
-                    float(c[key].sx) / max(float(c[key].n), 1.0) for c in candidates
-                ], dtype=np.float64)
-                ys = np.asarray([
-                    float(c[key].sy) / max(float(c[key].n), 1.0) for c in candidates
-                ], dtype=np.float64)
-                x_mean = float(np.mean(xs))
-                y_mean = float(np.mean(ys))
-                denom = float(np.sum((xs - x_mean) ** 2))
-                if denom < 1e-6:
-                    return np.nan, np.nan
-                slope = float(np.sum((xs - x_mean) * (ys - y_mean)) / denom)
-                intercept = float(y_mean - slope * x_mean)
-                return slope, intercept
-
-            neg_factor, neg_intercept = _fit_side("neg")
-            pos_factor, pos_intercept = _fit_side("pos")
-            if (not _finite(neg_factor) or not _finite(pos_factor) or
-                    neg_factor <= 0.5 or pos_factor <= 0.5):
-                diag["reason"] = "direction_slope_invalid"
-                return np.nan, np.nan, np.nan, diag
-
-            factor = 0.5 * (float(neg_factor) + float(pos_factor))
-            direction_factor_delta = abs(float(neg_factor) - float(pos_factor)) / max(abs(factor), 1e-6)
-            diag["factor_median"] = float(factor)
-            diag["factor_rel_mad"] = float(direction_factor_delta)
-            diag["neg_factor"] = float(neg_factor)
-            diag["pos_factor"] = float(pos_factor)
-            if direction_factor_delta > float(EQUINOX_PAIRED_FACTOR_REL_MAD_MAX):
-                diag["reason"] = "direction_slope_disagreement"
-                return np.nan, np.nan, np.nan, diag
-
-            offset = 0.5 * (float(neg_intercept) + float(pos_intercept))
-            friction = (float(neg_intercept) - float(pos_intercept)) / max(2.0 * factor, 1e-6)
-            if friction < 0.0:
-                diag["reason"] = "friction_sign"
-                return np.nan, np.nan, np.nan, diag
-
-            def _model_mse(model_factor, model_friction, model_offset):
-                sse = 0.0
-                total_n = 0.0
-                for c in candidates:
-                    w = float(c["weight"])
-                    for sign, key in ((-1.0, "neg"), (1.0, "pos")):
-                        bm = c[key]
-                        scale = w / max(float(bm.n), 1.0)
-                        n, sx, sy, sxx, syy, sxy = self._moments_scaled(bm, scale)
-                        intercept = float(model_offset) - float(model_factor) * float(model_friction) * sign
-                        sse += (
-                            syy + float(model_factor) ** 2 * sxx + intercept ** 2 * n +
-                            2.0 * float(model_factor) * intercept * sx -
-                            2.0 * float(model_factor) * sxy - 2.0 * intercept * sy)
-                        total_n += n
-                return float(max(0.0, sse / max(total_n, 1.0)))
-
-            candidate_mse = _model_mse(factor, friction, offset)
             current_factor = float(_sanitize_num(
                 self.filtered_params['latAccelFactor'].x, self.offline_latAccelFactor))
             current_friction = float(_sanitize_num(
                 self.filtered_params['frictionCoefficient'].x, self.offline_friction))
             offset_filter = self.filtered_params.get('latAccelOffset', None)
             current_offset = float(_sanitize_num(getattr(offset_filter, 'x', 0.0), 0.0))
-            current_mse = _model_mse(current_factor, current_friction, current_offset)
-            improvement = 0.0
-            if np.isfinite(current_mse) and current_mse > 1e-9:
-                improvement = 1.0 - float(candidate_mse) / float(current_mse)
-            diag["error_improvement"] = float(improvement)
+
+            # The Equinox data does not support treating the left and right
+            # directions as two independent regressions. Build one physical
+            # model instead, giving each magnitude-matched direction the same
+            # effective point count. Raw direction imbalance remains visible in
+            # diagnostics, but cannot permanently block otherwise clean data.
+            fit_pairs = []
+            for c in candidates:
+                fit_pairs.append({
+                    "weight": float(c["weight"]),
+                    "neg": {name: float(getattr(c["neg"], name))
+                            for name in ("n", "sx", "sy", "sxx", "syy", "sxy")},
+                    "pos": {name: float(getattr(c["pos"], name))
+                            for name in ("n", "sx", "sy", "sxx", "syy", "sxy")},
+                })
+
+            min_factor, max_factor, min_friction, max_friction = self._dynamic_bands()
+            factor, friction, offset, fit_diag = fit_balanced_common_torque_model(
+                fit_pairs, current_factor, current_friction, current_offset,
+                (min_factor, max_factor), (min_friction, max_friction))
+            diag.update(fit_diag)
+            solver_valid = bool(fit_diag.get("valid", False))
+            diag["valid"] = False
+            diag["fit_method"] = "balanced_common"
+            diag["factor_median"] = float(factor) if _finite(factor) else None
+            diag["factor_rel_mad"] = None
+            if not solver_valid:
+                diag["reason"] = str(fit_diag.get("reason", "fit_invalid"))
+                return np.nan, np.nan, np.nan, diag
+
+            improvement = float(fit_diag.get("error_improvement", 0.0) or 0.0)
 
             # Do not chase a materially different candidate unless it actually
             # explains the balanced left/right evidence better than the current
             # applied value. Near convergence, the normal parameter deadband is
             # sufficient and a positive improvement is no longer required.
-            materially_different = abs(factor - current_factor) >= float(CLEAN_LAT_FACTOR_DEADBAND)
+            materially_different = bool(
+                abs(factor - current_factor) >= float(CLEAN_LAT_FACTOR_DEADBAND) or
+                abs(friction - current_friction) >= float(CLEAN_FRICTION_DEADBAND))
             if materially_different and improvement < float(EQUINOX_PAIRED_MIN_ERROR_IMPROVEMENT):
                 diag["reason"] = "no_error_improvement"
                 return np.nan, np.nan, np.nan, diag
@@ -3562,9 +3517,12 @@ class TorqueEstimator:
                                          [round(float(v), 6) for v in self._adaptive_band_limits]),
                 "paired_fit_valid": bool(getattr(self, "_ltp_paired_diag", {}).get("valid", False)),
                 "paired_fit_reason": str(getattr(self, "_ltp_paired_diag", {}).get("reason", "none")),
+                "paired_fit_method": str(getattr(self, "_ltp_paired_diag", {}).get("fit_method", "none")),
                 "paired_fit_pairs": int(getattr(self, "_ltp_paired_diag", {}).get("pair_count", 0) or 0),
                 "paired_fit_inliers": int(getattr(self, "_ltp_paired_diag", {}).get("inlier_pair_count", 0) or 0),
                 "paired_fit_points": int(getattr(self, "_ltp_paired_diag", {}).get("paired_points", 0) or 0),
+                "paired_effective_points": round(float(
+                    getattr(self, "_ltp_paired_diag", {}).get("effective_points", 0.0) or 0.0), 2),
                 "paired_direction_balance": round(float(
                     getattr(self, "_ltp_paired_diag", {}).get("direction_balance", 0.0) or 0.0), 4),
                 "paired_factor_rel_mad": (None if getattr(self, "_ltp_paired_diag", {}).get(
@@ -3573,6 +3531,16 @@ class TorqueEstimator:
                 "paired_error_improvement": (None if getattr(self, "_ltp_paired_diag", {}).get(
                     "error_improvement", None) is None else round(float(
                     getattr(self, "_ltp_paired_diag", {}).get("error_improvement")), 5)),
+                "paired_candidate_mse": (None if getattr(self, "_ltp_paired_diag", {}).get(
+                    "candidate_mse", None) is None else round(float(
+                    getattr(self, "_ltp_paired_diag", {}).get("candidate_mse")), 7)),
+                "paired_current_mse": (None if getattr(self, "_ltp_paired_diag", {}).get(
+                    "current_mse", None) is None else round(float(
+                    getattr(self, "_ltp_paired_diag", {}).get("current_mse")), 7)),
+                "paired_factor_at_bound": bool(getattr(
+                    self, "_ltp_paired_diag", {}).get("factor_at_bound", False)),
+                "paired_friction_at_bound": bool(getattr(
+                    self, "_ltp_paired_diag", {}).get("friction_at_bound", False)),
                 "candidate_status": str(getattr(self, "_ltp_candidate_status", "idle")),
                 "candidate_history": int(len(getattr(self, "_ltp_candidate_history", []))),
                 "learning_converged": bool(getattr(self, "_ltp_learning_converged", False)),
@@ -4213,6 +4181,7 @@ class TorqueEstimator:
             pd = getattr(self, "_ltp_paired_diag", {}) or {}
             paired_status = (
                 "[Equinox-Paired]\n"
+                f"method={pd.get('fit_method', 'none')} "
                 f"valid={bool(pd.get('valid', False))} reason={pd.get('reason', 'none')} "
                 f"pairs={int(pd.get('pair_count', 0) or 0)} "
                 f"inliers={int(pd.get('inlier_pair_count', 0) or 0)} "
