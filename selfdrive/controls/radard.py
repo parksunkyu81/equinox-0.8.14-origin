@@ -10,6 +10,7 @@ from common.params import Params
 from common.realtime import Ratekeeper, Priority, config_realtime_process
 from selfdrive.controls.lib.cluster.fastcluster_py import cluster_points_centroid
 from selfdrive.controls.lib.radar_helpers import Cluster, Track, RADAR_TO_CAMERA
+from selfdrive.controls.lib.lead_continuity import LeadContinuityFilter
 from selfdrive.swaglog import cloudlog
 from selfdrive.hardware import TICI
 
@@ -102,6 +103,8 @@ class RadarD():
     self.v_ego_hist = deque([0], maxlen=delay+1)
 
     self.ready = False
+    self.lead_continuity = [LeadContinuityFilter(radar_ts), LeadContinuityFilter(radar_ts)]
+    self.lead_continuity_states = ["lost", "lost"]
 
   def update(self, sm, rr, enable_lead):
     self.current_time = 1e-9*max(sm.logMonoTime.values())
@@ -163,18 +166,41 @@ class RadarD():
 
     # *** publish radarState ***
     dat = messaging.new_message('radarState')
-    dat.valid = sm.all_checks() and len(rr.errors) == 0
+    radar_state_valid = sm.all_checks() and len(rr.errors) == 0
+    dat.valid = radar_state_valid
     radarState = dat.radarState
     radarState.mdMonoTime = sm.logMonoTime['modelV2']
     radarState.canMonoTimes = list(rr.canMonoTimes)
     radarState.radarErrors = list(rr.errors)
     radarState.carStateMonoTime = sm.logMonoTime['carState']
 
-    if enable_lead:
-      leads_v3 = sm['modelV2'].leadsV3
-      if len(leads_v3) > 1:
-        radarState.leadOne = get_lead(self.v_ego, self.ready, clusters, leads_v3[0], low_speed_override=True)
-        radarState.leadTwo = get_lead(self.v_ego, self.ready, clusters, leads_v3[1], low_speed_override=False)
+    leads_v3 = sm['modelV2'].leadsV3
+    if enable_lead and len(leads_v3) > 1:
+      raw_lead_one = get_lead(self.v_ego, self.ready, clusters, leads_v3[0], low_speed_override=True)
+      raw_lead_two = get_lead(self.v_ego, self.ready, clusters, leads_v3[1], low_speed_override=False)
+      filtered_leads = [
+        self.lead_continuity[0].update(
+          raw_lead_one, leads_v3[0].prob, self.v_ego, enabled=radar_state_valid),
+        self.lead_continuity[1].update(
+          raw_lead_two, leads_v3[1].prob, self.v_ego, enabled=radar_state_valid),
+      ]
+      radarState.leadOne = filtered_leads[0]
+      radarState.leadTwo = filtered_leads[1]
+      for i, (lead_filter, raw_lead, filtered_lead, lead_msg) in enumerate(zip(
+          self.lead_continuity, (raw_lead_one, raw_lead_two), filtered_leads,
+          (leads_v3[0], leads_v3[1]))):
+        state = lead_filter.state
+        if state != self.lead_continuity_states[i]:
+          cloudlog.info(
+            "lead continuity %d %s->%s prob=%.3f raw=%s filtered=%s dRel=%.1f vRel=%.1f",
+            i, self.lead_continuity_states[i], state, float(lead_msg.prob),
+            bool(raw_lead.get('status', False)), bool(filtered_lead.get('status', False)),
+            float(filtered_lead.get('dRel', 0.0)), float(filtered_lead.get('vRel', 0.0)))
+          self.lead_continuity_states[i] = state
+    else:
+      self.lead_continuity[0].reset()
+      self.lead_continuity[1].reset()
+      self.lead_continuity_states = ["lost", "lost"]
     return dat
 
 

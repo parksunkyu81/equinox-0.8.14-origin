@@ -43,6 +43,7 @@ from selfdrive.controls.lib.stop_accel_boost import STOP_ACCEL_BOOST_FACTOR, Sto
 from selfdrive.controls.lib.curve_speed_limiter import (
   CurveSpeedLimiter, CURVE_SPEED_DISABLED, build_model_curve_profile, calculate_curve_speed,
 )
+from selfdrive.controls.lib.curve_pedal_coordinator import CurvePedalCoordinator
 from selfdrive.controls.lib.panda_safety import panda_safety_config_matches, update_panda_safety_readiness
 from selfdrive.controls.lib.process_health import expected_not_running_processes, update_process_not_running_state
 from selfdrive.controls.lib.driving_style_learner import DrivingStyleLearner
@@ -190,6 +191,10 @@ class Controls:
         self.max_speed_clu = 0.
         self.curve_speed_ms = 0.
         self.curve_speed_limiter = CurveSpeedLimiter()
+        self.curve_pedal_coordinator = CurvePedalCoordinator(DT_CTRL)
+        self.curve_plan_speed_ms = CURVE_SPEED_DISABLED
+        self.curve_pedal_raw_accel = 0.0
+        self.curve_pedal_final_accel = 0.0
         self.is_curv_driving = False
         self.curv_speed = 0.0
         self._curve_log_last_t = -1e9
@@ -301,6 +306,10 @@ class Controls:
         self.max_speed_clu = 0.
         self.curve_speed_ms = 0.
         self.curve_speed_limiter.reset()
+        self.curve_pedal_coordinator.reset()
+        self.curve_plan_speed_ms = CURVE_SPEED_DISABLED
+        self.curve_pedal_raw_accel = 0.0
+        self.curve_pedal_final_accel = 0.0
         self.slowing_down = False
         self.slowing_down_alert = False
         self.slowing_down_sound_alert = False
@@ -353,7 +362,9 @@ class Controls:
         lateralPlan = sm['lateralPlan']
         if not self.slow_on_curves:
             self.curve_speed_limiter.reset()
+            self.curve_pedal_coordinator.reset()
             self.curve_speed_ms = CURVE_SPEED_DISABLED
+            self.curve_plan_speed_ms = CURVE_SPEED_DISABLED
             return
 
         # modelV2 and lateralPlan are produced at 20 Hz while controlsd runs at
@@ -439,7 +450,12 @@ class Controls:
     def _log_curve_speed(self, v_ego, target_speed_clu, road_limit_speed,
                          apply_limit_speed, curv_limit):
         now_mono = sec_since_boot()
-        if v_ego < 1.0 or (now_mono - self._curve_log_last_t) < 1.0:
+        curve_transition_active = bool(
+          self.curve_pedal_coordinator.engaged or
+          self.curve_pedal_coordinator.pedal_intervening or
+          self.curve_plan_speed_ms < CURVE_SPEED_DISABLED)
+        log_interval = 0.2 if curve_transition_active else 1.0
+        if v_ego < 1.0 or (now_mono - self._curve_log_last_t) < log_interval:
             return
         self._curve_log_last_t = float(now_mono)
         try:
@@ -482,6 +498,14 @@ class Controls:
               "filtered_curve_kph": _kph_from_ms(diag.get("filtered_speed_ms", CURVE_SPEED_DISABLED)),
               "confirmed": bool(diag.get("confirmed", False)),
               "invalid_hold": bool(diag.get("invalid_hold", False)),
+              "curve_phase": self.curve_pedal_coordinator.phase,
+              "curve_entry_kph": round(float(self.curve_pedal_coordinator.entry_speed_kph), 3),
+              "curve_plan_kph": _kph_from_ms(self.curve_plan_speed_ms),
+              "curve_brake_latched": bool(self.curve_pedal_coordinator.brake_latched),
+              "curve_pedal_intervening": bool(self.curve_pedal_coordinator.pedal_intervening),
+              "curve_pedal_lift_ratio": round(float(self.curve_pedal_coordinator.last_lift_ratio), 4),
+              "curve_raw_accel": round(float(self.curve_pedal_raw_accel), 4),
+              "curve_final_accel": round(float(self.curve_pedal_final_accel), 4),
               "curve_target_kph": round(float(target_speed_clu) * self.speed_conv_to_ms * CV.MS_TO_KPH, 3),
               "curv_limit_clu": int(curv_limit),
               "road_limit_speed": _number(road_limit_speed),
@@ -515,16 +539,39 @@ class Controls:
         curv_limit = 0
         self.cal_curve_speed(sm, vEgo, frame, measured_curvature)
         cruise_speed_ms = self.v_cruise_kph * CV.KPH_TO_MS
-        if (self.slow_on_curves and MIN_CURVE_SPEED <= self.curve_speed_ms <
+        if self.CP.enableGasInterceptor:
+            curve_diag = dict(getattr(self.curve_speed_limiter, "last_diag", {}) or {})
+            try:
+                raw_curve_speed_ms = float(curve_diag.get("raw_speed_ms", CURVE_SPEED_DISABLED))
+            except (TypeError, ValueError):
+                raw_curve_speed_ms = CURVE_SPEED_DISABLED
+            if not np.isfinite(raw_curve_speed_ms):
+                raw_curve_speed_ms = CURVE_SPEED_DISABLED
+            curve_detected = bool(curve_diag.get("confirmed", False) and
+                                  MIN_CURVE_SPEED <= raw_curve_speed_ms < CURVE_SPEED_DISABLED)
+            curve_plan_speed_ms = self.curve_pedal_coordinator.update_curve(
+              curve_detected,
+              vEgo,
+              self.v_cruise_kph,
+              raw_curve_speed_ms,
+              selected_time_s=curve_diag.get("selected_time_s", None))
+            self.curve_plan_speed_ms = (CURVE_SPEED_DISABLED if curve_plan_speed_ms is None
+                                        else float(curve_plan_speed_ms))
+        else:
+            self.curve_plan_speed_ms = self.curve_speed_ms
+
+        if (self.slow_on_curves and MIN_CURVE_SPEED <= self.curve_plan_speed_ms <
                 min(CURVE_SPEED_DISABLED, cruise_speed_ms)):
-            max_speed_clu = min(self.v_cruise_kph * CV.KPH_TO_MS, self.curve_speed_ms) * self.speed_conv_to_clu
+            max_speed_clu = min(cruise_speed_ms, self.curve_plan_speed_ms) * self.speed_conv_to_clu
             curv_limit = int(max_speed_clu)
         else:
             max_speed_clu = self.kph_to_clu(self.v_cruise_kph)
 
         # onroad CURV indicator: show the configured curve target while curve
         # slowdown is actively available to the engaged cruise controller.
-        self.is_curv_driving = bool(curv_limit > 0 and CS.cruiseState.enabled)
+        curve_state_engaged = (self.curve_pedal_coordinator.engaged
+                               if self.CP.enableGasInterceptor else curv_limit > 0)
+        self.is_curv_driving = bool(curve_state_engaged and curv_limit > 0 and CS.cruiseState.enabled)
         # The configured curve target is fixed at MIN_CURVE_SPEED. The applied
         # speed still approaches it through the safety filters above.
         self.curv_speed = (float(MIN_CURVE_SPEED) * CV.MS_TO_KPH
@@ -1091,6 +1138,23 @@ class Controls:
 
             actuators.accel = self.LoC.update(self.active, CS, long_plan, pid_accel_limits, t_since_plan,
                                               self.stop_accel_boost_active)
+            self.curve_pedal_raw_accel = float(actuators.accel)
+            lead_one = self.sm['radarState'].leadOne
+            lead_ttc = (float(lead_one.dRel) / max(-float(lead_one.vRel), 0.1)
+                        if lead_one.status and lead_one.vRel < -0.3 else 1e9)
+            urgent_longitudinal = bool(
+              long_plan.fcw or
+              (lead_one.status and lead_one.vRel < -0.3 and
+               (lead_one.dRel < 8.0 or lead_ttc < 3.0)))
+            if self.CP.enableGasInterceptor:
+                actuators.accel = self.curve_pedal_coordinator.update_accel(
+                  actuators.accel,
+                  self.active,
+                  CS.vEgo,
+                  CS.brakePressed,
+                  CS.gasPressed,
+                  urgent_safety=urgent_longitudinal)
+            self.curve_pedal_final_accel = float(actuators.accel)
 
             # Steering PID loop and lateral MPC
             # lat_active = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \

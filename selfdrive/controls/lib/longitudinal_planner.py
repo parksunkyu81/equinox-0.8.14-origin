@@ -18,6 +18,8 @@ from selfdrive.swaglog import cloudlog
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
 AWARENESS_DECEL = -0.2  # car smoothly decel at .2m/s^2 when user is distracted
+LEAD_LOSS_CRUISE_BLEND_S = 1.0
+LEAD_LOSS_ACCEL_RISE_MPS3 = 0.4
 
 # 가속도를 낮추어 엑셀 사용을 최소화합니다.
 _A_CRUISE_MIN_V_FOLLOWING = [-1.2, -1.2, -1.1, -1.0, -0.8]
@@ -57,6 +59,7 @@ class Planner:
     self.vision_lead_present = False
     self.previous_vision_lead_present = False
     self.last_vision_lead_mono_time = 0
+    self.lead_loss_blend_remaining = 0.0
 
     self.a_desired = init_a
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, DT_MDL)
@@ -78,10 +81,9 @@ class Planner:
 
     reset_state = long_control_off if self.CP.openpilotLongitudinalControl else not sm['controlsState'].enabled
 
-    # EQUINOX_NR is vision-only. Detect a lead-loss edge using the source
-    # model timestamp, not the republished radarState timestamp. On that one
-    # edge, release the previous lead's acceleration continuity constraint so
-    # the cruise plan does not inherit stale negative acceleration.
+    # Detect a confirmed lead-loss edge using the source model timestamp. The
+    # radar layer already absorbs short dropouts; once its bounded hold expires,
+    # blend into cruise without deleting the previous acceleration state.
     self.vision_lead_present = bool(sm['radarState'].leadOne.status or sm['radarState'].leadTwo.status)
     vision_lead_mono_time = sm['radarState'].mdMonoTime
     self.previous_vision_lead_present, self.last_vision_lead_mono_time, vision_lead_lost = \
@@ -89,14 +91,25 @@ class Planner:
                                     self.last_vision_lead_mono_time,
                                     self.vision_lead_present, vision_lead_mono_time)
 
-    prev_accel_constraint = not (reset_state or sm['carState'].standstill or vision_lead_lost)
+    if vision_lead_lost:
+      self.lead_loss_blend_remaining = LEAD_LOSS_CRUISE_BLEND_S
+      if self.CP.enableGasInterceptor:
+        # Negative planned acceleration and zero both mean zero command to a
+        # gas interceptor. Start the clear-road blend from that physical zero
+        # point, while the rise limiter below prevents a cruise acceleration
+        # jump. Aligning the speed state avoids an artificial wait for a stale
+        # lead-follow trajectory to catch back up to measured speed.
+        self.v_desired_filter.x = max(self.v_desired_filter.x, v_ego)
+        self.a_desired = max(self.a_desired, 0.0)
+    elif self.vision_lead_present:
+      self.lead_loss_blend_remaining = 0.0
+
+    prev_accel_constraint = not (reset_state or sm['carState'].standstill)
 
     if reset_state:
       self.v_desired_filter.x = v_ego
       self.a_desired = 0.0
-    elif vision_lead_lost and self.CP.enableGasInterceptor:
-      self.v_desired_filter.x = max(self.v_desired_filter.x, v_ego)
-      self.a_desired = max(self.a_desired, 0.0)
+      self.lead_loss_blend_remaining = 0.0
 
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
 
@@ -108,6 +121,11 @@ class Planner:
       accel_limits_turns[0] = min(accel_limits_turns[0], accel_limits_turns[1])
     accel_limits_turns[0] = min(accel_limits_turns[0], self.a_desired + 0.05)
     accel_limits_turns[1] = max(accel_limits_turns[1], self.a_desired - 0.05)
+    if self.CP.enableGasInterceptor and self.lead_loss_blend_remaining > 0.0:
+      accel_limits_turns[1] = min(
+        accel_limits_turns[1], self.a_desired + LEAD_LOSS_ACCEL_RISE_MPS3 * DT_MDL)
+      self.lead_loss_blend_remaining = max(
+        0.0, self.lead_loss_blend_remaining - DT_MDL)
 
     accel_limits_turns[1] = limit_stop_acceleration(v_ego, accel_limits_turns[1])
 
