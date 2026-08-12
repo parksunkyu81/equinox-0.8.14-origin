@@ -26,6 +26,8 @@ SPEED_LIMIT_APPROACH_START_S = 6.0
 SPEED_LIMIT_FULL_LIFT_S = 2.0
 BRAKE_SHADOW_MIN_CONFIDENCE = 0.65
 BRAKE_SHADOW_DECEL_MARGIN_MS2 = 0.20
+BRAKE_BOOTSTRAP_MIN_PRESSURE = 0.55
+BRAKE_BOOTSTRAP_DECEL_MARGIN_MS2 = 0.35
 BRAKE_SHADOW_CONFIRM_S = 0.30
 BRAKE_SHADOW_CLEAR_S = 0.80
 
@@ -121,6 +123,9 @@ class PredictiveCoastingCoordinator:
     self.natural_decel_confidence = 0.0
     self.brake_needed_shadow = False
     self.brake_advisory = False
+    self.brake_bootstrap = True
+    self.brake_min_pressure = BRAKE_BOOTSTRAP_MIN_PRESSURE
+    self.brake_decel_margin_ms2 = BRAKE_BOOTSTRAP_DECEL_MARGIN_MS2
     self.brake_shadow_elapsed = 0.0
     self.brake_shadow_clear_elapsed = BRAKE_SHADOW_CLEAR_S
     self.driver_brake_pressed = False
@@ -314,11 +319,23 @@ class PredictiveCoastingCoordinator:
     self.natural_decel_ms2 = max(0.0, _finite(natural_decel_ms2))
     self.natural_decel_confidence = float(clip(
       _finite(natural_decel_confidence), 0.0, 1.0))
+    # Do not suppress the BRAKE advisory entirely while the vehicle model is
+    # still learning. Start with conservative thresholds, then blend toward
+    # the normal thresholds as confidence reaches the trusted level.
+    confidence_ratio = float(clip(
+      self.natural_decel_confidence / BRAKE_SHADOW_MIN_CONFIDENCE, 0.0, 1.0))
+    self.brake_bootstrap = bool(
+      self.natural_decel_confidence < BRAKE_SHADOW_MIN_CONFIDENCE)
+    self.brake_min_pressure = (
+      BRAKE_BOOTSTRAP_MIN_PRESSURE + confidence_ratio *
+      (0.20 - BRAKE_BOOTSTRAP_MIN_PRESSURE))
+    self.brake_decel_margin_ms2 = (
+      BRAKE_BOOTSTRAP_DECEL_MARGIN_MS2 + confidence_ratio *
+      (BRAKE_SHADOW_DECEL_MARGIN_MS2 - BRAKE_BOOTSTRAP_DECEL_MARGIN_MS2))
     shadow_candidate = bool(
-      not fcw and pressure >= 0.20 and
-      self.natural_decel_confidence >= BRAKE_SHADOW_MIN_CONFIDENCE and
+      not fcw and pressure >= self.brake_min_pressure and
       self.required_decel_ms2 <
-      -self.natural_decel_ms2 - BRAKE_SHADOW_DECEL_MARGIN_MS2)
+      -self.natural_decel_ms2 - self.brake_decel_margin_ms2)
     self._update_brake_shadow(shadow_candidate, brake_alert_enabled)
     self.last_pressure = pressure
 

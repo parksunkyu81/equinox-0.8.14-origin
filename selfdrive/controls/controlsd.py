@@ -551,6 +551,11 @@ class Controls:
               "predictive_brake_shadow": bool(self.predictive_coasting.brake_needed_shadow),
               "predictive_brake_alert_enabled": bool(self.predictive_brake_alert_enabled),
               "predictive_brake_advisory": bool(self.predictive_coasting.brake_advisory),
+              "predictive_brake_bootstrap": bool(self.predictive_coasting.brake_bootstrap),
+              "predictive_brake_min_pressure": round(
+                float(self.predictive_coasting.brake_min_pressure), 4),
+              "predictive_brake_decel_margin_ms2": round(
+                float(self.predictive_coasting.brake_decel_margin_ms2), 4),
               "predictive_brake_shadow_events": int(self.predictive_coasting.brake_shadow_events),
               "predictive_brake_shadow_brake_responses": int(
                 self.predictive_coasting.brake_shadow_brake_responses),
