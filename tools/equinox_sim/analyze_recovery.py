@@ -9,6 +9,14 @@ from selfdrive.controls.lib.pedal_force_recovery import (
 )
 
 
+RECOVERY_REQUIRED_GATES = (
+  "gasInterceptor", "controlsActive", "adaptiveCruise", "pidState",
+  "noBrake", "noDriverGas", "notStandstill", "aboveMinSpeed",
+  "driverAware", "notForceDecel", "notCurve", "noFcw", "canValid",
+  "fullPlan", "planFresh", "speedDemand",
+)
+
+
 def _first_sample(samples, predicate, start_time=None, end_time=None):
   for sample in samples:
     mono_time = float(sample["monoTime"])
@@ -39,7 +47,7 @@ def analyze_samples(samples):
     s["controls"]["recoveryRawAccel"] <= 0.001)
   eligibility_at_zero = zero_demand["eligibility"] if zero_demand else {}
   failed_eligibility = sorted(
-    name for name, passed in eligibility_at_zero.items() if not bool(passed)
+    name for name in RECOVERY_REQUIRED_GATES if not bool(eligibility_at_zero.get(name, False))
   )
   candidate = zero_demand if zero_demand is not None and not failed_eligibility else None
   recovery = _first_sample(samples, lambda s: s["controls"]["recoveryActive"])

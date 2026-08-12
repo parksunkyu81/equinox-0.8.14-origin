@@ -684,6 +684,16 @@ struct ControlsState @0x97ff69c53601abf1 {
   drivingStyleAIGasEvents @141 :UInt32;
   drivingStyleAIBrakeEvents @142 :UInt32;
   drivingStyleAIStableFollowSec @143 :Float32;
+  pedalForceRecoveryMode @144 :UInt8;
+  pedalLeadAssistActive @145 :Bool;
+  pedalLeadAssistCandidateDuration @146 :Float32;
+  pedalLeadAssistFilteredVRel @147 :Float32;
+  pedalLeadAssistActualTR @148 :Float32;
+  pedalLeadAssistDesiredTR @149 :Float32;
+  pedalLeadAssistTrMargin @150 :Float32;
+  pedalLeadAssistCancelReason @151 :UInt8;
+  pedalLeadAssistCount @152 :UInt32;
+  pedalLeadAssistPedalTarget @153 :Float32;
 
 
 

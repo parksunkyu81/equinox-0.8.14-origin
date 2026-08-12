@@ -9,6 +9,7 @@ from selfdrive.car.gm.values import DBC, NO_ASCM, CanBus, CarControllerParams
 from opendbc.can.packer import CANPacker
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
 from selfdrive.controls.lib.stop_accel_boost import pedal_command_allowed
+from selfdrive.controls.lib.pedal_force_recovery import PEDAL_FORCE_RECOVERY_PEDAL_FLOOR
 
 VisualAlert = car.CarControl.HUDControl.VisualAlert
 GearShifter = car.CarState.GearShifter
@@ -126,6 +127,18 @@ class CarController():
         # positive-pedal ceiling. Coasting can only remove pedal; it can never
         # create acceleration or override brake/FCW/longitudinal zero requests.
         styled_pedal = clip(acc_mult * actuators.accel * learned_gain, 0.0, 0.85)
+        hard_recovery = getattr(controls, 'pedal_force_recovery', None)
+        lead_assist = getattr(controls, 'lead_coast_assist', None)
+        recovery = (hard_recovery if hard_recovery is not None and hard_recovery.active else
+                    lead_assist if lead_assist is not None and lead_assist.active else None)
+        if recovery is not None:
+          # Guarantee the calibrated command floor even when the learned style
+          # gain is below 1.0, without letting that gain amplify recovery. The
+          # predictive-coasting multiplier below remains the final authority.
+          raw_recovery_pedal = clip(acc_mult * recovery.raw_accel * learned_gain, 0.0, 0.85)
+          recovery_floor = (PEDAL_FORCE_RECOVERY_PEDAL_FLOOR if recovery is hard_recovery
+                            else lead_assist.pedal_target)
+          styled_pedal = max(raw_recovery_pedal, recovery_floor)
         coast_scale = clip(float(getattr(controls, 'predictive_coast_pedal_scale', 1.0)), 0.0, 1.0)
         self.predictive_coast_styled_pedal = float(styled_pedal)
         self.predictive_coast_pedal_scale = float(coast_scale)
