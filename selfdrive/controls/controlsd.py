@@ -45,7 +45,7 @@ from selfdrive.controls.lib.curve_speed_limiter import (
 )
 from selfdrive.controls.lib.curve_pedal_coordinator import CurvePedalCoordinator
 from selfdrive.controls.lib.predictive_coasting import PredictiveCoastingCoordinator
-from selfdrive.controls.lib.natural_decel_learner import NaturalDecelLearner
+from selfdrive.controls.lib.natural_decel_learner import NaturalDecelLearner, select_road_pitch
 from selfdrive.controls.lib.panda_safety import panda_safety_config_matches, update_panda_safety_readiness
 from selfdrive.controls.lib.process_health import expected_not_running_processes, update_process_not_running_state
 from selfdrive.controls.lib.driving_style_learner import DrivingStyleLearner
@@ -198,6 +198,10 @@ class Controls:
         self.predictive_coast_pedal_scale = 1.0
         self.natural_decel_learner = NaturalDecelLearner(params=params)
         self.natural_decel_status = self.natural_decel_learner.status(0.0)
+        self.natural_decel_pitch_deg = 0.0
+        self.natural_decel_pitch_valid = False
+        self.natural_decel_pitch_fallback = False
+        self.natural_decel_pitch_source = "invalid"
         self.predictive_brake_alert_enabled = params.get_bool("PredictiveBrakeAlert")
         self.speed_limit_coast_active = False
         self.speed_limit_coast_target_ms = 0.0
@@ -561,6 +565,10 @@ class Controls:
               "natural_decel_eligible": bool(self.natural_decel_status.eligible),
               "natural_decel_duration_s": round(float(self.natural_decel_status.duration_s), 2),
               "natural_decel_events": int(self.natural_decel_status.events),
+              "natural_decel_pitch_deg": round(float(self.natural_decel_pitch_deg), 4),
+              "natural_decel_pitch_valid": bool(self.natural_decel_pitch_valid),
+              "natural_decel_pitch_fallback": bool(self.natural_decel_pitch_fallback),
+              "natural_decel_pitch_source": str(self.natural_decel_pitch_source),
               "natural_decel_bins": self.natural_decel_learner.bins_snapshot(),
               "curve_target_kph": round(float(target_speed_clu) * self.speed_conv_to_ms * CV.MS_TO_KPH, 3),
               "curv_limit_clu": int(curv_limit),
@@ -1251,12 +1259,22 @@ class Controls:
             coast_lane_change = lat_plan.laneChangeState != LaneChangeState.off
             coast_orientation = self.sm['liveLocationKalman'].calibratedOrientationNED
             coast_orientation_values = coast_orientation.value
-            coast_pitch_valid = bool(
-              self.sm.valid['liveLocationKalman'] and coast_orientation.valid and
-              len(coast_orientation_values) > 1 and
-              math.isfinite(float(coast_orientation_values[1])))
-            coast_pitch_deg = (math.degrees(float(coast_orientation_values[1]))
-                               if coast_pitch_valid else 0.0)
+            coast_pitch_rad = (float(coast_orientation_values[1])
+                               if len(coast_orientation_values) > 1 else math.nan)
+            llk = self.sm['liveLocationKalman']
+            calibration_ok = bool(
+              self.sm.valid['liveCalibration'] and
+              self.sm['liveCalibration'].calStatus == Calibration.CALIBRATED)
+            (self.natural_decel_pitch_deg,
+             self.natural_decel_pitch_valid,
+             self.natural_decel_pitch_fallback,
+             self.natural_decel_pitch_source) = select_road_pitch(
+               coast_pitch_rad,
+               llk_valid=self.sm.valid['liveLocationKalman'],
+               orientation_valid=coast_orientation.valid,
+               inputs_ok=llk.inputsOK,
+               sensors_ok=llk.sensorsOK,
+               calibration_ok=calibration_ok)
             natural_context_ok = bool(
               predictive_enabled and self.active and
               not self.curve_pedal_coordinator.engaged and
@@ -1269,8 +1287,9 @@ class Controls:
               brake_pressed=CS.brakePressed,
               gas_pressed=CS.gasPressed,
               context_ok=natural_context_ok,
-              pitch_deg=coast_pitch_deg,
-              pitch_valid=coast_pitch_valid,
+              pitch_deg=self.natural_decel_pitch_deg,
+              pitch_valid=self.natural_decel_pitch_valid,
+              pitch_fallback=self.natural_decel_pitch_fallback,
               dt=DT_CTRL)
 
             if self.is_curv_driving:

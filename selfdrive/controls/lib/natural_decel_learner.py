@@ -11,6 +11,8 @@ DEFAULT_DECEL_MS2 = (0.10, 0.13, 0.18, 0.23, 0.29, 0.35, 0.40)
 
 MIN_LEARN_SPEED_KPH = 10.0
 MAX_FLAT_ROAD_PITCH_DEG = 2.0
+MAX_FALLBACK_ROAD_PITCH_DEG = 1.5
+MAX_FALLBACK_DECEL_MS2 = 0.80
 PEDAL_ZERO_THRESHOLD = 0.005
 SETTLE_TIME_S = 0.60
 SAVE_INTERVAL_S = 60.0
@@ -29,6 +31,30 @@ def _finite(value, default=0.0):
   except (TypeError, ValueError):
     return float(default)
   return value if math.isfinite(value) else float(default)
+
+
+def select_road_pitch(pitch_rad, *, llk_valid, orientation_valid,
+                      inputs_ok, sensors_ok, calibration_ok):
+  """Select GPS-backed pitch or a conservative inertial-only fallback.
+
+  locationd marks the complete NED orientation invalid without external GPS,
+  even though its gravity-observable roll/pitch values remain available. Only
+  use the fallback pitch when localization inputs, IMU sensors, and camera
+  calibration are all healthy. Yaw is intentionally never used here.
+  """
+  try:
+    pitch_rad = float(pitch_rad)
+  except (TypeError, ValueError):
+    return 0.0, False, False, "invalid"
+  if not math.isfinite(pitch_rad) or not llk_valid:
+    return 0.0, False, False, "invalid"
+
+  pitch_deg = math.degrees(pitch_rad)
+  if orientation_valid:
+    return pitch_deg, True, False, "gps_ned"
+  if inputs_ok and sensors_ok and calibration_ok:
+    return pitch_deg, True, True, "imu_pitch_fallback"
+  return 0.0, False, False, "invalid"
 
 
 @dataclass(frozen=True)
@@ -162,11 +188,14 @@ class NaturalDecelLearner:
     } for index in range(len(self.estimates))]
 
   def update(self, *, v_ego, a_ego, pedal_output, brake_pressed, gas_pressed,
-             context_ok, pitch_deg=0.0, pitch_valid=False, dt=0.01, now=None):
+             context_ok, pitch_deg=0.0, pitch_valid=False,
+             pitch_fallback=False, dt=0.01, now=None):
     now = self._clock() if now is None else _finite(now, self._clock())
     dt = _clip(_finite(dt, 0.01), 0.001, 0.2)
     speed_kph = max(0.0, _finite(v_ego)) * 3.6
-    flat_road = bool(pitch_valid and abs(_finite(pitch_deg)) <= MAX_FLAT_ROAD_PITCH_DEG)
+    pitch_limit = (MAX_FALLBACK_ROAD_PITCH_DEG
+                   if pitch_fallback else MAX_FLAT_ROAD_PITCH_DEG)
+    flat_road = bool(pitch_valid and abs(_finite(pitch_deg)) <= pitch_limit)
     eligible = bool(context_ok and flat_road and speed_kph >= MIN_LEARN_SPEED_KPH and
                     _finite(pedal_output) <= PEDAL_ZERO_THRESHOLD and
                     not brake_pressed and not gas_pressed)
@@ -188,7 +217,8 @@ class NaturalDecelLearner:
     # Positive acceleration on a nominally flat road is not natural slowdown;
     # it is usually grade, wind, drivetrain creep, or a transition sample.
     measured_decel = -_finite(a_ego)
-    if not 0.03 <= measured_decel <= 1.20:
+    max_decel = MAX_FALLBACK_DECEL_MS2 if pitch_fallback else 1.20
+    if not 0.03 <= measured_decel <= max_decel:
       self._save(now)
       return self.status(v_ego)
 

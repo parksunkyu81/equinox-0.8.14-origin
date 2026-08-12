@@ -788,6 +788,12 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                           "../assets/offroad/icon_road.png",
                                           this));
 
+  toggles.append(new ParamControl("PredictiveBrakeAlert",
+                                          "Enable predictive brake alert",
+                                          "Show a visual alert and play the configured Korean voice when learned natural deceleration is not enough.",
+                                          "../assets/offroad/icon_road.png",
+                                          this));
+
   toggles.append(new ParamControl("AutoShutdown",
                                           "Enable auto shutdown",
                                           "Automatically power off the EON 180 seconds after external power is disconnected and driving has stopped.",
