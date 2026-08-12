@@ -4,6 +4,16 @@ STOP_ACCEL_BOOST_MAX_SPEED_KPH = 25.0
 STOP_ACCEL_BOOST_MAX_SPEED_MS = STOP_ACCEL_BOOST_MAX_SPEED_KPH / 3.6
 STOP_ACCEL_BOOST_FACTOR = 1.30
 STOP_ACCEL_ZERO_EPS = 1e-3
+# A confirmed, safely receding lead may need a small launch request before the
+# normal longitudinal PID becomes positive. Ramp to the known-effective
+# Equinox pedal floor instead of multiplying zero by the boost factor.
+STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_KPH = 8.0
+STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_MS = STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_KPH / 3.6
+STOP_ACCEL_BOOST_FLOOR_ACCEL = 0.36
+STOP_ACCEL_BOOST_FLOOR_RAMP_S = 0.12
+STOP_ACCEL_BOOST_FLOOR_MIN_VREL_MS = 0.20
+STOP_ACCEL_BOOST_FLOOR_MIN_LEAD_SPEED_MS = 0.50
+STOP_ACCEL_BOOST_FLOOR_MIN_LEAD_DISTANCE_M = 2.50
 
 # Cancel a latched launch if the same lead stops again or the ego vehicle is
 # closing too quickly. A zero lead distance means that vision currently has no
@@ -16,8 +26,18 @@ STOP_ACCEL_BOOST_MIN_LEAD_DISTANCE_M = 1.5
 class StopAccelBoostLatch:
   """Hold a confirmed lead launch from 1 km/h until the 25 km/h cutoff."""
 
-  def __init__(self):
+  def __init__(self, dt=0.01):
+    self.dt = max(1e-3, float(dt))
     self.latched = False
+    self.floor_elapsed = 0.0
+    self.floor_allowed = False
+    self.floor_accel = 0.0
+
+  def _clear_latch(self):
+    self.latched = False
+    self.floor_elapsed = 0.0
+    self.floor_allowed = False
+    self.floor_accel = 0.0
 
   def update(self, system_ready, launch_detected, v_ego, brake_pressed=False,
              gas_pressed=False, lead_speed=0.0, lead_relative_speed=0.0,
@@ -38,23 +58,43 @@ class StopAccelBoostLatch:
     if (not system_ready or brake_pressed or
         v_ego >= STOP_ACCEL_BOOST_MAX_SPEED_MS or
         lead_stopped_again or unsafe_approach):
-      self.latched = False
+      self._clear_latch()
     elif launch_detected:
       # This may latch while stationary, but active remains false below 1 km/h.
       # It lets a driver-initiated launch receive boost without another delay.
       self.latched = True
 
+    self.floor_allowed = bool(
+      self.latched and not gas_pressed and not brake_pressed and lead_valid and
+      STOP_ACCEL_BOOST_MIN_SPEED_MS <= v_ego < STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_MS and
+      lead_distance >= STOP_ACCEL_BOOST_FLOOR_MIN_LEAD_DISTANCE_M and
+      lead_speed >= STOP_ACCEL_BOOST_FLOOR_MIN_LEAD_SPEED_MS and
+      lead_relative_speed >= STOP_ACCEL_BOOST_FLOOR_MIN_VREL_MS)
+    if self.floor_allowed:
+      self.floor_elapsed = min(STOP_ACCEL_BOOST_FLOOR_RAMP_S,
+                               self.floor_elapsed + self.dt)
+      self.floor_accel = STOP_ACCEL_BOOST_FLOOR_ACCEL * min(
+        1.0, self.floor_elapsed / STOP_ACCEL_BOOST_FLOOR_RAMP_S)
+    else:
+      self.floor_elapsed = 0.0
+      self.floor_accel = 0.0
+
     return bool(self.latched and not gas_pressed and not brake_pressed and
                 STOP_ACCEL_BOOST_MIN_SPEED_MS <= v_ego < STOP_ACCEL_BOOST_MAX_SPEED_MS)
 
 
-def apply_stop_accel_boost(requested_accel, v_ego, boost_active, accel_limits):
-  """Apply 30% boost only in the measured 1-25 km/h launch window."""
+def apply_stop_accel_boost(requested_accel, v_ego, boost_active, accel_limits,
+                           launch_floor_accel=0.0):
+  """Apply launch boost and an independently safety-gated ramped floor."""
   accel = float(requested_accel)
   if (boost_active and
       STOP_ACCEL_BOOST_MIN_SPEED_MS <= v_ego < STOP_ACCEL_BOOST_MAX_SPEED_MS and
       accel > 0.0):
     accel *= STOP_ACCEL_BOOST_FACTOR
+  # The floor repairs only the observed zero-request launch hole. Never turn a
+  # meaningful planner deceleration request into positive pedal.
+  if boost_active and accel >= -STOP_ACCEL_ZERO_EPS:
+    accel = max(accel, max(0.0, float(launch_floor_accel)))
 
   return min(float(accel_limits[1]), max(float(accel_limits[0]), accel))
 

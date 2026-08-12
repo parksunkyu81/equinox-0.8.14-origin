@@ -61,7 +61,7 @@ class LongControl:
     self.v_pid = v_pid
 
   def update(self, active, CS, long_plan, accel_limits, t_since_plan,
-             stop_accel_boost_active=False):
+             stop_accel_boost_active=False, stop_accel_boost_floor=0.0):
     """Update longitudinal control. This updates the state machine and runs a PID loop"""
     # Interp control trajectory
     speeds = long_plan.speeds
@@ -142,7 +142,9 @@ class LongControl:
 
     boost_allowed = stop_accel_boost_active and active and not gas_override and not CS.brakePressed
     self.stop_accel_boost_raw_accel = float(output_accel)
-    final_accel = apply_stop_accel_boost(output_accel, CS.vEgo, boost_allowed, accel_limits)
+    final_accel = apply_stop_accel_boost(
+      output_accel, CS.vEgo, boost_allowed, accel_limits,
+      launch_floor_accel=stop_accel_boost_floor if boost_allowed else 0.0)
     self.stop_accel_boost_final_accel = float(final_accel)
     self.stop_accel_boost_applied = bool(boost_allowed and
                                          final_accel > output_accel + STOP_ACCEL_ZERO_EPS)

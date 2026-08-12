@@ -276,7 +276,7 @@ class Controls:
 
         self.left_lane_visible = False
         self.right_lane_visible = False
-        self.stop_accel_boost_latch = StopAccelBoostLatch()
+        self.stop_accel_boost_latch = StopAccelBoostLatch(DT_CTRL)
         self.stop_accel_boost_active = False
         self.driving_style_learner = DrivingStyleLearner(params=params)
         self.driving_style_status = self.driving_style_learner.status(0.0)
@@ -579,6 +579,8 @@ class Controls:
               "curve_final_accel": round(float(self.curve_pedal_final_accel), 4),
               "predictive_coast_phase": self.predictive_coasting.phase,
               "predictive_coast_intervening": bool(self.predictive_coasting.intervening),
+              "predictive_coast_quick_release": bool(
+                self.predictive_coasting.quick_release_active),
               "predictive_coast_pedal_scale": round(float(self.predictive_coast_pedal_scale), 4),
               "predictive_coast_desired_gap_m": round(float(self.predictive_coasting.desired_gap_m), 3),
               "predictive_coast_margin_m": round(float(self.predictive_coasting.distance_margin_m), 3),
@@ -593,6 +595,10 @@ class Controls:
               "predictive_coast_ai_gain": round(float(self.driving_style_gain), 4),
               "predictive_coast_last_pedal": round(float(self.last_actuators.gas), 5),
               "predictive_coast_source": self.predictive_coasting.dominant_source,
+              "stop_accel_boost_floor_allowed": bool(
+                self.stop_accel_boost_latch.floor_allowed),
+              "stop_accel_boost_floor_accel": round(
+                float(self.stop_accel_boost_latch.floor_accel), 4),
               "predictive_coast_source_pressures": {
                 key: round(float(value), 4)
                 for key, value in self.predictive_coasting.source_pressures.items()
@@ -1264,8 +1270,21 @@ class Controls:
             pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, CS.vEgo, self.v_cruise_kph * CV.KPH_TO_MS)
             t_since_plan = (self.sm.frame - self.sm.rcv_frame['longitudinalPlan']) * DT_CTRL
 
-            raw_long_accel = self.LoC.update(self.active, CS, long_plan, pid_accel_limits, t_since_plan,
-                                             self.stop_accel_boost_active)
+            boost_floor_context_safe = bool(
+              self.stop_accel_boost_latch.floor_allowed and
+              not self.is_curv_driving and not self.curve_pedal_coordinator.engaged and
+              not self.speed_limit_coast_active and not long_plan.fcw and
+              float(self.sm['driverMonitoringState'].awarenessStatus) >= 0.0 and
+              self.sm.valid['radarState'] and
+              len(self.sm['radarState'].radarErrors) == 0 and
+              self.sm.valid['longitudinalPlan'] and 0.0 <= t_since_plan <= 0.25 and
+              len(long_plan.speeds) == CONTROL_N and
+              str(long_plan.longitudinalPlanSource) == 'lead0')
+            boost_floor_accel = (self.stop_accel_boost_latch.floor_accel
+                                 if boost_floor_context_safe else 0.0)
+            raw_long_accel = self.LoC.update(
+              self.active, CS, long_plan, pid_accel_limits, t_since_plan,
+              self.stop_accel_boost_active, boost_floor_accel)
             recovery_eligible = self.pedal_force_recovery_eligible(CS, long_plan, t_since_plan)
             hard_recovery_accel = self.pedal_force_recovery.update(recovery_eligible, raw_long_accel)
             lead_one = self.sm['radarState'].leadOne

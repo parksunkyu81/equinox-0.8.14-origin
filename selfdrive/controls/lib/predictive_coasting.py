@@ -19,6 +19,14 @@ PREDICTIVE_COAST_SCALE_FALL_S = 0.80
 PREDICTIVE_COAST_SCALE_RISE_S = 1.00
 PREDICTIVE_COAST_FAST_RISE_S = 0.55
 PREDICTIVE_COAST_ACCEL_FILTER_TAU_S = 0.35
+# In stop-and-go traffic, a clearly receding lead should release a completed
+# pedal lift sooner than the normal highway-sized 2 m / 0.5 s hysteresis. The
+# entry and urgent-stop thresholds remain unchanged.
+PREDICTIVE_COAST_LOW_SPEED_QUICK_EXIT_KPH = 15.0
+PREDICTIVE_COAST_QUICK_EXIT_VREL_MS = 0.80
+PREDICTIVE_COAST_QUICK_EXIT_MARGIN_M = 0.25
+PREDICTIVE_COAST_QUICK_CLEAR_S = 0.15
+PREDICTIVE_COAST_QUICK_RISE_S = 0.35
 CURVE_APPROACH_START_S = 2.50
 CURVE_FULL_LIFT_S = 0.80
 SOURCE_SPEED_GAP_FULL_LIFT_KPH = 10.0
@@ -129,6 +137,7 @@ class PredictiveCoastingCoordinator:
     self.brake_shadow_elapsed = 0.0
     self.brake_shadow_clear_elapsed = BRAKE_SHADOW_CLEAR_S
     self.driver_brake_pressed = False
+    self.quick_release_active = False
 
   @property
   def learning_blocked(self):
@@ -144,12 +153,14 @@ class PredictiveCoastingCoordinator:
       self.pedal_scale = min(target, self.pedal_scale + step)
     self.pedal_scale = float(clip(self.pedal_scale, 0.0, 1.0))
 
-  def _recover(self, fast=False):
+  def _recover(self, fast=False, quick_low_speed=False):
     self.phase = "recover"
     self.risk_elapsed = 0.0
     self.last_pressure = 0.0
-    self._rate_scale(1.0, PREDICTIVE_COAST_FAST_RISE_S if fast else
-                     PREDICTIVE_COAST_SCALE_RISE_S)
+    rise_time = (PREDICTIVE_COAST_QUICK_RISE_S if quick_low_speed else
+                 PREDICTIVE_COAST_FAST_RISE_S if fast else
+                 PREDICTIVE_COAST_SCALE_RISE_S)
+    self._rate_scale(1.0, rise_time)
     if self.pedal_scale >= 1.0 - 1e-6:
       self.phase = "idle"
       self.intervening = False
@@ -210,6 +221,7 @@ class PredictiveCoastingCoordinator:
       self.pedal_scale = 0.0
       self.intervening = True
       self.brake_latched = True
+      self.quick_release_active = False
       self.risk_elapsed = 0.0
       if self.brake_needed_shadow:
         self.brake_shadow_brake_responses += 1
@@ -355,14 +367,35 @@ class PredictiveCoastingCoordinator:
       self.brake_latched = False
       self.risk_elapsed = PREDICTIVE_COAST_CONFIRM_S
       self.clear_elapsed = 0.0
+      self.quick_release_active = False
       return self.pedal_scale
 
+    quick_release_candidate = bool(
+      plausible_lead and v_ego * 3.6 <= PREDICTIVE_COAST_LOW_SPEED_QUICK_EXIT_KPH and
+      pressure <= 0.0 and v_rel >= PREDICTIVE_COAST_QUICK_EXIT_VREL_MS and
+      self.distance_margin_m >= PREDICTIVE_COAST_QUICK_EXIT_MARGIN_M and
+      self.time_to_gap_s >= PREDICTIVE_COAST_EXIT_TTG_S and
+      curve_pressure <= 0.0 and speed_pressure <= 0.0)
+    # Once quick recovery starts, use wider exit thresholds so a small radar
+    # fluctuation cannot freeze the scale near zero again. Any renewed coast
+    # pressure, closing lead, curve, or speed-limit request cancels it.
+    quick_release_hold = bool(
+      self.quick_release_active and plausible_lead and
+      v_ego * 3.6 <= PREDICTIVE_COAST_LOW_SPEED_QUICK_EXIT_KPH and
+      pressure <= 0.0 and v_rel > 0.20 and self.distance_margin_m > 0.05 and
+      curve_pressure <= 0.0 and speed_pressure <= 0.0)
+    quick_lead_release = bool(quick_release_candidate or quick_release_hold)
     lead_release_safe = bool(
       not plausible_lead or
       (self.time_to_gap_s >= PREDICTIVE_COAST_EXIT_TTG_S and
        self.distance_margin_m >= PREDICTIVE_COAST_EXIT_MARGIN_M and
        v_rel >= -0.2))
-    release_safe = bool(pressure <= 0.0 and lead_release_safe)
+    release_safe = bool(pressure <= 0.0 and
+                        (lead_release_safe or quick_lead_release))
+    clear_required = (PREDICTIVE_COAST_QUICK_CLEAR_S if quick_lead_release else
+                      PREDICTIVE_COAST_CLEAR_S)
+    if not quick_lead_release:
+      self.quick_release_active = False
     if pressure > 0.0:
       self.risk_elapsed = min(PREDICTIVE_COAST_CONFIRM_S,
                               self.risk_elapsed + self.dt)
@@ -378,6 +411,7 @@ class PredictiveCoastingCoordinator:
     confirmed = self.risk_elapsed >= PREDICTIVE_COAST_CONFIRM_S - 1e-9
     if confirmed or self.intervening:
       if pressure > 0.0:
+        self.quick_release_active = False
         suffix = "coast" if pressure >= 0.65 else "pre_coast"
         self.phase = "{}_{}".format(self.dominant_source, suffix)
         target_scale = 1.0 - pressure
@@ -390,7 +424,7 @@ class PredictiveCoastingCoordinator:
         self.brake_latched = False
         return self.pedal_scale
 
-      if self.clear_elapsed < PREDICTIVE_COAST_CLEAR_S:
+      if self.clear_elapsed < clear_required:
         self.phase = "hysteresis_hold"
         self.intervening = True
         return self.pedal_scale
@@ -399,10 +433,14 @@ class PredictiveCoastingCoordinator:
                           self.distance_margin_m > PREDICTIVE_COAST_EXIT_MARGIN_M and
                           curve_pressure <= 0.0 and speed_pressure <= 0.0)
       self.brake_latched = False
-      return self._recover(fast=opening_fast)
+      if quick_release_candidate or quick_release_hold:
+        self.quick_release_active = True
+      return self._recover(fast=opening_fast,
+                           quick_low_speed=quick_lead_release)
 
     self.phase = "idle"
     self.pedal_scale = 1.0
     self.intervening = False
     self.brake_latched = False
+    self.quick_release_active = False
     return self.pedal_scale
