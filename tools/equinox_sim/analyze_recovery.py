@@ -44,7 +44,7 @@ def analyze_samples(samples):
   zero_demand = _first_sample(samples, lambda s:
     s["controls"]["speedError"] >= PEDAL_FORCE_RECOVERY_SPEED_ERROR and
     s["controls"]["futureSpeedError"] >= PEDAL_FORCE_RECOVERY_SPEED_ERROR and
-    s["controls"]["recoveryRawAccel"] <= 0.001)
+    -0.001 <= s["controls"]["recoveryRawAccel"] <= 0.001)
   eligibility_at_zero = zero_demand["eligibility"] if zero_demand else {}
   failed_eligibility = sorted(
     name for name in RECOVERY_REQUIRED_GATES if not bool(eligibility_at_zero.get(name, False))

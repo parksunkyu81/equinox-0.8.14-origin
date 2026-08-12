@@ -82,7 +82,7 @@ def recovery_log_trigger(recovery_active, controls_active, adaptive_cruise,
     bool(plan_valid) and 0.0 <= float(plan_age_ms) <= 250.0 and \
     float(speed_error) >= PEDAL_FORCE_RECOVERY_SPEED_ERROR and \
     float(future_speed_error) >= PEDAL_FORCE_RECOVERY_SPEED_ERROR and \
-    float(raw_accel) <= PEDAL_FORCE_RECOVERY_ACCEL_EPS
+    -PEDAL_FORCE_RECOVERY_ACCEL_EPS <= float(raw_accel) <= PEDAL_FORCE_RECOVERY_ACCEL_EPS
   return bool(recovery_active) or production_candidate
 
 
@@ -133,7 +133,11 @@ class PedalForceRecovery:
       self.forced_accel = self.raw_accel
       return self.forced_accel
 
-    if not self.active and self.raw_accel <= PEDAL_FORCE_RECOVERY_ACCEL_EPS:
+    # Recover an abnormal zero only. A meaningful negative request is an
+    # intentional deceleration and must never be converted into positive pedal.
+    near_zero_request = (-PEDAL_FORCE_RECOVERY_ACCEL_EPS <= self.raw_accel <=
+                         PEDAL_FORCE_RECOVERY_ACCEL_EPS)
+    if not self.active and near_zero_request:
       if self.inactive_frames >= self.rearm_frames:
         # Safety/eligibility gates still cancel the forced output immediately.
         # Only count a new event after a meaningful inactive interval so a
@@ -386,7 +390,7 @@ class LeadCoastAssist:
       float(speed_error) >= LEAD_COAST_ASSIST_SPEED_ERROR and
       float(future_speed_error) >= LEAD_COAST_ASSIST_FUTURE_ERROR and
       float(a_ego) <= LEAD_COAST_ASSIST_DECEL and
-      self.raw_accel <= LEAD_COAST_ASSIST_ACCEL_EPS)
+      -PEDAL_FORCE_RECOVERY_ACCEL_EPS <= self.raw_accel <= LEAD_COAST_ASSIST_ACCEL_EPS)
 
     if self.active:
       if not lead_hold_safe:

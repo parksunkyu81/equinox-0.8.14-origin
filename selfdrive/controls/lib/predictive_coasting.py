@@ -27,6 +27,14 @@ PREDICTIVE_COAST_QUICK_EXIT_VREL_MS = 0.80
 PREDICTIVE_COAST_QUICK_EXIT_MARGIN_M = 0.25
 PREDICTIVE_COAST_QUICK_CLEAR_S = 0.15
 PREDICTIVE_COAST_QUICK_RISE_S = 0.35
+PREDICTIVE_COAST_BRAKE_RELEASE_CLEAR_S = 0.15
+# A lead that is already pulling away must never be treated as an immediate
+# closing hazard because of a stale relative-acceleration filter. 35 km/h is
+# the stop-and-go/city range where a zero-pedal hold is felt most strongly.
+PREDICTIVE_COAST_OPENING_RELEASE_VREL_MS = 0.50
+PREDICTIVE_COAST_OPENING_HOLD_VREL_MS = 0.20
+PREDICTIVE_COAST_STRONG_OPENING_VREL_MS = 1.20
+PREDICTIVE_COAST_QUICK_EXIT_MAX_KPH = 35.0
 PREDICTIVE_COAST_LEARNED_LOW_SPEED_MAX_KPH = 35.0
 PREDICTIVE_COAST_LEARNED_CLOSING_VREL_MS = -0.10
 PREDICTIVE_COAST_LEARNED_OFFSET_MAX_S = 0.10
@@ -52,10 +60,21 @@ def _finite(value, default=0.0):
 
 
 def _time_to_gap(distance_margin, v_rel, a_rel):
-  """Return the first future time when the lead reaches the desired gap."""
+  """Return when a *currently closing* lead reaches the desired gap.
+
+  Relative acceleration is noisy and filtered, so using it to predict a
+  reversal while the measured lead is already opening can turn an improving
+  gap into a false zero-time hazard. Re-evaluate on the next frame after the
+  measured relative speed has actually become closing instead.
+  """
   margin = _finite(distance_margin)
   rel_speed = _finite(v_rel)
   rel_accel = _finite(a_rel)
+  # Only a clearly opening lead invalidates the filtered closing prediction.
+  # Near-zero relative speed can still be the beginning of a real hard brake,
+  # so retain acceleration-based prediction until opening exceeds 0.5 m/s.
+  if rel_speed >= PREDICTIVE_COAST_OPENING_RELEASE_VREL_MS:
+    return math.inf
   if margin <= 0.0:
     return 0.0 if rel_speed < -0.05 or rel_accel < -0.05 else math.inf
 
@@ -143,6 +162,10 @@ class PredictiveCoastingCoordinator:
     self.brake_shadow_clear_elapsed = BRAKE_SHADOW_CLEAR_S
     self.driver_brake_pressed = False
     self.quick_release_active = False
+    self.opening_release_active = False
+    self.launch_floor_release_active = False
+    self.recovery_floor_release_active = False
+    self.brake_release_active = False
 
   @property
   def learning_blocked(self):
@@ -205,6 +228,8 @@ class PredictiveCoastingCoordinator:
              speed_limit_distance_m=math.inf, natural_decel_ms2=0.0,
              natural_decel_confidence=0.0, brake_alert_enabled=False,
              lead_loss_recovery_active=False,
+             launch_boost_floor_active=False,
+             positive_recovery_active=False,
              learned_low_speed_coast_offset_s=0.0):
     if not enabled or not control_active or not can_valid:
       self.reset()
@@ -229,6 +254,10 @@ class PredictiveCoastingCoordinator:
       self.intervening = True
       self.brake_latched = True
       self.quick_release_active = False
+      self.opening_release_active = False
+      self.launch_floor_release_active = False
+      self.recovery_floor_release_active = False
+      self.brake_release_active = False
       self.risk_elapsed = 0.0
       if self.brake_needed_shadow:
         self.brake_shadow_brake_responses += 1
@@ -369,7 +398,10 @@ class PredictiveCoastingCoordinator:
     self._update_brake_shadow(shadow_candidate, brake_alert_enabled)
     self.last_pressure = pressure
 
-    meaningful_closing = bool(v_rel < -0.3 or self.filtered_rel_accel < -0.4)
+    # Never declare an urgent lead hazard from the filtered acceleration alone.
+    # The filter can remain negative for several seconds after the lead has
+    # started pulling away (the exact failure seen in the 2026-08-12 logs).
+    meaningful_closing = bool(v_rel < -0.3)
     urgent = bool(
       fcw or
       (plausible_lead and v_rel < -0.3 and
@@ -386,6 +418,10 @@ class PredictiveCoastingCoordinator:
       self.risk_elapsed = PREDICTIVE_COAST_CONFIRM_S
       self.clear_elapsed = 0.0
       self.quick_release_active = False
+      self.opening_release_active = False
+      self.launch_floor_release_active = False
+      self.recovery_floor_release_active = False
+      self.brake_release_active = False
       return self.pedal_scale
 
     # A false lead here is not a one-frame camera dropout: radard has already
@@ -402,13 +438,62 @@ class PredictiveCoastingCoordinator:
       self.risk_elapsed = 0.0
       self.clear_elapsed = PREDICTIVE_COAST_CLEAR_S
       self.quick_release_active = False
+      self.opening_release_active = False
+      self.launch_floor_release_active = False
+      self.recovery_floor_release_active = False
+      self.brake_release_active = False
       return self.pedal_scale
 
+    # A safely armed launch floor already proves that the same lead is moving
+    # away, the driver is not braking, and curve/speed/FCW gates are clear.
+    # Do not multiply that independently ramped floor by a stale coasting zero.
+    launch_floor_release = bool(
+      launch_boost_floor_active and plausible_lead and
+      v_rel >= PREDICTIVE_COAST_OPENING_HOLD_VREL_MS and pressure <= 0.0 and
+      curve_pressure <= 0.0 and speed_pressure <= 0.0 and not fcw)
+    if launch_floor_release:
+      self.phase = "launch_floor_release"
+      self.pedal_scale = 1.0
+      self.intervening = False
+      self.brake_latched = False
+      self.risk_elapsed = 0.0
+      self.clear_elapsed = PREDICTIVE_COAST_CLEAR_S
+      self.quick_release_active = True
+      self.opening_release_active = True
+      self.launch_floor_release_active = True
+      self.recovery_floor_release_active = False
+      self.brake_release_active = False
+      return self.pedal_scale
+
+    # The dedicated recovery modes have stricter entry gates than predictive
+    # coasting (fresh plan, PID state, no brake/curve/speed/FCW, valid CAN and
+    # either a safely receding lead or a confirmed lead-loss transition). Once
+    # one is active, a stale zero coasting scale must not nullify its floor.
+    recovery_floor_release = bool(
+      positive_recovery_active and pressure <= 0.0 and
+      curve_pressure <= 0.0 and speed_pressure <= 0.0 and not fcw)
+    if recovery_floor_release:
+      self.phase = "recovery_floor_release"
+      self.pedal_scale = 1.0
+      self.intervening = False
+      self.brake_latched = False
+      self.risk_elapsed = 0.0
+      self.clear_elapsed = PREDICTIVE_COAST_CLEAR_S
+      self.quick_release_active = False
+      self.opening_release_active = bool(
+        plausible_lead and v_rel >= PREDICTIVE_COAST_OPENING_HOLD_VREL_MS)
+      self.launch_floor_release_active = False
+      self.recovery_floor_release_active = True
+      self.brake_release_active = False
+      return self.pedal_scale
+
+    quick_exit_max_kph = (
+      PREDICTIVE_COAST_LEARNED_LOW_SPEED_MAX_KPH
+      if _finite(learned_low_speed_coast_offset_s) > 0.0 else
+      PREDICTIVE_COAST_LOW_SPEED_QUICK_EXIT_KPH)
     quick_release_candidate = bool(
       plausible_lead and
-      v_ego * 3.6 <= (PREDICTIVE_COAST_LEARNED_LOW_SPEED_MAX_KPH
-                      if _finite(learned_low_speed_coast_offset_s) > 0.0 else
-                      PREDICTIVE_COAST_LOW_SPEED_QUICK_EXIT_KPH) and
+      v_ego * 3.6 <= quick_exit_max_kph and
       pressure <= 0.0 and v_rel >= PREDICTIVE_COAST_QUICK_EXIT_VREL_MS and
       self.distance_margin_m >= PREDICTIVE_COAST_QUICK_EXIT_MARGIN_M and
       self.time_to_gap_s >= PREDICTIVE_COAST_EXIT_TTG_S and
@@ -418,19 +503,40 @@ class PredictiveCoastingCoordinator:
     # pressure, closing lead, curve, or speed-limit request cancels it.
     quick_release_hold = bool(
       self.quick_release_active and plausible_lead and
-      v_ego * 3.6 <= PREDICTIVE_COAST_LOW_SPEED_QUICK_EXIT_KPH and
-      pressure <= 0.0 and v_rel > 0.20 and self.distance_margin_m > 0.05 and
+      v_ego * 3.6 <= quick_exit_max_kph and pressure <= 0.0 and
+      v_rel > PREDICTIVE_COAST_OPENING_HOLD_VREL_MS and
+      self.distance_margin_m > 0.05 and
       curve_pressure <= 0.0 and speed_pressure <= 0.0)
     quick_lead_release = bool(quick_release_candidate or quick_release_hold)
+    opening_release = bool(
+      plausible_lead and pressure <= 0.0 and
+      v_rel >= PREDICTIVE_COAST_OPENING_RELEASE_VREL_MS and
+      curve_pressure <= 0.0 and speed_pressure <= 0.0)
+    strong_opening_release = bool(
+      opening_release and
+      v_ego * 3.6 <= PREDICTIVE_COAST_QUICK_EXIT_MAX_KPH and
+      v_rel >= PREDICTIVE_COAST_STRONG_OPENING_VREL_MS)
+    self.opening_release_active = opening_release
+    self.launch_floor_release_active = False
+    self.recovery_floor_release_active = False
+    self.brake_release_active = False
     lead_release_safe = bool(
       not plausible_lead or
+      opening_release or
       (self.time_to_gap_s >= PREDICTIVE_COAST_EXIT_TTG_S and
        self.distance_margin_m >= PREDICTIVE_COAST_EXIT_MARGIN_M and
        v_rel >= -0.2))
     release_safe = bool(pressure <= 0.0 and
                         (lead_release_safe or quick_lead_release))
     clear_required = (PREDICTIVE_COAST_QUICK_CLEAR_S if quick_lead_release else
-                      PREDICTIVE_COAST_CLEAR_S)
+                       PREDICTIVE_COAST_CLEAR_S)
+    brake_release_safe = bool(
+      self.brake_latched and pressure <= 0.0 and
+      curve_pressure <= 0.0 and speed_pressure <= 0.0 and
+      (not plausible_lead or lead_release_safe))
+    if brake_release_safe:
+      clear_required = min(clear_required, PREDICTIVE_COAST_BRAKE_RELEASE_CLEAR_S)
+      self.brake_release_active = True
     if not quick_lead_release:
       self.quick_release_active = False
     if pressure > 0.0:
@@ -449,6 +555,7 @@ class PredictiveCoastingCoordinator:
     if confirmed or self.intervening:
       if pressure > 0.0:
         self.quick_release_active = False
+        self.opening_release_active = False
         suffix = "coast" if pressure >= 0.65 else "pre_coast"
         self.phase = "{}_{}".format(self.dominant_source, suffix)
         target_scale = 1.0 - pressure
@@ -461,14 +568,23 @@ class PredictiveCoastingCoordinator:
         self.brake_latched = False
         return self.pedal_scale
 
+      # Once the measured lead is clearly pulling away there is no reason to
+      # hold the previous zero ceiling for another hysteresis interval. Start
+      # a bounded positive recovery on this frame; closing/curve/speed/FCW
+      # pressure on any later frame still cancels it immediately above.
+      if strong_opening_release:
+        self.quick_release_active = quick_lead_release
+        self.brake_latched = False
+        return self._recover(fast=True, quick_low_speed=quick_lead_release)
+
       if self.clear_elapsed < clear_required:
         self.phase = "hysteresis_hold"
         self.intervening = True
         return self.pedal_scale
 
-      opening_fast = bool(plausible_lead and v_rel > 0.5 and
-                          self.distance_margin_m > PREDICTIVE_COAST_EXIT_MARGIN_M and
-                          curve_pressure <= 0.0 and speed_pressure <= 0.0)
+      opening_fast = opening_release
+      if brake_release_safe:
+        opening_fast = True
       self.brake_latched = False
       if quick_release_candidate or quick_release_hold:
         self.quick_release_active = True
@@ -480,4 +596,8 @@ class PredictiveCoastingCoordinator:
     self.intervening = False
     self.brake_latched = False
     self.quick_release_active = False
+    self.opening_release_active = False
+    self.launch_floor_release_active = False
+    self.recovery_floor_release_active = False
+    self.brake_release_active = False
     return self.pedal_scale

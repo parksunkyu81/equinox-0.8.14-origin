@@ -373,7 +373,11 @@ class Controls:
           self.LoC.long_control_state == car.CarControl.Actuators.LongControlState.pid and
           not CS.brakePressed and not CS.gasPressed and not CS.standstill and
           CS.vEgo > V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS and
-          driver_aware and not self.is_curv_driving and not long_plan.fcw and
+          driver_aware and not self.is_curv_driving and
+          not bool(getattr(getattr(self, 'curve_pedal_coordinator', None),
+                           'engaged', False)) and
+          not bool(getattr(self, 'speed_limit_coast_active', False)) and
+          not long_plan.fcw and
           can_valid and plan_valid and 0.0 <= t_since_plan <= 0.25 and full_plan and
           recovery_speed_demand(speed_error, future_speed_error))
 
@@ -600,6 +604,14 @@ class Controls:
               "predictive_coast_intervening": bool(self.predictive_coasting.intervening),
               "predictive_coast_quick_release": bool(
                 self.predictive_coasting.quick_release_active),
+              "predictive_coast_opening_release": bool(
+                self.predictive_coasting.opening_release_active),
+              "predictive_coast_launch_floor_release": bool(
+                self.predictive_coasting.launch_floor_release_active),
+              "predictive_coast_recovery_floor_release": bool(
+                self.predictive_coasting.recovery_floor_release_active),
+              "predictive_coast_brake_release": bool(
+                self.predictive_coasting.brake_release_active),
               "predictive_coast_pedal_scale": round(float(self.predictive_coast_pedal_scale), 4),
               "predictive_coast_desired_gap_m": round(float(self.predictive_coasting.desired_gap_m), 3),
               "predictive_coast_margin_m": round(float(self.predictive_coasting.distance_margin_m), 3),
@@ -1405,6 +1417,12 @@ class Controls:
               natural_decel_confidence=self.natural_decel_status.confidence,
               brake_alert_enabled=self.predictive_brake_alert_enabled,
               lead_loss_recovery_active=self.lead_loss_cruise_assist.active,
+              launch_boost_floor_active=bool(
+                boost_floor_context_safe and boost_floor_accel > 0.0),
+              positive_recovery_active=bool(
+                self.pedal_force_recovery.active or
+                self.lead_coast_assist.active or
+                self.lead_loss_cruise_assist.active),
               learned_low_speed_coast_offset_s=(
                 self.driving_style_status.low_speed_coast_offset_s))
 

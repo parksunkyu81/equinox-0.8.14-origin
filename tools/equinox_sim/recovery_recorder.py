@@ -26,6 +26,10 @@ POST_EVENT_SECONDS = 10.0
 MIN_EVENT_INTERVAL_SECONDS = 20.0
 EXPECTED_CONTROL_HZ = 50
 PRE_EVENT_SAMPLES = int(PRE_EVENT_SECONDS * EXPECTED_CONTROL_HZ) + 50
+POST_ARBITRATION_ZERO_SECONDS = 0.16
+# The recorder samples every other controlsState frame (25 Hz).
+POST_ARBITRATION_ZERO_SAMPLES = max(2, int(round(
+  POST_ARBITRATION_ZERO_SECONDS * EXPECTED_CONTROL_HZ / 2.0)))
 DEFAULT_LOG_DIR = "/data/media/0/pedal_recovery_logs"
 FALLBACK_LOG_DIR = "/tmp/pedal_recovery_logs"
 
@@ -85,6 +89,7 @@ class PedalRecoveryRecorder:
     self.recording = False
     self.post_event_deadline = 0.0
     self.last_trigger_signal = False
+    self.post_arbitration_zero_samples = 0
     self.current_trigger_reason = ""
     self.event_sequence = 0
     self.last_event_started_at = -MIN_EVENT_INTERVAL_SECONDS
@@ -296,8 +301,7 @@ class PedalRecoveryRecorder:
       },
     }
 
-  @staticmethod
-  def _is_trigger(snapshot):
+  def _is_trigger(self, snapshot):
     controls = snapshot["controls"]
     car = snapshot["car"]
     plan = snapshot["plan"]
@@ -307,7 +311,23 @@ class PedalRecoveryRecorder:
       plan["valid"], plan["ageMs"], controls["speedError"],
       controls["futureSpeedError"], controls["recoveryRawAccel"],
     )
-    return recovery_trigger or controls["stopAccelBoostActive"]
+    # Catch the second class of stalls: planner/controlsd requests positive
+    # acceleration, but final pedal arbitration (for example predictive
+    # coasting) outputs zero. Require 160 ms so a single asynchronous CAN or
+    # state-transition sample cannot create an event.
+    post_arbitration_zero = bool(
+      controls["active"] and car["adaptiveCruise"] and
+      not car["brakePressed"] and not car["gasPressed"] and
+      not car["standstill"] and car["vEgo"] > V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS and
+      snapshot["carControl"]["requestedAccel"] >= 0.10 and
+      snapshot["carControl"]["outputGas"] <= 0.001 and
+      snapshot["eligibility"]["canValid"] and plan["valid"] and
+      0.0 <= plan["ageMs"] <= 250.0)
+    self.post_arbitration_zero_samples = (
+      self.post_arbitration_zero_samples + 1 if post_arbitration_zero else 0)
+    post_arbitration_trigger = (
+      self.post_arbitration_zero_samples >= POST_ARBITRATION_ZERO_SAMPLES)
+    return recovery_trigger or controls["stopAccelBoostActive"] or post_arbitration_trigger
 
   def _start_event(self, snapshot, now):
     self.recording = True
@@ -316,8 +336,12 @@ class PedalRecoveryRecorder:
     self.post_event_deadline = now + POST_EVENT_SECONDS
     self.event_sequence += 1
     self.last_event_started_at = now
-    self.current_trigger_reason = "stop_accel_boost" \
-      if snapshot["controls"]["stopAccelBoostActive"] else "pedal_force_recovery"
+    if snapshot["controls"]["stopAccelBoostActive"]:
+      self.current_trigger_reason = "stop_accel_boost"
+    elif self.post_arbitration_zero_samples >= POST_ARBITRATION_ZERO_SAMPLES:
+      self.current_trigger_reason = "post_arbitration_zero"
+    else:
+      self.current_trigger_reason = "pedal_force_recovery"
     cloudlog.warning(
       f"Pedal event {self.event_sequence} ({self.current_trigger_reason}) triggered; "
       f"capturing {PRE_EVENT_SECONDS:.0f}s before and {POST_EVENT_SECONDS:.0f}s after"
