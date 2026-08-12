@@ -198,7 +198,8 @@ class PredictiveCoastingCoordinator:
              curve_time_s=math.inf, curve_distance_m=math.inf,
              speed_limit_active=False, speed_limit_target=0.0,
              speed_limit_distance_m=math.inf, natural_decel_ms2=0.0,
-             natural_decel_confidence=0.0, brake_alert_enabled=False):
+             natural_decel_confidence=0.0, brake_alert_enabled=False,
+             lead_loss_recovery_active=False):
     if not enabled or not control_active or not can_valid:
       self.reset()
       return self.pedal_scale
@@ -367,6 +368,22 @@ class PredictiveCoastingCoordinator:
       self.brake_latched = False
       self.risk_elapsed = PREDICTIVE_COAST_CONFIRM_S
       self.clear_elapsed = 0.0
+      self.quick_release_active = False
+      return self.pedal_scale
+
+    # A false lead here is not a one-frame camera dropout: radard has already
+    # completed its bounded hold. Let the dedicated lead-loss assist own the
+    # smooth positive ramp instead of retaining an obsolete zero ceiling.
+    lead_loss_release = bool(
+      lead_loss_recovery_active and not plausible_lead and pressure <= 0.0 and
+      curve_pressure <= 0.0 and speed_pressure <= 0.0)
+    if lead_loss_release:
+      self.phase = "lead_loss_recover"
+      self.pedal_scale = 1.0
+      self.intervening = False
+      self.brake_latched = False
+      self.risk_elapsed = 0.0
+      self.clear_elapsed = PREDICTIVE_COAST_CLEAR_S
       self.quick_release_active = False
       return self.pedal_scale
 

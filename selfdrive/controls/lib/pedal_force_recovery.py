@@ -30,9 +30,20 @@ LEAD_COAST_ASSIST_MAX_SECONDS = 0.80
 LEAD_COAST_ASSIST_COOLDOWN_SECONDS = 0.50
 LEAD_COAST_ASSIST_ACCEL_PER_PEDAL = 1.0 / 0.17
 
+# Once radard's bounded continuity hold has really expired, bridge the
+# confirmed lead0 -> cruise transition with a small positive pedal ramp. This
+# is deliberately edge-triggered: ordinary no-lead cruise never activates it.
+LEAD_LOSS_ASSIST_ARM_SECONDS = 0.60
+LEAD_LOSS_ASSIST_RAMP_SECONDS = 0.12
+LEAD_LOSS_ASSIST_MAX_SECONDS = 1.00
+LEAD_LOSS_ASSIST_ENTER_CRUISE_ERROR = 0.50
+LEAD_LOSS_ASSIST_EXIT_CRUISE_ERROR = 0.20
+LEAD_LOSS_ASSIST_ACCEL_EPS = 0.05
+
 RECOVERY_MODE_NONE = 0
 RECOVERY_MODE_HARD_ZERO = 1
 RECOVERY_MODE_LEAD_COAST_ASSIST = 2
+RECOVERY_MODE_LEAD_LOSS_CRUISE = 3
 
 LEAD_ASSIST_CANCEL_NONE = 0
 LEAD_ASSIST_CANCEL_SAFETY = 1
@@ -160,6 +171,126 @@ class PedalForceRecovery:
     else:
       self.inactive_frames = 0
       self.forced_accel = max(self.raw_accel, PEDAL_FORCE_RECOVERY_ACCEL)
+
+    return self.forced_accel
+
+
+class LeadLossCruiseAssist:
+  """Bridge a confirmed lead loss into cruise without a zero-pedal pause."""
+
+  def __init__(self, dt=0.01):
+    self.dt = max(1e-3, float(dt))
+    self.arm_frames_max = max(1, int(round(LEAD_LOSS_ASSIST_ARM_SECONDS / self.dt)))
+    self.ramp_frames = max(1, int(round(LEAD_LOSS_ASSIST_RAMP_SECONDS / self.dt)))
+    self.max_frames = max(1, int(round(LEAD_LOSS_ASSIST_MAX_SECONDS / self.dt)))
+    self.handoff_frames = max(1, int(round(PEDAL_FORCE_RECOVERY_HANDOFF_SECONDS / self.dt)))
+    self.reset()
+
+  @property
+  def duration(self):
+    return self.active_frames * self.dt
+
+  @property
+  def armed(self):
+    return self.arm_frames > 0
+
+  def reset(self):
+    self.active = False
+    self.previous_lead_valid = False
+    self.arm_frames = 0
+    self.active_frames = 0
+    self.handoff_stable_frames = 0
+    self.activation_count = 0
+    self.raw_accel = 0.0
+    self.forced_accel = 0.0
+    self.pedal_target = 0.0
+    self.cancel_reason = LEAD_ASSIST_CANCEL_NONE
+
+  def _deactivate(self, reason):
+    self.active = False
+    self.active_frames = 0
+    self.handoff_stable_frames = 0
+    self.pedal_target = 0.0
+    self.cancel_reason = int(reason)
+
+  def update(self, base_safe, lead_valid, cruise_speed_error, requested_accel):
+    self.raw_accel = float(requested_accel)
+    lead_valid = bool(lead_valid)
+    lead_lost = self.previous_lead_valid and not lead_valid
+    self.previous_lead_valid = lead_valid
+
+    if lead_lost:
+      # Radard has already completed its 0.7 s bounded prediction before this
+      # edge is visible here. Keep a short arm window only for planner skew.
+      self.arm_frames = self.arm_frames_max
+
+    if lead_valid:
+      self.arm_frames = 0
+      if self.active:
+        self._deactivate(LEAD_ASSIST_CANCEL_LEAD)
+      self.forced_accel = self.raw_accel
+      return self.forced_accel
+
+    if not base_safe:
+      # Do not preserve a delayed acceleration opportunity across brake, FCW,
+      # curve, speed-limit, stale-plan, radar, or disengagement gates.
+      self.arm_frames = 0
+      if self.active:
+        self._deactivate(LEAD_ASSIST_CANCEL_SAFETY)
+      self.forced_accel = self.raw_accel
+      return self.forced_accel
+
+    cruise_demand = float(cruise_speed_error)
+    eligible = bool(
+      cruise_demand >= LEAD_LOSS_ASSIST_ENTER_CRUISE_ERROR and
+      self.raw_accel >= -PEDAL_FORCE_RECOVERY_ACCEL_EPS)
+
+    if self.active:
+      if not base_safe or cruise_demand < LEAD_LOSS_ASSIST_EXIT_CRUISE_ERROR or \
+         self.raw_accel < -PEDAL_FORCE_RECOVERY_ACCEL_EPS:
+        self._deactivate(LEAD_ASSIST_CANCEL_SAFETY)
+      elif self.active_frames >= self.max_frames:
+        self._deactivate(LEAD_ASSIST_CANCEL_TIMEOUT)
+      elif self.raw_accel >= PEDAL_FORCE_RECOVERY_ACCEL:
+        self.handoff_stable_frames += 1
+        if self.handoff_stable_frames >= self.handoff_frames:
+          self._deactivate(LEAD_ASSIST_CANCEL_PID_HANDOFF)
+      else:
+        self.handoff_stable_frames = 0
+
+      if self.active:
+        self.active_frames += 1
+        ramp_ratio = min(1.0, self.active_frames / float(self.ramp_frames))
+        self.pedal_target = PEDAL_FORCE_RECOVERY_PEDAL_FLOOR * ramp_ratio
+        assist_accel = PEDAL_FORCE_RECOVERY_ACCEL * ramp_ratio
+        self.forced_accel = max(self.raw_accel, assist_accel)
+        return self.forced_accel
+
+      self.forced_accel = self.raw_accel
+      return self.forced_accel
+
+    if self.raw_accel > LEAD_LOSS_ASSIST_ACCEL_EPS or not eligible:
+      # The normal planner already bridged the transition, or cruise does not
+      # demand acceleration. Never save this edge for a later surprise ramp.
+      self.arm_frames = 0
+
+    if self.arm_frames > 0:
+      self.arm_frames -= 1
+
+    if self.armed and eligible and self.raw_accel <= LEAD_LOSS_ASSIST_ACCEL_EPS:
+      self.active = True
+      self.arm_frames = 0
+      self.active_frames = 1
+      self.handoff_stable_frames = 0
+      self.activation_count += 1
+      self.cancel_reason = LEAD_ASSIST_CANCEL_NONE
+      ramp_ratio = 1.0 / float(self.ramp_frames)
+      self.pedal_target = PEDAL_FORCE_RECOVERY_PEDAL_FLOOR * ramp_ratio
+      self.forced_accel = max(self.raw_accel,
+                              PEDAL_FORCE_RECOVERY_ACCEL * ramp_ratio)
+    else:
+      self.pedal_target = 0.0
+      self.forced_accel = self.raw_accel
 
     return self.forced_accel
 

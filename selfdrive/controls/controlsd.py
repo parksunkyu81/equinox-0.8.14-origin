@@ -51,8 +51,9 @@ from selfdrive.controls.lib.process_health import expected_not_running_processes
 from selfdrive.controls.lib.driving_style_learner import DrivingStyleLearner
 from selfdrive.controls.lib.pedal_force_recovery import (
   PEDAL_FORCE_RECOVERY_PEDAL_FLOOR, RECOVERY_MODE_HARD_ZERO,
-  RECOVERY_MODE_LEAD_COAST_ASSIST, RECOVERY_MODE_NONE,
-  LeadCoastAssist, PedalForceRecovery, recovery_speed_demand,
+  RECOVERY_MODE_LEAD_COAST_ASSIST, RECOVERY_MODE_LEAD_LOSS_CRUISE,
+  RECOVERY_MODE_NONE, LeadCoastAssist, LeadLossCruiseAssist,
+  PedalForceRecovery, recovery_speed_demand,
 )
 from selfdrive.process_diagnostics import append_process_diagnostic
 
@@ -175,6 +176,7 @@ class Controls:
         self.LoC = LongControl(self.CP)
         self.pedal_force_recovery = PedalForceRecovery(DT_CTRL)
         self.lead_coast_assist = LeadCoastAssist(DT_CTRL)
+        self.lead_loss_cruise_assist = LeadLossCruiseAssist(DT_CTRL)
         self.VM = VehicleModel(self.CP)
 
         if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
@@ -331,6 +333,7 @@ class Controls:
         self.predictive_coasting.reset()
         self.pedal_force_recovery.reset()
         self.lead_coast_assist.reset()
+        self.lead_loss_cruise_assist.reset()
         self.predictive_coast_pedal_scale = 1.0
         self.speed_limit_coast_active = False
         self.speed_limit_coast_target_ms = 0.0
@@ -389,6 +392,22 @@ class Controls:
           radar_valid and self.sm.valid['longitudinalPlan'] and
           0.0 <= t_since_plan <= 0.25 and len(long_plan.speeds) == CONTROL_N and
           str(long_plan.longitudinalPlanSource) == 'lead0')
+
+    def lead_loss_cruise_assist_base_safe(self, CS, long_plan, t_since_plan,
+                                          radar_valid):
+        """Safety gate for a confirmed lead0 -> cruise transition ramp."""
+        return bool(
+          self.CP.enableGasInterceptor and self.active and self.state == State.enabled and
+          CS.adaptiveCruise and
+          self.LoC.long_control_state == car.CarControl.Actuators.LongControlState.pid and
+          not CS.brakePressed and not CS.gasPressed and not CS.standstill and
+          CS.vEgo > V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS and
+          float(self.sm['driverMonitoringState'].awarenessStatus) >= 0.0 and
+          not self.is_curv_driving and not self.curve_pedal_coordinator.engaged and
+          not self.speed_limit_coast_active and not long_plan.fcw and
+          bool(getattr(CS, 'canValid', True)) and radar_valid and
+          self.sm.valid['longitudinalPlan'] and 0.0 <= t_since_plan <= 0.25 and
+          len(long_plan.speeds) == CONTROL_N)
 
     def get_long_lead_safe_speed(self, sm, CS, vEgo):
         if CS.adaptiveCruise:
@@ -599,6 +618,14 @@ class Controls:
                 self.stop_accel_boost_latch.floor_allowed),
               "stop_accel_boost_floor_accel": round(
                 float(self.stop_accel_boost_latch.floor_accel), 4),
+              "lead_loss_cruise_armed": bool(self.lead_loss_cruise_assist.armed),
+              "lead_loss_cruise_active": bool(self.lead_loss_cruise_assist.active),
+              "lead_loss_cruise_duration_s": round(
+                float(self.lead_loss_cruise_assist.duration), 3),
+              "lead_loss_cruise_pedal_target": round(
+                float(self.lead_loss_cruise_assist.pedal_target), 5),
+              "lead_loss_cruise_count": int(
+                self.lead_loss_cruise_assist.activation_count),
               "predictive_coast_source_pressures": {
                 key: round(float(value), 4)
                 for key, value in self.predictive_coasting.source_pressures.items()
@@ -1285,8 +1312,6 @@ class Controls:
             raw_long_accel = self.LoC.update(
               self.active, CS, long_plan, pid_accel_limits, t_since_plan,
               self.stop_accel_boost_active, boost_floor_accel)
-            recovery_eligible = self.pedal_force_recovery_eligible(CS, long_plan, t_since_plan)
-            hard_recovery_accel = self.pedal_force_recovery.update(recovery_eligible, raw_long_accel)
             lead_one = self.sm['radarState'].leadOne
             radar_valid = bool(self.sm.valid['radarState'] and
                                len(self.sm['radarState'].radarErrors) == 0)
@@ -1294,8 +1319,25 @@ class Controls:
             speeds = long_plan.speeds
             speed_error = float(self.LoC.v_pid - CS.vEgo)
             future_speed_error = float(speeds[-1] - CS.vEgo) if len(speeds) == CONTROL_N else 0.0
+            cruise_speed_error = float(
+              min(self.v_cruise_kph, V_CRUISE_MAX) * CV.KPH_TO_MS - CS.vEgo)
+            lead_loss_base_safe = self.lead_loss_cruise_assist_base_safe(
+              CS, long_plan, t_since_plan, radar_valid)
+            lead_loss_accel = self.lead_loss_cruise_assist.update(
+              base_safe=lead_loss_base_safe,
+              lead_valid=bool(lead_one.status),
+              cruise_speed_error=cruise_speed_error,
+              requested_accel=raw_long_accel)
+            recovery_eligible = (
+              self.pedal_force_recovery_eligible(CS, long_plan, t_since_plan) and
+              not self.lead_loss_cruise_assist.active and
+              not self.lead_loss_cruise_assist.armed)
+            hard_recovery_accel = self.pedal_force_recovery.update(
+              recovery_eligible, raw_long_accel)
             lead_assist_base_safe = self.lead_coast_assist_base_safe(
-              CS, long_plan, t_since_plan, radar_valid) and not self.pedal_force_recovery.active
+              CS, long_plan, t_since_plan, radar_valid) and \
+              not self.pedal_force_recovery.active and \
+              not self.lead_loss_cruise_assist.active
             lead_assist_accel = self.lead_coast_assist.update(
               base_safe=lead_assist_base_safe,
               lead_valid=bool(lead_one.status),
@@ -1309,6 +1351,7 @@ class Controls:
               requested_accel=raw_long_accel,
               lead_measurement_updated=bool(self.sm.updated['radarState']))
             actuators.accel = (hard_recovery_accel if self.pedal_force_recovery.active
+                               else lead_loss_accel if self.lead_loss_cruise_assist.active
                                else lead_assist_accel)
             self.curve_pedal_raw_accel = float(actuators.accel)
             # Curve target shaping remains in the longitudinal plan. Lead,
@@ -1350,7 +1393,8 @@ class Controls:
               speed_limit_distance_m=self.speed_limit_coast_distance_m,
               natural_decel_ms2=self.natural_decel_status.decel_ms2,
               natural_decel_confidence=self.natural_decel_status.confidence,
-              brake_alert_enabled=self.predictive_brake_alert_enabled)
+              brake_alert_enabled=self.predictive_brake_alert_enabled,
+              lead_loss_recovery_active=self.lead_loss_cruise_assist.active)
 
             coast_lane_change = lat_plan.laneChangeState != LaneChangeState.off
             coast_orientation = self.sm['liveLocationKalman'].calibratedOrientationNED
@@ -1413,6 +1457,8 @@ class Controls:
             self.pedal_force_recovery.update(False, actuators.accel)
             self.lead_coast_assist.update(False, False, 0.0, 0.0, CS.vEgo, 1.3,
                                           0.0, 0.0, CS.aEgo, actuators.accel)
+            self.lead_loss_cruise_assist.update(
+              False, False, 0.0, actuators.accel)
             self.predictive_coast_pedal_scale = 1.0
             lac_log = log.ControlsState.LateralDebugState.new_message()
             if self.sm.rcv_frame['testJoystick'] > 0 and self.active:
@@ -1667,19 +1713,23 @@ class Controls:
         controlsState.stopAccelBoostFinalAccel = float(self.LoC.stop_accel_boost_final_accel)
         controlsState.stopAccelBoostFactor = float(STOP_ACCEL_BOOST_FACTOR)
         recovery_mode = (RECOVERY_MODE_HARD_ZERO if self.pedal_force_recovery.active else
+                         RECOVERY_MODE_LEAD_LOSS_CRUISE if self.lead_loss_cruise_assist.active else
                          RECOVERY_MODE_LEAD_COAST_ASSIST if self.lead_coast_assist.active else
                          RECOVERY_MODE_NONE)
         recovery = (self.pedal_force_recovery if self.pedal_force_recovery.active else
+                    self.lead_loss_cruise_assist if self.lead_loss_cruise_assist.active else
                     self.lead_coast_assist)
         controlsState.pedalForceRecoveryActive = recovery_mode != RECOVERY_MODE_NONE
         controlsState.pedalForceRecoveryDuration = float(recovery.duration)
         controlsState.pedalForceRecoveryCount = int(
-          self.pedal_force_recovery.activation_count + self.lead_coast_assist.activation_count)
+          self.pedal_force_recovery.activation_count +
+          self.lead_loss_cruise_assist.activation_count +
+          self.lead_coast_assist.activation_count)
         controlsState.pedalForceRecoveryRawAccel = float(recovery.raw_accel)
         controlsState.pedalForceRecoveryAccel = float(recovery.forced_accel)
         controlsState.pedalForceRecoveryPedalFloor = float(
           PEDAL_FORCE_RECOVERY_PEDAL_FLOOR if self.pedal_force_recovery.active
-          else self.lead_coast_assist.pedal_target)
+          else recovery.pedal_target)
         controlsState.pedalForceRecoveryMode = int(recovery_mode)
         controlsState.pedalLeadAssistActive = bool(self.lead_coast_assist.active)
         controlsState.pedalLeadAssistCandidateDuration = float(self.lead_coast_assist.candidate_duration)
