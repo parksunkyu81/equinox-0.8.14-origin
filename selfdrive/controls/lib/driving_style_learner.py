@@ -33,6 +33,22 @@ MIN_GAS_EVENTS_NEXT_UPDATE = 4
 MIN_TR_EVENTS_PER_UPDATE = 3
 MIN_STABLE_FOLLOW_S = 60.0
 
+# Low-speed manual-brake learning does not change the always-on following TR.
+# It learns a small, closing-only predictive-coasting headway so the comma
+# pedal is released slightly earlier without inviting cut-ins on a steady or
+# receding lead.
+LOW_SPEED_COAST_MIN_KPH = 3.0
+LOW_SPEED_COAST_MAX_KPH = 35.0
+LOW_SPEED_COAST_MAX_OFFSET_S = 0.10
+LOW_SPEED_COAST_FIRST_OFFSET_S = 0.05
+LOW_SPEED_COAST_UPDATE_STEP_S = 0.01
+LOW_SPEED_COAST_EVENTS_PER_UPDATE = 3
+LOW_SPEED_COAST_MIN_PEDAL = 0.01
+LOW_SPEED_COAST_MAX_VREL_MS = -0.20
+LOW_SPEED_COAST_MAX_DISTANCE_MARGIN_M = 3.0
+LOW_SPEED_COAST_STANDSTILL_GAP_M = 4.5
+LOW_SPEED_COAST_SNAPSHOT_MAX_AGE_S = 0.30
+
 MIN_EVENT_DURATION_S = 0.12
 MAX_EVENT_DURATION_S = 4.0
 MIN_LEARN_SPEED_MS = 1.0 / 3.6
@@ -92,6 +108,9 @@ class DrivingStyleStatus:
   gas_events: int
   brake_events: int
   stable_follow_s: float
+  low_speed_coast_offset_s: float
+  low_speed_brake_events: int
+  low_speed_coast_updates: int
 
 
 class DrivingStyleLearner:
@@ -116,6 +135,7 @@ class DrivingStyleLearner:
     self.global_gain = 1.0
     self.bin_offsets = [0.0] * len(SPEED_BIN_CENTERS_KPH)
     self.tr_offset = 0.0
+    self.low_speed_coast_offset_s = 0.0
 
     self.gas_events = 0
     self.brake_events = 0
@@ -124,6 +144,9 @@ class DrivingStyleLearner:
     self.stable_follow_s = 0.0
     self.gain_updates = 0
     self.tr_updates = 0
+    self.low_speed_brake_events = 0
+    self.low_speed_coast_updates = 0
+    self.low_speed_brake_batch_events = 0
 
     self.gain_batch_score = 0.0
     self.gain_batch_events = 0
@@ -135,6 +158,8 @@ class DrivingStyleLearner:
 
     self._gas_event = None
     self._brake_event = None
+    self._low_speed_brake_event = None
+    self._low_speed_snapshot = None
     self._lead_stable_s = 0.0
     self._last_lead_distance = None
     self._last_snapshot = None
@@ -195,9 +220,13 @@ class DrivingStyleLearner:
       if isinstance(offsets, list) and len(offsets) == len(self.bin_offsets):
         self.bin_offsets = [_clip(_finite(value), -0.03, 0.03) for value in offsets]
       self.tr_offset = _clip(_finite(state.get("tr_offset")), TR_OFFSET_MIN, TR_OFFSET_MAX)
+      self.low_speed_coast_offset_s = _clip(
+        _finite(state.get("low_speed_coast_offset_s")), 0.0,
+        LOW_SPEED_COAST_MAX_OFFSET_S)
 
       for name in ("gas_events", "brake_events", "gain_evidence_events", "tr_evidence_events",
-                   "gain_updates", "tr_updates"):
+                   "gain_updates", "tr_updates", "low_speed_brake_events",
+                   "low_speed_coast_updates", "low_speed_brake_batch_events"):
         setattr(self, name, max(0, int(state.get(name, 0))))
       self.stable_follow_s = max(0.0, _finite(state.get("stable_follow_s")))
 
@@ -225,6 +254,7 @@ class DrivingStyleLearner:
       "global_gain": round(self.global_gain, 6),
       "bin_offsets": [round(value, 6) for value in self.bin_offsets],
       "tr_offset": round(self.tr_offset, 6),
+      "low_speed_coast_offset_s": round(self.low_speed_coast_offset_s, 6),
       "gas_events": self.gas_events,
       "brake_events": self.brake_events,
       "gain_evidence_events": self.gain_evidence_events,
@@ -232,6 +262,9 @@ class DrivingStyleLearner:
       "stable_follow_s": round(self.stable_follow_s, 3),
       "gain_updates": self.gain_updates,
       "tr_updates": self.tr_updates,
+      "low_speed_brake_events": self.low_speed_brake_events,
+      "low_speed_coast_updates": self.low_speed_coast_updates,
+      "low_speed_brake_batch_events": self.low_speed_brake_batch_events,
       "gain_batch_score": round(self.gain_batch_score, 6),
       "gain_batch_events": self.gain_batch_events,
       "bin_batch_score": [round(value, 6) for value in self.bin_batch_score],
@@ -261,6 +294,8 @@ class DrivingStyleLearner:
     if was_enabled != self.enabled:
       self._gas_event = None
       self._brake_event = None
+      self._low_speed_brake_event = None
+      self._low_speed_snapshot = None
       self._lead_stable_s = 0.0
       self._last_lead_distance = None
       self._last_snapshot = None
@@ -290,6 +325,10 @@ class DrivingStyleLearner:
       gas_events=self.gas_events,
       brake_events=self.brake_events,
       stable_follow_s=self.stable_follow_s,
+      low_speed_coast_offset_s=(self.low_speed_coast_offset_s
+                                if self.enabled else 0.0),
+      low_speed_brake_events=self.low_speed_brake_events,
+      low_speed_coast_updates=self.low_speed_coast_updates,
     )
 
   def _update_lead_stability(self, context_ok, lead_valid, lead_distance, lead_rel_speed, dt):
@@ -331,6 +370,49 @@ class DrivingStyleLearner:
     event = dict(snapshot)
     event.update({"start": now, "peak": max(0.0, _finite(signal_value)), "valid": True})
     return event
+
+  def _low_speed_brake_candidate(self, now):
+    snapshot = self._low_speed_snapshot
+    if snapshot is None or now - snapshot["time"] > LOW_SPEED_COAST_SNAPSHOT_MAX_AGE_S:
+      return None
+    if not self._last_control_active:
+      return None
+    speed_kph = snapshot["v_ego"] * 3.6
+    desired_gap = (LOW_SPEED_COAST_STANDSTILL_GAP_M +
+                   snapshot["v_ego"] * snapshot["base_tr"])
+    distance_margin = snapshot["lead_distance"] - desired_gap
+    candidate = bool(
+      LOW_SPEED_COAST_MIN_KPH <= speed_kph <= LOW_SPEED_COAST_MAX_KPH and
+      snapshot["lead_valid"] and
+      snapshot["pedal_output"] >= LOW_SPEED_COAST_MIN_PEDAL and
+      snapshot["lead_rel_speed"] <= LOW_SPEED_COAST_MAX_VREL_MS and
+      distance_margin <= LOW_SPEED_COAST_MAX_DISTANCE_MARGIN_M)
+    if not candidate:
+      return None
+    event = dict(snapshot)
+    event.update({"start": now, "valid": True})
+    return event
+
+  def _finish_low_speed_brake_event(self, now):
+    event = self._low_speed_brake_event
+    self._low_speed_brake_event = None
+    duration = 0.0 if event is None else now - event["start"]
+    if event is None or not event["valid"] or \
+       not MIN_EVENT_DURATION_S <= duration <= MAX_EVENT_DURATION_S:
+      return False
+    self.low_speed_brake_events += 1
+    self.low_speed_brake_batch_events += 1
+    changed = False
+    if self.low_speed_brake_batch_events >= LOW_SPEED_COAST_EVENTS_PER_UPDATE:
+      target = (LOW_SPEED_COAST_FIRST_OFFSET_S if self.low_speed_coast_updates == 0 else
+                self.low_speed_coast_offset_s + LOW_SPEED_COAST_UPDATE_STEP_S)
+      new_offset = _clip(target, 0.0, LOW_SPEED_COAST_MAX_OFFSET_S)
+      changed = new_offset > self.low_speed_coast_offset_s + 1e-9
+      self.low_speed_coast_offset_s = new_offset
+      self.low_speed_coast_updates += int(changed)
+      self.low_speed_brake_batch_events = 0
+    self._dirty = True
+    return changed
 
   def _add_gain_evidence(self, score, speed_bin):
     score = _clip(_finite(score), -1.0, 1.0)
@@ -480,7 +562,8 @@ class DrivingStyleLearner:
 
   def update(self, *, v_ego, a_ego, gas, gas_pressed, brake, brake_pressed,
              cruise_enabled, control_active, requested_accel, lead_valid,
-             lead_distance, lead_rel_speed, base_tr, unsafe_context=False,
+             lead_distance, lead_rel_speed, base_tr, pedal_output=0.0,
+             unsafe_context=False, low_speed_brake_context_ok=True,
              can_valid=True, dt=0.01, now=None):
     now = self._clock() if now is None else _finite(now, self._clock())
     dt = _clip(_finite(dt, 0.01), 0.001, 0.2)
@@ -489,6 +572,9 @@ class DrivingStyleLearner:
     gas_pressed = bool(gas_pressed)
     brake_pressed = bool(brake_pressed)
     context_ok = bool(can_valid and cruise_enabled and not unsafe_context)
+    low_speed_context_ok = bool(
+      self.enabled and can_valid and cruise_enabled and control_active and
+      low_speed_brake_context_ok)
     self._update_lead_stability(context_ok, bool(lead_valid), lead_distance, lead_rel_speed, dt)
 
     if self.enabled and context_ok and lead_valid and self._lead_stable_s >= 2.0 and \
@@ -500,6 +586,8 @@ class DrivingStyleLearner:
     if not self.enabled:
       self._gas_event = None
       self._brake_event = None
+      self._low_speed_brake_event = None
+      self._low_speed_snapshot = None
       self._last_snapshot = None
       self._last_control_active = bool(control_active and cruise_enabled)
       return self.status(v_ego)
@@ -522,13 +610,31 @@ class DrivingStyleLearner:
     elif not brake_pressed and self._brake_event is not None:
       self._finish_brake_event(now)
 
+    low_speed_changed = False
+    if brake_pressed and self._low_speed_brake_event is None and not gas_pressed:
+      self._low_speed_brake_event = (None if not low_speed_context_ok else
+                                     self._low_speed_brake_candidate(now))
+    elif brake_pressed and self._low_speed_brake_event is not None:
+      if not low_speed_context_ok or now - self._low_speed_brake_event["start"] > MAX_EVENT_DURATION_S:
+        self._low_speed_brake_event["valid"] = False
+    elif not brake_pressed and self._low_speed_brake_event is not None:
+      low_speed_changed = self._finish_low_speed_brake_event(now)
+
     if context_ok and control_active and not gas_pressed and not brake_pressed and \
        _finite(v_ego) >= MIN_LEARN_SPEED_MS:
       self._last_snapshot = self._make_snapshot(now, v_ego, requested_accel, lead_valid,
                                                 lead_distance, lead_rel_speed, base_tr)
+    if low_speed_context_ok and not gas_pressed and not brake_pressed and \
+       _finite(v_ego) >= MIN_LEARN_SPEED_MS:
+      self._low_speed_snapshot = self._make_snapshot(
+        now, v_ego, requested_accel, lead_valid, lead_distance,
+        lead_rel_speed, base_tr)
+      self._low_speed_snapshot["pedal_output"] = max(0.0, _finite(pedal_output))
+    elif gas_pressed or not low_speed_context_ok:
+      self._low_speed_snapshot = None
 
     gain_changed = self._maybe_apply_gain(now)
     tr_changed = self._maybe_apply_tr(now)
-    self._save(now, force=gain_changed or tr_changed)
+    self._save(now, force=gain_changed or tr_changed or low_speed_changed)
     self._last_control_active = bool(control_active and cruise_enabled)
     return self.status(v_ego)

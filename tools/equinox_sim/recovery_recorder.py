@@ -225,6 +225,9 @@ class PedalRecoveryRecorder:
         "stopAccelBoostRawAccel": round(float(controls.stopAccelBoostRawAccel), 5),
         "stopAccelBoostFinalAccel": round(float(controls.stopAccelBoostFinalAccel), 5),
         "stopAccelBoostFactor": round(float(controls.stopAccelBoostFactor), 3),
+        "drivingStyleGain": round(float(controls.drivingStyleAIGain), 5),
+        "drivingStyleTrOffset": round(float(controls.drivingStyleAITrOffset), 5),
+        "drivingStyleBrakeEvents": int(controls.drivingStyleAIBrakeEvents),
       },
       "plan": {
         "valid": bool(self.sm.valid["longitudinalPlan"]),

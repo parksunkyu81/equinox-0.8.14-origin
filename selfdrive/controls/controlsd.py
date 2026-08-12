@@ -611,6 +611,10 @@ class Controls:
               "predictive_coast_lead_vrel_ms": round(float(self.predictive_coasting.lead_rel_speed_ms), 3),
               "predictive_coast_lead_accel_ms2": round(float(self.predictive_coasting.lead_accel_ms2), 3),
               "predictive_coast_lead_prob": round(float(self.predictive_coasting.lead_model_prob), 4),
+              "predictive_coast_low_speed_learned_offset_s": round(
+                float(self.predictive_coasting.learned_low_speed_offset_s), 4),
+              "predictive_coast_low_speed_learned_active": bool(
+                self.predictive_coasting.learned_low_speed_offset_active),
               "predictive_coast_ai_gain": round(float(self.driving_style_gain), 4),
               "predictive_coast_last_pedal": round(float(self.last_actuators.gas), 5),
               "predictive_coast_source": self.predictive_coasting.dominant_source,
@@ -626,6 +630,12 @@ class Controls:
                 float(self.lead_loss_cruise_assist.pedal_target), 5),
               "lead_loss_cruise_count": int(
                 self.lead_loss_cruise_assist.activation_count),
+              "driving_style_low_speed_coast_offset_s": round(
+                float(self.driving_style_status.low_speed_coast_offset_s), 4),
+              "driving_style_low_speed_brake_events": int(
+                self.driving_style_status.low_speed_brake_events),
+              "driving_style_low_speed_coast_updates": int(
+                self.driving_style_status.low_speed_coast_updates),
               "predictive_coast_source_pressures": {
                 key: round(float(value), 4)
                 for key, value in self.predictive_coasting.source_pressures.items()
@@ -1394,7 +1404,9 @@ class Controls:
               natural_decel_ms2=self.natural_decel_status.decel_ms2,
               natural_decel_confidence=self.natural_decel_status.confidence,
               brake_alert_enabled=self.predictive_brake_alert_enabled,
-              lead_loss_recovery_active=self.lead_loss_cruise_assist.active)
+              lead_loss_recovery_active=self.lead_loss_cruise_assist.active,
+              learned_low_speed_coast_offset_s=(
+                self.driving_style_status.low_speed_coast_offset_s))
 
             coast_lane_change = lat_plan.laneChangeState != LaneChangeState.off
             coast_orientation = self.sm['liveLocationKalman'].calibratedOrientationNED
@@ -1483,6 +1495,11 @@ class Controls:
                                     self.is_curv_driving or long_plan.fcw or
                                     self.stop_accel_boost_active or
                                     self.predictive_coasting.learning_blocked)
+        low_speed_brake_context_ok = bool(
+          not self.joystick_mode and self.CP.enableGasInterceptor and
+          not CS.leftBlinker and not CS.rightBlinker and not lane_change_active and
+          not self.is_curv_driving and not self.curve_pedal_coordinator.engaged and
+          not self.speed_limit_coast_active and not long_plan.fcw and CS.canValid)
         style_lead_valid = bool(dynamic_follow_valid and dynamic_follow.leadDistance > 0.0)
         self.driving_style_status = self.driving_style_learner.update(
           v_ego=CS.vEgo,
@@ -1498,7 +1515,9 @@ class Controls:
           lead_distance=dynamic_follow.leadDistance if style_lead_valid else 0.0,
           lead_rel_speed=dynamic_follow.leadRelativeSpeed if style_lead_valid else 0.0,
           base_tr=dynamic_follow.mpcTR if dynamic_follow_valid else 1.3,
+          pedal_output=self.last_actuators.gas,
           unsafe_context=style_unsafe_context,
+          low_speed_brake_context_ok=low_speed_brake_context_ok,
           can_valid=CS.canValid,
           dt=DT_CTRL)
         # Never stack learned pedal gain on top of the dedicated 30% lead-launch

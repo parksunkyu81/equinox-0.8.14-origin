@@ -27,6 +27,9 @@ PREDICTIVE_COAST_QUICK_EXIT_VREL_MS = 0.80
 PREDICTIVE_COAST_QUICK_EXIT_MARGIN_M = 0.25
 PREDICTIVE_COAST_QUICK_CLEAR_S = 0.15
 PREDICTIVE_COAST_QUICK_RISE_S = 0.35
+PREDICTIVE_COAST_LEARNED_LOW_SPEED_MAX_KPH = 35.0
+PREDICTIVE_COAST_LEARNED_CLOSING_VREL_MS = -0.10
+PREDICTIVE_COAST_LEARNED_OFFSET_MAX_S = 0.10
 CURVE_APPROACH_START_S = 2.50
 CURVE_FULL_LIFT_S = 0.80
 SOURCE_SPEED_GAP_FULL_LIFT_KPH = 10.0
@@ -123,6 +126,8 @@ class PredictiveCoastingCoordinator:
     self.lead_rel_speed_ms = 0.0
     self.lead_accel_ms2 = 0.0
     self.lead_model_prob = 0.0
+    self.learned_low_speed_offset_s = 0.0
+    self.learned_low_speed_offset_active = False
     self.last_pressure = 0.0
     self.source_pressures = {"lead": 0.0, "curve": 0.0, "speed_limit": 0.0}
     self.dominant_source = "none"
@@ -199,7 +204,8 @@ class PredictiveCoastingCoordinator:
              speed_limit_active=False, speed_limit_target=0.0,
              speed_limit_distance_m=math.inf, natural_decel_ms2=0.0,
              natural_decel_confidence=0.0, brake_alert_enabled=False,
-             lead_loss_recovery_active=False):
+             lead_loss_recovery_active=False,
+             learned_low_speed_coast_offset_s=0.0):
     if not enabled or not control_active or not can_valid:
       self.reset()
       return self.pedal_scale
@@ -245,6 +251,15 @@ class PredictiveCoastingCoordinator:
       a_ego = float(clip(_finite(a_ego), -3.5, 2.5))
       tr = float(clip(_finite(effective_tr, 1.3),
                       PREDICTIVE_COAST_MIN_TR_S, PREDICTIVE_COAST_MAX_TR_S))
+      learned_offset = float(clip(
+        _finite(learned_low_speed_coast_offset_s), 0.0,
+        PREDICTIVE_COAST_LEARNED_OFFSET_MAX_S))
+      self.learned_low_speed_offset_active = bool(
+        v_ego * 3.6 <= PREDICTIVE_COAST_LEARNED_LOW_SPEED_MAX_KPH and
+        v_rel < PREDICTIVE_COAST_LEARNED_CLOSING_VREL_MS and learned_offset > 0.0)
+      self.learned_low_speed_offset_s = (learned_offset
+                                         if self.learned_low_speed_offset_active else 0.0)
+      tr += self.learned_low_speed_offset_s
       self.desired_gap_m = PREDICTIVE_COAST_STANDSTILL_GAP_M + v_ego * tr
       self.distance_margin_m = d_rel - self.desired_gap_m
 
@@ -278,6 +293,8 @@ class PredictiveCoastingCoordinator:
       self.lead_rel_speed_ms = 0.0
       self.lead_accel_ms2 = 0.0
       self.lead_model_prob = 0.0
+      self.learned_low_speed_offset_s = 0.0
+      self.learned_low_speed_offset_active = False
       accel_alpha = self.dt / (PREDICTIVE_COAST_ACCEL_FILTER_TAU_S + self.dt)
       self.filtered_rel_accel += accel_alpha * (0.0 - self.filtered_rel_accel)
 
@@ -388,7 +405,10 @@ class PredictiveCoastingCoordinator:
       return self.pedal_scale
 
     quick_release_candidate = bool(
-      plausible_lead and v_ego * 3.6 <= PREDICTIVE_COAST_LOW_SPEED_QUICK_EXIT_KPH and
+      plausible_lead and
+      v_ego * 3.6 <= (PREDICTIVE_COAST_LEARNED_LOW_SPEED_MAX_KPH
+                      if _finite(learned_low_speed_coast_offset_s) > 0.0 else
+                      PREDICTIVE_COAST_LOW_SPEED_QUICK_EXIT_KPH) and
       pressure <= 0.0 and v_rel >= PREDICTIVE_COAST_QUICK_EXIT_VREL_MS and
       self.distance_margin_m >= PREDICTIVE_COAST_QUICK_EXIT_MARGIN_M and
       self.time_to_gap_s >= PREDICTIVE_COAST_EXIT_TTG_S and
