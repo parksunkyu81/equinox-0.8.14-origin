@@ -18,8 +18,8 @@ from selfdrive.swaglog import cloudlog
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
 AWARENESS_DECEL = -0.2  # car smoothly decel at .2m/s^2 when user is distracted
-LEAD_LOSS_CRUISE_BLEND_S = 1.0
-LEAD_LOSS_ACCEL_RISE_MPS3 = 0.4
+LEAD_LOSS_CRUISE_BLEND_S = 0.60
+LEAD_LOSS_ACCEL_RISE_MPS3 = 0.70
 
 # 가속도를 낮추어 엑셀 사용을 최소화합니다.
 _A_CRUISE_MIN_V_FOLLOWING = [-1.2, -1.2, -1.1, -1.0, -0.8]

@@ -39,7 +39,10 @@ from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, V_C
 from selfdrive.car.gm.values import MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
-from selfdrive.controls.lib.stop_accel_boost import STOP_ACCEL_BOOST_FACTOR, StopAccelBoostLatch
+from selfdrive.controls.lib.stop_accel_boost import (
+  STOP_ACCEL_BOOST_FACTOR, StopAccelBoostLatch,
+  boost_floor_context_allowed, speed_limit_decel_requested,
+)
 from selfdrive.controls.lib.curve_speed_limiter import (
   CurveSpeedLimiter, CURVE_SPEED_DISABLED, build_model_curve_profile, calculate_curve_speed,
 )
@@ -366,6 +369,10 @@ class Controls:
         driver_aware = float(self.sm['driverMonitoringState'].awarenessStatus) >= 0.0
         plan_valid = bool(self.sm.valid['longitudinalPlan'])
         can_valid = bool(getattr(CS, 'canValid', True))
+        speed_limit_decel = speed_limit_decel_requested(
+          bool(getattr(self, 'speed_limit_coast_active', False)),
+          float(getattr(self, 'speed_limit_coast_target_ms', 0.0)),
+          CS.vEgo)
 
         return bool(
           self.CP.enableGasInterceptor and self.active and self.state == State.enabled and
@@ -376,13 +383,16 @@ class Controls:
           driver_aware and not self.is_curv_driving and
           not bool(getattr(getattr(self, 'curve_pedal_coordinator', None),
                            'engaged', False)) and
-          not bool(getattr(self, 'speed_limit_coast_active', False)) and
+          not speed_limit_decel and
           not long_plan.fcw and
           can_valid and plan_valid and 0.0 <= t_since_plan <= 0.25 and full_plan and
           recovery_speed_demand(speed_error, future_speed_error))
 
     def lead_coast_assist_base_safe(self, CS, long_plan, t_since_plan, radar_valid):
         """Common safety gate for low-demand lead-follow pedal assistance."""
+        speed_limit_decel = speed_limit_decel_requested(
+          self.speed_limit_coast_active, self.speed_limit_coast_target_ms,
+          CS.vEgo)
         return bool(
           self.CP.enableGasInterceptor and self.active and self.state == State.enabled and
           CS.adaptiveCruise and
@@ -391,7 +401,7 @@ class Controls:
           CS.vEgo > V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS and
           float(self.sm['driverMonitoringState'].awarenessStatus) >= 0.0 and
           not self.is_curv_driving and not self.curve_pedal_coordinator.engaged and
-          not self.speed_limit_coast_active and not long_plan.fcw and
+          not speed_limit_decel and not long_plan.fcw and
           not self.stop_accel_boost_active and bool(getattr(CS, 'canValid', True)) and
           radar_valid and self.sm.valid['longitudinalPlan'] and
           0.0 <= t_since_plan <= 0.25 and len(long_plan.speeds) == CONTROL_N and
@@ -400,6 +410,9 @@ class Controls:
     def lead_loss_cruise_assist_base_safe(self, CS, long_plan, t_since_plan,
                                           radar_valid):
         """Safety gate for a confirmed lead0 -> cruise transition ramp."""
+        speed_limit_decel = speed_limit_decel_requested(
+          self.speed_limit_coast_active, self.speed_limit_coast_target_ms,
+          CS.vEgo)
         return bool(
           self.CP.enableGasInterceptor and self.active and self.state == State.enabled and
           CS.adaptiveCruise and
@@ -408,7 +421,7 @@ class Controls:
           CS.vEgo > V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS and
           float(self.sm['driverMonitoringState'].awarenessStatus) >= 0.0 and
           not self.is_curv_driving and not self.curve_pedal_coordinator.engaged and
-          not self.speed_limit_coast_active and not long_plan.fcw and
+          not speed_limit_decel and not long_plan.fcw and
           bool(getattr(CS, 'canValid', True)) and radar_valid and
           self.sm.valid['longitudinalPlan'] and 0.0 <= t_since_plan <= 0.25 and
           len(long_plan.speeds) == CONTROL_N)
@@ -1319,16 +1332,26 @@ class Controls:
             pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, CS.vEgo, self.v_cruise_kph * CV.KPH_TO_MS)
             t_since_plan = (self.sm.frame - self.sm.rcv_frame['longitudinalPlan']) * DT_CTRL
 
-            boost_floor_context_safe = bool(
-              self.stop_accel_boost_latch.floor_allowed and
-              not self.is_curv_driving and not self.curve_pedal_coordinator.engaged and
-              not self.speed_limit_coast_active and not long_plan.fcw and
-              float(self.sm['driverMonitoringState'].awarenessStatus) >= 0.0 and
-              self.sm.valid['radarState'] and
-              len(self.sm['radarState'].radarErrors) == 0 and
-              self.sm.valid['longitudinalPlan'] and 0.0 <= t_since_plan <= 0.25 and
-              len(long_plan.speeds) == CONTROL_N and
-              str(long_plan.longitudinalPlanSource) == 'lead0')
+            boost_floor_context_safe = boost_floor_context_allowed(
+              self.stop_accel_boost_latch.floor_allowed,
+              can_valid=CS.canValid,
+              radar_valid=self.sm.valid['radarState'],
+              radar_error=len(self.sm['radarState'].radarErrors) > 0,
+              driver_aware=(
+                float(self.sm['driverMonitoringState'].awarenessStatus) >= 0.0),
+              curv_driving=self.is_curv_driving,
+              curve_active=(
+                self.curve_pedal_coordinator.engaged or
+                self.curve_pedal_coordinator.pedal_intervening),
+              speed_limit_active=self.speed_limit_coast_active,
+              speed_limit_target=self.speed_limit_coast_target_ms,
+              v_ego=CS.vEgo,
+              fcw=long_plan.fcw,
+              plan_valid=self.sm.valid['longitudinalPlan'],
+              plan_age=t_since_plan,
+              plan_full=len(long_plan.speeds) == CONTROL_N,
+              plan_source_lead=(
+                str(long_plan.longitudinalPlanSource) == 'lead0'))
             boost_floor_accel = (self.stop_accel_boost_latch.floor_accel
                                  if boost_floor_context_safe else 0.0)
             raw_long_accel = self.LoC.update(

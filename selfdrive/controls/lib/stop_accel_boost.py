@@ -23,6 +23,34 @@ STOP_ACCEL_BOOST_CLOSING_REL_SPEED_MS = -0.30
 STOP_ACCEL_BOOST_MIN_LEAD_DISTANCE_M = 1.5
 
 
+def speed_limit_decel_requested(speed_limit_active, speed_limit_target,
+                                v_ego, margin=0.05):
+  """True only when the published limit actually asks the car to slow."""
+  return bool(
+    speed_limit_active and
+    float(speed_limit_target) < float(v_ego) - float(margin))
+
+
+def boost_floor_context_allowed(floor_allowed, *, can_valid, radar_valid,
+                                radar_error, driver_aware, curv_driving,
+                                curve_active, speed_limit_active,
+                                speed_limit_target, v_ego, fcw, plan_valid,
+                                plan_age, plan_full, plan_source_lead):
+  """Final non-lead safety gate for the already validated launch floor.
+
+  A published speed limit must not block a launch merely because it exists;
+  it blocks only when the target is actually below current speed. Lead motion,
+  distance, brake and driver-gas gates are owned by StopAccelBoostLatch.
+  """
+  speed_limit_decel = speed_limit_decel_requested(
+    speed_limit_active, speed_limit_target, v_ego)
+  return bool(
+    floor_allowed and can_valid and radar_valid and not radar_error and
+    driver_aware and not curv_driving and not curve_active and
+    not speed_limit_decel and not fcw and plan_valid and
+    0.0 <= float(plan_age) <= 0.25 and plan_full and plan_source_lead)
+
+
 class StopAccelBoostLatch:
   """Hold a confirmed lead launch from 1 km/h until the 25 km/h cutoff."""
 
