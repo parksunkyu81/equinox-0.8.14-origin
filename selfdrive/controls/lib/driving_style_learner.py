@@ -45,9 +45,14 @@ LOW_SPEED_COAST_UPDATE_STEP_S = 0.01
 LOW_SPEED_COAST_EVENTS_PER_UPDATE = 3
 LOW_SPEED_COAST_MIN_PEDAL = 0.01
 LOW_SPEED_COAST_MAX_VREL_MS = -0.20
-LOW_SPEED_COAST_MAX_DISTANCE_MARGIN_M = 3.0
+LOW_SPEED_COAST_ZERO_PEDAL_MAX_VREL_MS = -0.50
+LOW_SPEED_COAST_BASE_DISTANCE_MARGIN_M = 3.0
+LOW_SPEED_COAST_MAX_DISTANCE_MARGIN_M = 5.0
+LOW_SPEED_COAST_DISTANCE_MARGIN_SPEED_S = 0.20
+LOW_SPEED_COAST_ZERO_PEDAL_MAX_DISTANCE_MARGIN_M = 1.5
 LOW_SPEED_COAST_STANDSTILL_GAP_M = 4.5
 LOW_SPEED_COAST_SNAPSHOT_MAX_AGE_S = 0.30
+LOW_SPEED_COAST_MAX_EVENT_DURATION_S = 6.0
 
 MIN_EVENT_DURATION_S = 0.12
 MAX_EVENT_DURATION_S = 4.0
@@ -381,12 +386,24 @@ class DrivingStyleLearner:
     desired_gap = (LOW_SPEED_COAST_STANDSTILL_GAP_M +
                    snapshot["v_ego"] * snapshot["base_tr"])
     distance_margin = snapshot["lead_distance"] - desired_gap
+    distance_margin_limit = min(
+      LOW_SPEED_COAST_MAX_DISTANCE_MARGIN_M,
+      LOW_SPEED_COAST_BASE_DISTANCE_MARGIN_M +
+      snapshot["v_ego"] * LOW_SPEED_COAST_DISTANCE_MARGIN_SPEED_S)
+    pedal_applied = snapshot["pedal_output"] >= LOW_SPEED_COAST_MIN_PEDAL
+    # A manual brake after the comma pedal has already reached zero is still
+    # useful evidence when the lead is both close and closing decisively. This
+    # is the common real-world case when coasting started, but started too late.
+    zero_pedal_closing_evidence = bool(
+      not pedal_applied and
+      snapshot["lead_rel_speed"] <= LOW_SPEED_COAST_ZERO_PEDAL_MAX_VREL_MS and
+      distance_margin <= LOW_SPEED_COAST_ZERO_PEDAL_MAX_DISTANCE_MARGIN_M)
     candidate = bool(
       LOW_SPEED_COAST_MIN_KPH <= speed_kph <= LOW_SPEED_COAST_MAX_KPH and
       snapshot["lead_valid"] and
-      snapshot["pedal_output"] >= LOW_SPEED_COAST_MIN_PEDAL and
       snapshot["lead_rel_speed"] <= LOW_SPEED_COAST_MAX_VREL_MS and
-      distance_margin <= LOW_SPEED_COAST_MAX_DISTANCE_MARGIN_M)
+      distance_margin <= distance_margin_limit and
+      (pedal_applied or zero_pedal_closing_evidence))
     if not candidate:
       return None
     event = dict(snapshot)
@@ -398,7 +415,7 @@ class DrivingStyleLearner:
     self._low_speed_brake_event = None
     duration = 0.0 if event is None else now - event["start"]
     if event is None or not event["valid"] or \
-       not MIN_EVENT_DURATION_S <= duration <= MAX_EVENT_DURATION_S:
+       not MIN_EVENT_DURATION_S <= duration <= LOW_SPEED_COAST_MAX_EVENT_DURATION_S:
       return False
     self.low_speed_brake_events += 1
     self.low_speed_brake_batch_events += 1
@@ -615,7 +632,8 @@ class DrivingStyleLearner:
       self._low_speed_brake_event = (None if not low_speed_context_ok else
                                      self._low_speed_brake_candidate(now))
     elif brake_pressed and self._low_speed_brake_event is not None:
-      if not low_speed_context_ok or now - self._low_speed_brake_event["start"] > MAX_EVENT_DURATION_S:
+      if not low_speed_context_ok or \
+         now - self._low_speed_brake_event["start"] > LOW_SPEED_COAST_MAX_EVENT_DURATION_S:
         self._low_speed_brake_event["valid"] = False
     elif not brake_pressed and self._low_speed_brake_event is not None:
       low_speed_changed = self._finish_low_speed_brake_event(now)
