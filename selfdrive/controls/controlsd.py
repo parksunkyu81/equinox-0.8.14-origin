@@ -205,6 +205,7 @@ class Controls:
         self.max_speed_clu = 0.
         self.curve_speed_ms = 0.
         self.curve_speed_limiter = CurveSpeedLimiter()
+        self._model_curve_control_enabled = False
         self.curve_pedal_coordinator = CurvePedalCoordinator(DT_CTRL)
         self.predictive_coasting = PredictiveCoastingCoordinator(DT_CTRL)
         self.predictive_coast_pedal_scale = 1.0
@@ -332,6 +333,7 @@ class Controls:
         self.max_speed_clu = 0.
         self.curve_speed_ms = 0.
         self.curve_speed_limiter.reset()
+        self._model_curve_control_enabled = False
         self.curve_pedal_coordinator.reset()
         self.predictive_coasting.reset()
         self.pedal_force_recovery.reset()
@@ -468,6 +470,7 @@ class Controls:
         lateralPlan = sm['lateralPlan']
         if not self.slow_on_curves:
             self.curve_speed_limiter.reset()
+            self._model_curve_control_enabled = False
             self.curve_pedal_coordinator.reset()
             self.curve_speed_ms = CURVE_SPEED_DISABLED
             self.curve_plan_speed_ms = CURVE_SPEED_DISABLED
@@ -485,13 +488,50 @@ class Controls:
         curvature_factor = 0.85 * ntune_scc_get("sccCurvatureFactor")
 
         model = sm['modelV2']
+        model_curve_control_min_kph = float(self.CP.minSteerSpeed) * CV.MS_TO_KPH
+        model_curve_control_release_kph = max(0.0, model_curve_control_min_kph - 1.0)
         (model_curvatures, model_times, model_distances,
          model_profile_valid, model_profile_diag) = build_v0813_model_curve_profile(
           model.position.t,
           model.orientationRate.z,
           model.velocity.x, model.velocity.y, model.velocity.z,
           model.position.x, model.position.y, model.position.z,
-          measured_curvature)
+          measured_curvature, v_ego=v_ego,
+          control_min_speed_kph=model_curve_control_min_kph)
+
+        # The Equinox torque/LKAS path starts at 10 km/h. Below that speed the
+        # v0.8.13 adapter still runs for diagnostics, but it cannot acquire CURV
+        # authority. Retain state down to 9 km/h on deceleration so speed noise
+        # around the hardware gate does not repeatedly reset confirmation.
+        v_ego_kph = float(v_ego) * CV.MS_TO_KPH
+        if v_ego_kph >= model_curve_control_min_kph:
+            self._model_curve_control_enabled = True
+        elif v_ego_kph < model_curve_control_release_kph:
+            self._model_curve_control_enabled = False
+            self.curve_speed_limiter.reset()
+
+        if v_ego_kph < model_curve_control_min_kph:
+            self.curve_speed_ms = CURVE_SPEED_DISABLED
+            shadow_diag = {
+              "source": "modelV2_v0813_shadow",
+              "values_valid": False,
+              "plan_valid": False,
+              "raw_speed_ms": CURVE_SPEED_DISABLED,
+              "filtered_speed_ms": CURVE_SPEED_DISABLED,
+              "confirmed": False,
+              "invalid_hold": False,
+              "model_valid": bool(sm.valid['modelV2'] and model_profile_valid),
+              "model_profile_points": int(len(model_curvatures)),
+              "mpc_valid": bool(sm.valid['lateralPlan'] and lateralPlan.mpcSolutionValid and
+                                len(lateralPlan.curvatures) == CONTROL_N),
+              "measured_curvature": (
+                float(measured_curvature) if np.isfinite(measured_curvature) else None),
+              "curvature_factor": float(curvature_factor),
+            }
+            shadow_diag.update(model_profile_diag)
+            self.curve_speed_limiter.last_diag = shadow_diag
+            return
+
         model_valid = bool(sm.valid['modelV2'] and model_profile_valid)
         mpc_valid = bool(sm.valid['lateralPlan'] and lateralPlan.mpcSolutionValid and
                          len(lateralPlan.curvatures) == CONTROL_N)
@@ -506,7 +546,7 @@ class Controls:
             curvatures = model_curvatures
             time_idxs = model_times
             distances = model_distances
-            source = "modelV2_v0813_fused"
+            source = "modelV2_v0813_adaptive"
             input_valid = True
         elif lateral_plan_updated and mpc_valid:
             curvatures = list(lateralPlan.curvatures)
@@ -545,7 +585,10 @@ class Controls:
             update_kwargs["time_idxs"] = time_idxs
         self.curve_speed_ms = self.curve_speed_limiter.update(
           curvatures, v_ego, cruise_speed_ms, MIN_CURVE_SPEED,
-          curvature_factor, **update_kwargs)
+          curvature_factor,
+          confirm_frames=model_profile_diag.get("model_confirm_frames"),
+          invalid_hold_frames=model_profile_diag.get("model_invalid_hold_frames"),
+          **update_kwargs)
         self.curve_speed_limiter.last_diag.update({
           "model_valid": bool(model_valid),
           "model_profile_points": int(len(model_curvatures)),
@@ -602,7 +645,22 @@ class Controls:
               "model_yaw_points": int(diag.get("model_yaw_points", 0) or 0),
               "model_agree_points": int(diag.get("model_agree_points", 0) or 0),
               "model_disagree_points": int(diag.get("model_disagree_points", 0) or 0),
+              "model_sign_mismatch_points": int(diag.get("model_sign_mismatch_points", 0) or 0),
               "model_geometry_only_points": int(diag.get("model_geometry_only_points", 0) or 0),
+              "model_short_horizon_points": int(diag.get("model_short_horizon_points", 0) or 0),
+              "model_short_chord_points": int(diag.get("model_short_chord_points", 0) or 0),
+              "model_curvature_cap_points": int(diag.get("model_curvature_cap_points", 0) or 0),
+              "model_adaptive_span_max": int(diag.get("model_adaptive_span_max", 0) or 0),
+              "model_profile_horizon_m": _number(diag.get("model_profile_horizon_m", 0.0)),
+              "model_profile_confidence": _number(diag.get("model_profile_confidence", 0.0)),
+              "model_profile_min_points": int(diag.get("model_profile_min_points", 0) or 0),
+              "model_profile_min_horizon_m": _number(diag.get("model_profile_min_horizon_m", 0.0)),
+              "model_profile_min_confidence": _number(diag.get("model_profile_min_confidence", 0.0)),
+              "model_profile_leg_distance_m": _number(diag.get("model_profile_leg_distance_m", 0.0)),
+              "model_profile_control_allowed": bool(diag.get("model_profile_control_allowed", False)),
+              "model_high_speed_corroborated": bool(diag.get("model_high_speed_corroborated", False)),
+              "model_confirm_frames": int(diag.get("model_confirm_frames", 0) or 0),
+              "model_invalid_hold_frames": int(diag.get("model_invalid_hold_frames", 0) or 0),
               "model_geometry_max_curvature": diag.get("model_geometry_max_curvature", None),
               "model_yaw_max_curvature": diag.get("model_yaw_max_curvature", None),
               "mpc_valid": bool(diag.get("mpc_valid", False)),
