@@ -73,7 +73,10 @@ class CarInterface(CarInterfaceBase):
         ret.alternativeExperience = 1  # UNSAFE_DISABLE_DISENGAGE_ON_GAS
         ret.pcmCruise = False  # stock cruise control is kept off
         ret.openpilotLongitudinalControl = True  # ASCM vehicles use OP for long
-        ret.radarOffCan = False  # ASCM vehicles (typically) have radar
+        # NO_ASCM variants have no physical radar CAN. radard still runs for
+        # modelV2 lead fusion, but its GM interface correctly uses the
+        # vision-only RadarInterfaceBase path for these vehicles.
+        ret.radarOffCan = candidate in NO_ASCM
 
         # Default to normal torque limits
         ret.safetyConfigs[0].safetyParam = 0
