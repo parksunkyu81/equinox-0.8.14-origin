@@ -8,7 +8,10 @@ from typing import Optional, List, Union
 from setproctitle import getproctitle  # pylint: disable=no-name-in-module
 
 from common.clock import sec_since_boot  # pylint: disable=no-name-in-module, import-error
-from system.hardware import PC
+# This branch still supports comma two/EON. system.hardware only detects TICI
+# and therefore reports EON as a PC, silently disabling SCHED_FIFO and CPU
+# affinity for every Python control process.
+from selfdrive.hardware import PC
 
 
 # time step for each process

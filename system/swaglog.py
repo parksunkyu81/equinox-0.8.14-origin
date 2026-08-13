@@ -7,7 +7,9 @@ from logging.handlers import BaseRotatingHandler
 import zmq
 
 from common.logging_extra import SwagLogger, SwagFormatter, SwagLogFileFormatter
-from system.hardware import PC
+# Keep EON logs on-device. system.hardware has no EON detection in this hybrid
+# branch and incorrectly routes its logs to the PC path.
+from selfdrive.hardware import PC
 
 if PC:
   SWAGLOG_DIR = os.path.join(str(Path.home()), ".comma", "log")
