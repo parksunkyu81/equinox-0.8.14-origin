@@ -619,6 +619,8 @@ class Controls:
                 self.predictive_coasting.quick_release_active),
               "predictive_coast_opening_release": bool(
                 self.predictive_coasting.opening_release_active),
+              "predictive_coast_positive_demand_release": bool(
+                self.predictive_coasting.positive_demand_release_active),
               "predictive_coast_launch_floor_release": bool(
                 self.predictive_coasting.launch_floor_release_active),
               "predictive_coast_recovery_floor_release": bool(

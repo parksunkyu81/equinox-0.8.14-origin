@@ -35,6 +35,13 @@ PREDICTIVE_COAST_OPENING_RELEASE_VREL_MS = 0.50
 PREDICTIVE_COAST_OPENING_HOLD_VREL_MS = 0.20
 PREDICTIVE_COAST_STRONG_OPENING_VREL_MS = 1.20
 PREDICTIVE_COAST_QUICK_EXIT_MAX_KPH = 35.0
+# Escape a stale zero hysteresis ceiling when the longitudinal controller has
+# rebuilt a substantial positive request and the tracked lead is no longer
+# closing. This is deliberately stricter than the normal release path: the
+# lead must remain beyond the desired gap for the existing 0.5 s clear period.
+PREDICTIVE_COAST_POSITIVE_DEMAND_RELEASE_ACCEL_MS2 = 0.50
+PREDICTIVE_COAST_POSITIVE_DEMAND_RELEASE_MARGIN_M = 0.75
+PREDICTIVE_COAST_POSITIVE_DEMAND_RELEASE_VREL_MS = 0.0
 PREDICTIVE_COAST_LEARNED_LOW_SPEED_MAX_KPH = 35.0
 PREDICTIVE_COAST_LEARNED_CLOSING_VREL_MS = -0.10
 PREDICTIVE_COAST_LEARNED_OFFSET_MAX_S = 0.10
@@ -163,6 +170,7 @@ class PredictiveCoastingCoordinator:
     self.driver_brake_pressed = False
     self.quick_release_active = False
     self.opening_release_active = False
+    self.positive_demand_release_active = False
     self.launch_floor_release_active = False
     self.recovery_floor_release_active = False
     self.brake_release_active = False
@@ -242,6 +250,7 @@ class PredictiveCoastingCoordinator:
 
     v_ego = max(0.0, _finite(v_ego))
     self.driver_brake_pressed = bool(brake_pressed)
+    self.positive_demand_release_active = False
     if v_ego * 3.6 < PREDICTIVE_COAST_MIN_SPEED_KPH:
       self.reset()
       return self.pedal_scale
@@ -517,12 +526,20 @@ class PredictiveCoastingCoordinator:
       v_ego * 3.6 <= PREDICTIVE_COAST_QUICK_EXIT_MAX_KPH and
       v_rel >= PREDICTIVE_COAST_STRONG_OPENING_VREL_MS)
     self.opening_release_active = opening_release
+    positive_demand_release = bool(
+      plausible_lead and pressure <= 0.0 and
+      _finite(requested_accel) >= PREDICTIVE_COAST_POSITIVE_DEMAND_RELEASE_ACCEL_MS2 and
+      self.distance_margin_m >= PREDICTIVE_COAST_POSITIVE_DEMAND_RELEASE_MARGIN_M and
+      v_rel >= PREDICTIVE_COAST_POSITIVE_DEMAND_RELEASE_VREL_MS and
+      curve_pressure <= 0.0 and speed_pressure <= 0.0 and not fcw)
+    self.positive_demand_release_active = positive_demand_release
     self.launch_floor_release_active = False
     self.recovery_floor_release_active = False
     self.brake_release_active = False
     lead_release_safe = bool(
       not plausible_lead or
       opening_release or
+      positive_demand_release or
       (self.time_to_gap_s >= PREDICTIVE_COAST_EXIT_TTG_S and
        self.distance_margin_m >= PREDICTIVE_COAST_EXIT_MARGIN_M and
        v_rel >= -0.2))
