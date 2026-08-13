@@ -9,7 +9,7 @@ from common.params import Params
 from decimal import Decimal
 import cereal.messaging as messaging
 from selfdrive.car.gm.steering_limits import STEER_DELTA_BP_KPH, STEER_DELTA_DOWN_V, STEER_DELTA_UP_V
-from selfdrive.controls.lib.torque_authority import effective_torque_params
+from selfdrive.controls.lib.torque_authority import DynamicTorqueAuthorityScheduler, effective_torque_params
 
 # At higher speeds (25+mph) we can assume:
 # Lateral acceleration achieved by a specific car correlates to
@@ -99,50 +99,9 @@ DYN_DELTA_UP_V = STEER_DELTA_UP_V
 DYN_DELTA_DOWN_BP = STEER_DELTA_BP_KPH
 DYN_DELTA_DOWN_V = STEER_DELTA_DOWN_V
 
-# 코너 강도 판정. 세 값 중 가장 큰 값을 사용한다.
-# 코너 감지 민감도 보정.
-# 기존 임계가 높으면 완만한 저속 코너에서 corner_strength=0에 가까워져
-# effective LatAccelFactor/Friction이 표시상/체감상 거의 변하지 않는 문제가 있었다.
-DYN_CURV_STRENGTH_BP = [0.00025, 0.00160]
-DYN_LATACC_STRENGTH_BP = [0.05, 0.75]
-DYN_STEER_STRENGTH_BP = [0.015, 0.22]
-
-# 저속/저중속 부스트 속도 게이트: 10~35kph 완전 ON, 35~45kph bridge로 점진 완화.
-# v4: 10~30kph 강한 개선을 35kph까지 유지하고, 35~45kph 추종력 공백을 제거한다.
-DYN_LOW_SPEED_GATE_BP = [0.0, 8.0, 10.0, 30.0, 35.0, 40.0, 45.0, 50.0]
-DYN_LOW_SPEED_GATE_V  = [0.0, 0.0, 1.00, 1.00, 1.00, 0.70, 0.40, 0.0]
-
-# 45~60kph 중속 코너 보조 게이트.
-# 저속 부스트는 35kph 이후 줄이되, 램프/완만한 중속 코너에서 기본값으로 너무 빨리 죽지 않게 한다.
-DYN_MID_SPEED_GATE_BP = [35.0, 40.0, 45.0, 55.0, 60.0, 70.0]
-DYN_MID_SPEED_GATE_V  = [0.25, 0.45, 0.55, 0.55, 0.30, 0.0]
-
-# 고속 안정 게이트: 60kph 이상에서는 조향을 둔감하게 만들어 와리가리 억제.
-DYN_HIGH_SPEED_GATE_BP = [45.0, 60.0, 80.0, 110.0, 130.0]
-DYN_HIGH_SPEED_GATE_V  = [0.0, 0.20, 0.75, 1.00, 1.00]
-
-# 부스트 램프/홀드. 프레임 기반이며 controls update 주기에 독립적으로 안전하게 동작한다.
-DYN_BOOST_RISE_STEP = 0.14
-DYN_BOOST_FALL_STEP = 0.025
-DYN_LOW_SPEED_HOLD_FRAMES = 80  # 약 0.8초 @100Hz 근처
-
-# 일반 CAN 램프 제한은 정상 동작이므로 권한을 유지하고, 강한 추종 오차에서만 줄인다.
-DYN_STEER_LIMITED_BOOST_MULT = 1.00
-DYN_TORQUE_SLEW_ACTIVE_MULT = 0.85
-
-# steeringPressed가 True라고 해서 저속 코너 dynamic boost를 0으로 끄면,
-# 운전자가 핸들을 살짝 잡은 일반 코너에서 LatAccelFactor/Friction 보조가 전혀 체감되지 않는다.
-# 강한 운전자 조향 개입은 차단하되, 가벼운 steeringPressed 상태에서는 저속 코너 보조를 일부 유지한다.
-DYN_STEERING_PRESSED_LOW_BOOST_MULT = 0.65
-DYN_STEERING_PRESSED_MID_BOOST_MULT = 0.55
-DYN_STEERING_PRESSED_LOW_MIN_BOOST = 0.65
-DYN_STEERING_PRESSED_BRIDGE_MIN_BOOST = 0.55
-DYN_DRIVER_TORQUE_HARD_DISABLE = 30.0
-
-# v2: 이전 프레임의 강한 rate-limit/추종 gap을 직접 backoff 입력으로 사용한다.
-# 외부 인터페이스를 바꾸지 않고, 직전 프레임에서 low-speed slew 또는 stable torque slew가
-# 큰 gap을 만들었는지 저장했다가 다음 프레임 dynamic boost를 줄인다.
-DYN_RATE_LIMITED_STRONG_BOOST_MULT = 0.70
+# Driver override and rate-limit thresholds remain controller inputs; boost
+# shape, hold and direction damping are centralized in torque_authority.py.
+DYN_DRIVER_TORQUE_HARD_DISABLE = 2.0
 DYN_RATE_LIMITED_STRONG_TRACKING_GAP = 0.45
 DYN_RATE_LIMITED_STRONG_OUTPUT_GAP = 0.18
 
@@ -189,6 +148,7 @@ class LatControlTorque(LatControl):
         self._stable_torque_slew_active = False
 
         # dynamic effective torque state
+        self._dyn_scheduler = DynamicTorqueAuthorityScheduler()
         self._dyn_corner_boost = 0.0
         self._dyn_corner_hold_frames = 0
         # _dyn_base_live_torque_params는 torqued/liveTorqueParameters에서 받은 "학습 기준값"이고,
@@ -202,6 +162,9 @@ class LatControlTorque(LatControl):
         self._dyn_last_low_speed_gate = 0.0
         self._dyn_last_mid_speed_gate = 0.0
         self._dyn_last_high_speed_gate = 0.0
+        self._dyn_last_authority_ceiling = 0.0
+        self._dyn_last_direction_reversal = False
+        self._dyn_last_direction_damping = False
         self._dyn_prev_rate_limited_strong = False
         self._dyn_prev_rate_limit_err = 0.0
         self._dyn_last_rate_limited_strong = False
@@ -395,16 +358,11 @@ class LatControlTorque(LatControl):
                                    actual_lateral_accel, steer_limited=False, steering_pressed=False,
                                    last_actuators=None, rate_limited_strong=False, rate_limit_err=0.0,
                                    driver_steering_torque=0.0):
-        """
-        속도/코너 강도 기반 effective torque params.
-        - liveTorqueParameters 학습값은 건드리지 않는다.
-        - torque_from_lateral_accel()에 넣는 임시 파라미터만 변경한다.
-        - 10~35kph: latAccelFactor 낮춤 + friction 올림 = 저속 코너 최대 조향.
-        - 60~110kph: latAccelFactor 올림 + friction 낮춤 = 고속 와리가리 억제.
-        """
+        """Apply bounded transient authority without changing learned values."""
         base_params = dict(getattr(self, '_dyn_base_live_torque_params', self.live_torque_params))
 
         if not DYN_TORQUE_PROFILE_ENABLED or not self._is_equinox_torque_profile:
+            self._dyn_scheduler.reset()
             self._dyn_effective_active = False
             self._dyn_last_blend = 0.0
             self.live_torque_params = dict(base_params)
@@ -416,96 +374,25 @@ class LatControlTorque(LatControl):
         total_pts = base_params.get('totalBucketPoints', 0)
 
         v_kph = self._safe_float(v_ego, 0.0) * 3.6
-        desired_curv_abs = abs(self._safe_float(desired_curvature, 0.0))
-        desired_lat_abs = abs(self._safe_float(desired_lateral_accel, 0.0))
-
-        try:
-            steer_abs = abs(float(getattr(last_actuators, 'steer', 0.0))) if last_actuators is not None else 0.0
-            if not math.isfinite(steer_abs):
-                steer_abs = 0.0
-        except Exception:
-            steer_abs = 0.0
-
-        curv_w = float(interp(desired_curv_abs, DYN_CURV_STRENGTH_BP, [0.0, 1.0]))
-        latacc_w = float(interp(desired_lat_abs, DYN_LATACC_STRENGTH_BP, [0.0, 1.0]))
-        steer_w = float(interp(steer_abs, DYN_STEER_STRENGTH_BP, [0.0, 1.0]))
-        corner_strength = float(clip(max(curv_w, latacc_w, steer_w), 0.0, 1.0))
-
-        low_gate = float(clip(interp(v_kph, DYN_LOW_SPEED_GATE_BP, DYN_LOW_SPEED_GATE_V), 0.0, 1.0))
-        mid_gate = float(clip(interp(v_kph, DYN_MID_SPEED_GATE_BP, DYN_MID_SPEED_GATE_V), 0.0, 1.0))
-        high_gate = float(clip(interp(v_kph, DYN_HIGH_SPEED_GATE_BP, DYN_HIGH_SPEED_GATE_V), 0.0, 1.0))
-
         rate_err = abs(self._safe_float(rate_limit_err, 0.0))
         strong_rate_limited = bool(rate_limited_strong) or (rate_err >= float(DYN_RATE_LIMITED_STRONG_OUTPUT_GAP))
-
-        low_boost_target = corner_strength * low_gate
-        mid_boost_target = corner_strength * mid_gate
 
         driver_torque_abs = abs(self._safe_float(driver_steering_torque, 0.0))
         strong_driver_override = bool(steering_pressed) and (driver_torque_abs >= float(DYN_DRIVER_TORQUE_HARD_DISABLE))
 
-        # steeringPressed가 들어와도 저속 코너 보조를 완전히 끄지 않는다.
-        # - 강한 운전자 토크면 OP와 싸우지 않도록 0으로 차단
-        # - 가벼운 hand-on/미세 개입이면 보조를 일부 유지
-        if strong_driver_override:
-            low_boost_target = 0.0
-            mid_boost_target = 0.0
-            self._dyn_corner_hold_frames = 0
-        elif bool(steering_pressed):
-            low_boost_target *= float(DYN_STEERING_PRESSED_LOW_BOOST_MULT)
-            mid_boost_target *= float(DYN_STEERING_PRESSED_MID_BOOST_MULT)
-
-        # 제한이 걸리면 더 밀지 않고 부스트를 줄임.
-        # strong rate-limit은 단순 limit보다 더 강하게 backoff한다.
-        if bool(strong_rate_limited):
-            low_boost_target *= float(DYN_RATE_LIMITED_STRONG_BOOST_MULT)
-            mid_boost_target *= float(DYN_RATE_LIMITED_STRONG_BOOST_MULT)
-        elif bool(steer_limited):
-            low_boost_target *= float(DYN_STEER_LIMITED_BOOST_MULT)
-            mid_boost_target *= float(DYN_STEER_LIMITED_BOOST_MULT)
-        if bool(getattr(self, '_stable_torque_slew_active', False)):
-            low_boost_target *= float(DYN_TORQUE_SLEW_ACTIVE_MULT)
-            mid_boost_target *= float(DYN_TORQUE_SLEW_ACTIVE_MULT)
-
-        # 10~35km/h는 로그상 clip/rate가 가장 심한 저속~저중속 코너 영역이므로
-        # 작은 코너 요구라도 부스트를 충분히 확보한다.
-        # BUGFIX: 기존 corner_strength 임계가 높으면 완만한 코너에서 dynamic 값이 거의 안 변했다.
-        # desired curvature / lateral accel / 이전 steer 중 하나라도 코너 힌트가 있으면 최소 부스트를 보장한다.
-        turning_hint = bool(
-            (desired_curv_abs >= 0.00020) or
-            (desired_lat_abs >= 0.035) or
-            (steer_abs >= 0.015)
-        )
-        if (10.0 <= v_kph <= 35.0) and turning_hint and (not strong_driver_override):
-            low35_min_boost = 0.70 if bool(strong_rate_limited) else 1.00
-            if bool(steering_pressed):
-                low35_min_boost *= float(DYN_STEERING_PRESSED_LOW_MIN_BOOST)
-            low_boost_target = max(low_boost_target, low35_min_boost * low_gate)
-        elif (35.0 < v_kph <= 45.0) and turning_hint and (not strong_driver_override):
-            bridge_min_boost = float(interp(v_kph, [35.0, 40.0, 45.0], [0.85, 0.72, 0.58]))
-            if bool(strong_rate_limited):
-                bridge_min_boost *= 0.82
-            if bool(steering_pressed):
-                bridge_min_boost *= float(DYN_STEERING_PRESSED_BRIDGE_MIN_BOOST)
-            low_boost_target = max(low_boost_target, bridge_min_boost)
-
-        # 코너 종료 후 짧게 유지한 뒤 천천히 감쇠.
-        if low_boost_target > 0.08:
-            self._dyn_corner_hold_frames = int(DYN_LOW_SPEED_HOLD_FRAMES)
-        elif self._dyn_corner_hold_frames > 0:
-            self._dyn_corner_hold_frames -= 1
-            low_boost_target = max(low_boost_target, min(float(self._dyn_corner_boost), 0.65) * low_gate)
-
-        # 램프 적용: 갑자기 토크 성격이 바뀌지 않도록 함.
-        cur_boost = float(getattr(self, '_dyn_corner_boost', 0.0) or 0.0)
-        if low_boost_target > cur_boost:
-            cur_boost = min(low_boost_target, cur_boost + float(DYN_BOOST_RISE_STEP))
-        else:
-            cur_boost = max(low_boost_target, cur_boost - float(DYN_BOOST_FALL_STEP))
-        cur_boost = float(clip(cur_boost, 0.0, 1.0))
-        self._dyn_corner_boost = cur_boost
-
-        authority_request = float(clip(max(cur_boost, mid_boost_target, high_gate), 0.0, 1.0))
+        # Demand-only scheduling prevents the applied steer from feeding back
+        # into boost. The scheduler owns ramp, hold and reversal damping.
+        dyn = self._dyn_scheduler.update(
+            v_kph, self._safe_float(desired_curvature, 0.0),
+            self._safe_float(desired_lateral_accel, 0.0),
+            steering_pressed=bool(steering_pressed),
+            strong_driver_override=strong_driver_override,
+            steer_limited=bool(steer_limited),
+            strong_rate_limited=strong_rate_limited,
+            torque_slew_active=bool(getattr(self, '_stable_torque_slew_active', False)))
+        authority_request = float(dyn['authorityRequest'])
+        self._dyn_corner_boost = authority_request
+        self._dyn_corner_hold_frames = int(dyn['holdFrames'])
 
         # 저속/중속 권한과 학습 신뢰도를 단일 스케줄러에서 블렌딩한다.
         eff_lat, eff_fric, blend = effective_torque_params(
@@ -513,10 +400,13 @@ class LatControlTorque(LatControl):
         )
         self._dyn_last_blend = float(blend)
 
-        self._dyn_last_corner_strength = corner_strength
-        self._dyn_last_low_speed_gate = low_gate
-        self._dyn_last_mid_speed_gate = mid_gate
-        self._dyn_last_high_speed_gate = high_gate
+        self._dyn_last_corner_strength = float(dyn['cornerStrength'])
+        self._dyn_last_low_speed_gate = float(dyn['lowGate'])
+        self._dyn_last_mid_speed_gate = float(dyn['midGate'])
+        self._dyn_last_high_speed_gate = float(dyn['highGate'])
+        self._dyn_last_authority_ceiling = float(dyn['authorityCeiling'])
+        self._dyn_last_direction_reversal = bool(dyn['directionReversal'])
+        self._dyn_last_direction_damping = bool(dyn['directionDamping'])
         self._dyn_last_rate_limited_strong = bool(strong_rate_limited)
         self._dyn_last_target_delta_up = float(interp(v_kph, DYN_DELTA_UP_BP, DYN_DELTA_UP_V))
         self._dyn_last_target_delta_down = float(interp(v_kph, DYN_DELTA_DOWN_BP, DYN_DELTA_DOWN_V))
@@ -544,6 +434,8 @@ class LatControlTorque(LatControl):
             eff = dict(getattr(self, '_dyn_last_effective_params', base))
         except Exception:
             eff = dict(base)
+        if not bool(getattr(self, '_dyn_effective_active', False)):
+            eff = dict(base)
         return {
             'active': bool(getattr(self, '_dyn_effective_active', False)),
             'blend': float(getattr(self, '_dyn_last_blend', 0.0) or 0.0),
@@ -551,6 +443,9 @@ class LatControlTorque(LatControl):
             'low_gate': float(getattr(self, '_dyn_last_low_speed_gate', 0.0) or 0.0),
             'mid_gate': float(getattr(self, '_dyn_last_mid_speed_gate', 0.0) or 0.0),
             'high_gate': float(getattr(self, '_dyn_last_high_speed_gate', 0.0) or 0.0),
+            'authorityCeiling': float(getattr(self, '_dyn_last_authority_ceiling', 0.0) or 0.0),
+            'directionReversal': bool(getattr(self, '_dyn_last_direction_reversal', False)),
+            'directionDamping': bool(getattr(self, '_dyn_last_direction_damping', False)),
             'latAccelFactor': float(eff.get('latAccelFactor', base.get('latAccelFactor', 0.0)) or 0.0),
             'friction': float(eff.get('friction', base.get('friction', 0.0)) or 0.0),
             'latAccelOffset': float(eff.get('latAccelOffset', base.get('latAccelOffset', 0.0)) or 0.0),
@@ -609,6 +504,7 @@ class LatControlTorque(LatControl):
             self._stable_prev_output_torque = 0.0
             self._stable_torque_slew_gap = 0.0
             self._stable_torque_slew_active = False
+            self._dyn_scheduler.reset()
             self._dyn_prev_rate_limited_strong = False
             self._dyn_prev_rate_limit_err = 0.0
             self._dyn_effective_active = False

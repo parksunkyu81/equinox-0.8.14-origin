@@ -695,6 +695,15 @@ struct ControlsState @0x97ff69c53601abf1 {
   pedalLeadAssistCount @152 :UInt32;
   pedalLeadAssistPedalTarget @153 :Float32;
 
+  # Actual per-frame dynamic torque values applied by LatControlTorque.
+  dynamicTorqueActive @154 :Bool;
+  dynamicTorqueLatAccelFactor @155 :Float32;
+  dynamicTorqueFriction @156 :Float32;
+  dynamicTorqueBlend @157 :Float32;
+  dynamicTorqueAuthorityCeiling @158 :Float32;
+  dynamicTorqueCornerStrength @159 :Float32;
+  dynamicTorqueDirectionDamping @160 :Bool;
+
 
 
   enum OpenpilotState @0xdbe58b96d2d1ac61 {

@@ -1757,6 +1757,15 @@ class Controls:
         controlsState.latAccelOffset = self.torque_latAccelOffset
         controlsState.friction = self.torque_friction
         controlsState.totalBucketPoints = self.totalBucketPoints
+        if hasattr(self.LaC, 'get_dynamic_debug_torque_params'):
+            dyn_torque = self.LaC.get_dynamic_debug_torque_params()
+            controlsState.dynamicTorqueActive = bool(dyn_torque['active'])
+            controlsState.dynamicTorqueLatAccelFactor = float(dyn_torque['latAccelFactor'])
+            controlsState.dynamicTorqueFriction = float(dyn_torque['friction'])
+            controlsState.dynamicTorqueBlend = float(dyn_torque['blend'])
+            controlsState.dynamicTorqueAuthorityCeiling = float(dyn_torque['authorityCeiling'])
+            controlsState.dynamicTorqueCornerStrength = float(dyn_torque['corner_strength'])
+            controlsState.dynamicTorqueDirectionDamping = bool(dyn_torque['directionDamping'])
 
         # Dynamic TR
         #controlsState.cruiseGap = int(Params().get("cruiseGap", encoding="utf8"))

@@ -74,6 +74,11 @@ from common.filter_simple import FirstOrderFilter
 from selfdrive.swaglog import cloudlog
 from selfdrive.car.gm.steering_limits import steer_delta_limits_kph
 from selfdrive.controls.lib.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
+from selfdrive.controls.lib.torque_authority import (
+    HIGH_SPEED_GATE_BP, HIGH_SPEED_GATE_V, LOW_SPEED_GATE_BP, LOW_SPEED_GATE_V,
+    MID_SPEED_GATE_BP, MID_SPEED_GATE_V, authority_ceiling,
+    corner_strength as dynamic_corner_strength,
+    effective_torque_params as dynamic_effective_torque_params)
 from selfdrive.locationd.torque_paired_fit import fit_balanced_common_torque_model
 from common.numpy_fast import interp, clip
 
@@ -173,19 +178,9 @@ LIVE_TORQUE_TUNING_ENABLED = True  # bounded live tuning; unsafe learned values 
 LAT_ACCEL_FACTOR_ANCHOR = 2.05
 FRICTION_ANCHOR = 0.230
 
-# --- LatControl dynamic effective torque display helper ---
-# 실제 dynamic torque 적용은 latcontrol_torque.py 내부에서 수행한다.
-# torqued는 liveTorqueParameters의 학습/앵커 값을 publish하므로, 기존 ltp_log의 latAF_f/fric_f만 보면
-# 코너에서도 값이 안 변하는 것처럼 보인다. 아래 값은 ltp_log 검증용 추정 표시값이며 제어 publish 값은 건드리지 않는다.
-DYN_LOG_LAT_FACTOR_BP = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
-DYN_LOG_FRICTION_BP   = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 100.0, 110.0, 130.0]
-DYN_LOG_LOW_GATE_BP   = [0.0, 8.0, 10.0, 30.0, 35.0, 40.0, 45.0, 50.0]
-DYN_LOG_LOW_GATE_V    = [0.0, 0.0, 1.00, 1.00, 1.00, 0.70, 0.40, 0.0]
-DYN_LOG_MID_GATE_BP   = [35.0, 40.0, 45.0, 55.0, 60.0, 70.0]
-DYN_LOG_MID_GATE_V    = [0.25, 0.45, 0.55, 0.55, 0.30, 0.0]
-DYN_LOG_HIGH_GATE_BP  = [45.0, 60.0, 80.0, 110.0, 130.0]
-DYN_LOG_HIGH_GATE_V   = [0.0, 0.20, 0.75, 1.00, 1.00]
-
+# --- LatControl dynamic effective torque diagnostics ---
+# controlsState에서 실제 적용값을 기록하고, controlsState가 아직 도착하지
+# 않은 시작 구간에만 동일한 공유 스케줄의 stateless 추정값을 사용한다.
 # -----------------------------
 # Force targets (disable CP/cache overrides)
 # -----------------------------
@@ -986,6 +981,14 @@ class TorqueEstimator:
         self._lc_eps_evt = False
         self._lc_eps_damp = False
         self._lc_eps_damp_until = 0.0
+        self._dyn_actual_t = None
+        self._dyn_actual_active = False
+        self._dyn_actual_lat_factor = None
+        self._dyn_actual_friction = None
+        self._dyn_actual_blend = 0.0
+        self._dyn_actual_authority_ceiling = 0.0
+        self._dyn_actual_corner_strength = 0.0
+        self._dyn_actual_direction_damping = False
         self.last_is_frozen = False
         self.stop_freeze_until = 0.0
 
@@ -2690,6 +2693,20 @@ class TorqueEstimator:
 
                 self._lc_eps_evt = bool(getattr(lts, "epsEvt", False))
                 self._lc_eps_damp = bool(getattr(lts, "epsDamp", False))
+                actual_lat = float(getattr(msg, "dynamicTorqueLatAccelFactor", 0.0) or 0.0)
+                actual_fric = float(getattr(msg, "dynamicTorqueFriction", 0.0) or 0.0)
+                if np.isfinite(actual_lat) and np.isfinite(actual_fric) and actual_lat > 0.0 and actual_fric > 0.0:
+                    self._dyn_actual_t = float(t)
+                    self._dyn_actual_active = bool(getattr(msg, "dynamicTorqueActive", False))
+                    self._dyn_actual_lat_factor = actual_lat
+                    self._dyn_actual_friction = actual_fric
+                    self._dyn_actual_blend = float(getattr(msg, "dynamicTorqueBlend", 0.0) or 0.0)
+                    self._dyn_actual_authority_ceiling = float(
+                        getattr(msg, "dynamicTorqueAuthorityCeiling", 0.0) or 0.0)
+                    self._dyn_actual_corner_strength = float(
+                        getattr(msg, "dynamicTorqueCornerStrength", 0.0) or 0.0)
+                    self._dyn_actual_direction_damping = bool(
+                        getattr(msg, "dynamicTorqueDirectionDamping", False))
             except Exception:
                 return
 
@@ -3275,12 +3292,7 @@ class TorqueEstimator:
         return path
 
     def _estimate_dynamic_display_params(self, base_lat: float, base_fric: float):
-        """Return latcontrol_torque dynamic-effective estimate for ltp_log only.
-
-        Do not publish these values as liveTorqueParameters; latcontrol_torque applies
-        the real per-frame effective params internally. This is only to make logs show
-        why latAF_f/fric_f can stay fixed while applied torque profile changes.
-        """
+        """Return a stateless fallback until actual ControlsState values arrive."""
         try:
             base_lat = float(base_lat)
             if not np.isfinite(base_lat):
@@ -3312,66 +3324,14 @@ class TorqueEstimator:
             lat_acc_abs = abs((float(v_ms) * float(yaw_abs)))
         except Exception:
             lat_acc_abs = 0.0
-        try:
-            steer_des_abs = abs(float(self.last_steer_desired)) if (self.last_steer_desired is not None and np.isfinite(self.last_steer_desired)) else 0.0
-        except Exception:
-            steer_des_abs = 0.0
-        try:
-            steer_app_abs = abs(float(self.last_steer_applied)) if (self.last_steer_applied is not None and np.isfinite(self.last_steer_applied)) else 0.0
-        except Exception:
-            steer_app_abs = 0.0
-        steer_abs = max(steer_des_abs, steer_app_abs)
-
-        curv_w = float(np.interp(curv_abs, [0.00025, 0.00160], [0.0, 1.0]))
-        lat_w = float(np.interp(lat_acc_abs, [0.05, 0.75], [0.0, 1.0]))
-        steer_w = float(np.interp(steer_abs, [0.015, 0.22], [0.0, 1.0]))
-        corner_strength = float(np.clip(max(curv_w, lat_w, steer_w), 0.0, 1.0))
-
-        low_gate = float(np.clip(np.interp(v_kph, DYN_LOG_LOW_GATE_BP, DYN_LOG_LOW_GATE_V), 0.0, 1.0))
-        mid_gate = float(np.clip(np.interp(v_kph, DYN_LOG_MID_GATE_BP, DYN_LOG_MID_GATE_V), 0.0, 1.0))
-        high_gate = float(np.clip(np.interp(v_kph, DYN_LOG_HIGH_GATE_BP, DYN_LOG_HIGH_GATE_V), 0.0, 1.0))
-        turning_hint = bool((curv_abs >= 0.00020) or (lat_acc_abs >= 0.035) or (steer_abs >= 0.015))
-
-        low_boost = corner_strength * low_gate
-        mid_boost = corner_strength * mid_gate
-        steering_pressed = bool(getattr(self, "_last_steer_override_db", getattr(self, "_last_steer_override", False)))
-        try:
-            driver_torque_abs = abs(float(getattr(self, "_last_driver_torque", 0.0) or 0.0))
-        except Exception:
-            driver_torque_abs = 0.0
-        strong_driver_override = bool(steering_pressed) and (driver_torque_abs >= 30.0)
-
-        if strong_driver_override:
-            low_boost = 0.0
-            mid_boost = 0.0
-        elif steering_pressed:
-            low_boost *= 0.65
-            mid_boost *= 0.55
-
-        if (10.0 <= v_kph <= 35.0) and turning_hint and (not strong_driver_override):
-            min_boost = 1.00 * (0.65 if steering_pressed else 1.00)
-            low_boost = max(low_boost, low_gate * min_boost)
-        elif (35.0 < v_kph <= 45.0) and turning_hint and (not strong_driver_override):
-            min_boost = float(np.interp(v_kph, [35.0, 40.0, 45.0], [0.85, 0.72, 0.58]))
-            if steering_pressed:
-                min_boost *= 0.55
-            low_boost = max(low_boost, min_boost)
-
+        corner_strength = dynamic_corner_strength(curv_abs, lat_acc_abs)
+        low_gate = float(np.clip(np.interp(v_kph, LOW_SPEED_GATE_BP, LOW_SPEED_GATE_V), 0.0, 1.0))
+        mid_gate = float(np.clip(np.interp(v_kph, MID_SPEED_GATE_BP, MID_SPEED_GATE_V), 0.0, 1.0))
+        high_gate = float(np.clip(np.interp(v_kph, HIGH_SPEED_GATE_BP, HIGH_SPEED_GATE_V), 0.0, 1.0))
         total_pts = len(self.corner_points) + len(self.straight_points)
-        learning_gate = float(np.interp(total_pts, [1500.0, 6000.0], [0.0, 1.0]))
-        blend = float(np.clip(max(low_boost, mid_boost, high_gate) * learning_gate, 0.0, 1.0))
-        lat_scale = float(np.interp(v_kph, DYN_LOG_LAT_FACTOR_BP,
-                                    [1.000, 0.995, 0.985, 0.980, 0.980, 0.985, 0.990,
-                                     0.995, 1.000, 1.010, 1.020, 1.025, 1.030]))
-        fric_scale = float(np.interp(v_kph, DYN_LOG_FRICTION_BP,
-                                     [1.000, 1.010, 1.025, 1.030, 1.030, 1.025, 1.015,
-                                      1.010, 1.000, 0.995, 0.985, 0.980, 0.980]))
-        target_lat = base_lat * lat_scale
-        target_fric = base_fric * fric_scale
-        eff_lat = float(np.clip(base_lat + (target_lat - base_lat) * blend,
-                                max(1.75, base_lat * 0.96), min(2.42, base_lat * 1.04)))
-        eff_fric = float(np.clip(base_fric + (target_fric - base_fric) * blend,
-                                 max(0.165, base_fric * 0.90), min(0.305, base_fric * 1.10)))
+        authority_request = corner_strength * max(low_gate, mid_gate, high_gate)
+        eff_lat, eff_fric, blend = dynamic_effective_torque_params(
+            base_lat, base_fric, v_kph, authority_request, total_pts)
         return eff_lat, eff_fric, blend, corner_strength, low_gate, mid_gate, high_gate
 
     def _log_to_file(self, msg):
@@ -3429,6 +3389,28 @@ class TorqueEstimator:
                 dyn_latAF, dyn_fric, dyn_blend, dyn_corner_strength, dyn_low_gate, dyn_mid_gate, dyn_high_gate = (
                     float(ltp.latAccelFactorFiltered), float(ltp.frictionCoefficientFiltered), 0.0, 0.0, 0.0, 0.0, 0.0
                 )
+            dyn_source = "estimate_fallback"
+            dyn_active = bool(dyn_blend > 1e-4)
+            dyn_ceiling = authority_ceiling(float(v_kph or 0.0))
+            dyn_direction_damping = False
+            actual_t = getattr(self, "_dyn_actual_t", None)
+            actual_fresh = bool(
+                actual_t is not None and np.isfinite(actual_t) and
+                abs(float(now_mono) - float(actual_t)) <= 1.0)
+            if actual_fresh:
+                actual_lat = getattr(self, "_dyn_actual_lat_factor", None)
+                actual_fric = getattr(self, "_dyn_actual_friction", None)
+                if (actual_lat is not None and actual_fric is not None and
+                        np.isfinite(actual_lat) and np.isfinite(actual_fric)):
+                    dyn_source = "controlsState_actual"
+                    dyn_active = bool(getattr(self, "_dyn_actual_active", False))
+                    dyn_latAF = float(actual_lat)
+                    dyn_fric = float(actual_fric)
+                    dyn_blend = float(getattr(self, "_dyn_actual_blend", 0.0) or 0.0)
+                    dyn_ceiling = float(getattr(self, "_dyn_actual_authority_ceiling", 0.0) or 0.0)
+                    dyn_corner_strength = float(getattr(self, "_dyn_actual_corner_strength", 0.0) or 0.0)
+                    dyn_direction_damping = bool(
+                        getattr(self, "_dyn_actual_direction_damping", False))
 
             rec = {
                 "ts": now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -3554,6 +3536,16 @@ class TorqueEstimator:
                 "dyn_latAF_eff_est": round(float(dyn_latAF), 5),
                 "dyn_fric_eff_est": round(float(dyn_fric), 5),
                 "dyn_blend_est": round(float(dyn_blend), 4),
+                "dyn_source": dyn_source,
+                "dyn_actual_active": bool(dyn_active),
+                "dyn_latAF_eff_actual": (
+                    round(float(dyn_latAF), 5) if dyn_source == "controlsState_actual" else None),
+                "dyn_fric_eff_actual": (
+                    round(float(dyn_fric), 5) if dyn_source == "controlsState_actual" else None),
+                "dyn_blend_actual": (
+                    round(float(dyn_blend), 4) if dyn_source == "controlsState_actual" else None),
+                "dyn_authority_ceiling": round(float(dyn_ceiling), 4),
+                "dyn_direction_damping": bool(dyn_direction_damping),
                 "dyn_corner_strength_est": round(float(dyn_corner_strength), 4),
                 "dyn_low_gate_est": round(float(dyn_low_gate), 4),
                 "dyn_mid_gate_est": round(float(dyn_mid_gate), 4),
