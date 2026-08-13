@@ -44,7 +44,7 @@ from selfdrive.controls.lib.stop_accel_boost import (
   boost_floor_context_allowed, speed_limit_decel_requested,
 )
 from selfdrive.controls.lib.curve_speed_limiter import (
-  CurveSpeedLimiter, CURVE_SPEED_DISABLED, build_model_curve_profile, calculate_curve_speed,
+  CurveSpeedLimiter, CURVE_SPEED_DISABLED, build_v0813_model_curve_profile, calculate_curve_speed,
 )
 from selfdrive.controls.lib.curve_pedal_coordinator import CurvePedalCoordinator
 from selfdrive.controls.lib.predictive_coasting import PredictiveCoastingCoordinator
@@ -485,7 +485,8 @@ class Controls:
         curvature_factor = 0.85 * ntune_scc_get("sccCurvatureFactor")
 
         model = sm['modelV2']
-        model_curvatures, model_times, model_distances, model_profile_valid = build_model_curve_profile(
+        (model_curvatures, model_times, model_distances,
+         model_profile_valid, model_profile_diag) = build_v0813_model_curve_profile(
           model.position.t,
           model.orientationRate.z,
           model.velocity.x, model.velocity.y, model.velocity.z,
@@ -505,7 +506,7 @@ class Controls:
             curvatures = model_curvatures
             time_idxs = model_times
             distances = model_distances
-            source = "modelV2_33"
+            source = "modelV2_v0813_fused"
             input_valid = True
         elif lateral_plan_updated and mpc_valid:
             curvatures = list(lateralPlan.curvatures)
@@ -552,6 +553,7 @@ class Controls:
           "measured_curvature": float(measured_curvature) if np.isfinite(measured_curvature) else None,
           "curvature_factor": float(curvature_factor),
         })
+        self.curve_speed_limiter.last_diag.update(model_profile_diag)
 
     def _log_curve_speed(self, v_ego, target_speed_clu, road_limit_speed,
                          apply_limit_speed, curv_limit):
@@ -595,6 +597,14 @@ class Controls:
               "source": str(diag.get("source", "unknown")),
               "model_valid": bool(diag.get("model_valid", False)),
               "model_profile_points": int(diag.get("model_profile_points", 0) or 0),
+              "model_curve_adapter": str(diag.get("model_curve_adapter", "unknown")),
+              "model_geometry_points": int(diag.get("model_geometry_points", 0) or 0),
+              "model_yaw_points": int(diag.get("model_yaw_points", 0) or 0),
+              "model_agree_points": int(diag.get("model_agree_points", 0) or 0),
+              "model_disagree_points": int(diag.get("model_disagree_points", 0) or 0),
+              "model_geometry_only_points": int(diag.get("model_geometry_only_points", 0) or 0),
+              "model_geometry_max_curvature": diag.get("model_geometry_max_curvature", None),
+              "model_yaw_max_curvature": diag.get("model_yaw_max_curvature", None),
               "mpc_valid": bool(diag.get("mpc_valid", False)),
               "measured_curvature": diag.get("measured_curvature", None),
               "max_curvature": diag.get("max_curvature", None),

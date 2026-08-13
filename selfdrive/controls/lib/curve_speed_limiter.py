@@ -26,6 +26,17 @@ CURVE_PLAN_DT = 0.05
 MODEL_TRAJECTORY_SIZE = 33
 MODEL_CURVE_MIN_TIME_S = 0.50
 MODEL_CURVE_MAX_TIME_S = 5.00
+# The v0.8.13 model was trained and released with the single road camera. Its
+# position path is stable enough for road geometry, but orientationRate can be
+# noticeably noisier than the later dual-camera model around a corner entry.
+# Use a broad path chord and require the two predictions to agree before a
+# large yaw-rate curvature can tighten the speed target.
+MODEL_CURVE_PATH_INDEX_SPAN = 2
+MODEL_CURVE_MIN_CHORD_M = 0.75
+MODEL_CURVE_MAX_ABS = 0.20
+MODEL_CURVE_AGREEMENT_ABS = 0.0025
+MODEL_CURVE_AGREEMENT_RATIO = 2.5
+MODEL_CURVE_GEOMETRY_WEIGHT = 0.75
 
 
 def _finite_sequence(values):
@@ -56,22 +67,63 @@ def _smoothed_abs_curvatures(curvatures):
   return smoothed
 
 
-def build_model_curve_profile(position_t, orientation_rate_z,
-                              velocity_x, velocity_y, velocity_z,
-                              position_x, position_y, position_z,
-                              measured_curvature):
-  """Build a present-plus-future curvature profile from the v0.8.16 model output."""
+def _path_geometry_curvature(position_x, position_y, index):
+  """Return signed horizontal curvature from a wide three-point path chord."""
+  left = max(0, index - MODEL_CURVE_PATH_INDEX_SPAN)
+  right = min(len(position_x) - 1, index + MODEL_CURVE_PATH_INDEX_SPAN)
+  if left == index or right == index:
+    return None
+
+  ax, ay = position_x[left], position_y[left]
+  bx, by = position_x[index], position_y[index]
+  cx, cy = position_x[right], position_y[right]
+  ab = math.hypot(bx - ax, by - ay)
+  bc = math.hypot(cx - bx, cy - by)
+  ac = math.hypot(cx - ax, cy - ay)
+  if min(ab, bc) < MODEL_CURVE_MIN_CHORD_M or ac < 2.0 * MODEL_CURVE_MIN_CHORD_M:
+    return None
+
+  cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+  curvature = 2.0 * cross / max(ab * bc * ac, 1e-6)
+  if not math.isfinite(curvature) or abs(curvature) > MODEL_CURVE_MAX_ABS:
+    return None
+  return float(curvature)
+
+
+def build_v0813_model_curve_profile(position_t, orientation_rate_z,
+                                    velocity_x, velocity_y, velocity_z,
+                                    position_x, position_y, position_z,
+                                    measured_curvature):
+  """Build a v0.8.13-compatible curve profile and adapter diagnostics.
+
+  Road-path geometry is the primary signal. orientationRate/velocity is used
+  as an independent consistency check, preventing one noisy model head from
+  turning a path twitch into a false tight curve.
+  """
+  diag = {
+    "model_curve_adapter": "v0.8.13_path_yaw_fusion",
+    "model_geometry_points": 0,
+    "model_yaw_points": 0,
+    "model_agree_points": 0,
+    "model_disagree_points": 0,
+    "model_geometry_only_points": 0,
+    "model_geometry_max_curvature": 0.0,
+    "model_yaw_max_curvature": 0.0,
+    "model_profile_valid": False,
+  }
   seqs = [_finite_sequence(v) for v in (
     position_t, orientation_rate_z, velocity_x, velocity_y, velocity_z,
     position_x, position_y, position_z,
   )]
   if any(v is None for v in seqs):
-    return [], [], [], False
+    return [], [], [], False, diag
 
-  times, yaw_rates, vxs, vys, vzs, pxs, pys, pzs = seqs
+  times, yaw_rates, vxs, vys, _vzs, pxs, pys, pzs = seqs
   lengths = [len(v) for v in seqs]
   if any(n != MODEL_TRAJECTORY_SIZE for n in lengths):
-    return [], [], [], False
+    return [], [], [], False, diag
+  if any(times[i] <= times[i - 1] for i in range(1, len(times))):
+    return [], [], [], False, diag
 
   try:
     measured = abs(float(measured_curvature))
@@ -85,23 +137,67 @@ def build_model_curve_profile(position_t, orientation_rate_z,
   distances = [0.0]
   p0x, p0y, p0z = pxs[0], pys[0], pzs[0]
 
-  for t, yaw_rate, vx, vy, vz, px, py, pz in zip(
-      times, yaw_rates, vxs, vys, vzs, pxs, pys, pzs):
+  for i, t in enumerate(times):
     if t < MODEL_CURVE_MIN_TIME_S or t > MODEL_CURVE_MAX_TIME_S:
       continue
-    speed = math.sqrt(vx * vx + vy * vy + vz * vz)
-    curvature = yaw_rate / max(speed, 1.0)
-    distance = math.sqrt((px - p0x) ** 2 + (py - p0y) ** 2 + (pz - p0z) ** 2)
-    if not (math.isfinite(curvature) and math.isfinite(distance)):
-      return [], [], [], False
+
+    distance = math.sqrt((pxs[i] - p0x) ** 2 + (pys[i] - p0y) ** 2 + (pzs[i] - p0z) ** 2)
+    geometry_curvature = _path_geometry_curvature(pxs, pys, i)
+    if geometry_curvature is None or not math.isfinite(distance):
+      continue
+
+    geometry_abs = abs(geometry_curvature)
+    diag["model_geometry_points"] += 1
+    diag["model_geometry_max_curvature"] = max(
+      diag["model_geometry_max_curvature"], geometry_abs)
+
+    horizontal_speed = math.hypot(vxs[i], vys[i])
+    yaw_curvature = yaw_rates[i] / max(horizontal_speed, 1.0)
+    yaw_valid = math.isfinite(yaw_curvature) and abs(yaw_curvature) <= MODEL_CURVE_MAX_ABS
+    if yaw_valid:
+      yaw_abs = abs(yaw_curvature)
+      diag["model_yaw_points"] += 1
+      diag["model_yaw_max_curvature"] = max(diag["model_yaw_max_curvature"], yaw_abs)
+      smaller = min(geometry_abs, yaw_abs)
+      agreement_limit = max(MODEL_CURVE_AGREEMENT_ABS,
+                            smaller * (MODEL_CURVE_AGREEMENT_RATIO - 1.0))
+      agrees = abs(geometry_abs - yaw_abs) <= agreement_limit
+      if agrees:
+        curvature = (MODEL_CURVE_GEOMETRY_WEIGHT * geometry_abs +
+                     (1.0 - MODEL_CURVE_GEOMETRY_WEIGHT) * yaw_abs)
+        diag["model_agree_points"] += 1
+      else:
+        # A disagreement is kept at the weaker prediction plus a small noise
+        # allowance. Persistent real bends agree in both model heads; isolated
+        # path or yaw-rate spikes therefore cannot request a deep-curve target.
+        curvature = min(geometry_abs, yaw_abs) + MODEL_CURVE_AGREEMENT_ABS
+        curvature = min(curvature, max(geometry_abs, yaw_abs))
+        diag["model_disagree_points"] += 1
+    else:
+      # Geometry remains usable when the velocity head briefly degenerates,
+      # but reduce its authority until yaw-rate corroboration returns.
+      curvature = MODEL_CURVE_GEOMETRY_WEIGHT * geometry_abs
+      diag["model_geometry_only_points"] += 1
+
     curvatures.append(float(curvature))
     profile_times.append(float(t))
     distances.append(max(0.0, float(distance)))
 
-  # The official 33 point horizon has many samples in this interval. Requiring
-  # several prevents a malformed partial model message from enabling slowdown.
-  valid = len(curvatures) >= 8
-  return curvatures, profile_times, distances, valid
+  # Keep the same minimum horizon contract as the original 33-point adapter.
+  valid = len(curvatures) >= 8 and diag["model_geometry_points"] >= 7
+  diag["model_profile_valid"] = bool(valid)
+  return curvatures, profile_times, distances, valid, diag
+
+
+def build_model_curve_profile(position_t, orientation_rate_z,
+                              velocity_x, velocity_y, velocity_z,
+                              position_x, position_y, position_z,
+                              measured_curvature):
+  """Compatibility wrapper retaining the original four-value API."""
+  curvatures, times, distances, valid, _diag = build_v0813_model_curve_profile(
+    position_t, orientation_rate_z, velocity_x, velocity_y, velocity_z,
+    position_x, position_y, position_z, measured_curvature)
+  return curvatures, times, distances, valid
 
 
 def calculate_curve_speed_details(curvatures, v_ego, cruise_speed, min_curve_speed,
