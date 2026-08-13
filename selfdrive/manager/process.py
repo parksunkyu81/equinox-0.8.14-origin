@@ -4,6 +4,7 @@ import signal
 import struct
 import time
 import subprocess
+import traceback
 from typing import Optional, List, ValuesView
 from abc import ABC, abstractmethod
 from multiprocessing import Process
@@ -18,6 +19,7 @@ from common.realtime import sec_since_boot
 from selfdrive.swaglog import cloudlog
 from selfdrive.hardware import HARDWARE
 from cereal import log
+from selfdrive.process_diagnostics import append_process_diagnostic
 
 WATCHDOG_FN = "/dev/shm/wd_"
 ENABLE_WATCHDOG = os.getenv("NO_WATCHDOG") is None
@@ -42,9 +44,17 @@ def launcher(proc: str, name: str) -> None:
     getattr(mod, 'main')()
   except KeyboardInterrupt:
     cloudlog.warning(f"child {proc} got SIGINT")
-  except Exception:
+  except Exception as exc:
     # can't install the crash handler because sys.excepthook doesn't play nice
     # with threads, so catch it here.
+    traceback_text = traceback.format_exc()
+    append_process_diagnostic(
+      "python_process_exception",
+      process={"name": name, "module": proc, "pid": os.getpid()},
+      exception_type=type(exc).__name__,
+      exception_message=str(exc),
+      traceback=traceback_text,
+    )
     sentry.capture_exception()
     raise
 

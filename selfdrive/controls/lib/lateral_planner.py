@@ -9,6 +9,7 @@ from selfdrive.controls.lib.desire_helper import DesireHelper, AUTO_LCA_START_TI
 import cereal.messaging as messaging
 from cereal import log
 from common.params import Params
+from selfdrive.controls.lib.model_data_validation import as_finite_vector, validated_model_trajectory
 
 TRAJECTORY_SIZE = 33
 
@@ -26,9 +27,14 @@ class LateralPlanner:
 
     self.path_xyz = np.zeros((TRAJECTORY_SIZE, 3))
     self.path_xyz_stds = np.ones((TRAJECTORY_SIZE, 3))
+    self.speed_forward = np.zeros((TRAJECTORY_SIZE,))
     self.plan_yaw = np.zeros((TRAJECTORY_SIZE,))
+    self.plan_yaw_rate = np.zeros((TRAJECTORY_SIZE,))
+    self.plan_curv = np.zeros((TRAJECTORY_SIZE,))
+    self.plan_curv_rate = np.zeros((TRAJECTORY_SIZE,))
     self.t_idxs = np.arange(TRAJECTORY_SIZE)
     self.y_pts = np.zeros(TRAJECTORY_SIZE)
+    self.model_data_valid = False
 
     self.lat_mpc = LateralMpc()
     self.reset_mpc(np.zeros(4))
@@ -44,16 +50,25 @@ class LateralPlanner:
     # Parse model predictions
     md = sm['modelV2']
     self.LP.parse_model(md)
-    if len(md.position.x) == TRAJECTORY_SIZE and len(md.orientation.x) == TRAJECTORY_SIZE:
-      self.path_xyz = np.column_stack([md.position.x, md.position.y, md.position.z])
-      self.speed_forward = np.linalg.norm(np.column_stack([md.velocity.x, md.velocity.y, md.velocity.z]), axis=1)
-      self.t_idxs = np.array(md.position.t)
-      self.plan_yaw = np.array(md.orientation.z)
-      self.plan_yaw_rate = np.array(md.orientationRate.z)
+    trajectory = validated_model_trajectory(md, TRAJECTORY_SIZE)
+    self.model_data_valid = trajectory is not None
+    if trajectory is not None:
+      self.path_xyz, self.speed_forward, self.t_idxs, self.plan_yaw, self.plan_yaw_rate = trajectory
       self.plan_curv = self.plan_yaw_rate / np.maximum(self.speed_forward, np.ones_like(self.speed_forward))
-      self.plan_curv_rate = np.gradient(self.plan_curv, self.t_idxs)
-    if len(md.position.xStd) == TRAJECTORY_SIZE:
-      self.path_xyz_stds = np.column_stack([md.position.xStd, md.position.yStd, md.position.zStd])
+      # Curvature rate is currently not passed to the MPC. Keep it finite and
+      # avoid np.gradient failures on malformed/non-monotonic model timestamps.
+      self.plan_curv_rate.fill(0.0)
+    elif sec_since_boot() > self.last_cloudlog_t + 5.0:
+      self.last_cloudlog_t = sec_since_boot()
+      cloudlog.warning("Lateral planner - incomplete or non-finite model trajectory")
+
+    position_stds = (
+      as_finite_vector(md.position.xStd, expected_size=TRAJECTORY_SIZE),
+      as_finite_vector(md.position.yStd, expected_size=TRAJECTORY_SIZE),
+      as_finite_vector(md.position.zStd, expected_size=TRAJECTORY_SIZE),
+    )
+    if all(position_std is not None for position_std in position_stds):
+      self.path_xyz_stds = np.column_stack(position_stds)
 
     # Lane change logic
     lane_change_prob = self.LP.l_lane_change_prob + self.LP.r_lane_change_prob
@@ -66,7 +81,9 @@ class LateralPlanner:
 
     # Calculate final driving path and set MPC costs
     if self.use_lanelines:
-      d_path_xyz = self.LP.get_d_path(v_ego, self.t_idxs, self.path_xyz)
+      # LanePlanner applies its offset in-place; a copy prevents an invalid
+      # model frame from accumulating the offset on the last valid trajectory.
+      d_path_xyz = self.LP.get_d_path(v_ego, self.t_idxs, self.path_xyz.copy())
       self.lat_mpc.set_weights(MPC_COST_LAT.PATH, MPC_COST_LAT.HEADING, MPC_COST_LAT.STEER_RATE)
     else:
       d_path_xyz = self.path_xyz
@@ -113,7 +130,7 @@ class LateralPlanner:
   def publish(self, sm, pm):
     plan_solution_valid = self.solution_invalid_cnt < 2
     plan_send = messaging.new_message('lateralPlan')
-    plan_send.valid = sm.all_checks(service_list=['carState', 'controlsState', 'modelV2'])
+    plan_send.valid = self.model_data_valid and sm.all_checks(service_list=['carState', 'controlsState', 'modelV2'])
 
     lateralPlan = plan_send.lateralPlan
     lateralPlan.modelMonoTime = sm.logMonoTime['modelV2']

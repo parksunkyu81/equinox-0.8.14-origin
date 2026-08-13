@@ -12,6 +12,7 @@ from selfdrive.car.gm.values import LEFT_EDGE_OFFSET, RIGHT_EDGE_OFFSET
 from selfdrive.controls.lib.lane_probability import combined_lane_probability, \
                                                     enhance_lane_probability, \
                                                     limit_lane_probability_rise
+from selfdrive.controls.lib.model_data_validation import as_finite_vector
 
 ENABLE_ZORROBYTE = False
 ENABLE_INC_LANE_PROB = True
@@ -83,24 +84,26 @@ class LanePlanner:
 
     #opkr
     if self.drive_close_to_edge:
-      left_edge_prob = np.clip(1.0 - md.roadEdgeStds[0], 0.0, 1.0)
-      left_nearside_prob = md.laneLineProbs[0]
-      left_close_prob = md.laneLineProbs[1]
-      right_close_prob = md.laneLineProbs[2]
-      right_nearside_prob = md.laneLineProbs[3]
-      right_edge_prob = np.clip(1.0 - md.roadEdgeStds[1], 0.0, 1.0)
+      road_edge_stds = as_finite_vector(md.roadEdgeStds, minimum_size=2)
+      lane_line_probs = as_finite_vector(md.laneLineProbs, minimum_size=4)
+      if road_edge_stds is not None and lane_line_probs is not None:
+        left_edge_prob = np.clip(1.0 - road_edge_stds[0], 0.0, 1.0)
+        left_nearside_prob, left_close_prob, right_close_prob, right_nearside_prob = lane_line_probs[:4]
+        right_edge_prob = np.clip(1.0 - road_edge_stds[1], 0.0, 1.0)
 
-      self.lp_timer3 += DT_MDL
-      if self.lp_timer3 > 3.0:
-        self.lp_timer3 = 0.0
-        if right_nearside_prob < 0.1 and left_nearside_prob < 0.1:
-          self.road_edge_offset = 0.0
-        elif right_edge_prob > 0.35 and right_nearside_prob < 0.2 and right_close_prob > 0.5 and left_nearside_prob >= right_nearside_prob:
-          self.road_edge_offset = -self.right_edge_offset
-        elif left_edge_prob > 0.35 and left_nearside_prob < 0.2 and left_close_prob > 0.5 and right_nearside_prob >= left_nearside_prob:
-          self.road_edge_offset = -self.left_edge_offset
-        else:
-          self.road_edge_offset = 0.0
+        self.lp_timer3 += DT_MDL
+        if self.lp_timer3 > 3.0:
+          self.lp_timer3 = 0.0
+          if right_nearside_prob < 0.1 and left_nearside_prob < 0.1:
+            self.road_edge_offset = 0.0
+          elif right_edge_prob > 0.35 and right_nearside_prob < 0.2 and right_close_prob > 0.5 and left_nearside_prob >= right_nearside_prob:
+            self.road_edge_offset = -self.right_edge_offset
+          elif left_edge_prob > 0.35 and left_nearside_prob < 0.2 and left_close_prob > 0.5 and right_nearside_prob >= left_nearside_prob:
+            self.road_edge_offset = -self.left_edge_offset
+          else:
+            self.road_edge_offset = 0.0
+      else:
+        self.road_edge_offset = 0.0
     else:
       self.road_edge_offset = 0.0
 
@@ -108,23 +111,44 @@ class LanePlanner:
 
 
     lane_lines = md.laneLines
-    if len(lane_lines) == 4 and len(lane_lines[0].t) == TRAJECTORY_SIZE:
-      self.ll_t = (np.array(lane_lines[1].t) + np.array(lane_lines[2].t))/2
+    lane_line_probs = as_finite_vector(md.laneLineProbs, minimum_size=4)
+    lane_line_stds = as_finite_vector(md.laneLineStds, minimum_size=4)
+    lane_data = None
+    if len(lane_lines) == 4 and lane_line_probs is not None and lane_line_stds is not None:
+      lane_data = tuple(
+        as_finite_vector(values, expected_size=TRAJECTORY_SIZE)
+        for values in (lane_lines[1].t, lane_lines[2].t, lane_lines[1].x,
+                       lane_lines[1].y, lane_lines[2].y)
+      )
+    if lane_data is not None and all(values is not None for values in lane_data):
+      left_t, right_t, left_x, left_y, right_y = lane_data
+      self.ll_t = (left_t + right_t) / 2.0
       # left and right ll x is the same
-      self.ll_x = lane_lines[1].x
+      self.ll_x = left_x
       # only offset left and right lane lines; offsetting path does not make sense
 
-      self.lll_y = np.array(lane_lines[1].y) + self.total_camera_offset
-      self.rll_y = np.array(lane_lines[2].y) + self.total_camera_offset
-      self.lll_prob = md.laneLineProbs[1]
-      self.rll_prob = md.laneLineProbs[2]
-      self.lll_std = md.laneLineStds[1]
-      self.rll_std = md.laneLineStds[2]
+      self.lll_y = left_y + self.total_camera_offset
+      self.rll_y = right_y + self.total_camera_offset
+      self.lll_prob = lane_line_probs[1]
+      self.rll_prob = lane_line_probs[2]
+      self.lll_std = lane_line_stds[1]
+      self.rll_std = lane_line_stds[2]
+    else:
+      # Fall back to the model path instead of reusing stale lane confidence.
+      self.lll_prob = 0.0
+      self.rll_prob = 0.0
+      self.lll_std = 1.0
+      self.rll_std = 1.0
 
-    desire_state = md.meta.desireState
-    if len(desire_state):
-      self.l_lane_change_prob = desire_state[log.LateralPlan.Desire.laneChangeLeft]
-      self.r_lane_change_prob = desire_state[log.LateralPlan.Desire.laneChangeRight]
+    left_desire_idx = log.LateralPlan.Desire.laneChangeLeft
+    right_desire_idx = log.LateralPlan.Desire.laneChangeRight
+    desire_state = as_finite_vector(md.meta.desireState, minimum_size=max(left_desire_idx, right_desire_idx) + 1)
+    if desire_state is not None:
+      self.l_lane_change_prob = desire_state[left_desire_idx]
+      self.r_lane_change_prob = desire_state[right_desire_idx]
+    else:
+      self.l_lane_change_prob = 0.0
+      self.r_lane_change_prob = 0.0
 
   def get_d_path(self, v_ego, path_t, path_xyz):
     # Reduce reliance on lanelines that are too far apart or

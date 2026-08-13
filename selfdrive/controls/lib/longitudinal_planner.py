@@ -13,6 +13,7 @@ from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
 from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, CONTROL_N
 from selfdrive.controls.lib.vision_lead_transition import update_vision_lead_transition
+from selfdrive.controls.lib.model_data_validation import as_finite_vector
 from selfdrive.swaglog import cloudlog
 
 
@@ -131,12 +132,13 @@ class Planner:
 
     self.mpc.set_accel_limits(accel_limits_turns[0], accel_limits_turns[1])
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
-    if (len(sm['modelV2'].position.x) == 33 and
-         len(sm['modelV2'].velocity.x) == 33 and
-          len(sm['modelV2'].acceleration.x) == 33):
-      x = np.interp(T_IDXS_MPC, T_IDXS, sm['modelV2'].position.x)
-      v = np.interp(T_IDXS_MPC, T_IDXS, sm['modelV2'].velocity.x)
-      a = np.interp(T_IDXS_MPC, T_IDXS, sm['modelV2'].acceleration.x)
+    model_x = as_finite_vector(sm['modelV2'].position.x, expected_size=33)
+    model_v = as_finite_vector(sm['modelV2'].velocity.x, expected_size=33)
+    model_a = as_finite_vector(sm['modelV2'].acceleration.x, expected_size=33)
+    if model_x is not None and model_v is not None and model_a is not None:
+      x = np.interp(T_IDXS_MPC, T_IDXS, model_x)
+      v = np.interp(T_IDXS_MPC, T_IDXS, model_v)
+      a = np.interp(T_IDXS_MPC, T_IDXS, model_a)
     else:
       x = np.zeros(len(T_IDXS_MPC))
       v = np.zeros(len(T_IDXS_MPC))

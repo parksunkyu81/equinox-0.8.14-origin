@@ -5,6 +5,7 @@ from common.realtime import Priority, config_realtime_process
 from system.swaglog import cloudlog
 from selfdrive.controls.lib.longitudinal_planner import Planner
 from selfdrive.controls.lib.lateral_planner import LateralPlanner
+from selfdrive.controls.lib.planner_fault_guard import run_planner_cycle
 from selfdrive.hardware import TICI
 import cereal.messaging as messaging
 
@@ -22,6 +23,7 @@ def plannerd_thread(sm=None, pm=None):
 
   longitudinal_planner = Planner(CP)
   lateral_planner = LateralPlanner(CP)
+  last_exception_log = {"lateral": 0.0, "longitudinal": 0.0}
 
   if sm is None:
     sm = messaging.SubMaster(['carState', 'controlsState', 'radarState', 'modelV2'],
@@ -34,10 +36,12 @@ def plannerd_thread(sm=None, pm=None):
     sm.update()
 
     if sm.updated['modelV2']:
-      lateral_planner.update(sm)
-      lateral_planner.publish(sm, pm)
-      longitudinal_planner.update(sm)
-      longitudinal_planner.publish(sm, pm)
+      last_exception_log["lateral"] = run_planner_cycle(
+        "lateral", lateral_planner, sm, pm, last_exception_log["lateral"]
+      )
+      last_exception_log["longitudinal"] = run_planner_cycle(
+        "longitudinal", longitudinal_planner, sm, pm, last_exception_log["longitudinal"]
+      )
 
 
 def main(sm=None, pm=None):
