@@ -122,7 +122,7 @@ class DynamicTorqueAuthorityScheduler:
   def update(self, v_kph, desired_curvature, desired_lateral_accel,
              steering_pressed=False, strong_driver_override=False,
              steer_limited=False, strong_rate_limited=False,
-             torque_slew_active=False):
+             torque_slew_active=False, output_reversal_active=False):
     speed = max(0.0, float(v_kph))
     curvature = float(desired_curvature)
     strength = corner_strength(curvature, desired_lateral_accel)
@@ -168,9 +168,16 @@ class DynamicTorqueAuthorityScheduler:
       target *= TORQUE_SLEW_ACTIVE_MULT
     if direction_damping:
       target = min(target * DIRECTION_REVERSAL_MULT, DIRECTION_REVERSAL_BOOST_CAP)
+    if output_reversal_active:
+      # Output sign changes can be caused by closed-loop correction even when
+      # planner curvature keeps the same sign.  Drop held authority immediately
+      # so the output guard is not fighting a stale corner boost.
+      self.hold_frames = 0
+      self.boost = min(self.boost, DIRECTION_REVERSAL_BOOST_CAP)
+      target = min(target, DIRECTION_REVERSAL_BOOST_CAP)
     target = min(target, ceiling)
 
-    if target > 0.10 and not direction_damping:
+    if target > 0.10 and not direction_damping and not output_reversal_active:
       self.hold_frames = BOOST_HOLD_FRAMES
     elif self.hold_frames > 0 and target < self.boost:
       self.hold_frames -= 1
@@ -191,5 +198,6 @@ class DynamicTorqueAuthorityScheduler:
       'highGate': high_gate,
       'directionReversal': reversal,
       'directionDamping': direction_damping,
+      'outputReversalActive': bool(output_reversal_active),
       'holdFrames': self.hold_frames,
     }

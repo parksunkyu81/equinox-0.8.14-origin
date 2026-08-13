@@ -1297,7 +1297,7 @@ class Controls:
         CC.enabled = self.enabled
         # Check which actuators can be enabled
         CC.latActive = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
-                       CS.vEgo > self.CP.minSteerSpeed and not CS.standstill \
+                       CS.vEgo >= self.CP.minSteerSpeed and not CS.standstill \
                        and abs(CS.steeringAngleDeg) < self.CP.maxSteeringAngleDeg
         CC.longActive = self.active and not self.events.any(ET.OVERRIDE) and self.CP.openpilotLongitudinalControl
 
@@ -1786,6 +1786,22 @@ class Controls:
               dyn_torque['modelCurvatureDirectionReversal'])
             controlsState.modelSteerDelayCompensation = float(
               dyn_torque['modelSteerDelayCompensation'])
+            controlsState.lowSpeedTorqueGuardActive = bool(
+              dyn_torque['lowSpeedTorqueGuardActive'])
+            controlsState.lowSpeedTorqueGuardState = int(
+              dyn_torque['lowSpeedTorqueGuardState'])
+            controlsState.lowSpeedTorqueRawSteer = float(
+              dyn_torque['lowSpeedTorqueRawSteer'])
+            controlsState.lowSpeedTorqueGuardedSteer = float(
+              dyn_torque['lowSpeedTorqueGuardedSteer'])
+            controlsState.lowSpeedTorqueAppliedSteer = float(
+              dyn_torque['lowSpeedTorqueAppliedSteer'])
+            controlsState.lowSpeedTorqueConfirmMs = int(
+              dyn_torque['lowSpeedTorqueConfirmMs'])
+            controlsState.lowSpeedTorqueReversalCount = int(
+              dyn_torque['lowSpeedTorqueReversalCount'])
+            controlsState.lowSpeedTorqueBoostSuppressed = bool(
+              dyn_torque['lowSpeedTorqueBoostSuppressed'])
 
         # Dynamic TR
         #controlsState.cruiseGap = int(Params().get("cruiseGap", encoding="utf8"))

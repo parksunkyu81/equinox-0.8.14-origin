@@ -999,6 +999,14 @@ class TorqueEstimator:
         self._model_curvature_direction_reversal = False
         self._model_steer_delay_base = float(CP.steerActuatorDelay)
         self._model_steer_delay_compensation = 0.0
+        self._ls_torque_guard_active = False
+        self._ls_torque_guard_state = 0
+        self._ls_torque_raw_steer = 0.0
+        self._ls_torque_guarded_steer = 0.0
+        self._ls_torque_applied_steer = 0.0
+        self._ls_torque_confirm_ms = 0
+        self._ls_torque_reversal_count = 0
+        self._ls_torque_boost_suppressed = False
         self.last_is_frozen = False
         self.stop_freeze_until = 0.0
 
@@ -2731,6 +2739,22 @@ class TorqueEstimator:
                         getattr(msg, "modelSteerDelayCompensation", 0.0) or 0.0)
                     self._model_steer_delay_base = float(
                         getattr(msg, "steerActuatorDelay", self._model_steer_delay_base) or 0.0)
+                self._ls_torque_guard_active = bool(
+                    getattr(msg, "lowSpeedTorqueGuardActive", False))
+                self._ls_torque_guard_state = int(
+                    getattr(msg, "lowSpeedTorqueGuardState", 0) or 0)
+                self._ls_torque_raw_steer = float(
+                    getattr(msg, "lowSpeedTorqueRawSteer", 0.0) or 0.0)
+                self._ls_torque_guarded_steer = float(
+                    getattr(msg, "lowSpeedTorqueGuardedSteer", 0.0) or 0.0)
+                self._ls_torque_applied_steer = float(
+                    getattr(msg, "lowSpeedTorqueAppliedSteer", 0.0) or 0.0)
+                self._ls_torque_confirm_ms = int(
+                    getattr(msg, "lowSpeedTorqueConfirmMs", 0) or 0)
+                self._ls_torque_reversal_count = int(
+                    getattr(msg, "lowSpeedTorqueReversalCount", 0) or 0)
+                self._ls_torque_boost_suppressed = bool(
+                    getattr(msg, "lowSpeedTorqueBoostSuppressed", False))
             except Exception:
                 return
 
@@ -3587,6 +3611,22 @@ class TorqueEstimator:
                 "model_steer_delay_total": round(float(
                     (getattr(self, "_model_steer_delay_base", 0.0) or 0.0) +
                     (getattr(self, "_model_steer_delay_compensation", 0.0) or 0.0)), 3),
+                "ls_torque_guard_active": bool(getattr(
+                    self, "_ls_torque_guard_active", False)),
+                "ls_torque_guard_state": int(getattr(
+                    self, "_ls_torque_guard_state", 0) or 0),
+                "ls_torque_raw_steer": round(float(getattr(
+                    self, "_ls_torque_raw_steer", 0.0) or 0.0), 5),
+                "ls_torque_guarded_steer": round(float(getattr(
+                    self, "_ls_torque_guarded_steer", 0.0) or 0.0), 5),
+                "ls_torque_applied_steer": round(float(getattr(
+                    self, "_ls_torque_applied_steer", 0.0) or 0.0), 5),
+                "ls_torque_confirm_ms": int(getattr(
+                    self, "_ls_torque_confirm_ms", 0) or 0),
+                "ls_torque_reversal_count": int(getattr(
+                    self, "_ls_torque_reversal_count", 0) or 0),
+                "ls_torque_boost_suppressed": bool(getattr(
+                    self, "_ls_torque_boost_suppressed", False)),
                 "dyn_corner_strength_est": round(float(dyn_corner_strength), 4),
                 "dyn_low_gate_est": round(float(dyn_low_gate), 4),
                 "dyn_mid_gate_est": round(float(dyn_mid_gate), 4),

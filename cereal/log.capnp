@@ -712,6 +712,16 @@ struct ControlsState @0x97ff69c53601abf1 {
   modelCurvatureDirectionReversal @165 :Bool;
   modelSteerDelayCompensation @166 :Float32;
 
+  # Final low-speed torque reversal guard, after PID and before CarController.
+  lowSpeedTorqueGuardActive @167 :Bool;
+  lowSpeedTorqueGuardState @168 :UInt8;
+  lowSpeedTorqueRawSteer @169 :Float32;
+  lowSpeedTorqueGuardedSteer @170 :Float32;
+  lowSpeedTorqueAppliedSteer @171 :Float32;
+  lowSpeedTorqueConfirmMs @172 :UInt16;
+  lowSpeedTorqueReversalCount @173 :UInt32;
+  lowSpeedTorqueBoostSuppressed @174 :Bool;
+
 
 
   enum OpenpilotState @0xdbe58b96d2d1ac61 {

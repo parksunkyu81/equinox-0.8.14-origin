@@ -9,6 +9,7 @@ from common.params import Params
 from decimal import Decimal
 import cereal.messaging as messaging
 from selfdrive.car.gm.steering_limits import STEER_DELTA_BP_KPH, STEER_DELTA_DOWN_V, STEER_DELTA_UP_V
+from selfdrive.controls.lib.low_speed_torque_guard import LowSpeedTorqueReversalGuard
 from selfdrive.controls.lib.torque_authority import DynamicTorqueAuthorityScheduler, effective_torque_params
 from selfdrive.controls.lib.v0813_lateral_compat import V0813CurvatureGuard
 
@@ -35,13 +36,13 @@ HS_LIMIT_HOLD_V = [4.0, 6.0, 8.0, 12.0, 16.0]
 # Low-speed adaptive slew guard.
 # It does not reduce steady-state steering authority. It only slows a sudden
 # jump when the requested steer is far ahead of the last actually applied steer.
-LS_ADAPTIVE_SLEW_MIN_KPH = 8.0
+LS_ADAPTIVE_SLEW_MIN_KPH = 10.0
 LS_ADAPTIVE_SLEW_FULL_ON_KPH = 12.0
 LS_ADAPTIVE_SLEW_FULL_OFF_KPH = 28.0
-LS_ADAPTIVE_SLEW_MAX_KPH = 8.0
+LS_ADAPTIVE_SLEW_MAX_KPH = 34.0
 LS_ADAPTIVE_SLEW_GAP_START = 0.45
 LS_ADAPTIVE_SLEW_GAP_FULL = 1.00
-LS_ADAPTIVE_SLEW_ALLOW_GAP_BP = [8.0, 12.0, 20.0, 28.0, 34.0]
+LS_ADAPTIVE_SLEW_ALLOW_GAP_BP = [10.0, 12.0, 20.0, 28.0, 34.0]
 LS_ADAPTIVE_SLEW_ALLOW_GAP_V = [1.00, 0.78, 0.72, 0.78, 1.00]
 
 # Safety output torque slew guard.
@@ -122,6 +123,10 @@ class LatControlTorque(LatControl):
         self._stable_prev_output_torque = 0.0
         self._stable_torque_slew_gap = 0.0
         self._stable_torque_slew_active = False
+        self._low_speed_reversal_guard = LowSpeedTorqueReversalGuard()
+        self._ls_raw_requested_steer = 0.0
+        self._ls_guarded_requested_steer = 0.0
+        self._ls_applied_steer = 0.0
 
         # dynamic effective torque state
         self._dyn_scheduler = DynamicTorqueAuthorityScheduler()
@@ -242,7 +247,7 @@ class LatControlTorque(LatControl):
     def _guard_low_speed_steer_slew(self, v_ego, requested_steer, last_actuators, steering_pressed):
         v_kph = float(v_ego) * 3.6
         if (
-                v_kph <= LS_ADAPTIVE_SLEW_MIN_KPH or
+                v_kph < LS_ADAPTIVE_SLEW_MIN_KPH or
                 v_kph >= LS_ADAPTIVE_SLEW_MAX_KPH or
                 bool(steering_pressed)
         ):
@@ -328,7 +333,8 @@ class LatControlTorque(LatControl):
             strong_driver_override=strong_driver_override,
             steer_limited=bool(steer_limited),
             strong_rate_limited=strong_rate_limited,
-            torque_slew_active=bool(getattr(self, '_stable_torque_slew_active', False)))
+            torque_slew_active=bool(getattr(self, '_stable_torque_slew_active', False)),
+            output_reversal_active=bool(self._low_speed_reversal_guard.boost_suppressed))
         authority_request = float(dyn['authorityRequest'])
         self._dyn_corner_boost = authority_request
         self._dyn_corner_hold_frames = int(dyn['holdFrames'])
@@ -398,6 +404,20 @@ class LatControlTorque(LatControl):
             'rateLimitedStrong': bool(getattr(self, '_dyn_last_rate_limited_strong', False)),
         }
         debug.update(self._model_curvature_guard.diagnostics())
+        reversal_debug = self._low_speed_reversal_guard.diagnostics()
+        debug.update({
+            'lowSpeedTorqueGuardActive': bool(reversal_debug['active']),
+            'lowSpeedTorqueGuardState': int(reversal_debug['state']),
+            'lowSpeedTorqueRawSteer': float(getattr(
+                self, '_ls_raw_requested_steer', reversal_debug['rawSteer']) or 0.0),
+            'lowSpeedTorqueGuardedSteer': float(getattr(
+                self, '_ls_guarded_requested_steer', reversal_debug['guardedSteer']) or 0.0),
+            'lowSpeedTorqueAppliedSteer': float(getattr(
+                self, '_ls_applied_steer', reversal_debug['appliedSteer']) or 0.0),
+            'lowSpeedTorqueConfirmMs': int(reversal_debug['confirmMs']),
+            'lowSpeedTorqueReversalCount': int(reversal_debug['reversalCount']),
+            'lowSpeedTorqueBoostSuppressed': bool(reversal_debug['boostSuppressed']),
+        })
         return debug
 
     def _guard_output_torque_slew(self, v_ego, output_torque, steering_pressed=False, steer_limited=False):
@@ -446,6 +466,10 @@ class LatControlTorque(LatControl):
             self._stable_prev_output_torque = 0.0
             self._stable_torque_slew_gap = 0.0
             self._stable_torque_slew_active = False
+            self._low_speed_reversal_guard.reset(0.0)
+            self._ls_raw_requested_steer = 0.0
+            self._ls_guarded_requested_steer = 0.0
+            self._ls_applied_steer = 0.0
             self._dyn_scheduler.reset()
             self._dyn_prev_rate_limited_strong = False
             self._dyn_prev_rate_limit_err = 0.0
@@ -514,14 +538,17 @@ class LatControlTorque(LatControl):
                 steer_limited or
                 CS.steeringPressed or
                 CS.vEgo < 5 or
+                self._low_speed_reversal_guard.active or
                 (hs_guard_active and self._hs_guard_hold_frames > 0)
             )
+            pid_i_before_update = float(self.pid.i)
             output_torque = self.pid.update(pid_log.error,
                                             feedforward=ff,
                                             speed=CS.vEgo,
                                             freeze_integrator=freeze_integrator)
 
             requested_steer_raw = -output_torque
+            self._ls_raw_requested_steer = float(requested_steer_raw)
             requested_steer = requested_steer_raw
             requested_steer, low_speed_slew_active = self._guard_low_speed_steer_slew(
                 CS.vEgo, requested_steer, last_actuators, CS.steeringPressed
@@ -530,29 +557,53 @@ class LatControlTorque(LatControl):
                 output_torque = -requested_steer
                 self.pid.control = output_torque
 
-            output_torque = self._guard_output_torque_slew(
-                CS.vEgo, output_torque, CS.steeringPressed, bool(steer_limited)
-            )
-            self.pid.control = output_torque
-
-            # v2: 다음 프레임 dynamic boost에 직접 넣을 strong rate-limit proxy를 저장한다.
-            # low-speed slew에서 requested가 실제 적용 가능 범위보다 크게 앞서거나,
-            # output torque slew가 target을 크게 잘라낸 경우에는 다음 프레임 부스트를 줄인다.
             try:
                 applied_last = float(getattr(last_actuators, 'steer', 0.0)) if last_actuators is not None else 0.0
                 if not math.isfinite(applied_last):
                     applied_last = 0.0
             except Exception:
                 applied_last = 0.0
+            self._ls_applied_steer = float(applied_last)
+
+            requested_steer = self._low_speed_reversal_guard.update(
+                CS.vEgo * 3.6, requested_steer, applied_last,
+                desired_curvature=desired_curvature,
+                desired_lateral_accel=desired_lateral_accel,
+                steering_pressed=CS.steeringPressed,
+                active=active,
+            )
+            reversal_limited = bool(
+                abs(float(requested_steer) - float(requested_steer_raw)) > 1e-6)
+            if reversal_limited:
+                output_torque = -requested_steer
+                # Do not accumulate integral behind a guarded output.  During
+                # a reversal, gently unwind existing I torque toward neutral.
+                self.pid.i = pid_i_before_update
+                if self._low_speed_reversal_guard.active:
+                    self.pid.i *= 0.98
+                self.pid.control = output_torque
+
+            output_torque = self._guard_output_torque_slew(
+                CS.vEgo, output_torque, CS.steeringPressed, bool(steer_limited)
+            )
+            self.pid.control = output_torque
+            self._ls_guarded_requested_steer = float(-output_torque)
+
+            # v2: 다음 프레임 dynamic boost에 직접 넣을 strong rate-limit proxy를 저장한다.
+            # low-speed slew에서 requested가 실제 적용 가능 범위보다 크게 앞서거나,
+            # output torque slew가 target을 크게 잘라낸 경우에는 다음 프레임 부스트를 줄인다.
             same_direction = (float(requested_steer_raw) * applied_last) >= -0.02
             if same_direction:
                 tracking_gap = max(0.0, abs(float(requested_steer_raw)) - abs(applied_last))
             else:
                 tracking_gap = abs(float(requested_steer_raw) - applied_last)
             stable_gap = float(getattr(self, '_stable_torque_slew_gap', 0.0) or 0.0)
-            dyn_rate_err = max(stable_gap, tracking_gap if bool(low_speed_slew_active) else 0.0)
+            reversal_gap = abs(float(requested_steer_raw) - float(self._ls_guarded_requested_steer))
+            dyn_rate_err = max(stable_gap, reversal_gap,
+                               tracking_gap if bool(low_speed_slew_active) else 0.0)
             self._dyn_prev_rate_limit_err = float(dyn_rate_err)
             self._dyn_prev_rate_limited_strong = bool(
+                self._low_speed_reversal_guard.boost_suppressed or
                 (bool(low_speed_slew_active) and tracking_gap >= float(DYN_RATE_LIMITED_STRONG_TRACKING_GAP)) or
                 (bool(getattr(self, '_stable_torque_slew_active', False)) and stable_gap >= float(DYN_RATE_LIMITED_STRONG_OUTPUT_GAP))
             )

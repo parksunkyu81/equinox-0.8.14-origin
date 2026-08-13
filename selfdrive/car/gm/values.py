@@ -3,6 +3,7 @@ from selfdrive.car import dbc_dict
 
 Ecu = car.CarParams.Ecu
 from common.conversions import Conversions as CV
+from selfdrive.car.gm.steering_limits import GM_MIN_STEER_SPEED_MS
 
 LEFT_EDGE_OFFSET = 15       # 양수
 RIGHT_EDGE_OFFSET = -15     # 음수
@@ -22,7 +23,7 @@ class CarControllerParams():
         self.STEER_STEP = 2  # 50 Hz at the 100 Hz control loop
         self.STEER_DELTA_UP = 14  # Low-speed ceiling; CarController applies the speed map.
         self.STEER_DELTA_DOWN = 20
-        self.MIN_STEER_SPEED = 3.  # m/s
+        self.MIN_STEER_SPEED = GM_MIN_STEER_SPEED_MS
         self.STEER_DRIVER_ALLOWANCE = 50
         self.STEER_DRIVER_MULTIPLIER = 4
         self.STEER_DRIVER_FACTOR = 100

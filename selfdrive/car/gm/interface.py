@@ -11,6 +11,7 @@ from selfdrive.car import STD_CARGO_KG, scale_rot_inertia, scale_tire_stiffness,
 from selfdrive.car.interfaces import CarInterfaceBase
 from selfdrive.ntune import ntune_common_get, ntune_torque_get
 from common.params import Params
+from selfdrive.car.gm.steering_limits import GM_MIN_STEER_SPEED_MS
 from decimal import Decimal
 
 ButtonType = car.CarState.ButtonEvent.Type
@@ -84,7 +85,7 @@ class CarInterface(CarInterfaceBase):
         # Start with a baseline lateral tuning for all GM vehicles. Override tuning as needed in each model section below.
         ret.enableGasInterceptor = 0x201 in fingerprint[0]
         #ret.minEnableSpeed = 18 * CV.MPH_TO_MS
-        ret.minSteerSpeed = 10.0 * CV.KPH_TO_MS
+        ret.minSteerSpeed = GM_MIN_STEER_SPEED_MS
         ret.minEnableSpeed = -1
         #ret.steerRateCost = 0.35  # def : 2.0
 

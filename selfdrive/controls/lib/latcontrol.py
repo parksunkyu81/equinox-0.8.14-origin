@@ -2,6 +2,7 @@ from abc import abstractmethod, ABC
 
 from common.numpy_fast import clip
 from common.realtime import DT_CTRL
+from selfdrive.car.gm.steering_limits import GM_MIN_STEER_SPEED_MS
 
 
 # ============================================================
@@ -17,7 +18,7 @@ from common.realtime import DT_CTRL
 # 10km/h = 약 2.778m/s
 # ============================================================
 
-MIN_STEER_SPEED = 10.0 / 3.6
+MIN_STEER_SPEED = GM_MIN_STEER_SPEED_MS
 
 # Saturation 판단은 너무 저속에서 하면 오검출이 많음.
 # 기존 10.0m/s = 36km/h 기준 유지.

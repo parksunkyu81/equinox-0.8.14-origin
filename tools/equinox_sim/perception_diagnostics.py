@@ -165,13 +165,20 @@ class RotatingJsonlWriter:
     self.records_since_flush = 0
     metadata = {
       "type": "metadata",
-      "formatVersion": 1,
+      "formatVersion": 2,
       "sampleHz": SAMPLE_HZ,
       "containsVideo": False,
       "pathDistancesM": list(PATH_DISTANCES_M),
       "planPointIndices": list(PLAN_POINT_INDICES),
       "maxFileBytes": self.max_file_bytes,
       "maxFiles": self.max_files,
+      "lowSpeedTorqueGuardStates": {
+        "0": "follow",
+        "1": "unwindToZero",
+        "2": "confirmNewDirection",
+        "3": "rampOpposite",
+        "4": "driverBypass",
+      },
     }
     self._write_line(metadata)
     self._prune()
@@ -298,6 +305,7 @@ class PerceptionDiagnosticsRecorder:
       road_edges_y20.append(sample_path_at_distances(edge.x, edge.y, (20.0,))[0])
 
     actuators = car_control.actuators
+    actuators_output = car_control.actuatorsOutput
     return {
       "type": "sample",
       "wallTimeKST": datetime.now(KST).isoformat(timespec="milliseconds"),
@@ -360,6 +368,7 @@ class PerceptionDiagnosticsRecorder:
         "active": bool(controls.active),
         "curvature": rounded(controls.curvature),
         "requestedSteer": rounded(actuators.steer),
+        "appliedSteer": rounded(actuators_output.steer),
         "requestedSteeringAngleDeg": rounded(actuators.steeringAngleDeg),
         "actualSteeringAngleDeg": rounded(car_state.steeringAngleDeg),
         "actualSteeringRateDeg": rounded(car_state.steeringRateDeg),
@@ -387,6 +396,16 @@ class PerceptionDiagnosticsRecorder:
           "baseSteerActuatorDelay": rounded(controls.steerActuatorDelay),
           "totalModelSteerDelay": rounded(
             controls.steerActuatorDelay + controls.modelSteerDelayCompensation),
+          "lowSpeedReversalGuard": {
+            "active": bool(controls.lowSpeedTorqueGuardActive),
+            "state": int(controls.lowSpeedTorqueGuardState),
+            "rawSteer": rounded(controls.lowSpeedTorqueRawSteer),
+            "guardedSteer": rounded(controls.lowSpeedTorqueGuardedSteer),
+            "appliedSteer": rounded(controls.lowSpeedTorqueAppliedSteer),
+            "confirmMs": int(controls.lowSpeedTorqueConfirmMs),
+            "reversalCount": int(controls.lowSpeedTorqueReversalCount),
+            "boostSuppressed": bool(controls.lowSpeedTorqueBoostSuppressed),
+          },
         },
       },
     }

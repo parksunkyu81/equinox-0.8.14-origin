@@ -1,6 +1,10 @@
 import math
 
 
+GM_MIN_STEER_SPEED_KPH = 10.0
+GM_MIN_STEER_SPEED_MS = GM_MIN_STEER_SPEED_KPH / 3.6
+
+
 # Panda enforces 14/20 as absolute ceilings. Use that extra response only in
 # the 11-35 kph low-speed cornering band, then taper early so highway steering
 # stays inside the stable 7/17 envelope.
