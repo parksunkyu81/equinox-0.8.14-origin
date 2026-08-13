@@ -11,7 +11,6 @@
 #include "selfdrive/common/clutil.h"
 #include "selfdrive/common/params.h"
 #include "selfdrive/common/timing.h"
-#include "selfdrive/common/swaglog.h"
 
 constexpr float FCW_THRESHOLD_5MS2_HIGH = 0.15;
 constexpr float FCW_THRESHOLD_5MS2_LOW = 0.05;
@@ -29,7 +28,6 @@ constexpr const kj::ArrayPtr<const T> to_kj_array_ptr(const std::array<T, size> 
 
 void model_init(ModelState* s, cl_device_id device_id, cl_context context) {
   s->frame = new ModelFrame(device_id, context);
-  s->wide_frame = new ModelFrame(device_id, context);
 
 #ifdef USE_THNEED
   s->m = std::make_unique<ThneedModel>("../../models/supercombo.thneed",
@@ -38,7 +36,7 @@ void model_init(ModelState* s, cl_device_id device_id, cl_context context) {
 #else
   s->m = std::make_unique<SNPEModel>("../../models/supercombo.dlc",
 #endif
-   &s->output[0], NET_OUTPUT_SIZE, USE_GPU_RUNTIME, true);
+   &s->output[0], NET_OUTPUT_SIZE, USE_GPU_RUNTIME, false);
 
 #ifdef TEMPORAL
   s->m->addRecurrent(&s->output[OUTPUT_SIZE], TEMPORAL_SIZE);
@@ -55,8 +53,8 @@ void model_init(ModelState* s, cl_device_id device_id, cl_context context) {
 #endif
 }
 
-ModelOutput* model_eval_frame(ModelState* s, VisionBuf* buf, VisionBuf* wbuf,
-                              const mat3 &transform, const mat3 &transform_wide, float *desire_in) {
+ModelOutput* model_eval_frame(ModelState* s, cl_mem yuv_cl, int width, int height,
+                              const mat3 &transform, float *desire_in) {
 #ifdef DESIRE
   if (desire_in != NULL) {
     for (int i = 1; i < DESIRE_LEN; i++) {
@@ -73,17 +71,9 @@ ModelOutput* model_eval_frame(ModelState* s, VisionBuf* buf, VisionBuf* wbuf,
 #endif
 
   // if getInputBuf is not NULL, net_input_buf will be
-  auto net_input_buf = s->frame->prepare(buf->buf_cl, buf->width, buf->height, transform, static_cast<cl_mem*>(s->m->getInputBuf()));
+  auto net_input_buf = s->frame->prepare(yuv_cl, width, height, transform, static_cast<cl_mem*>(s->m->getInputBuf()));
   s->m->addImage(net_input_buf, s->frame->buf_size);
-  LOGT("Image added");
-
-  if (wbuf != nullptr) {
-    auto net_extra_buf = s->wide_frame->prepare(wbuf->buf_cl, wbuf->width, wbuf->height, transform_wide, static_cast<cl_mem*>(s->m->getExtraBuf()));
-    s->m->addExtra(net_extra_buf, s->wide_frame->buf_size);
-    LOGT("Extra image added");
-  }
   s->m->execute();
-  LOGT("Execution finished");
 
   return (ModelOutput*)&s->output;
 }
@@ -318,14 +308,16 @@ void fill_model(cereal::ModelDataV2::Builder &framed, const ModelOutput &net_out
   }
 }
 
-void model_publish(PubMaster &pm, uint32_t vipc_frame_id, uint32_t vipc_frame_id_extra, uint32_t frame_id, float frame_drop,
+void model_publish(PubMaster &pm, uint32_t vipc_frame_id, uint32_t frame_id, float frame_drop,
                    const ModelOutput &net_outputs, uint64_t timestamp_eof,
                    float model_execution_time, kj::ArrayPtr<const float> raw_pred, const bool valid) {
   const uint32_t frame_age = (frame_id > vipc_frame_id) ? (frame_id - vipc_frame_id) : 0;
   MessageBuilder msg;
   auto framed = msg.initEvent(valid).initModelV2();
   framed.setFrameId(vipc_frame_id);
-  framed.setFrameIdExtra(vipc_frame_id_extra);
+  // The comma two has one road-facing camera. Keep frameIdExtra coherent for
+  // consumers shared with newer schemas without fabricating a second stream.
+  framed.setFrameIdExtra(vipc_frame_id);
   framed.setFrameAge(frame_age);
   framed.setFrameDropPerc(frame_drop * 100);
   framed.setTimestampEof(timestamp_eof);
