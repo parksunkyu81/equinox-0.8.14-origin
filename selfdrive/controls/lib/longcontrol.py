@@ -54,6 +54,8 @@ class LongControl:
     self.stop_accel_boost_applied = False
     self.stop_accel_boost_raw_accel = 0.0
     self.stop_accel_boost_final_accel = 0.0
+    self.driver_launch_handoff_active = False
+    self.driver_launch_handoff_shadow_accel = 0.0
 
   def reset(self, v_pid):
     """Reset PID controller and change setpoint"""
@@ -61,7 +63,8 @@ class LongControl:
     self.v_pid = v_pid
 
   def update(self, active, CS, long_plan, accel_limits, t_since_plan,
-             stop_accel_boost_active=False, stop_accel_boost_floor=0.0):
+             stop_accel_boost_active=False, stop_accel_boost_floor=0.0,
+             driver_launch_handoff=False):
     """Update longitudinal control. This updates the state machine and runs a PID loop"""
     # Interp control trajectory
     speeds = long_plan.speeds
@@ -90,14 +93,27 @@ class LongControl:
 
     # Update state machine
     output_accel = self.last_output_accel
+    gas_override = bool(CS.gasPressed)
+    qualified_gas_handoff = bool(
+      active and gas_override and driver_launch_handoff and not CS.brakePressed)
+    launch_context_active = bool(stop_accel_boost_active or qualified_gas_handoff)
+    self.driver_launch_handoff_active = qualified_gas_handoff
+    self.driver_launch_handoff_shadow_accel = 0.0
+
     self.long_control_state = long_control_state_trans(self.CP, active, self.long_control_state, CS.vEgo,
                                                        v_target, v_target_future, CS.brakePressed,
                                                        CS.cruiseState.standstill,
-                                                       stop_accel_boost_active)
+                                                       launch_context_active)
 
-    # 운전자가 가속페달을 밟으면 자동 가속을 즉시 중지하고 PID 누적값을 지워, 운전자가 페달을 놓은 뒤 갑자기 자동 가속하는 것을 방지하는 코드입니다.
-    gas_override = bool(CS.gasPressed)
-    if self.long_control_state == LongCtrlState.off or gas_override or CS.brakePressed:
+    # Driver gas always suppresses automatic pedal output. During a confirmed
+    # stopped-lead launch, however, it must not erase the launch/PID state. Keep
+    # a frozen-integrator shadow calculation warm so the first post-release
+    # control frame can resume lead tracking without a second dead period.
+    if self.long_control_state == LongCtrlState.off or CS.brakePressed:
+      self.reset(CS.vEgo)
+      output_accel = 0.
+
+    elif gas_override and not qualified_gas_handoff:
       self.reset(CS.vEgo)
       output_accel = 0.
 
@@ -107,10 +123,10 @@ class LongControl:
 
       # Toyota starts braking more when it thinks you want to stop
       # Freeze the integrator so we don't accelerate to compensate, and don't allow positive acceleration
-      prevent_overshoot = not stop_accel_boost_active and not self.CP.stoppingControl and \
+      prevent_overshoot = not launch_context_active and not self.CP.stoppingControl and \
                           CS.vEgo < 1.5 and v_target_future < 0.7 and v_target_future < self.v_pid
       deadzone = interp(CS.vEgo, self.CP.longitudinalTuning.deadzoneBP, self.CP.longitudinalTuning.deadzoneV)
-      freeze_integrator = prevent_overshoot
+      freeze_integrator = prevent_overshoot or qualified_gas_handoff
 
       error = self.v_pid - CS.vEgo
       error_deadzone = apply_deadzone(error, deadzone)
@@ -132,6 +148,10 @@ class LongControl:
       if prevent_overshoot:
         output_accel = min(output_accel, 0.0)
 
+      if qualified_gas_handoff:
+        self.driver_launch_handoff_shadow_accel = float(output_accel)
+        output_accel = 0.0
+
     # Intention is to stop, switch to a different brake control until we stop
     elif self.long_control_state == LongCtrlState.stopping:
       # Keep applying brakes until the car is stopped
@@ -148,6 +168,9 @@ class LongControl:
     self.stop_accel_boost_final_accel = float(final_accel)
     self.stop_accel_boost_applied = bool(boost_allowed and
                                          final_accel > output_accel + STOP_ACCEL_ZERO_EPS)
-    self.last_output_accel = final_accel
+    # Do not replace the prepared controller history with the deliberately
+    # suppressed zero output during a qualified manual launch.
+    if not qualified_gas_handoff:
+      self.last_output_accel = final_accel
 
     return final_accel

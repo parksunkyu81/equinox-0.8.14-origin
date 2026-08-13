@@ -722,6 +722,12 @@ struct ControlsState @0x97ff69c53601abf1 {
   lowSpeedTorqueReversalCount @173 :UInt32;
   lowSpeedTorqueBoostSuppressed @174 :Bool;
 
+  # Driver-initiated stopped-lead launch handoff diagnostics.
+  driverLaunchHandoffActive @175 :Bool;
+  driverLaunchHandoffShadowAccel @176 :Float32;
+  stopAccelBoostFloorAccel @177 :Float32;
+  stopAccelBoostHillExtraAccel @178 :Float32;
+
 
 
   enum OpenpilotState @0xdbe58b96d2d1ac61 {

@@ -230,6 +230,12 @@ class PedalRecoveryRecorder:
         "stopAccelBoostRawAccel": round(float(controls.stopAccelBoostRawAccel), 5),
         "stopAccelBoostFinalAccel": round(float(controls.stopAccelBoostFinalAccel), 5),
         "stopAccelBoostFactor": round(float(controls.stopAccelBoostFactor), 3),
+        "driverLaunchHandoffActive": bool(controls.driverLaunchHandoffActive),
+        "driverLaunchHandoffShadowAccel": round(
+          float(controls.driverLaunchHandoffShadowAccel), 5),
+        "stopAccelBoostFloorAccel": round(float(controls.stopAccelBoostFloorAccel), 5),
+        "stopAccelBoostHillExtraAccel": round(
+          float(controls.stopAccelBoostHillExtraAccel), 5),
         "drivingStyleGain": round(float(controls.drivingStyleAIGain), 5),
         "drivingStyleTrOffset": round(float(controls.drivingStyleAITrOffset), 5),
         "drivingStyleBrakeEvents": int(controls.drivingStyleAIBrakeEvents),
@@ -327,7 +333,8 @@ class PedalRecoveryRecorder:
       self.post_arbitration_zero_samples + 1 if post_arbitration_zero else 0)
     post_arbitration_trigger = (
       self.post_arbitration_zero_samples >= POST_ARBITRATION_ZERO_SAMPLES)
-    return recovery_trigger or controls["stopAccelBoostActive"] or post_arbitration_trigger
+    return (recovery_trigger or controls["stopAccelBoostActive"] or
+            controls["driverLaunchHandoffActive"] or post_arbitration_trigger)
 
   def _start_event(self, snapshot, now):
     self.recording = True
@@ -336,7 +343,9 @@ class PedalRecoveryRecorder:
     self.post_event_deadline = now + POST_EVENT_SECONDS
     self.event_sequence += 1
     self.last_event_started_at = now
-    if snapshot["controls"]["stopAccelBoostActive"]:
+    if snapshot["controls"]["driverLaunchHandoffActive"]:
+      self.current_trigger_reason = "driver_launch_handoff"
+    elif snapshot["controls"]["stopAccelBoostActive"]:
       self.current_trigger_reason = "stop_accel_boost"
     elif self.post_arbitration_zero_samples >= POST_ARBITRATION_ZERO_SAMPLES:
       self.current_trigger_reason = "post_arbitration_zero"

@@ -1328,7 +1328,11 @@ class Controls:
         boost_system_ready = bool(not self.joystick_mode and
                                   self.CP.carName == 'gm' and self.CP.enableGasInterceptor and
                                   self.active and self.state == State.enabled and
-                                  dynamic_follow_valid and dynamic_follow.stopAccelBoostEnabled)
+                                  CS.canValid and self.sm.valid['longitudinalPlan'] and
+                                  self.sm.valid['radarState'] and
+                                  len(self.sm['radarState'].radarErrors) == 0 and
+                                  not long_plan.fcw and dynamic_follow_valid and
+                                  dynamic_follow.stopAccelBoostEnabled)
         self.stop_accel_boost_active = self.stop_accel_boost_latch.update(
           boost_system_ready,
           dynamic_follow_valid and dynamic_follow.leadCatchupActive,
@@ -1364,11 +1368,12 @@ class Controls:
               plan_full=len(long_plan.speeds) == CONTROL_N,
               plan_source_lead=(
                 str(long_plan.longitudinalPlanSource) == 'lead0'))
-            boost_floor_accel = (self.stop_accel_boost_latch.floor_accel
-                                 if boost_floor_context_safe else 0.0)
+            boost_floor_accel = self.stop_accel_boost_latch.update_hill_response(
+              boost_floor_context_safe, CS.aEgo)
             raw_long_accel = self.LoC.update(
               self.active, CS, long_plan, pid_accel_limits, t_since_plan,
-              self.stop_accel_boost_active, boost_floor_accel)
+              self.stop_accel_boost_active, boost_floor_accel,
+              self.stop_accel_boost_latch.driver_launch_handoff)
             lead_one = self.sm['radarState'].leadOne
             radar_valid = bool(self.sm.valid['radarState'] and
                                len(self.sm['radarState'].radarErrors) == 0)
@@ -1819,6 +1824,14 @@ class Controls:
         controlsState.stopAccelBoostRawAccel = float(self.LoC.stop_accel_boost_raw_accel)
         controlsState.stopAccelBoostFinalAccel = float(self.LoC.stop_accel_boost_final_accel)
         controlsState.stopAccelBoostFactor = float(STOP_ACCEL_BOOST_FACTOR)
+        controlsState.driverLaunchHandoffActive = bool(
+          self.LoC.driver_launch_handoff_active)
+        controlsState.driverLaunchHandoffShadowAccel = float(
+          self.LoC.driver_launch_handoff_shadow_accel)
+        controlsState.stopAccelBoostFloorAccel = float(
+          self.stop_accel_boost_latch.floor_accel)
+        controlsState.stopAccelBoostHillExtraAccel = float(
+          self.stop_accel_boost_latch.hill_extra_accel)
         recovery_mode = (RECOVERY_MODE_HARD_ZERO if self.pedal_force_recovery.active else
                          RECOVERY_MODE_LEAD_LOSS_CRUISE if self.lead_loss_cruise_assist.active else
                          RECOVERY_MODE_LEAD_COAST_ASSIST if self.lead_coast_assist.active else
