@@ -74,6 +74,7 @@ from common.filter_simple import FirstOrderFilter
 from selfdrive.swaglog import cloudlog
 from selfdrive.car.gm.steering_limits import steer_delta_limits_kph
 from selfdrive.controls.lib.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
+from selfdrive.controls.lib.v0813_lateral_compat import compensated_steer_delay
 from selfdrive.controls.lib.torque_authority import (
     HIGH_SPEED_GATE_BP, HIGH_SPEED_GATE_V, LOW_SPEED_GATE_BP, LOW_SPEED_GATE_V,
     MID_SPEED_GATE_BP, MID_SPEED_GATE_V, authority_ceiling,
@@ -906,7 +907,9 @@ class PointBuckets:
 class TorqueEstimator:
     def __init__(self, CP, decimated=False):
         self.hist_len = int(HISTORY / DT_MDL)
-        self.lag = CP.steerActuatorDelay + 0.2
+        # Keep learned applied-torque/measured-motion alignment identical to
+        # the v0.8.13 lookahead used by get_lag_adjusted_curvature().
+        self.lag = compensated_steer_delay(CP.steerActuatorDelay)
 
         self._car_fingerprint = getattr(CP, 'carFingerprint', None)
         self._is_equinox_torque_profile = str(self._car_fingerprint) == EQUINOX_TORQUE_FINGERPRINT
@@ -989,6 +992,13 @@ class TorqueEstimator:
         self._dyn_actual_authority_ceiling = 0.0
         self._dyn_actual_corner_strength = 0.0
         self._dyn_actual_direction_damping = False
+        self._model_curvature_guard_active = False
+        self._model_curvature_raw = 0.0
+        self._model_curvature_filtered = 0.0
+        self._model_curvature_filter_alpha = 1.0
+        self._model_curvature_direction_reversal = False
+        self._model_steer_delay_base = float(CP.steerActuatorDelay)
+        self._model_steer_delay_compensation = 0.0
         self.last_is_frozen = False
         self.stop_freeze_until = 0.0
 
@@ -2707,6 +2717,20 @@ class TorqueEstimator:
                         getattr(msg, "dynamicTorqueCornerStrength", 0.0) or 0.0)
                     self._dyn_actual_direction_damping = bool(
                         getattr(msg, "dynamicTorqueDirectionDamping", False))
+                    self._model_curvature_guard_active = bool(
+                        getattr(msg, "modelCurvatureGuardActive", False))
+                    self._model_curvature_raw = float(
+                        getattr(msg, "modelCurvatureRaw", 0.0) or 0.0)
+                    self._model_curvature_filtered = float(
+                        getattr(msg, "modelCurvatureFiltered", 0.0) or 0.0)
+                    self._model_curvature_filter_alpha = float(
+                        getattr(msg, "modelCurvatureFilterAlpha", 1.0) or 1.0)
+                    self._model_curvature_direction_reversal = bool(
+                        getattr(msg, "modelCurvatureDirectionReversal", False))
+                    self._model_steer_delay_compensation = float(
+                        getattr(msg, "modelSteerDelayCompensation", 0.0) or 0.0)
+                    self._model_steer_delay_base = float(
+                        getattr(msg, "steerActuatorDelay", self._model_steer_delay_base) or 0.0)
             except Exception:
                 return
 
@@ -3546,6 +3570,23 @@ class TorqueEstimator:
                     round(float(dyn_blend), 4) if dyn_source == "controlsState_actual" else None),
                 "dyn_authority_ceiling": round(float(dyn_ceiling), 4),
                 "dyn_direction_damping": bool(dyn_direction_damping),
+                "model_curvature_guard_active": bool(getattr(
+                    self, "_model_curvature_guard_active", False)),
+                "model_curvature_raw": round(float(getattr(
+                    self, "_model_curvature_raw", 0.0) or 0.0), 7),
+                "model_curvature_filtered": round(float(getattr(
+                    self, "_model_curvature_filtered", 0.0) or 0.0), 7),
+                "model_curvature_filter_alpha": round(float(getattr(
+                    self, "_model_curvature_filter_alpha", 1.0) or 1.0), 5),
+                "model_curvature_direction_reversal": bool(getattr(
+                    self, "_model_curvature_direction_reversal", False)),
+                "model_steer_delay_compensation": round(float(getattr(
+                    self, "_model_steer_delay_compensation", 0.0) or 0.0), 3),
+                "model_steer_delay_base": round(float(getattr(
+                    self, "_model_steer_delay_base", 0.0) or 0.0), 3),
+                "model_steer_delay_total": round(float(
+                    (getattr(self, "_model_steer_delay_base", 0.0) or 0.0) +
+                    (getattr(self, "_model_steer_delay_compensation", 0.0) or 0.0)), 3),
                 "dyn_corner_strength_est": round(float(dyn_corner_strength), 4),
                 "dyn_low_gate_est": round(float(dyn_low_gate), 4),
                 "dyn_mid_gate_est": round(float(dyn_mid_gate), 4),

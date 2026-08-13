@@ -5,6 +5,7 @@ from common.realtime import DT_MDL
 from common.conversions import Conversions as CV
 from selfdrive.modeld.constants import T_IDXS
 from selfdrive.ntune import ntune_common_get
+from selfdrive.controls.lib.v0813_lateral_compat import compensated_steer_delay
 
 # 경고: 이 값은 모델의 훈련 분포를 기반으로 결정되었으며,
 # 이 속도 이상의 모델 예측은 예측할 수 없습니다.
@@ -103,7 +104,8 @@ def get_lag_adjusted_curvature(CP, v_ego, psis, curvatures, curvature_rates):
   v_ego = max(v_ego, 0.1)
 
   # TODO 이 부분은 좀 더 고민이 필요함. 현재는 .2초의 추가 지연을 사용하여 다른 지연을 추정
-  delay = max(0.01, CP.steerActuatorDelay)
+  # Match the official v0.8.13 planner lookahead and torqued sample alignment.
+  delay = compensated_steer_delay(CP.steerActuatorDelay)
   # MPC가 휠을 돌리고 지연 전의 조정을 계획할 수 있음.
   current_curvature_desired = curvatures[0]
   psi = interp(delay, T_IDXS[:CONTROL_N], psis)

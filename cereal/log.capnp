@@ -704,6 +704,14 @@ struct ControlsState @0x97ff69c53601abf1 {
   dynamicTorqueCornerStrength @159 :Float32;
   dynamicTorqueDirectionDamping @160 :Bool;
 
+  # v0.8.13 model-demand normalization actually applied by LatControlTorque.
+  modelCurvatureGuardActive @161 :Bool;
+  modelCurvatureRaw @162 :Float32;
+  modelCurvatureFiltered @163 :Float32;
+  modelCurvatureFilterAlpha @164 :Float32;
+  modelCurvatureDirectionReversal @165 :Bool;
+  modelSteerDelayCompensation @166 :Float32;
+
 
 
   enum OpenpilotState @0xdbe58b96d2d1ac61 {

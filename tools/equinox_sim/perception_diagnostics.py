@@ -376,6 +376,17 @@ class PerceptionDiagnosticsRecorder:
           "authorityCeiling": rounded(controls.dynamicTorqueAuthorityCeiling),
           "cornerStrength": rounded(controls.dynamicTorqueCornerStrength),
           "directionDamping": bool(controls.dynamicTorqueDirectionDamping),
+          "modelCurvatureGuardActive": bool(controls.modelCurvatureGuardActive),
+          "modelCurvatureRaw": rounded(controls.modelCurvatureRaw),
+          "modelCurvatureFiltered": rounded(controls.modelCurvatureFiltered),
+          "modelCurvatureFilterAlpha": rounded(controls.modelCurvatureFilterAlpha),
+          "modelCurvatureDirectionReversal": bool(
+            controls.modelCurvatureDirectionReversal),
+          "modelSteerDelayCompensation": rounded(
+            controls.modelSteerDelayCompensation),
+          "baseSteerActuatorDelay": rounded(controls.steerActuatorDelay),
+          "totalModelSteerDelay": rounded(
+            controls.steerActuatorDelay + controls.modelSteerDelayCompensation),
         },
       },
     }

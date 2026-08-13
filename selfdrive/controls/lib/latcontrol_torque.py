@@ -10,6 +10,7 @@ from decimal import Decimal
 import cereal.messaging as messaging
 from selfdrive.car.gm.steering_limits import STEER_DELTA_BP_KPH, STEER_DELTA_DOWN_V, STEER_DELTA_UP_V
 from selfdrive.controls.lib.torque_authority import DynamicTorqueAuthorityScheduler, effective_torque_params
+from selfdrive.controls.lib.v0813_lateral_compat import V0813CurvatureGuard
 
 # At higher speeds (25+mph) we can assume:
 # Lateral acceleration achieved by a specific car correlates to
@@ -27,35 +28,9 @@ from selfdrive.controls.lib.torque_authority import DynamicTorqueAuthoritySchedu
 LOW_SPEED_X = [0, 5, 10, 20, 30]
 LOW_SPEED_Y = [15, 10, 0, 0, 5]
 
-# ==============================
-# Curvature request guard
-# 30km/h 이상에서 목표 곡률(desired_curvature) 변화를 완화한다.
-# 중속에서는 부드럽게, 고속에서는 더 보수적으로 적용한다.
-# ==============================
-HS_CURV_GUARD_ON_KPH = 55.0
-
-# update 1회당 desired_curvature 최대 변화량
-HS_CURV_DELTA_MAX_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-HS_CURV_DELTA_MAX_V = [0.00100, 0.00072, 0.00052, 0.00038, 0.00024, 0.00016]
-
-# desired_curvature_rate 절대값 제한
-HS_CURV_RATE_MAX_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-HS_CURV_RATE_MAX_V = [0.030, 0.023, 0.017, 0.012, 0.008, 0.005]
-
-# 저역통과 필터 alpha (작을수록 더 부드러움)
-HS_CURV_ALPHA_BP = [30.0, 45.0, 70.0, 90.0, 110.0, 130.0]
-HS_CURV_ALPHA_V = [0.78, 0.70, 0.58, 0.44, 0.30, 0.22]
-
-# 좌/우 부호가 갑자기 뒤집히는 경우 완화
-HS_SIGN_FLIP_MIN_CURV = 0.00045
-HS_SIGN_FLIP_KEEP_RATIO = 0.12
-
 # steer_limited / saturated 직후 몇 프레임 더 보수적으로 유지할지
 HS_LIMIT_HOLD_BP = [30.0, 60.0, 90.0, 110.0, 130.0]
 HS_LIMIT_HOLD_V = [4.0, 6.0, 8.0, 12.0, 16.0]
-
-HS_LIMIT_DELTA_SHRINK = 0.55
-HS_LIMIT_ALPHA_SHRINK = 0.75
 
 # Low-speed adaptive slew guard.
 # It does not reduce steady-state steering authority. It only slows a sudden
@@ -143,6 +118,7 @@ class LatControlTorque(LatControl):
         self._hs_prev_desired_curvature = 0.0
         self._hs_prev_desired_curvature_rate = 0.0
         self._hs_guard_hold_frames = 0
+        self._model_curvature_guard = V0813CurvatureGuard()
         self._stable_prev_output_torque = 0.0
         self._stable_torque_slew_gap = 0.0
         self._stable_torque_slew_active = False
@@ -251,54 +227,17 @@ class LatControlTorque(LatControl):
         return out
 
     def _guard_high_speed_curvature(self, v_ego, desired_curvature, desired_curvature_rate):
-        v_kph = float(v_ego) * 3.6
-
-        try:
-            curv_in = float(desired_curvature)
-            if not math.isfinite(curv_in):
-                curv_in = 0.0
-        except Exception:
-            curv_in = 0.0
-
-        try:
-            rate_in = float(desired_curvature_rate)
-            if not math.isfinite(rate_in):
-                rate_in = 0.0
-        except Exception:
-            rate_in = 0.0
-
-        if v_kph < HS_CURV_GUARD_ON_KPH:
-            self._hs_prev_desired_curvature = curv_in
-            self._hs_prev_desired_curvature_rate = rate_in
-            return curv_in, rate_in, False
-
-        prev = float(getattr(self, "_hs_prev_desired_curvature", 0.0) or 0.0)
-        hold_frames = int(max(0, getattr(self, "_hs_guard_hold_frames", 0) or 0))
-
-        # 고속에서 좌/우 부호가 갑자기 뒤집히면 일단 보수적으로 눌러줌
-        if (abs(prev) >= HS_SIGN_FLIP_MIN_CURV and
-                abs(curv_in) >= HS_SIGN_FLIP_MIN_CURV and
-                (prev * curv_in) < 0.0):
-            curv_in = 0.0
-            rate_in = 0.0
-
-        delta_max = float(interp(v_kph, HS_CURV_DELTA_MAX_BP, HS_CURV_DELTA_MAX_V))
-        alpha = float(interp(v_kph, HS_CURV_ALPHA_BP, HS_CURV_ALPHA_V))
-        rate_max = float(interp(v_kph, HS_CURV_RATE_MAX_BP, HS_CURV_RATE_MAX_V))
-
-        # 최근에 steer limit / saturation이 있었다면 잠깐 더 강하게 보수화
-        if hold_frames > 0:
-            delta_max *= HS_LIMIT_DELTA_SHRINK
-            alpha *= HS_LIMIT_ALPHA_SHRINK
-            rate_max *= HS_LIMIT_DELTA_SHRINK
-
-        curv_rl = float(clip(curv_in, prev - delta_max, prev + delta_max))
-        curv_out = float((alpha * curv_rl) + ((1.0 - alpha) * prev))
-        rate_out = float(clip(rate_in, -rate_max, rate_max))
-
-        self._hs_prev_desired_curvature = curv_out
-        self._hs_prev_desired_curvature_rate = rate_out
-        return curv_out, rate_out, True
+        curv_out, rate_out, guard_active = self._model_curvature_guard.update(
+            float(v_ego) * 3.6,
+            desired_curvature,
+            desired_curvature_rate,
+            limited_hold=int(max(0, getattr(self, "_hs_guard_hold_frames", 0) or 0)) > 0,
+        )
+        # Retain these attributes for existing diagnostics and forks which read
+        # them, while the v0.8.13 guard owns the actual state transition.
+        self._hs_prev_desired_curvature = float(curv_out)
+        self._hs_prev_desired_curvature_rate = float(rate_out)
+        return curv_out, rate_out, guard_active
 
     def _guard_low_speed_steer_slew(self, v_ego, requested_steer, last_actuators, steering_pressed):
         v_kph = float(v_ego) * 3.6
@@ -436,7 +375,7 @@ class LatControlTorque(LatControl):
             eff = dict(base)
         if not bool(getattr(self, '_dyn_effective_active', False)):
             eff = dict(base)
-        return {
+        debug = {
             'active': bool(getattr(self, '_dyn_effective_active', False)),
             'blend': float(getattr(self, '_dyn_last_blend', 0.0) or 0.0),
             'corner_strength': float(getattr(self, '_dyn_last_corner_strength', 0.0) or 0.0),
@@ -458,6 +397,8 @@ class LatControlTorque(LatControl):
             'targetDeltaDown': float(getattr(self, '_dyn_last_target_delta_down', 0.0) or 0.0),
             'rateLimitedStrong': bool(getattr(self, '_dyn_last_rate_limited_strong', False)),
         }
+        debug.update(self._model_curvature_guard.diagnostics())
+        return debug
 
     def _guard_output_torque_slew(self, v_ego, output_torque, steering_pressed=False, steer_limited=False):
         if (not STABLE_TORQUE_SLEW_ENABLED) or bool(steering_pressed):
@@ -501,6 +442,7 @@ class LatControlTorque(LatControl):
             self._hs_prev_desired_curvature = 0.0
             self._hs_prev_desired_curvature_rate = 0.0
             self._hs_guard_hold_frames = 0
+            self._model_curvature_guard.reset()
             self._stable_prev_output_torque = 0.0
             self._stable_torque_slew_gap = 0.0
             self._stable_torque_slew_active = False

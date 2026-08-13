@@ -1752,7 +1752,9 @@ class Controls:
         controlsState.roadLimitSpeedLeftDist = left_dist
 
         controlsState.steerRatio = self.VM.sR
-        controlsState.steerActuatorDelay = ntune_common_get('steerActuatorDelay')
+        # Report the effective CarParams value after the GM minimum clamp, not
+        # the raw ntune request. v0.8.13's additional 0.2 s is logged below.
+        controlsState.steerActuatorDelay = float(self.CP.steerActuatorDelay)
 
         controlsState.sccGasFactor = ntune_scc_get('sccGasFactor')
         controlsState.sccBrakeFactor = ntune_scc_get('sccBrakeFactor')
@@ -1776,6 +1778,14 @@ class Controls:
             controlsState.dynamicTorqueAuthorityCeiling = float(dyn_torque['authorityCeiling'])
             controlsState.dynamicTorqueCornerStrength = float(dyn_torque['corner_strength'])
             controlsState.dynamicTorqueDirectionDamping = bool(dyn_torque['directionDamping'])
+            controlsState.modelCurvatureGuardActive = bool(dyn_torque['modelCurvatureGuardActive'])
+            controlsState.modelCurvatureRaw = float(dyn_torque['modelCurvatureRaw'])
+            controlsState.modelCurvatureFiltered = float(dyn_torque['modelCurvatureFiltered'])
+            controlsState.modelCurvatureFilterAlpha = float(dyn_torque['modelCurvatureFilterAlpha'])
+            controlsState.modelCurvatureDirectionReversal = bool(
+              dyn_torque['modelCurvatureDirectionReversal'])
+            controlsState.modelSteerDelayCompensation = float(
+              dyn_torque['modelSteerDelayCompensation'])
 
         # Dynamic TR
         #controlsState.cruiseGap = int(Params().get("cruiseGap", encoding="utf8"))
