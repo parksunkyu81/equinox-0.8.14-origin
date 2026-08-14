@@ -69,9 +69,11 @@ RESPONSE_INITIAL_V = [0.846, 0.914, 0.867, 0.843, 0.906]
 RESPONSE_MAX_SCALE_V = [1.06, 1.04, 1.09, 1.12, 1.06]
 RESPONSE_TARGET = 0.97
 # Lateral acceleration is curvature * speed^2, so one global minimum excluded
-# valid low-speed corners even after long drives.  Keep a meaningful floor in
-# every speed bin while allowing the 10-30 km/h bins to collect real samples.
-RESPONSE_MIN_DESIRED_LAT_ACCEL_V = [0.035, 0.060, 0.085, 0.100, 0.110]
+# valid low-speed corners even after long drives.  The 2026-08-14 18:00+ EON
+# log showed path-stable 10-20 km/h corner demand concentrated at 0.010-0.023;
+# the previous 0.035 floor rejected every one of those samples.  Keep a 0.010
+# noise floor there while retaining the sign, driver, path and limiter gates.
+RESPONSE_MIN_DESIRED_LAT_ACCEL_V = [0.010, 0.060, 0.085, 0.100, 0.110]
 RESPONSE_STABLE_SECONDS = 0.30
 RESPONSE_SETPOINT_ABS_TOL = 0.020
 RESPONSE_SETPOINT_REL_TOL = 0.080
