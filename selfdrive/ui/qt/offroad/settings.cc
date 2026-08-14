@@ -565,7 +565,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
           [=](const QString &selected) {
     Params().put("FollowingDistanceProfile", selected.toStdString());
   });
-  QHBoxLayout* layoutBtn_0 = new QHBoxLayout(homeWidget);
+  QHBoxLayout* layoutBtn_0 = new QHBoxLayout();
   layoutBtn_0->addWidget(followingDistanceProfileLabel, 1);
   layoutBtn_0->addWidget(followingDistanceProfileCombo, 0);
 
@@ -661,8 +661,6 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
 
   vlayout->addSpacing(10);
   vlayout->addLayout(layoutBtn_3, 0);
-  vlayout->addSpacing(10);
-  vlayout->addLayout(layoutBtn_0, 1);
   vlayout->addSpacing(10);
   vlayout->addLayout(layoutBtn_1, 1);
   vlayout->addSpacing(10);
@@ -852,6 +850,9 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
     }
     toggleLayout->addWidget(toggle);
   }
+
+  toggleLayout->addWidget(horizontal_line());
+  toggleLayout->addLayout(layoutBtn_0);
 
 }
 
