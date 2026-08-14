@@ -728,6 +728,23 @@ struct ControlsState @0x97ff69c53601abf1 {
   stopAccelBoostFloorAccel @177 :Float32;
   stopAccelBoostHillExtraAccel @178 :Float32;
 
+  # Stable moving-lead gap recovery diagnostics. This mode preserves the
+  # selected following time and only fills an insufficient positive request.
+  movingGapCatchupActive @179 :Bool;
+  movingGapCatchupCandidateDuration @180 :Float32;
+  movingGapCatchupLeadStableDuration @181 :Float32;
+  movingGapCatchupFilteredVRel @182 :Float32;
+  movingGapCatchupDesiredGap @183 :Float32;
+  movingGapCatchupDistanceMargin @184 :Float32;
+  movingGapCatchupEnterMargin @185 :Float32;
+  movingGapCatchupExitMargin @186 :Float32;
+  movingGapCatchupTargetAccel @187 :Float32;
+  movingGapCatchupFinalAccel @188 :Float32;
+  movingGapCatchupPedalTarget @189 :Float32;
+  movingGapCatchupCancelReason @190 :UInt8;
+  movingGapCatchupCount @191 :UInt32;
+  movingGapCatchupLeadJump @192 :Bool;
+
 
 
   enum OpenpilotState @0xdbe58b96d2d1ac61 {

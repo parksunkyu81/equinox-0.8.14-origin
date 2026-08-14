@@ -132,9 +132,11 @@ class CarController():
         hard_recovery = getattr(controls, 'pedal_force_recovery', None)
         lead_assist = getattr(controls, 'lead_coast_assist', None)
         lead_loss_assist = getattr(controls, 'lead_loss_cruise_assist', None)
+        moving_gap_assist = getattr(controls, 'moving_gap_catchup_assist', None)
         recovery = (hard_recovery if hard_recovery is not None and hard_recovery.active else
                     lead_loss_assist if lead_loss_assist is not None and lead_loss_assist.active else
-                    lead_assist if lead_assist is not None and lead_assist.active else None)
+                    lead_assist if lead_assist is not None and lead_assist.active else
+                    moving_gap_assist if moving_gap_assist is not None and moving_gap_assist.active else None)
         if recovery is not None:
           # Guarantee the calibrated command floor even when the learned style
           # gain is below 1.0, without letting that gain amplify recovery. The

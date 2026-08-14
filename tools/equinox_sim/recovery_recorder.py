@@ -223,6 +223,23 @@ class PedalRecoveryRecorder:
         "leadAssistCancelReason": int(controls.pedalLeadAssistCancelReason),
         "leadAssistCount": int(controls.pedalLeadAssistCount),
         "leadAssistPedalTarget": round(float(controls.pedalLeadAssistPedalTarget), 5),
+        "movingGapActive": bool(controls.movingGapCatchupActive),
+        "movingGapCandidateDuration": round(
+          float(controls.movingGapCatchupCandidateDuration), 5),
+        "movingGapLeadStableDuration": round(
+          float(controls.movingGapCatchupLeadStableDuration), 5),
+        "movingGapFilteredVRel": round(float(controls.movingGapCatchupFilteredVRel), 5),
+        "movingGapDesiredGap": round(float(controls.movingGapCatchupDesiredGap), 5),
+        "movingGapDistanceMargin": round(
+          float(controls.movingGapCatchupDistanceMargin), 5),
+        "movingGapEnterMargin": round(float(controls.movingGapCatchupEnterMargin), 5),
+        "movingGapExitMargin": round(float(controls.movingGapCatchupExitMargin), 5),
+        "movingGapTargetAccel": round(float(controls.movingGapCatchupTargetAccel), 5),
+        "movingGapFinalAccel": round(float(controls.movingGapCatchupFinalAccel), 5),
+        "movingGapPedalTarget": round(float(controls.movingGapCatchupPedalTarget), 5),
+        "movingGapCancelReason": int(controls.movingGapCatchupCancelReason),
+        "movingGapCount": int(controls.movingGapCatchupCount),
+        "movingGapLeadJump": bool(controls.movingGapCatchupLeadJump),
         "forceDecel": bool(controls.forceDecel),
         "curvDriving": bool(controls.curvDriving),
         "stopAccelBoostActive": bool(controls.stopAccelBoostActive),

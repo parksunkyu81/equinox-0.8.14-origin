@@ -30,6 +30,30 @@ LEAD_COAST_ASSIST_MAX_SECONDS = 0.80
 LEAD_COAST_ASSIST_COOLDOWN_SECONDS = 0.50
 LEAD_COAST_ASSIST_ACCEL_PER_PEDAL = 1.0 / 0.17
 
+# Moving lead gap recovery is intentionally separate from the short
+# LeadCoastAssist deadzone recovery above. It never shortens the selected
+# following time; it only supplies a bounded positive floor while a stable lead
+# is farther away than the distance implied by that time.
+MOVING_GAP_MIN_SPEED_KPH = 20.0
+MOVING_GAP_MAX_SPEED_KPH = 70.0
+MOVING_GAP_STANDSTILL_GAP_M = 4.5
+MOVING_GAP_MIN_MODEL_PROB = 0.80
+MOVING_GAP_DRIVER_CLEAR_SECONDS = 0.20
+MOVING_GAP_LEAD_STABLE_SECONDS = 0.50
+MOVING_GAP_CANDIDATE_SECONDS = 0.35
+MOVING_GAP_MAX_SECONDS = 3.0
+MOVING_GAP_COOLDOWN_SECONDS = 0.75
+MOVING_GAP_PID_HANDOFF_SECONDS = 0.15
+MOVING_GAP_MIN_CRUISE_ERROR_MS = 0.30
+MOVING_GAP_MIN_REQUESTED_ACCEL = -0.05
+MOVING_GAP_ENTER_VREL_MS = -0.05
+MOVING_GAP_EXIT_VREL_MS = -0.20
+MOVING_GAP_ACCEL_RISE_MS3 = 0.40
+MOVING_GAP_ACCEL_FALL_MS3 = 0.60
+MOVING_GAP_ACCEL_TO_PEDAL = 0.17
+MOVING_GAP_LEAD_JUMP_MIN_M = 3.0
+MOVING_GAP_LEAD_JUMP_RATIO = 0.20
+
 # Once radard's bounded continuity hold has really expired, bridge the
 # confirmed lead0 -> cruise transition with a small positive pedal ramp. This
 # is deliberately edge-triggered: ordinary no-lead cruise never activates it.
@@ -44,12 +68,273 @@ RECOVERY_MODE_NONE = 0
 RECOVERY_MODE_HARD_ZERO = 1
 RECOVERY_MODE_LEAD_COAST_ASSIST = 2
 RECOVERY_MODE_LEAD_LOSS_CRUISE = 3
+RECOVERY_MODE_MOVING_GAP_CATCHUP = 4
 
 LEAD_ASSIST_CANCEL_NONE = 0
 LEAD_ASSIST_CANCEL_SAFETY = 1
 LEAD_ASSIST_CANCEL_LEAD = 2
 LEAD_ASSIST_CANCEL_PID_HANDOFF = 3
 LEAD_ASSIST_CANCEL_TIMEOUT = 4
+LEAD_ASSIST_CANCEL_GAP_RECOVERED = 5
+LEAD_ASSIST_CANCEL_LEAD_JUMP = 6
+
+
+def _interp(x, xp, fp):
+  """Small dependency-free linear interpolation helper."""
+  x = float(x)
+  if x <= xp[0]:
+    return float(fp[0])
+  if x >= xp[-1]:
+    return float(fp[-1])
+  for index in range(1, len(xp)):
+    if x <= xp[index]:
+      span = float(xp[index] - xp[index - 1])
+      ratio = (x - xp[index - 1]) / span
+      return float(fp[index - 1] + ratio * (fp[index] - fp[index - 1]))
+  return float(fp[-1])
+
+
+def moving_gap_accel_cap(v_ego):
+  """Return the absolute catch-up acceleration ceiling for the current speed."""
+  speed_kph = max(0.0, float(v_ego)) * 3.6
+  return _interp(
+    speed_kph,
+    [MOVING_GAP_MIN_SPEED_KPH, 25.0, 30.0, 45.0, 60.0, MOVING_GAP_MAX_SPEED_KPH],
+    [0.08, 0.22, 0.22, 0.30, 0.35, 0.0])
+
+
+class MovingGapCatchupAssist:
+  """Recover an excessive moving-lead gap without changing desired follow time.
+
+  The normal planner remains authoritative for every negative request. This
+  supervisor can only replace a weak non-negative request with a rate-limited
+  positive floor, and the caller's predictive-coasting ceiling remains the
+  final lead/curve/speed-limit safety authority.
+  """
+
+  def __init__(self, dt=0.01):
+    self.dt = max(1e-3, float(dt))
+    self.driver_clear_frames_required = max(
+      1, int(round(MOVING_GAP_DRIVER_CLEAR_SECONDS / self.dt)))
+    self.lead_stable_frames_required = max(
+      1, int(round(MOVING_GAP_LEAD_STABLE_SECONDS / self.dt)))
+    self.candidate_frames_required = max(
+      1, int(round(MOVING_GAP_CANDIDATE_SECONDS / self.dt)))
+    self.max_frames = max(1, int(round(MOVING_GAP_MAX_SECONDS / self.dt)))
+    self.cooldown_frames_required = max(
+      1, int(round(MOVING_GAP_COOLDOWN_SECONDS / self.dt)))
+    self.handoff_frames_required = max(
+      1, int(round(MOVING_GAP_PID_HANDOFF_SECONDS / self.dt)))
+    self.reset()
+
+  @property
+  def duration(self):
+    return self.active_frames * self.dt
+
+  @property
+  def candidate_duration(self):
+    return self.candidate_frames * self.dt
+
+  @property
+  def lead_stable_duration(self):
+    return self.lead_stable_frames * self.dt
+
+  def reset(self):
+    self.active = False
+    self.active_frames = 0
+    self.driver_clear_frames = 0
+    self.lead_stable_frames = 0
+    self.candidate_frames = 0
+    self.cooldown_frames = self.cooldown_frames_required
+    self.handoff_stable_frames = 0
+    self.activation_count = 0
+    self.raw_accel = 0.0
+    self.forced_accel = 0.0
+    self.assist_accel = 0.0
+    self.target_accel = 0.0
+    self.pedal_target = 0.0
+    self.filtered_v_rel = 0.0
+    self.actual_tr = 0.0
+    self.desired_tr = 0.0
+    self.desired_gap_m = 0.0
+    self.distance_margin_m = 0.0
+    self.enter_margin_m = 0.0
+    self.exit_margin_m = 0.0
+    self.previous_lead_distance = 0.0
+    self.previous_lead_valid = False
+    self.lead_jump_detected = False
+    self.cancel_reason = LEAD_ASSIST_CANCEL_NONE
+
+  def _deactivate(self, reason):
+    self.active = False
+    self.active_frames = 0
+    self.candidate_frames = 0
+    self.handoff_stable_frames = 0
+    self.cooldown_frames = 0
+    self.assist_accel = 0.0
+    self.target_accel = 0.0
+    self.pedal_target = 0.0
+    self.cancel_reason = int(reason)
+
+  def _update_lead_continuity(self, lead_valid, lead_distance,
+                              lead_measurement_updated):
+    self.lead_jump_detected = False
+    if not lead_valid:
+      self.lead_stable_frames = 0
+      self.previous_lead_valid = False
+      self.previous_lead_distance = 0.0
+      return
+
+    if lead_measurement_updated:
+      distance = max(0.0, float(lead_distance))
+      if self.previous_lead_valid:
+        jump_limit = max(MOVING_GAP_LEAD_JUMP_MIN_M,
+                         MOVING_GAP_LEAD_JUMP_RATIO * self.previous_lead_distance)
+        self.lead_jump_detected = abs(distance - self.previous_lead_distance) > jump_limit
+      else:
+        # A newly selected lead must pass the full stability interval.
+        self.lead_stable_frames = 0
+      self.previous_lead_distance = distance
+      self.previous_lead_valid = True
+
+    if self.lead_jump_detected:
+      self.lead_stable_frames = 0
+    else:
+      self.lead_stable_frames = min(
+        self.lead_stable_frames_required, self.lead_stable_frames + 1)
+
+  def _requested_target_accel(self, v_ego, filtered_v_rel):
+    accel_cap = moving_gap_accel_cap(v_ego)
+    full_margin = self.enter_margin_m + max(4.0, 0.25 * max(float(v_ego), 0.0))
+    # Entry hysteresis is handled separately. Scaling from the exit margin
+    # makes authority taper to zero before the gap-recovered transition.
+    span = max(full_margin - self.exit_margin_m, 0.1)
+    gap_pressure = max(0.0, min(1.0,
+      (self.distance_margin_m - self.exit_margin_m) / span))
+    opening_pressure = max(0.0, min(1.0, (float(filtered_v_rel) + 0.05) / 1.0))
+    return min(accel_cap,
+               gap_pressure * (accel_cap + 0.05 * opening_pressure))
+
+  def update(self, *, base_safe, lead_valid, lead_v_rel, lead_distance,
+             lead_model_prob, v_ego, desired_tr, cruise_speed_error,
+             requested_accel, lead_measurement_updated=True):
+    self.raw_accel = float(requested_accel)
+    v_ego = max(0.0, float(v_ego))
+    lead_distance = max(0.0, float(lead_distance))
+    self.desired_tr = max(0.0, float(desired_tr))
+    self.actual_tr = lead_distance / max(v_ego, 1.0)
+    self.desired_gap_m = MOVING_GAP_STANDSTILL_GAP_M + v_ego * self.desired_tr
+    self.distance_margin_m = lead_distance - self.desired_gap_m
+    self.enter_margin_m = max(2.5, 0.25 * v_ego)
+    self.exit_margin_m = max(1.0, 0.10 * v_ego)
+
+    if lead_measurement_updated:
+      measured_v_rel = float(lead_v_rel)
+      alpha = 0.25
+      self.filtered_v_rel = (measured_v_rel if not self.previous_lead_valid else
+                             (1.0 - alpha) * self.filtered_v_rel +
+                             alpha * measured_v_rel)
+    self._update_lead_continuity(bool(lead_valid), lead_distance,
+                                 bool(lead_measurement_updated))
+
+    speed_kph = v_ego * 3.6
+    model_safe = float(lead_model_prob) >= MOVING_GAP_MIN_MODEL_PROB
+    speed_safe = MOVING_GAP_MIN_SPEED_KPH <= speed_kph < MOVING_GAP_MAX_SPEED_KPH
+    common_safe = bool(base_safe and lead_valid and model_safe and speed_safe)
+
+    if not common_safe:
+      self.driver_clear_frames = 0
+      if self.active:
+        self._deactivate(LEAD_ASSIST_CANCEL_SAFETY)
+      else:
+        self.candidate_frames = 0
+        self.cooldown_frames = min(
+          self.cooldown_frames_required, self.cooldown_frames + 1)
+        self.assist_accel = 0.0
+        self.target_accel = 0.0
+        self.pedal_target = 0.0
+      self.forced_accel = self.raw_accel
+      return self.forced_accel
+
+    self.driver_clear_frames = min(
+      self.driver_clear_frames_required, self.driver_clear_frames + 1)
+    lead_stable = self.lead_stable_frames >= self.lead_stable_frames_required
+    demand_safe = bool(
+      float(cruise_speed_error) >= MOVING_GAP_MIN_CRUISE_ERROR_MS and
+      self.raw_accel >= MOVING_GAP_MIN_REQUESTED_ACCEL)
+    lead_enter_safe = bool(
+      lead_stable and not self.lead_jump_detected and
+      self.filtered_v_rel >= MOVING_GAP_ENTER_VREL_MS and
+      self.distance_margin_m >= self.enter_margin_m)
+    lead_hold_safe = bool(
+      lead_stable and not self.lead_jump_detected and
+      self.filtered_v_rel > MOVING_GAP_EXIT_VREL_MS and
+      self.distance_margin_m > self.exit_margin_m)
+    requested_target = self._requested_target_accel(v_ego, self.filtered_v_rel)
+    useful_floor = requested_target > self.raw_accel + 0.02
+
+    if self.active:
+      if self.lead_jump_detected:
+        self._deactivate(LEAD_ASSIST_CANCEL_LEAD_JUMP)
+      elif not lead_hold_safe:
+        reason = (LEAD_ASSIST_CANCEL_GAP_RECOVERED
+                  if self.distance_margin_m <= self.exit_margin_m else
+                  LEAD_ASSIST_CANCEL_LEAD)
+        self._deactivate(reason)
+      elif not demand_safe:
+        self._deactivate(LEAD_ASSIST_CANCEL_SAFETY)
+      elif self.active_frames >= self.max_frames:
+        self._deactivate(LEAD_ASSIST_CANCEL_TIMEOUT)
+      elif not useful_floor:
+        self.handoff_stable_frames += 1
+        if self.handoff_stable_frames >= self.handoff_frames_required:
+          self._deactivate(LEAD_ASSIST_CANCEL_PID_HANDOFF)
+      else:
+        self.handoff_stable_frames = 0
+
+      if self.active:
+        self.active_frames += 1
+        self.target_accel = requested_target
+        rise_step = MOVING_GAP_ACCEL_RISE_MS3 * self.dt
+        fall_step = MOVING_GAP_ACCEL_FALL_MS3 * self.dt
+        if self.target_accel >= self.assist_accel:
+          self.assist_accel = min(self.target_accel, self.assist_accel + rise_step)
+        else:
+          self.assist_accel = max(self.target_accel, self.assist_accel - fall_step)
+        self.pedal_target = max(0.0, self.assist_accel * MOVING_GAP_ACCEL_TO_PEDAL)
+        self.forced_accel = max(self.raw_accel, self.assist_accel)
+        return self.forced_accel
+
+      self.forced_accel = self.raw_accel
+      return self.forced_accel
+
+    self.cooldown_frames = min(
+      self.cooldown_frames_required, self.cooldown_frames + 1)
+    candidate = bool(
+      self.driver_clear_frames >= self.driver_clear_frames_required and
+      self.cooldown_frames >= self.cooldown_frames_required and
+      lead_enter_safe and demand_safe and useful_floor)
+    self.candidate_frames = self.candidate_frames + 1 if candidate else 0
+
+    if self.candidate_frames >= self.candidate_frames_required:
+      self.active = True
+      self.active_frames = 1
+      self.candidate_frames = 0
+      self.handoff_stable_frames = 0
+      self.activation_count += 1
+      self.cancel_reason = LEAD_ASSIST_CANCEL_NONE
+      self.target_accel = requested_target
+      self.assist_accel = min(self.target_accel,
+                              MOVING_GAP_ACCEL_RISE_MS3 * self.dt)
+      self.pedal_target = self.assist_accel * MOVING_GAP_ACCEL_TO_PEDAL
+      self.forced_accel = max(self.raw_accel, self.assist_accel)
+    else:
+      self.target_accel = requested_target if candidate else 0.0
+      self.assist_accel = 0.0
+      self.pedal_target = 0.0
+      self.forced_accel = self.raw_accel
+
+    return self.forced_accel
 
 
 def recovery_speed_demand(speed_error, future_speed_error, injected_fault=False):
