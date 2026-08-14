@@ -560,11 +560,11 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   followingDistanceProfileLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
   QComboBox* followingDistanceProfileCombo = new QComboBox(homeWidget);
   followingDistanceProfileCombo->setObjectName("followingDistanceProfileCombo");
-  followingDistanceProfileCombo->addItems(QStringList() << "short" << "mid" << "long");
-  followingDistanceProfileCombo->setCurrentText(following_distance_profile);
+  followingDistanceProfileCombo->addItems(QStringList() << "SHORT" << "MID" << "LONG");
+  followingDistanceProfileCombo->setCurrentText(following_distance_profile.toUpper());
   connect(followingDistanceProfileCombo, &QComboBox::currentTextChanged,
           [=](const QString &selected) {
-    Params().put("FollowingDistanceProfile", selected.toStdString());
+    Params().put("FollowingDistanceProfile", selected.toLower().toStdString());
   });
   QHBoxLayout* layoutBtn_0 = new QHBoxLayout();
   layoutBtn_0->setContentsMargins(0, 0, 0, 0);
@@ -586,10 +586,8 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   commaPedalResistanceLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
   QComboBox* commaPedalResistanceCombo = new QComboBox(homeWidget);
   commaPedalResistanceCombo->setObjectName("commaPedalResistanceCombo");
-  commaPedalResistanceCombo->addItems(QStringList() << "High" << "Mid" << "Low");
-  commaPedalResistanceCombo->setCurrentText(
-    comma_pedal_resistance == "high" ? "High" :
-    comma_pedal_resistance == "low" ? "Low" : "Mid");
+  commaPedalResistanceCombo->addItems(QStringList() << "HIGH" << "MID" << "LOW");
+  commaPedalResistanceCombo->setCurrentText(comma_pedal_resistance.toUpper());
   connect(commaPedalResistanceCombo, &QComboBox::currentTextChanged,
           [=](const QString &selected) {
     Params().put("CommaPedalResistance", selected.toLower().toStdString());
