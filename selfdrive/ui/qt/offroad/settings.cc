@@ -640,6 +640,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
 
   QPushButton* lateralControlBtn = new QPushButton(lateral_control);
   lateralControlBtn->setObjectName("lateralControlBtn");
+  lateralControlBtn->hide();  // Temporarily keep the lateral control selector out of Community.
   connect(lateralControlBtn, &QPushButton::clicked, [=]() { main_layout->setCurrentWidget(lateralControl); });
 
   lateralControl = new LateralControl(this);
