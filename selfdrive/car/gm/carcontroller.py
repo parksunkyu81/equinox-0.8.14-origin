@@ -1,9 +1,11 @@
 from cereal import car
+from common.clock import sec_since_boot
 from common.numpy_fast import interp, clip
 from common.conversions import Conversions as CV
 from common.realtime import DT_CTRL
 from selfdrive.car import apply_std_steer_torque_limits, create_gas_interceptor_command
 from selfdrive.car.gm import gmcan
+from selfdrive.car.gm.steer_scheduler import GMSteeringCommandScheduler
 from selfdrive.car.gm.steering_limits import steer_delta_limits_ms
 from selfdrive.car.gm.values import DBC, NO_ASCM, CanBus, CarControllerParams
 from opendbc.can.packer import CANPacker
@@ -27,7 +29,7 @@ class CarController():
     self._dyn_delta_down_last = 0
 
 
-    self.lka_steering_cmd_counter_last = -1
+    self.steer_command_scheduler = GMSteeringCommandScheduler()
     self.lka_icon_status_last = (False, False)
     self.steer_rate_limited = False
 
@@ -66,9 +68,12 @@ class CarController():
     if not lkas_enabled:
       self.steer_rate_limited = False
 
-    if CS.lka_steering_cmd_counter != self.lka_steering_cmd_counter_last: # 차량에서 수신한 LKA 조향 메시지 카운터가 이전 값과 달라졌는지 확인
-      self.lka_steering_cmd_counter_last = CS.lka_steering_cmd_counter   # 카운터가 변경됐다면 차량의 새로운 조향 메시지가 수신된 것이므로, 마지막 카운터를 갱신
-    elif (frame % P.STEER_STEP) == 0:  # 수신 카운터가 변경되지 않았고, 현재 프레임이 조향 명령 전송 주기일 때만 (2프레임마다 조향 명령을 계산하고 전송)
+    # Schedule from monotonic time instead of frame parity. Panda loopback can
+    # arrive on every due (even) control frame; suppressing that frame would
+    # otherwise starve steering commands indefinitely.
+    steer_command_sent, idx = self.steer_command_scheduler.update(
+      sec_since_boot(), CS.lka_steering_cmd_counter)
+    if steer_command_sent:
       if lkas_enabled:
         new_steer = int(round(actuators.steer * P.STEER_MAX))
         apply_steer = apply_std_steer_torque_limits(new_steer, self.apply_steer_last, CS.out.steeringTorque, P)
@@ -81,9 +86,6 @@ class CarController():
       # GM EPS는 수신 메시지 카운터에 간극(gap)이 발생하면 결함(fault)을 보고합니다.
       # 시스템 해제 시점에 일시적으로 발생하는 OP/Panda 안전 동기화 문제를 처리하기 위해,
       # Panda 안전성 검사를 통과한 것으로 확인된 마지막 메시지를 기준으로 카운터를 증가시킵니다.
-      # 차량에서 마지막으로 수신한 카운터에 1을 더해 다음 값을 만듭니다. (0 → 1 → 2 → 3)
-      idx = (CS.lka_steering_cmd_counter + 1) % 4
-
       can_sends.append(gmcan.create_steering_control(self.packer_pt, CanBus.POWERTRAIN, apply_steer, idx, lkas_enabled))
 
     # 현재 조향 토크가 제한됐는지를 상위 제어기인 controls에 전달
