@@ -7,7 +7,7 @@
 #define DEFAULT_SEGMENT_SIZE (10 * 1024 * 1024)
 // controlsd, planners, UI and the bounded diagnostic recorders legitimately
 // put more than ten readers on services such as deviceState/carState on EON.
-// Overflow evicts every reader, causing a reconnect storm and commIssue.
+// Reader slots are reused on socket close and after an unclean reader exit.
 #define NUM_READERS 32
 #define ALIGN(n) ((n + (8 - 1)) & -8)
 
@@ -61,7 +61,7 @@ int msgq_msg_close(msgq_msg_t *msg);
 int msgq_new_queue(msgq_queue_t * q, const char * path, size_t size);
 void msgq_close_queue(msgq_queue_t *q);
 void msgq_init_publisher(msgq_queue_t * q);
-void msgq_init_subscriber(msgq_queue_t * q);
+int msgq_init_subscriber(msgq_queue_t * q);
 
 int msgq_msg_send(msgq_msg_t *msg, msgq_queue_t *q);
 int msgq_msg_recv(msgq_msg_t *msg, msgq_queue_t *q);

@@ -74,17 +74,25 @@ void msgq_reset_reader(msgq_queue_t * q){
 }
 
 void msgq_wait_for_subscriber(msgq_queue_t *q){
-  while (*q->num_readers == 0){
-    ;
+  while (true){
+    uint64_t num_readers = std::min<uint64_t>(*q->num_readers, NUM_READERS);
+    for (uint64_t i = 0; i < num_readers; i++){
+      if (*q->read_uids[i] != 0){
+        return;
+      }
+    }
   }
-
-  return;
 }
 
 
 int msgq_new_queue(msgq_queue_t * q, const char * path, size_t size){
   assert(size < 0xFFFFFFFF); // Buffer must be smaller than 2^32 bytes
   std::signal(SIGUSR2, sigusr2_handler);
+
+  q->mmap_p = NULL;
+  q->reader_id = -1;
+  q->read_uid_local = 0;
+  q->write_uid_local = 0;
 
   const char * prefix = "/dev/shm/";
   char * full_path = new char[strlen(path) + strlen(prefix) + 1];
@@ -127,8 +135,6 @@ int msgq_new_queue(msgq_queue_t * q, const char * path, size_t size){
 
   q->data = mem + sizeof(msgq_header_t);
   q->size = size;
-  q->reader_id = -1;
-
   q->endpoint = path;
   q->read_conflate = false;
 
@@ -137,7 +143,18 @@ int msgq_new_queue(msgq_queue_t * q, const char * path, size_t size){
 
 void msgq_close_queue(msgq_queue_t *q){
   if (q->mmap_p != NULL){
+    // Only release the slot if it is still owned by this socket. The
+    // publisher can reset the queue while a subscriber is shutting down, so
+    // comparing the full UID prevents an old socket from clearing a new one.
+    if (q->reader_id >= 0 && q->reader_id < NUM_READERS && q->read_uid_local != 0){
+      uint64_t expected_uid = q->read_uid_local;
+      std::atomic_compare_exchange_strong(q->read_uids[q->reader_id],
+                                          &expected_uid, uint64_t{0});
+      q->reader_id = -1;
+      q->read_uid_local = 0;
+    }
     munmap(q->mmap_p, q->size + sizeof(msgq_header_t));
+    q->mmap_p = NULL;
   }
 }
 
@@ -158,6 +175,8 @@ void msgq_init_publisher(msgq_queue_t * q) {
 }
 
 static void thread_signal(uint32_t tid) {
+  if (tid == 0) return;
+
   #ifndef SYS_tkill
     // TODO: this won't work for multithreaded programs
     kill(tid, SIGUSR2);
@@ -166,54 +185,62 @@ static void thread_signal(uint32_t tid) {
   #endif
 }
 
-void msgq_init_subscriber(msgq_queue_t * q) {
+static bool reader_thread_alive(uint64_t uid) {
+  uint32_t tid = uid & 0xFFFFFFFF;
+  if (tid == 0) return false;
+
+  int rc;
+  #ifndef SYS_tkill
+    rc = kill(tid, 0);
+  #else
+    rc = syscall(SYS_tkill, tid, 0);
+  #endif
+  return rc == 0 || errno == EPERM;
+}
+
+int msgq_init_subscriber(msgq_queue_t * q) {
   assert(q != NULL);
   assert(q->num_readers != NULL);
 
   uint64_t uid = msgq_get_uid();
 
-  // Get reader id
-  while (true){
-    uint64_t cur_num_readers = *q->num_readers;
-    uint64_t new_num_readers = cur_num_readers + 1;
-
-    // No more slots available. Reset all subscribers to kick out inactive ones
-    if (new_num_readers > NUM_READERS){
-      std::cout << "Warning, evicting all subscribers!" << std::endl;
-      *q->num_readers = 0;
-
-      for (size_t i = 0; i < NUM_READERS; i++){
-        *q->read_valids[i] = false;
-
-        uint64_t old_uid = *q->read_uids[i];
-        *q->read_uids[i] = 0;
-
-        // Wake up reader in case they are in a poll
-        thread_signal(old_uid & 0xFFFFFFFF);
-      }
-
-      continue;
+  // Claim the first free slot. Graceful closes clear their UID, while slots
+  // left behind by SIGKILL or a crash are reclaimed after their TID dies.
+  // Never evict healthy readers just to admit one more diagnostic subscriber.
+  for (size_t i = 0; i < NUM_READERS; i++){
+    uint64_t slot_uid = *q->read_uids[i];
+    if (slot_uid != 0 && !reader_thread_alive(slot_uid)){
+      uint64_t stale_uid = slot_uid;
+      std::atomic_compare_exchange_strong(q->read_uids[i], &stale_uid, uint64_t{0});
     }
 
-    // Use atomic compare and swap to handle race condition
-    // where two subscribers start at the same time
-    if (std::atomic_compare_exchange_strong(q->num_readers,
-                                            &cur_num_readers,
-                                            new_num_readers)){
-      q->reader_id = cur_num_readers;
+    uint64_t expected_uid = 0;
+    if (std::atomic_compare_exchange_strong(q->read_uids[i], &expected_uid, uid)){
+      q->reader_id = i;
       q->read_uid_local = uid;
 
       // We start with read_valid = false,
       // on the first read the read pointer will be synchronized with the write pointer
-      *q->read_valids[cur_num_readers] = false;
-      *q->read_pointers[cur_num_readers] = 0;
-      *q->read_uids[cur_num_readers] = uid;
-      break;
+      *q->read_valids[i] = false;
+      *q->read_pointers[i] = 0;
+
+      // num_readers is a high-water index used by the publisher. Slots below
+      // it can contain holes and are reused instead of growing indefinitely.
+      uint64_t cur_num_readers = *q->num_readers;
+      while (cur_num_readers < i + 1 &&
+             !std::atomic_compare_exchange_weak(q->num_readers,
+                                                &cur_num_readers,
+                                                uint64_t{i + 1})){
+      }
+
+      msgq_reset_reader(q);
+      return 0;
     }
   }
 
-  //std::cout << "New subscriber id: " << q->reader_id << " uid: " << q->read_uid_local << " " << q->endpoint << std::endl;
-  msgq_reset_reader(q);
+  std::cerr << q->endpoint << ": all subscriber slots are active" << std::endl;
+  errno = EMFILE;
+  return -1;
 }
 
 int msgq_msg_send(msgq_msg_t * msg, msgq_queue_t *q){
@@ -230,7 +257,7 @@ int msgq_msg_send(msgq_msg_t * msg, msgq_queue_t *q){
   // then we can always safely access the last message
   assert(3 * total_msg_size <= q->size);
 
-  uint64_t num_readers = *q->num_readers;
+  uint64_t num_readers = std::min<uint64_t>(*q->num_readers, NUM_READERS);
 
   uint32_t write_cycles, write_pointer;
   UNPACK64(write_cycles, write_pointer, *q->write_pointer);
@@ -247,6 +274,7 @@ int msgq_msg_send(msgq_msg_t * msg, msgq_queue_t *q){
     // Invalidate all readers that are beyond the write pointer
     // TODO: should we handle the case where a new reader shows up while this is running?
     for (uint64_t i = 0; i < num_readers; i++){
+      if (*q->read_uids[i] == 0) continue;
       uint64_t read_pointer = *q->read_pointers[i];
       uint64_t read_cycles = read_pointer >> 32;
       read_pointer &= 0xFFFFFFFF;
@@ -270,6 +298,7 @@ int msgq_msg_send(msgq_msg_t * msg, msgq_queue_t *q){
   uint64_t end = ALIGN(start + sizeof(int64_t) + msg->size);
 
   for (uint64_t i = 0; i < num_readers; i++){
+    if (*q->read_uids[i] == 0) continue;
     uint32_t read_cycles, read_pointer;
     UNPACK64(read_cycles, read_pointer, *q->read_pointers[i]);
 
@@ -294,7 +323,7 @@ int msgq_msg_send(msgq_msg_t * msg, msgq_queue_t *q){
   // Notify readers
   for (uint64_t i = 0; i < num_readers; i++){
     uint64_t reader_uid = *q->read_uids[i];
-    thread_signal(reader_uid & 0xFFFFFFFF);
+    if (reader_uid != 0) thread_signal(reader_uid & 0xFFFFFFFF);
   }
 
   return msg->size;
@@ -308,7 +337,7 @@ int msgq_msg_ready(msgq_queue_t * q){
 
   if (q->read_uid_local != *q->read_uids[id]){
     std::cout << q->endpoint << ": Reader was evicted, reconnecting" << std::endl;
-    msgq_init_subscriber(q);
+    if (msgq_init_subscriber(q) < 0) return -1;
     goto start;
   }
 
@@ -335,7 +364,7 @@ int msgq_msg_recv(msgq_msg_t * msg, msgq_queue_t * q){
 
   if (q->read_uid_local != *q->read_uids[id]){
     std::cout << q->endpoint << ": Reader was evicted, reconnecting" << std::endl;
-    msgq_init_subscriber(q);
+    if (msgq_init_subscriber(q) < 0) return -1;
     goto start;
   }
 
@@ -454,11 +483,14 @@ int msgq_poll(msgq_pollitem_t * items, size_t nitems, int timeout){
 }
 
 bool msgq_all_readers_updated(msgq_queue_t *q) {
-  uint64_t num_readers = *q->num_readers;
+  uint64_t num_readers = std::min<uint64_t>(*q->num_readers, NUM_READERS);
+  bool has_readers = false;
   for (uint64_t i = 0; i < num_readers; i++) {
+    if (*q->read_uids[i] == 0) continue;
+    has_readers = true;
     if (*q->read_valids[i] && *q->write_pointer != *q->read_pointers[i]) {
       return false;
     }
   }
-  return num_readers > 0;
+  return has_readers;
 }

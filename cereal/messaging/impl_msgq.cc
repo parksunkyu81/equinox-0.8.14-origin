@@ -83,7 +83,10 @@ int MSGQSubSocket::connect(Context *context, std::string endpoint, std::string a
     return r;
   }
 
-  msgq_init_subscriber(q);
+  r = msgq_init_subscriber(q);
+  if (r != 0){
+    return r;
+  }
 
   if (conflate){
     q->read_conflate = true;
