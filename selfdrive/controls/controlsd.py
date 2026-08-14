@@ -27,6 +27,7 @@ from selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from selfdrive.controls.lib.latcontrol_angle import LatControlAngle
 from selfdrive.controls.lib.events import Events, ET
 from selfdrive.controls.lib.alertmanager import AlertManager, set_offroad_alert
+from selfdrive.controls.lib.control_activation import apply_control_activation
 from selfdrive.controls.lib.vehicle_model import VehicleModel
 from selfdrive.locationd.calibrationd import Calibration
 from selfdrive.hardware import HARDWARE, TICI, EON
@@ -1353,11 +1354,10 @@ class Controls:
 
         CC = car.CarControl.new_message()
         CC.enabled = self.enabled
-        # Check which actuators can be enabled
-        CC.latActive = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
-                       CS.vEgo >= self.CP.minSteerSpeed and not CS.standstill \
-                       and abs(CS.steeringAngleDeg) < self.CP.maxSteeringAngleDeg
-        CC.longActive = self.active and not self.events.any(ET.OVERRIDE) and self.CP.openpilotLongitudinalControl
+        # CarControl is reconstructed again in publish_logs. Use the same
+        # helper in both places so activation flags cannot be dropped between
+        # lateral control and the vehicle CarController.
+        apply_control_activation(CC, self.active, CS, self.CP, self.events.any(ET.OVERRIDE))
 
         actuators = CC.actuators
         actuators.longControlState = self.LoC.long_control_state
@@ -1682,6 +1682,10 @@ class Controls:
         CC.enabled = self.enabled
         CC.active = self.active
         CC.actuators = actuators
+        # state_control computes these flags on a different temporary
+        # CarControl message. Re-populate them on the message passed to CI.apply
+        # and published to carControl; otherwise both fields default to false.
+        apply_control_activation(CC, self.active, CS, self.CP, self.events.any(ET.OVERRIDE))
 
         orientation_value = self.sm['liveLocationKalman'].orientationNED.value
         if len(orientation_value) > 2:
