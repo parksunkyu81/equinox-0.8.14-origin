@@ -530,10 +530,8 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   homeWidget = new QWidget(this);
   QVBoxLayout* toggleLayout = new QVBoxLayout(homeWidget);
   homeWidget->setObjectName("homeWidget");
-
-  ScrollView *scroller = new ScrollView(homeWidget, this);
-  scroller->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-  vlayout->addWidget(scroller, 1);
+  homeWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+  toggleLayout->setContentsMargins(0, 0, 0, 0);
 
   main_layout->addWidget(homeScreen);
 
@@ -557,6 +555,9 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   QLabel* followingDistanceProfileLabel = new QLabel(
     "Adjusting distance to the vehicle ahead", homeWidget);
   followingDistanceProfileLabel->setObjectName("followingDistanceProfileLabel");
+  followingDistanceProfileLabel->setWordWrap(true);
+  followingDistanceProfileLabel->setMinimumWidth(0);
+  followingDistanceProfileLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
   QComboBox* followingDistanceProfileCombo = new QComboBox(homeWidget);
   followingDistanceProfileCombo->setObjectName("followingDistanceProfileCombo");
   followingDistanceProfileCombo->addItems(QStringList() << "short" << "mid" << "long");
@@ -566,6 +567,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
     Params().put("FollowingDistanceProfile", selected.toStdString());
   });
   QHBoxLayout* layoutBtn_0 = new QHBoxLayout();
+  layoutBtn_0->setContentsMargins(0, 0, 0, 0);
   layoutBtn_0->addWidget(followingDistanceProfileLabel, 1);
   layoutBtn_0->addWidget(followingDistanceProfileCombo, 0);
 
@@ -579,6 +581,9 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   QLabel* commaPedalResistanceLabel = new QLabel(
     "Comma pedal resistance adjustment", homeWidget);
   commaPedalResistanceLabel->setObjectName("commaPedalResistanceLabel");
+  commaPedalResistanceLabel->setWordWrap(true);
+  commaPedalResistanceLabel->setMinimumWidth(0);
+  commaPedalResistanceLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
   QComboBox* commaPedalResistanceCombo = new QComboBox(homeWidget);
   commaPedalResistanceCombo->setObjectName("commaPedalResistanceCombo");
   commaPedalResistanceCombo->addItems(QStringList() << "High" << "Mid" << "Low");
@@ -590,6 +595,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
     Params().put("CommaPedalResistance", selected.toLower().toStdString());
   });
   QHBoxLayout* layoutBtn_5 = new QHBoxLayout();
+  layoutBtn_5->setContentsMargins(0, 0, 0, 0);
   layoutBtn_5->addWidget(commaPedalResistanceLabel, 1);
   layoutBtn_5->addWidget(commaPedalResistanceCombo, 0);
 
@@ -598,6 +604,8 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
     dynamicTR_Gap = "auto";
   QPushButton* dynamicTRGapBtn = new QPushButton("Dynamic Follow Profile : " + dynamicTR_Gap);
   dynamicTRGapBtn->setObjectName("dynamicTRGapBtn");
+  dynamicTRGapBtn->setMinimumWidth(0);
+  dynamicTRGapBtn->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 
   connect(dynamicTRGapBtn, &QPushButton::clicked, [=]() { main_layout->setCurrentWidget(dynamicTRGap); });
   dynamicTRGap = new DynamicTRGap(this);
@@ -610,7 +618,8 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
      main_layout->setCurrentWidget(homeScreen);
   });
   main_layout->addWidget(dynamicTRGap);
-  QHBoxLayout* layoutBtn_1 = new QHBoxLayout(homeWidget);
+  QHBoxLayout* layoutBtn_1 = new QHBoxLayout();
+  layoutBtn_1->setContentsMargins(0, 0, 0, 0);
   layoutBtn_1->addWidget(dynamicTRGapBtn);
   layoutBtn_1->addSpacing(10);
 
@@ -620,6 +629,8 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
     min_tr = "0.9";
   QPushButton* minTrBtn = new QPushButton("Dynamic Follow Min TR (0.85 to 1.3, DEF:0.9) : " + min_tr);
   minTrBtn->setObjectName("minTrBtn");
+  minTrBtn->setMinimumWidth(0);
+  minTrBtn->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 
   connect(minTrBtn, &QPushButton::clicked, [=]() { main_layout->setCurrentWidget(minTR); });
   minTR = new MinTR(this);
@@ -632,7 +643,8 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
      main_layout->setCurrentWidget(homeScreen);
   });
   main_layout->addWidget(minTR);
-  QHBoxLayout* layoutBtn_2 = new QHBoxLayout(homeWidget);
+  QHBoxLayout* layoutBtn_2 = new QHBoxLayout();
+  layoutBtn_2->setContentsMargins(0, 0, 0, 0);
   layoutBtn_2->addWidget(minTrBtn);
   layoutBtn_2->addSpacing(10);
   // =============================================================================================================== //
@@ -641,6 +653,8 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
     global_df_mod = "1.0";
   QPushButton* globalDfModBtn = new QPushButton("Dynamic Follow multiplier (0.85 to 2.5) : " + global_df_mod);
   globalDfModBtn->setObjectName("globalDfModBtn");
+  globalDfModBtn->setMinimumWidth(0);
+  globalDfModBtn->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 
   connect(globalDfModBtn, &QPushButton::clicked, [=]() { main_layout->setCurrentWidget(globalDfMod); });
   globalDfMod = new GlobalDfMod(this);
@@ -653,7 +667,8 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
      main_layout->setCurrentWidget(homeScreen);
   });
   main_layout->addWidget(globalDfMod);
-  QHBoxLayout* layoutBtn_4 = new QHBoxLayout(homeWidget);
+  QHBoxLayout* layoutBtn_4 = new QHBoxLayout();
+  layoutBtn_4->setContentsMargins(0, 0, 0, 0);
   layoutBtn_4->addWidget(globalDfModBtn);
   layoutBtn_4->addSpacing(10);
   // =============================================================================================================== //
@@ -664,6 +679,8 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
 
   QPushButton* lateralControlBtn = new QPushButton(lateral_control);
   lateralControlBtn->setObjectName("lateralControlBtn");
+  lateralControlBtn->setMinimumWidth(0);
+  lateralControlBtn->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   lateralControlBtn->hide();  // Temporarily keep the lateral control selector out of Community.
   connect(lateralControlBtn, &QPushButton::clicked, [=]() { main_layout->setCurrentWidget(lateralControl); });
 
@@ -678,7 +695,8 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
      main_layout->setCurrentWidget(homeScreen);
   });
   main_layout->addWidget(lateralControl);
-  QHBoxLayout* layoutBtn_3 = new QHBoxLayout(homeWidget);
+  QHBoxLayout* layoutBtn_3 = new QHBoxLayout();
+  layoutBtn_3->setContentsMargins(0, 0, 0, 0);
   layoutBtn_3->addWidget(lateralControlBtn);
   layoutBtn_3->addSpacing(10);
   // =============================================================================================================== //
@@ -693,7 +711,10 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   vlayout->addSpacing(10);
   vlayout->addLayout(layoutBtn_4, 1);
   vlayout->addSpacing(10);
-  vlayout->addWidget(scroller, 1);
+  // SettingsWindow already wraps every panel in a ScrollView. Keeping a
+  // second ScrollView here reduced the lower menu width by its viewport and
+  // scrollbar, and created nested horizontal/vertical scrolling on EON.
+  vlayout->addWidget(homeWidget, 0);
 
   QPalette pal = palette();
   pal.setColor(QPalette::Background, QColor(0x29, 0x29, 0x29));
