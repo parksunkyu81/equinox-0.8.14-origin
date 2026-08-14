@@ -369,14 +369,17 @@ class LatControlTorque(LatControl):
             self._safe_float(actual_lateral_accel, 0.0),
             steering_pressed=bool(steering_pressed),
             steer_limited=bool(steer_limited),
-            rate_limited=bool(strong_rate_limited or getattr(self, '_stable_torque_slew_active', False)),
+            # Normal torque slew is expected while following a real curve. The
+            # stability timer below lets it settle; only a strong rate limit is
+            # unsafe for response learning.
+            rate_limited=bool(strong_rate_limited),
             reversal_active=bool(dyn['directionDamping'] or self._low_speed_reversal_guard.boost_suppressed),
             path_unstable=bool(self._path_stability_active))
         eff_lat = float(clip(eff_lat / response_scale, LAT_FACTOR_ABS_MIN, eff_lat))
         eff_fric = float(clip(eff_fric * (1.0 + 0.15 * (response_scale - 1.0)),
                               eff_fric, FRICTION_ABS_MAX))
         if (self._response_compensator.dirty and
-                self._response_compensator.update_count - self._response_last_saved_count >= 3000):
+                self._response_compensator.update_count - self._response_last_saved_count >= 300):
             try:
                 put_nonblocking('TorqueResponseBins', self._response_compensator.serialize())
                 self._response_last_saved_count = self._response_compensator.update_count

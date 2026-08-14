@@ -68,8 +68,10 @@ RESPONSE_SPEED_UPPER_KPH = [20.0, 30.0, 40.0, 60.0, 80.0]
 RESPONSE_INITIAL_V = [0.846, 0.914, 0.867, 0.843, 0.906]
 RESPONSE_MAX_SCALE_V = [1.06, 1.04, 1.09, 1.12, 1.06]
 RESPONSE_TARGET = 0.97
-RESPONSE_MIN_DESIRED_LAT_ACCEL = 0.15
-RESPONSE_STABLE_SECONDS = 0.8
+RESPONSE_MIN_DESIRED_LAT_ACCEL = 0.11
+RESPONSE_STABLE_SECONDS = 0.30
+RESPONSE_SETPOINT_ABS_TOL = 0.020
+RESPONSE_SETPOINT_REL_TOL = 0.080
 RESPONSE_EMA_ALPHA = 0.015
 
 
@@ -145,7 +147,11 @@ class LateralResponseCompensator:
     self.bin_index = self._bin_for_speed(speed)
     bin_changed = self.bin_index != self.last_bin_index
     direction = 1 if desired > 0.0 else (-1 if desired < 0.0 else 0)
-    setpoint_stable = abs(desired - self.last_desired) <= max(0.008, 0.025 * abs(desired))
+    # Model demand naturally moves a few percent on a real constant-radius
+    # corner. Accept that motion while still rejecting an entry transition or
+    # an abrupt path change.
+    setpoint_stable = abs(desired - self.last_desired) <= max(
+      RESPONSE_SETPOINT_ABS_TOL, RESPONSE_SETPOINT_REL_TOL * abs(desired))
     self.frozen = bool(speed < 10.0 or speed > 80.0 or steering_pressed or steer_limited or
                        rate_limited or reversal_active or path_unstable or
                        abs(desired) < RESPONSE_MIN_DESIRED_LAT_ACCEL or
