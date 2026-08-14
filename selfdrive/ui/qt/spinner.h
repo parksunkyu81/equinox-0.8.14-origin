@@ -4,7 +4,7 @@
 #include <QSocketNotifier>
 #include <QWidget>
 
-constexpr QSize spinner_size = QSize(360, 360);
+constexpr QSize spinner_size = QSize(468, 468);
 
 class TrackWidget : public QWidget  {
   Q_OBJECT
