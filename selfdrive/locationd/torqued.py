@@ -992,6 +992,17 @@ class TorqueEstimator:
         self._dyn_actual_authority_ceiling = 0.0
         self._dyn_actual_corner_strength = 0.0
         self._dyn_actual_direction_damping = False
+        self._dyn_response_scale = 1.0
+        self._dyn_response_ratio = 1.0
+        self._dyn_response_bin = 0
+        self._dyn_response_stable = False
+        self._dyn_response_frozen = True
+        self._dyn_response_update_count = 0
+        self._dyn_path_stability_active = False
+        self._dyn_path_wobble_range = 0.0
+        self._dyn_path_wobble_flips = 0
+        self._lane_center_correction_m = 0.0
+        self._lane_center_correction_active = False
         self._model_curvature_guard_active = False
         self._model_curvature_raw = 0.0
         self._model_curvature_filtered = 0.0
@@ -2725,6 +2736,28 @@ class TorqueEstimator:
                         getattr(msg, "dynamicTorqueCornerStrength", 0.0) or 0.0)
                     self._dyn_actual_direction_damping = bool(
                         getattr(msg, "dynamicTorqueDirectionDamping", False))
+                    self._dyn_response_scale = float(
+                        getattr(msg, "dynamicTorqueResponseScale", 1.0) or 1.0)
+                    self._dyn_response_ratio = float(
+                        getattr(msg, "dynamicTorqueResponseRatio", 1.0) or 1.0)
+                    self._dyn_response_bin = int(
+                        getattr(msg, "dynamicTorqueResponseBin", 0) or 0)
+                    self._dyn_response_stable = bool(
+                        getattr(msg, "dynamicTorqueResponseStable", False))
+                    self._dyn_response_frozen = bool(
+                        getattr(msg, "dynamicTorqueResponseFrozen", True))
+                    self._dyn_response_update_count = int(
+                        getattr(msg, "dynamicTorqueResponseUpdateCount", 0) or 0)
+                    self._dyn_path_stability_active = bool(
+                        getattr(msg, "dynamicTorquePathStabilityActive", False))
+                    self._dyn_path_wobble_range = float(
+                        getattr(msg, "dynamicTorquePathWobbleRange", 0.0) or 0.0)
+                    self._dyn_path_wobble_flips = int(
+                        getattr(msg, "dynamicTorquePathWobbleFlips", 0) or 0)
+                    self._lane_center_correction_m = float(
+                        getattr(msg, "laneCenterCorrectionM", 0.0) or 0.0)
+                    self._lane_center_correction_active = bool(
+                        getattr(msg, "laneCenterCorrectionActive", False))
                     self._model_curvature_guard_active = bool(
                         getattr(msg, "modelCurvatureGuardActive", False))
                     self._model_curvature_raw = float(
@@ -3594,6 +3627,25 @@ class TorqueEstimator:
                     round(float(dyn_blend), 4) if dyn_source == "controlsState_actual" else None),
                 "dyn_authority_ceiling": round(float(dyn_ceiling), 4),
                 "dyn_direction_damping": bool(dyn_direction_damping),
+                "dyn_response_scale": round(float(getattr(
+                    self, "_dyn_response_scale", 1.0) or 1.0), 5),
+                "dyn_response_ratio": round(float(getattr(
+                    self, "_dyn_response_ratio", 1.0) or 1.0), 5),
+                "dyn_response_bin": int(getattr(self, "_dyn_response_bin", 0) or 0),
+                "dyn_response_stable": bool(getattr(self, "_dyn_response_stable", False)),
+                "dyn_response_frozen": bool(getattr(self, "_dyn_response_frozen", True)),
+                "dyn_response_update_count": int(getattr(
+                    self, "_dyn_response_update_count", 0) or 0),
+                "dyn_path_stability_active": bool(getattr(
+                    self, "_dyn_path_stability_active", False)),
+                "dyn_path_wobble_range": round(float(getattr(
+                    self, "_dyn_path_wobble_range", 0.0) or 0.0), 5),
+                "dyn_path_wobble_flips": int(getattr(
+                    self, "_dyn_path_wobble_flips", 0) or 0),
+                "lane_center_correction_m": round(float(getattr(
+                    self, "_lane_center_correction_m", 0.0) or 0.0), 5),
+                "lane_center_correction_active": bool(getattr(
+                    self, "_lane_center_correction_active", False)),
                 "model_curvature_guard_active": bool(getattr(
                     self, "_model_curvature_guard_active", False)),
                 "model_curvature_raw": round(float(getattr(

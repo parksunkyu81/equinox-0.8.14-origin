@@ -13,6 +13,7 @@ from selfdrive.controls.lib.lane_probability import combined_lane_probability, \
                                                     enhance_lane_probability, \
                                                     limit_lane_probability_rise
 from selfdrive.controls.lib.model_data_validation import as_finite_vector
+from selfdrive.controls.lib.lateral_path_stability import LaneCenterCorrection
 
 ENABLE_ZORROBYTE = False
 ENABLE_INC_LANE_PROB = True
@@ -72,6 +73,9 @@ class LanePlanner:
     self.lp_timer = 0
     self.lp_timer2 = 0
     self.lp_timer3 = 0
+    self._lane_center = LaneCenterCorrection()
+    self.lane_center_correction_m = 0.0
+    self.lane_center_correction_active = False
 
   def parse_model(self, md):
 
@@ -150,7 +154,8 @@ class LanePlanner:
       self.l_lane_change_prob = 0.0
       self.r_lane_change_prob = 0.0
 
-  def get_d_path(self, v_ego, path_t, path_xyz):
+  def get_d_path(self, v_ego, path_t, path_xyz, measured_curvature=0.0,
+                 lane_change_active=False):
     # Reduce reliance on lanelines that are too far apart or
     # will be in a few seconds
     path_xyz[:, 1] += self.path_offset
@@ -214,6 +219,24 @@ class LanePlanner:
     if safe_idxs[0]:
       lane_path_y_interp = np.interp(path_t, self.ll_t[safe_idxs], lane_path_y[safe_idxs])
       path_xyz[:,1] = self.d_prob * lane_path_y_interp + (1.0 - self.d_prob) * path_xyz[:,1]
+
+      lane_y_20m = float(np.interp(20.0, self.ll_x, lane_path_y))
+      path_y_20m = float(np.interp(20.0, path_xyz[:, 0], path_xyz[:, 1]))
+      residual_20m = lane_y_20m - path_y_20m
+      center_eligible = bool(
+        float(v_ego) * 3.6 >= 30.0 and
+        abs(float(measured_curvature)) <= 0.0012 and
+        not bool(lane_change_active) and
+        l_prob >= 0.50 and r_prob >= 0.50 and
+        self.lll_std <= 0.20 and self.rll_std <= 0.20 and
+        2.5 <= float(self.lane_width) <= 4.0
+      )
+      self.lane_center_correction_m = self._lane_center.update(
+        residual_20m, center_eligible, DT_MDL)
+      distance_weight = np.clip(path_xyz[:, 0] / 20.0, 0.0, 1.0)
+      path_xyz[:, 1] += self.lane_center_correction_m * distance_weight
     else:
       cloudlog.warning("Lateral mpc - NaNs in laneline times, ignoring")
+      self.lane_center_correction_m = self._lane_center.update(0.0, False, DT_MDL)
+    self.lane_center_correction_active = bool(self._lane_center.active)
     return path_xyz

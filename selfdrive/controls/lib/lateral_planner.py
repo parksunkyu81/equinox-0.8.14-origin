@@ -10,6 +10,7 @@ import cereal.messaging as messaging
 from cereal import log
 from common.params import Params
 from selfdrive.controls.lib.model_data_validation import as_finite_vector, validated_model_trajectory
+from selfdrive.controls.lib.lateral_path_stability import PathStabilityMonitor
 
 TRAJECTORY_SIZE = 33
 
@@ -35,6 +36,8 @@ class LateralPlanner:
     self.t_idxs = np.arange(TRAJECTORY_SIZE)
     self.y_pts = np.zeros(TRAJECTORY_SIZE)
     self.model_data_valid = False
+    self._path_stability = PathStabilityMonitor()
+    self._stable_path_xyz = None
 
     self.lat_mpc = LateralMpc()
     self.reset_mpc(np.zeros(4))
@@ -80,16 +83,32 @@ class LateralPlanner:
       self.LP.rll_prob *= self.DH.lane_change_ll_prob
 
     # Calculate final driving path and set MPC costs
+    lane_change_active = self.DH.lane_change_state != log.LateralPlan.LaneChangeState.off
     if self.use_lanelines:
       # LanePlanner applies its offset in-place; a copy prevents an invalid
       # model frame from accumulating the offset on the last valid trajectory.
-      d_path_xyz = self.LP.get_d_path(v_ego, self.t_idxs, self.path_xyz.copy())
+      d_path_xyz = self.LP.get_d_path(
+        v_ego, self.t_idxs, self.path_xyz.copy(),
+        measured_curvature=measured_curvature,
+        lane_change_active=lane_change_active)
       self.lat_mpc.set_weights(MPC_COST_LAT.PATH, MPC_COST_LAT.HEADING, MPC_COST_LAT.STEER_RATE)
     else:
       d_path_xyz = self.path_xyz
       # Heading cost is useful at low speed, otherwise end of plan can be off-heading
       heading_cost = interp(v_ego, [5.0, 10.0], [MPC_COST_LAT.HEADING, 0.15])
       self.lat_mpc.set_weights(MPC_COST_LAT.PATH, heading_cost, MPC_COST_LAT.STEER_RATE)
+
+    path_y_20m = float(np.interp(20.0, d_path_xyz[:, 0], d_path_xyz[:, 1]))
+    if lane_change_active:
+      self._path_stability.reset()
+      path_unstable = False
+    else:
+      path_unstable = self._path_stability.update(path_y_20m)
+    if path_unstable and self._stable_path_xyz is not None and self._stable_path_xyz.shape == d_path_xyz.shape:
+      # Filter only lateral position. Keeping model x/z current avoids changing
+      # MPC timing or longitudinal distance while an alternating path settles.
+      d_path_xyz[:, 1] = 0.90 * self._stable_path_xyz[:, 1] + 0.10 * d_path_xyz[:, 1]
+    self._stable_path_xyz = d_path_xyz.copy()
 
     y_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], np.linalg.norm(d_path_xyz, axis=1), d_path_xyz[:, 1])
     heading_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], np.linalg.norm(self.path_xyz, axis=1), self.plan_yaw)
@@ -155,5 +174,11 @@ class LateralPlanner:
     lateralPlan.autoLaneChangeTimer = int(AUTO_LCA_START_TIME) - int(self.DH.auto_lane_change_timer)
 
     lateralPlan.totalCameraOffset = float(self.LP.total_camera_offset)
+    path_stability = self._path_stability.diagnostics()
+    lateralPlan.pathStabilityActive = bool(path_stability['active'])
+    lateralPlan.pathWobbleRangeM = float(path_stability['rangeM'])
+    lateralPlan.pathWobbleFlips = int(path_stability['flips'])
+    lateralPlan.laneCenterCorrectionM = float(self.LP.lane_center_correction_m)
+    lateralPlan.laneCenterCorrectionActive = bool(self.LP.lane_center_correction_active)
 
     pm.send('lateralPlan', plan_send)

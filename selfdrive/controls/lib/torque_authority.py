@@ -6,6 +6,8 @@ those jobs separate prevents transient corner assistance from contaminating
 the persistent learned values.
 """
 
+import json
+
 from common.numpy_fast import clip, interp
 
 
@@ -17,9 +19,9 @@ AUTHORITY_SPEED_BP = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0,
 # on top of an already valid model. The new envelope is intentionally modest;
 # the speed-dependent ceiling below reduces the actually applied change again.
 AUTHORITY_LAT_FACTOR_SCALE_V = [1.000, 0.985, 0.960, 0.945, 0.940, 0.940,
-                                0.950, 0.970, 0.990, 1.000, 1.000, 1.000, 1.000]
+                                0.945, 0.955, 0.970, 0.995, 1.000, 1.000, 1.000]
 AUTHORITY_FRICTION_SCALE_V = [1.000, 1.015, 1.040, 1.060, 1.080, 1.080,
-                              1.070, 1.045, 1.020, 1.000, 1.000, 1.000, 1.000]
+                              1.075, 1.065, 1.045, 1.010, 1.000, 1.000, 1.000]
 AUTHORITY_LAT_FACTOR_DOWN_V = [0.000, 0.015, 0.040, 0.055, 0.060, 0.060,
                                0.050, 0.030, 0.010, 0.000, 0.000, 0.000, 0.000]
 AUTHORITY_FRICTION_UP_V = [0.000, 0.015, 0.040, 0.060, 0.080, 0.080,
@@ -29,7 +31,7 @@ AUTHORITY_FRICTION_UP_V = [0.000, 0.015, 0.040, 0.060, 0.080, 0.080,
 # learned 1.948/0.168 values seen in the 2026-08-13 log to roughly 1.872/0.177
 # at 25-30 km/h instead of the previous 1.75/0.202 extreme.
 AUTHORITY_MAX_BP = [0.0, 8.0, 10.0, 15.0, 25.0, 35.0, 45.0, 60.0, 80.0, 130.0]
-AUTHORITY_MAX_V = [0.00, 0.00, 0.30, 0.55, 0.65, 0.60, 0.45, 0.25, 0.00, 0.00]
+AUTHORITY_MAX_V = [0.00, 0.00, 0.30, 0.55, 0.65, 0.62, 0.55, 0.50, 0.12, 0.00]
 
 CORNER_CURVATURE_BP = [0.00030, 0.00180]
 CORNER_LAT_ACCEL_BP = [0.08, 0.85]
@@ -59,6 +61,137 @@ LAT_FACTOR_ABS_MIN = 1.75
 LAT_FACTOR_ABS_MAX = 2.42
 FRICTION_ABS_MIN = 0.165
 FRICTION_ABS_MAX = 0.305
+
+# Closed-loop response compensation. Initial response values come from the
+# 2026-08-14 Equinox log and are subsequently adapted independently per bin.
+RESPONSE_SPEED_UPPER_KPH = [20.0, 30.0, 40.0, 60.0, 80.0]
+RESPONSE_INITIAL_V = [0.846, 0.914, 0.867, 0.843, 0.906]
+RESPONSE_MAX_SCALE_V = [1.06, 1.04, 1.09, 1.12, 1.06]
+RESPONSE_TARGET = 0.97
+RESPONSE_MIN_DESIRED_LAT_ACCEL = 0.15
+RESPONSE_STABLE_SECONDS = 0.8
+RESPONSE_EMA_ALPHA = 0.015
+
+
+class LateralResponseCompensator:
+  """Learn bounded actual/desired lateral response in independent speed bins."""
+
+  def __init__(self, serialized_state=None):
+    self.responses = list(RESPONSE_INITIAL_V)
+    self.counts = [0] * len(RESPONSE_SPEED_UPPER_KPH)
+    self.stable_seconds = 0.0
+    self.last_direction = 0
+    self.last_desired = 0.0
+    self.last_bin_index = 0
+    self.scale = 1.0
+    self.ratio = 1.0
+    self.bin_index = 0
+    self.stable = False
+    self.frozen = True
+    self.update_count = 0
+    self.dirty = False
+    self.load(serialized_state)
+
+  def reset_transient(self):
+    self.stable_seconds = 0.0
+    self.last_direction = 0
+    self.last_desired = 0.0
+    self.last_bin_index = self.bin_index
+    self.scale = 1.0
+    self.ratio = 1.0
+    self.stable = False
+    self.frozen = True
+
+  @staticmethod
+  def _bin_for_speed(v_kph):
+    speed = float(v_kph)
+    for index, upper in enumerate(RESPONSE_SPEED_UPPER_KPH):
+      if speed < upper:
+        return index
+    return len(RESPONSE_SPEED_UPPER_KPH) - 1
+
+  def load(self, serialized_state):
+    if not serialized_state:
+      return
+    try:
+      if isinstance(serialized_state, bytes):
+        serialized_state = serialized_state.decode('utf8')
+      state = json.loads(serialized_state)
+      responses = state.get('responses', [])
+      counts = state.get('counts', [])
+      if len(responses) == len(self.responses):
+        self.responses = [float(clip(float(v), 0.72, 1.08)) for v in responses]
+      if len(counts) == len(self.counts):
+        self.counts = [max(0, int(v)) for v in counts]
+      self.update_count = max(0, int(state.get('updateCount', sum(self.counts))))
+    except Exception:
+      pass
+
+  def serialize(self):
+    return json.dumps({
+      'version': 1,
+      'speedUpperBoundsKph': RESPONSE_SPEED_UPPER_KPH,
+      'responses': [round(v, 6) for v in self.responses],
+      'counts': self.counts,
+      'updateCount': self.update_count,
+    }, separators=(',', ':'))
+
+  def update(self, v_kph, desired_lat, actual_lat, dt=0.01, steering_pressed=False,
+             steer_limited=False, rate_limited=False, reversal_active=False,
+             path_unstable=False):
+    speed = max(0.0, float(v_kph))
+    desired = float(desired_lat)
+    actual = float(actual_lat)
+    self.bin_index = self._bin_for_speed(speed)
+    bin_changed = self.bin_index != self.last_bin_index
+    direction = 1 if desired > 0.0 else (-1 if desired < 0.0 else 0)
+    setpoint_stable = abs(desired - self.last_desired) <= max(0.008, 0.025 * abs(desired))
+    self.frozen = bool(speed < 10.0 or speed > 80.0 or steering_pressed or steer_limited or
+                       rate_limited or reversal_active or path_unstable or
+                       abs(desired) < RESPONSE_MIN_DESIRED_LAT_ACCEL or
+                       direction == 0 or actual * desired <= 0.0)
+
+    if self.frozen:
+      self.stable_seconds = 0.0
+      self.last_direction = direction
+    else:
+      if direction != self.last_direction or bin_changed or not setpoint_stable:
+        self.stable_seconds = 0.0
+      self.last_direction = direction
+      self.stable_seconds += max(0.0, float(dt))
+    self.last_desired = desired
+    self.last_bin_index = self.bin_index
+
+    self.stable = bool(not self.frozen and self.stable_seconds >= RESPONSE_STABLE_SECONDS)
+    raw_ratio = float(clip(abs(actual) / max(abs(desired), 1e-3), 0.55, 1.20))
+    if self.stable:
+      idx = self.bin_index
+      self.responses[idx] += RESPONSE_EMA_ALPHA * (raw_ratio - self.responses[idx])
+      self.responses[idx] = float(clip(self.responses[idx], 0.72, 1.08))
+      self.counts[idx] += 1
+      self.update_count += 1
+      self.dirty = True
+
+    self.ratio = float(self.responses[self.bin_index])
+    max_scale = float(RESPONSE_MAX_SCALE_V[self.bin_index])
+    requested_scale = float(clip(RESPONSE_TARGET / max(self.ratio, 0.01), 1.0, max_scale))
+    # Do not add learned authority while the sample is unsafe. Ramp down much
+    # faster than ramp-up so model wobble cannot be amplified.
+    target_scale = 1.0 if self.frozen else requested_scale
+    step = 0.025 if target_scale < self.scale else 0.0025
+    self.scale += float(clip(target_scale - self.scale, -step, step))
+    self.scale = float(clip(self.scale, 1.0, max_scale))
+    return self.scale
+
+  def diagnostics(self):
+    return {
+      'scale': float(self.scale),
+      'ratio': float(self.ratio),
+      'bin': int(self.bin_index),
+      'stable': bool(self.stable),
+      'frozen': bool(self.frozen),
+      'updateCount': int(self.update_count),
+    }
 
 
 def authority_confidence(total_points):
@@ -122,7 +255,8 @@ class DynamicTorqueAuthorityScheduler:
   def update(self, v_kph, desired_curvature, desired_lateral_accel,
              steering_pressed=False, strong_driver_override=False,
              steer_limited=False, strong_rate_limited=False,
-             torque_slew_active=False, output_reversal_active=False):
+             torque_slew_active=False, output_reversal_active=False,
+             path_unstable=False):
     speed = max(0.0, float(v_kph))
     curvature = float(desired_curvature)
     strength = corner_strength(curvature, desired_lateral_accel)
@@ -154,7 +288,11 @@ class DynamicTorqueAuthorityScheduler:
     # No forced minimum boost: authority is proportional only to the model's
     # current curvature/lateral-acceleration demand.
     target = strength * max(low_gate, mid_gate, high_gate)
-    if strong_driver_override:
+    if path_unstable:
+      target = 0.0
+      self.hold_frames = 0
+      self.boost = min(self.boost, DIRECTION_REVERSAL_BOOST_CAP)
+    elif strong_driver_override:
       target = 0.0
       self.hold_frames = 0
       self.boost = min(self.boost, DIRECTION_REVERSAL_BOOST_CAP)
@@ -199,5 +337,6 @@ class DynamicTorqueAuthorityScheduler:
       'directionReversal': reversal,
       'directionDamping': direction_damping,
       'outputReversalActive': bool(output_reversal_active),
+      'pathUnstable': bool(path_unstable),
       'holdFrames': self.hold_frames,
     }

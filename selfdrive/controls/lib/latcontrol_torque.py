@@ -5,12 +5,15 @@ from common.numpy_fast import interp, clip
 from selfdrive.controls.lib.latcontrol import LatControl, MIN_STEER_SPEED
 from selfdrive.controls.lib.pid import PIDController
 from selfdrive.controls.lib.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
-from common.params import Params
+from common.params import Params, put_nonblocking
 from decimal import Decimal
 import cereal.messaging as messaging
 from selfdrive.car.gm.steering_limits import STEER_DELTA_BP_KPH, STEER_DELTA_DOWN_V, STEER_DELTA_UP_V
 from selfdrive.controls.lib.low_speed_torque_guard import LowSpeedTorqueReversalGuard
-from selfdrive.controls.lib.torque_authority import DynamicTorqueAuthorityScheduler, effective_torque_params
+from selfdrive.controls.lib.torque_authority import (DynamicTorqueAuthorityScheduler,
+                                                     LateralResponseCompensator,
+                                                     LAT_FACTOR_ABS_MIN, FRICTION_ABS_MAX,
+                                                     effective_torque_params)
 from selfdrive.controls.lib.v0813_lateral_compat import V0813CurvatureGuard
 
 # At higher speeds (25+mph) we can assume:
@@ -151,9 +154,26 @@ class LatControlTorque(LatControl):
         self._dyn_last_rate_limited_strong = False
         self._dyn_last_target_delta_up = 12.0
         self._dyn_last_target_delta_down = 20.0
+        self._path_stability_active = False
+        self._path_wobble_range_m = 0.0
+        self._path_wobble_flips = 0
+        try:
+            response_state = Params().get('TorqueResponseBins')
+        except Exception:
+            response_state = None
+        self._response_compensator = LateralResponseCompensator(response_state)
+        self._response_last_saved_count = self._response_compensator.update_count
         self._dir_torque_assist_left = 1.0
         self._dir_torque_assist_right = 1.0
         self._dir_torque_last_side = 0
+
+    def set_path_stability(self, active, range_m=0.0, flips=0):
+        self._path_stability_active = bool(active)
+        self._path_wobble_range_m = max(0.0, self._safe_float(range_m, 0.0))
+        try:
+            self._path_wobble_flips = max(0, int(flips))
+        except Exception:
+            self._path_wobble_flips = 0
 
     def update_live_torque_params(self, latAccelFactor, latAccelOffset, friction, totalBucketPoints=0):
         try:
@@ -334,7 +354,8 @@ class LatControlTorque(LatControl):
             steer_limited=bool(steer_limited),
             strong_rate_limited=strong_rate_limited,
             torque_slew_active=bool(getattr(self, '_stable_torque_slew_active', False)),
-            output_reversal_active=bool(self._low_speed_reversal_guard.boost_suppressed))
+            output_reversal_active=bool(self._low_speed_reversal_guard.boost_suppressed),
+            path_unstable=bool(self._path_stability_active))
         authority_request = float(dyn['authorityRequest'])
         self._dyn_corner_boost = authority_request
         self._dyn_corner_hold_frames = int(dyn['holdFrames'])
@@ -343,6 +364,25 @@ class LatControlTorque(LatControl):
         eff_lat, eff_fric, blend = effective_torque_params(
             base_lat, base_fric, v_kph, authority_request, total_pts
         )
+        response_scale = self._response_compensator.update(
+            v_kph, self._safe_float(desired_lateral_accel, 0.0),
+            self._safe_float(actual_lateral_accel, 0.0),
+            steering_pressed=bool(steering_pressed),
+            steer_limited=bool(steer_limited),
+            rate_limited=bool(strong_rate_limited or getattr(self, '_stable_torque_slew_active', False)),
+            reversal_active=bool(dyn['directionDamping'] or self._low_speed_reversal_guard.boost_suppressed),
+            path_unstable=bool(self._path_stability_active))
+        eff_lat = float(clip(eff_lat / response_scale, LAT_FACTOR_ABS_MIN, eff_lat))
+        eff_fric = float(clip(eff_fric * (1.0 + 0.15 * (response_scale - 1.0)),
+                              eff_fric, FRICTION_ABS_MAX))
+        if (self._response_compensator.dirty and
+                self._response_compensator.update_count - self._response_last_saved_count >= 3000):
+            try:
+                put_nonblocking('TorqueResponseBins', self._response_compensator.serialize())
+                self._response_last_saved_count = self._response_compensator.update_count
+                self._response_compensator.dirty = False
+            except Exception:
+                pass
         self._dyn_last_blend = float(blend)
 
         self._dyn_last_corner_strength = float(dyn['cornerStrength'])
@@ -364,7 +404,7 @@ class LatControlTorque(LatControl):
         }
         # BUGFIX: 실제 적용 effective 값을 self.live_torque_params에도 반영한다.
         # base는 _dyn_base_live_torque_params에 따로 보존하므로, 코너가 끝나면 원래 학습값으로 정상 복귀한다.
-        self._dyn_effective_active = bool(blend > 1e-4)
+        self._dyn_effective_active = bool(blend > 1e-4 or response_scale > 1.0001)
         self.live_torque_params = dict(self._dyn_last_effective_params if self._dyn_effective_active else base_params)
         return self.live_torque_params
 
@@ -403,6 +443,18 @@ class LatControlTorque(LatControl):
             'targetDeltaDown': float(getattr(self, '_dyn_last_target_delta_down', 0.0) or 0.0),
             'rateLimitedStrong': bool(getattr(self, '_dyn_last_rate_limited_strong', False)),
         }
+        response_debug = self._response_compensator.diagnostics()
+        debug.update({
+            'responseScale': float(response_debug['scale']),
+            'responseRatio': float(response_debug['ratio']),
+            'responseBin': int(response_debug['bin']),
+            'responseStable': bool(response_debug['stable']),
+            'responseFrozen': bool(response_debug['frozen']),
+            'responseUpdateCount': int(response_debug['updateCount']),
+            'pathStabilityActive': bool(self._path_stability_active),
+            'pathWobbleRangeM': float(self._path_wobble_range_m),
+            'pathWobbleFlips': int(self._path_wobble_flips),
+        })
         debug.update(self._model_curvature_guard.diagnostics())
         reversal_debug = self._low_speed_reversal_guard.diagnostics()
         debug.update({
@@ -475,6 +527,7 @@ class LatControlTorque(LatControl):
             self._dyn_prev_rate_limit_err = 0.0
             self._dyn_effective_active = False
             self._dyn_last_blend = 0.0
+            self._response_compensator.reset_transient()
             if hasattr(self, '_dyn_base_live_torque_params'):
                 self.live_torque_params = dict(self._dyn_base_live_torque_params)
         else:

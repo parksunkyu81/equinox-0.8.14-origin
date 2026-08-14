@@ -1354,6 +1354,11 @@ class Controls:
 
         lat_plan = self.sm['lateralPlan']
         long_plan = self.sm['longitudinalPlan']
+        if hasattr(self.LaC, 'set_path_stability'):
+            self.LaC.set_path_stability(
+              bool(getattr(lat_plan, 'pathStabilityActive', False)),
+              float(getattr(lat_plan, 'pathWobbleRangeM', 0.0)),
+              int(getattr(lat_plan, 'pathWobbleFlips', 0)))
 
         CC = car.CarControl.new_message()
         CC.enabled = self.enabled
@@ -1875,6 +1880,19 @@ class Controls:
             controlsState.dynamicTorqueAuthorityCeiling = float(dyn_torque['authorityCeiling'])
             controlsState.dynamicTorqueCornerStrength = float(dyn_torque['corner_strength'])
             controlsState.dynamicTorqueDirectionDamping = bool(dyn_torque['directionDamping'])
+            controlsState.dynamicTorqueResponseScale = float(dyn_torque['responseScale'])
+            controlsState.dynamicTorqueResponseRatio = float(dyn_torque['responseRatio'])
+            controlsState.dynamicTorqueResponseBin = int(dyn_torque['responseBin'])
+            controlsState.dynamicTorqueResponseStable = bool(dyn_torque['responseStable'])
+            controlsState.dynamicTorqueResponseFrozen = bool(dyn_torque['responseFrozen'])
+            controlsState.dynamicTorqueResponseUpdateCount = int(dyn_torque['responseUpdateCount'])
+            controlsState.dynamicTorquePathStabilityActive = bool(dyn_torque['pathStabilityActive'])
+            controlsState.dynamicTorquePathWobbleRange = float(dyn_torque['pathWobbleRangeM'])
+            controlsState.dynamicTorquePathWobbleFlips = int(dyn_torque['pathWobbleFlips'])
+            controlsState.laneCenterCorrectionM = float(
+              getattr(self.sm['lateralPlan'], 'laneCenterCorrectionM', 0.0))
+            controlsState.laneCenterCorrectionActive = bool(
+              getattr(self.sm['lateralPlan'], 'laneCenterCorrectionActive', False))
             controlsState.modelCurvatureGuardActive = bool(dyn_torque['modelCurvatureGuardActive'])
             controlsState.modelCurvatureRaw = float(dyn_torque['modelCurvatureRaw'])
             controlsState.modelCurvatureFiltered = float(dyn_torque['modelCurvatureFiltered'])

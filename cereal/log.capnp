@@ -745,6 +745,19 @@ struct ControlsState @0x97ff69c53601abf1 {
   movingGapCatchupCount @191 :UInt32;
   movingGapCatchupLeadJump @192 :Bool;
 
+  # Per-speed closed-loop lateral response and model-path stability.
+  dynamicTorqueResponseScale @193 :Float32;
+  dynamicTorqueResponseRatio @194 :Float32;
+  dynamicTorqueResponseBin @195 :UInt8;
+  dynamicTorqueResponseStable @196 :Bool;
+  dynamicTorqueResponseFrozen @197 :Bool;
+  dynamicTorqueResponseUpdateCount @198 :UInt32;
+  dynamicTorquePathStabilityActive @199 :Bool;
+  dynamicTorquePathWobbleRange @200 :Float32;
+  dynamicTorquePathWobbleFlips @201 :UInt8;
+  laneCenterCorrectionM @202 :Float32;
+  laneCenterCorrectionActive @203 :Bool;
+
 
 
   enum OpenpilotState @0xdbe58b96d2d1ac61 {
@@ -1096,6 +1109,11 @@ struct LateralPlan @0xe1e9318e2ae8b51e {
   autoLaneChangeEnabled @31 :Bool;
   autoLaneChangeTimer @32 :Int8;
   totalCameraOffset @34 :Float32;
+  pathStabilityActive @35 :Bool;
+  pathWobbleRangeM @36 :Float32;
+  pathWobbleFlips @37 :UInt8;
+  laneCenterCorrectionM @38 :Float32;
+  laneCenterCorrectionActive @39 :Bool;
 
   enum Desire {
     none @0;
