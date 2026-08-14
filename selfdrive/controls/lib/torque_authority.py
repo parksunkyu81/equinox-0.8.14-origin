@@ -68,7 +68,10 @@ RESPONSE_SPEED_UPPER_KPH = [20.0, 30.0, 40.0, 60.0, 80.0]
 RESPONSE_INITIAL_V = [0.846, 0.914, 0.867, 0.843, 0.906]
 RESPONSE_MAX_SCALE_V = [1.06, 1.04, 1.09, 1.12, 1.06]
 RESPONSE_TARGET = 0.97
-RESPONSE_MIN_DESIRED_LAT_ACCEL = 0.11
+# Lateral acceleration is curvature * speed^2, so one global minimum excluded
+# valid low-speed corners even after long drives.  Keep a meaningful floor in
+# every speed bin while allowing the 10-30 km/h bins to collect real samples.
+RESPONSE_MIN_DESIRED_LAT_ACCEL_V = [0.035, 0.060, 0.085, 0.100, 0.110]
 RESPONSE_STABLE_SECONDS = 0.30
 RESPONSE_SETPOINT_ABS_TOL = 0.020
 RESPONSE_SETPOINT_REL_TOL = 0.080
@@ -145,6 +148,7 @@ class LateralResponseCompensator:
     desired = float(desired_lat)
     actual = float(actual_lat)
     self.bin_index = self._bin_for_speed(speed)
+    min_desired_lat_accel = RESPONSE_MIN_DESIRED_LAT_ACCEL_V[self.bin_index]
     bin_changed = self.bin_index != self.last_bin_index
     direction = 1 if desired > 0.0 else (-1 if desired < 0.0 else 0)
     # Model demand naturally moves a few percent on a real constant-radius
@@ -154,7 +158,7 @@ class LateralResponseCompensator:
       RESPONSE_SETPOINT_ABS_TOL, RESPONSE_SETPOINT_REL_TOL * abs(desired))
     self.frozen = bool(speed < 10.0 or speed > 80.0 or steering_pressed or steer_limited or
                        rate_limited or reversal_active or path_unstable or
-                       abs(desired) < RESPONSE_MIN_DESIRED_LAT_ACCEL or
+                       abs(desired) < min_desired_lat_accel or
                        direction == 0 or actual * desired <= 0.0)
 
     if self.frozen:
