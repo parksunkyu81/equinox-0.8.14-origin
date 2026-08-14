@@ -763,6 +763,16 @@ struct ControlsState @0x97ff69c53601abf1 {
   followingDistanceLearnedTROffset @207 :Float32;
   followingDistanceProfileChanging @208 :Bool;
 
+  # User-selected comma-pedal response and the gain/command actually applied.
+  commaPedalResistanceProfile @209 :Text;
+  commaPedalProfileGain @210 :Float32;
+  commaPedalLearnedGain @211 :Float32;
+  commaPedalEffectiveGain @212 :Float32;
+  commaPedalProfileChanging @213 :Bool;
+  commaPedalRawCommand @214 :Float32;
+  commaPedalStyledCommand @215 :Float32;
+  commaPedalFinalCommand @216 :Float32;
+
 
 
   enum OpenpilotState @0xdbe58b96d2d1ac61 {

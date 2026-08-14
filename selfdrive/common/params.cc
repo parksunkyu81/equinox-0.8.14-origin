@@ -218,6 +218,7 @@ std::unordered_map<std::string, uint32_t> keys = {
     {"TorqueMaxLatAccel", PERSISTENT},
     {"TorqueResponseBins", PERSISTENT | DONT_LOG},
     {"FollowingDistanceProfile", PERSISTENT},
+    {"CommaPedalResistance", PERSISTENT},
 
     {"IsLiveTorque", PERSISTENT},
     {"IsLowSpeedFactor", PERSISTENT},

@@ -53,6 +53,10 @@ from selfdrive.controls.lib.natural_decel_learner import NaturalDecelLearner, se
 from selfdrive.controls.lib.panda_safety import panda_safety_config_matches, update_panda_safety_readiness
 from selfdrive.controls.lib.process_health import expected_not_running_processes, update_process_not_running_state
 from selfdrive.controls.lib.driving_style_learner import DrivingStyleLearner
+from selfdrive.controls.lib.comma_pedal_profile import (
+  CommaPedalProfileController, combine_comma_pedal_gain,
+  normalize_comma_pedal_profile,
+)
 from selfdrive.controls.lib.pedal_force_recovery import (
   PEDAL_FORCE_RECOVERY_PEDAL_FLOOR, RECOVERY_MODE_HARD_ZERO,
   RECOVERY_MODE_LEAD_COAST_ASSIST, RECOVERY_MODE_LEAD_LOSS_CRUISE,
@@ -71,6 +75,7 @@ SOFT_DISABLE_TIME = 3  # seconds
 PANDA_SAFETY_MATCH_FRAMES = 10  # 100 ms at 100 Hz
 CONTROLS_ALLOWED_MISMATCH_FRAMES = 25  # 250 ms at 100 Hz
 PROCESS_NOT_RUNNING_CONSECUTIVE_UPDATES = 3
+COMMA_PEDAL_PARAM_REFRESH_FRAMES = max(1, int(0.2 / DT_CTRL))
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
@@ -118,6 +123,7 @@ class Controls:
             self.camera_packets.append("wideRoadCameraState")
 
         params = Params()
+        self.params = params
         self.joystick_mode = params.get_bool("JoystickDebugMode")
         joystick_packet = ['testJoystick'] if self.joystick_mode else []
 
@@ -290,6 +296,17 @@ class Controls:
         self.driving_style_learner = DrivingStyleLearner(params=params)
         self.driving_style_status = self.driving_style_learner.status(0.0)
         self.driving_style_gain = 1.0
+        self.comma_pedal_profile = normalize_comma_pedal_profile(
+          params.get("CommaPedalResistance", encoding="utf8") or 'mid')
+        self.comma_pedal_profile_controller = CommaPedalProfileController(
+          self.comma_pedal_profile)
+        self.comma_pedal_profile_gain = 1.0
+        self.comma_pedal_learned_gain = 1.0
+        self.comma_pedal_effective_gain = 1.0
+        self.comma_pedal_profile_changing = False
+        self.comma_pedal_raw_command = 0.0
+        self.comma_pedal_styled_command = 0.0
+        self.comma_pedal_final_command = 0.0
 
         self.wide_camera = TICI and params.get_bool('EnableWideCamera')
         self.disable_op_fcw = params.get_bool('DisableOpFcw')
@@ -715,6 +732,14 @@ class Controls:
               "predictive_coast_low_speed_learned_active": bool(
                 self.predictive_coasting.learned_low_speed_offset_active),
               "predictive_coast_ai_gain": round(float(self.driving_style_gain), 4),
+              "comma_pedal_profile": str(self.comma_pedal_profile),
+              "comma_pedal_profile_gain": round(float(self.comma_pedal_profile_gain), 4),
+              "comma_pedal_learned_gain": round(float(self.comma_pedal_learned_gain), 4),
+              "comma_pedal_effective_gain": round(float(self.comma_pedal_effective_gain), 4),
+              "comma_pedal_profile_changing": bool(self.comma_pedal_profile_changing),
+              "comma_pedal_raw_command": round(float(self.comma_pedal_raw_command), 5),
+              "comma_pedal_styled_command": round(float(self.comma_pedal_styled_command), 5),
+              "comma_pedal_final_command": round(float(self.comma_pedal_final_command), 5),
               "predictive_coast_last_pedal": round(float(self.last_actuators.gas), 5),
               "predictive_coast_source": self.predictive_coasting.dominant_source,
               "stop_accel_boost_floor_allowed": bool(
@@ -1635,6 +1660,18 @@ class Controls:
                 lac_log.output = steer
                 lac_log.saturated = abs(steer) >= 0.9
 
+        if self.sm.frame % COMMA_PEDAL_PARAM_REFRESH_FRAMES == 0:
+            self.comma_pedal_profile = normalize_comma_pedal_profile(
+              self.params.get("CommaPedalResistance", encoding="utf8") or 'mid')
+        pedal_profile_active = bool(
+          self.active and self.CP.enableGasInterceptor and
+          self.last_actuators.gas > 0.001 and
+          not CS.gasPressed and not CS.brakePressed)
+        self.comma_pedal_profile_gain = self.comma_pedal_profile_controller.update(
+          self.comma_pedal_profile, CS.vEgo, pedal_profile_active, DT_CTRL)
+        self.comma_pedal_profile_changing = bool(
+          self.comma_pedal_profile_controller.changing)
+
         # Event-based driver-style learning. Inputs are evaluated only in clean,
         # straight, stable-control context. Curve slowdown, lane changes, FCW,
         # and stop-launch boost are excluded so those safety/context responses
@@ -1645,6 +1682,7 @@ class Controls:
                                     self.is_curv_driving or long_plan.fcw or
                                     self.stop_accel_boost_active or
                                     self.moving_gap_catchup_assist.active or
+                                    self.comma_pedal_profile_changing or
                                     (dynamic_follow_valid and
                                      dynamic_follow.followingDistanceProfileChanging) or
                                     self.predictive_coasting.learning_blocked)
@@ -1677,6 +1715,10 @@ class Controls:
         # boost. The learner remains bounded, but the two features serve
         # different purposes and must not compound each other.
         self.driving_style_gain = 1.0 if self.stop_accel_boost_active else self.driving_style_status.gain
+        self.comma_pedal_learned_gain = float(self.driving_style_status.gain)
+        self.comma_pedal_effective_gain = combine_comma_pedal_gain(
+          self.comma_pedal_profile_gain, self.comma_pedal_learned_gain,
+          self.stop_accel_boost_active)
 
         # Send a "steering required alert" if saturation count has reached the limit (조향 제어 초과)
         if lac_log.active and lac_log.saturated and not CS.steeringPressed:
@@ -2019,6 +2061,14 @@ class Controls:
         controlsState.drivingStyleAIGasEvents = int(self.driving_style_status.gas_events)
         controlsState.drivingStyleAIBrakeEvents = int(self.driving_style_status.brake_events)
         controlsState.drivingStyleAIStableFollowSec = float(self.driving_style_status.stable_follow_s)
+        controlsState.commaPedalResistanceProfile = str(self.comma_pedal_profile)
+        controlsState.commaPedalProfileGain = float(self.comma_pedal_profile_gain)
+        controlsState.commaPedalLearnedGain = float(self.comma_pedal_learned_gain)
+        controlsState.commaPedalEffectiveGain = float(self.comma_pedal_effective_gain)
+        controlsState.commaPedalProfileChanging = bool(self.comma_pedal_profile_changing)
+        controlsState.commaPedalRawCommand = float(self.comma_pedal_raw_command)
+        controlsState.commaPedalStyledCommand = float(self.comma_pedal_styled_command)
+        controlsState.commaPedalFinalCommand = float(self.comma_pedal_final_command)
 
         controlsState.totalCameraOffset = totalCameraOffset
 

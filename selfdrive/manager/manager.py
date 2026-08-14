@@ -83,6 +83,7 @@ def manager_init() -> None:
     ("minTR", "0.9"),
     ("globalDfMod", "1.0"),
     ("FollowingDistanceProfile", "mid"),
+    ("CommaPedalResistance", "mid"),
 
     # Temp
     ("CruiseGap1", "11"),
