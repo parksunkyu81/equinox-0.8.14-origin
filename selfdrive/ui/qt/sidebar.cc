@@ -7,8 +7,8 @@
 #include "selfdrive/ui/qt/util.h"
 
 namespace {
-constexpr int kHomeImageSize = 234;  // 30% larger than the stock 180 px logo.
-constexpr int kHomeImageBottomMargin = 40;
+constexpr int kHomeImageSize = 270;  // 50% larger than the stock 180 px logo.
+constexpr int kHomeImageBottomMargin = 20;
 }
 
 void Sidebar::drawMetric(QPainter &p, const QString &label, QColor c, int y) {
