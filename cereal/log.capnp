@@ -757,6 +757,11 @@ struct ControlsState @0x97ff69c53601abf1 {
   dynamicTorquePathWobbleFlips @201 :UInt8;
   laneCenterCorrectionM @202 :Float32;
   laneCenterCorrectionActive @203 :Bool;
+  followingDistanceProfile @204 :Text;
+  followingDistanceOffset @205 :Float32;
+  followingDistanceRawTR @206 :Float32;
+  followingDistanceLearnedTROffset @207 :Float32;
+  followingDistanceProfileChanging @208 :Bool;
 
 
 
@@ -2009,6 +2014,11 @@ struct DynamicFollowData {
     leadRelativeSpeed @10 :Float32;
     leadDistance @11 :Float32;
     egoSpeed @12 :Float32;
+    followingDistanceProfile @13 :Text;
+    followingDistanceOffset @14 :Float32;
+    rawTR @15 :Float32;
+    learnedTROffset @16 :Float32;
+    followingDistanceProfileChanging @17 :Bool;
 }
 
 struct LaneSpeed {

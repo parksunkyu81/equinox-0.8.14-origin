@@ -274,6 +274,13 @@ class PedalRecoveryRecorder:
         "leadRelativeSpeed": round(float(dynamic_follow.leadRelativeSpeed), 5),
         "leadDistance": round(float(dynamic_follow.leadDistance), 5),
         "egoSpeed": round(float(dynamic_follow.egoSpeed), 5),
+        "followingDistanceProfile": str(dynamic_follow.followingDistanceProfile),
+        "followingDistanceOffset": round(float(dynamic_follow.followingDistanceOffset), 5),
+        "rawTR": round(float(dynamic_follow.rawTR), 5),
+        "learnedTROffset": round(float(dynamic_follow.learnedTROffset), 5),
+        "profileChanging": bool(dynamic_follow.followingDistanceProfileChanging),
+        "baseTR": round(float(dynamic_follow.baseTR), 5),
+        "finalTR": round(float(dynamic_follow.mpcTR), 5),
       },
       "eligibility": {
         "gasInterceptor": self.enable_gas_interceptor,

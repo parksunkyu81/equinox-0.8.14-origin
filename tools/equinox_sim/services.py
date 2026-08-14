@@ -113,6 +113,11 @@ class EquinoxBenchServices:
     follow.targetFollowDistance = 0.0
     follow.predictedFollowDistance = 0.0
     follow.baseTR = 1.3
+    follow.followingDistanceProfile = "mid"
+    follow.followingDistanceOffset = 0.0
+    follow.rawTR = 1.3
+    follow.learnedTROffset = 0.0
+    follow.followingDistanceProfileChanging = False
     self.pm.send("dynamicFollowData", follow_msg)
 
   @staticmethod

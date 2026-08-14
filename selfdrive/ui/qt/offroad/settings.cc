@@ -547,6 +547,28 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   });
   main_layout->addWidget(selectCar);*/
 
+  QString following_distance_profile = QString::fromStdString(
+    Params().get("FollowingDistanceProfile"));
+  if (following_distance_profile != "short" && following_distance_profile != "mid" &&
+      following_distance_profile != "long") {
+    following_distance_profile = "mid";
+    Params().put("FollowingDistanceProfile", "mid");
+  }
+  QLabel* followingDistanceProfileLabel = new QLabel(
+    "Adjusting distance to the vehicle ahead", homeWidget);
+  followingDistanceProfileLabel->setObjectName("followingDistanceProfileLabel");
+  QComboBox* followingDistanceProfileCombo = new QComboBox(homeWidget);
+  followingDistanceProfileCombo->setObjectName("followingDistanceProfileCombo");
+  followingDistanceProfileCombo->addItems(QStringList() << "short" << "mid" << "long");
+  followingDistanceProfileCombo->setCurrentText(following_distance_profile);
+  connect(followingDistanceProfileCombo, &QComboBox::currentTextChanged,
+          [=](const QString &selected) {
+    Params().put("FollowingDistanceProfile", selected.toStdString());
+  });
+  QHBoxLayout* layoutBtn_0 = new QHBoxLayout(homeWidget);
+  layoutBtn_0->addWidget(followingDistanceProfileLabel, 1);
+  layoutBtn_0->addWidget(followingDistanceProfileCombo, 0);
+
   QString dynamicTR_Gap = QString::fromStdString(Params().get("DynamicTRGap"));
   if(dynamicTR_Gap.length() == 0)
     dynamicTR_Gap = "auto";
@@ -640,6 +662,8 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   vlayout->addSpacing(10);
   vlayout->addLayout(layoutBtn_3, 0);
   vlayout->addSpacing(10);
+  vlayout->addLayout(layoutBtn_0, 1);
+  vlayout->addSpacing(10);
   vlayout->addLayout(layoutBtn_1, 1);
   vlayout->addSpacing(10);
   vlayout->addLayout(layoutBtn_2, 1);
@@ -662,6 +686,28 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
       border-radius: 30px;
       color: #dddddd;
       background-color: #444444;
+    }
+    #followingDistanceProfileLabel {
+      font-size: 42px;
+      color: #dddddd;
+      padding: 20px;
+    }
+    #followingDistanceProfileCombo {
+      min-width: 300px;
+      min-height: 100px;
+      font-size: 45px;
+      padding: 10px 25px;
+      color: #dddddd;
+      background-color: #444444;
+      border: 0px;
+      border-radius: 20px;
+    }
+    #followingDistanceProfileCombo QAbstractItemView {
+      font-size: 45px;
+      min-height: 300px;
+      color: #dddddd;
+      background-color: #393939;
+      selection-background-color: #555555;
     }
   )");
 
