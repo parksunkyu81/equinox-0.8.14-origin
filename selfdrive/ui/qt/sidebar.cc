@@ -7,7 +7,7 @@
 #include "selfdrive/ui/qt/util.h"
 
 namespace {
-constexpr int kHomeImageSize = 200;
+constexpr int kHomeImageSize = 250;
 constexpr int kHomeImageBottomMargin = 20;
 }
 
