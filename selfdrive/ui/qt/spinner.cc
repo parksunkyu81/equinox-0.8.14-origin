@@ -8,7 +8,6 @@
 #include <QGridLayout>
 #include <QPainter>
 #include <QString>
-#include <QTransform>
 
 #include "selfdrive/hardware/hw.h"
 #include "selfdrive/ui/qt/qt_window.h"
@@ -17,35 +16,13 @@
 TrackWidget::TrackWidget(QWidget *parent) : QWidget(parent) {
   setAttribute(Qt::WA_OpaquePaintEvent);
   setFixedSize(spinner_size);
-
-  // pre-compute all the track imgs. make this a gif instead?
-  QPixmap comma_img = loadPixmap("../assets/img_spinner_comma.png", spinner_size);
-  QPixmap track_img = loadPixmap("../assets/img_spinner_track.png", spinner_size);
-
-  QTransform transform(1, 0, 0, 1, width() / 2, height() / 2);
-  QPixmap pm(spinner_size);
-  QPainter p(&pm);
-  p.setRenderHint(QPainter::SmoothPixmapTransform);
-  for (int i = 0; i < track_imgs.size(); ++i) {
-    p.resetTransform();
-    p.fillRect(0, 0, spinner_size.width(), spinner_size.height(), Qt::black);
-    p.drawPixmap(0, 0, comma_img);
-    p.setTransform(transform.rotate(360 / spinner_fps));
-    p.drawPixmap(-width() / 2, -height() / 2, track_img);
-    track_imgs[i] = pm.copy();
-  }
-
-  m_anim.setDuration(1000);
-  m_anim.setStartValue(0);
-  m_anim.setEndValue(int(track_imgs.size() -1));
-  m_anim.setLoopCount(-1);
-  m_anim.start();
-  connect(&m_anim, SIGNAL(valueChanged(QVariant)), SLOT(update()));
+  comma_img = loadPixmap("../assets/img_spinner_comma.png", spinner_size);
 }
 
 void TrackWidget::paintEvent(QPaintEvent *event) {
   QPainter painter(this);
-  painter.drawPixmap(0, 0, track_imgs[m_anim.currentValue().toInt()]);
+  painter.fillRect(rect(), Qt::black);
+  painter.drawPixmap(0, 0, comma_img);
 }
 
 // Spinner

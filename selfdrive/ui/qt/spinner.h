@@ -1,13 +1,9 @@
-#include <array>
-
 #include <QLabel>
 #include <QPixmap>
 #include <QProgressBar>
 #include <QSocketNotifier>
-#include <QVariantAnimation>
 #include <QWidget>
 
-constexpr int spinner_fps = 30;
 constexpr QSize spinner_size = QSize(360, 360);
 
 class TrackWidget : public QWidget  {
@@ -17,8 +13,7 @@ public:
 
 private:
   void paintEvent(QPaintEvent *event) override;
-  std::array<QPixmap, spinner_fps> track_imgs;
-  QVariantAnimation m_anim;
+  QPixmap comma_img;
 };
 
 class Spinner : public QWidget {
