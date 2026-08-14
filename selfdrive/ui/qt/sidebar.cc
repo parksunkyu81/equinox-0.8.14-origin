@@ -6,6 +6,11 @@
 #include "selfdrive/hardware/hw.h"
 #include "selfdrive/ui/qt/util.h"
 
+namespace {
+constexpr int kHomeImageSize = 234;  // 30% larger than the stock 180 px logo.
+constexpr int kHomeImageBottomMargin = 40;
+}
+
 void Sidebar::drawMetric(QPainter &p, const QString &label, QColor c, int y) {
   const QRect rect = {30, y, 240, label.contains("\n") ? 124 : 100};
 
@@ -28,7 +33,7 @@ void Sidebar::drawMetric(QPainter &p, const QString &label, QColor c, int y) {
 }
 
 Sidebar::Sidebar(QWidget *parent) : QFrame(parent) {
-  home_img = loadPixmap("../assets/images/button_home.png", {180, 180});
+  home_img = loadPixmap("../assets/images/button_home.png", {kHomeImageSize, kHomeImageSize});
   settings_img = loadPixmap("../assets/images/button_settings.png", settings_btn.size(), Qt::IgnoreAspectRatio);
 
   connect(this, &Sidebar::valueChanged, [=] { update(); });
@@ -95,7 +100,8 @@ void Sidebar::paintEvent(QPaintEvent *event) {
   p.setOpacity(0.65);
   p.drawPixmap(settings_btn.x(), settings_btn.y(), settings_img);
   p.setOpacity(1.0);
-  p.drawPixmap(60, 1080 - 180 - 40, home_img);
+  p.drawPixmap((width() - kHomeImageSize) / 2,
+               1080 - kHomeImageSize - kHomeImageBottomMargin, home_img);
 
   // network
   int x = 58;
