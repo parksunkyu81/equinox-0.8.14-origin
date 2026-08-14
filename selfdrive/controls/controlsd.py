@@ -1711,7 +1711,7 @@ class Controls:
           low_speed_brake_context_ok=low_speed_brake_context_ok,
           can_valid=CS.canValid,
           dt=DT_CTRL)
-        # Never stack learned pedal gain on top of the dedicated 30% lead-launch
+        # Never stack learned pedal gain on top of the dedicated 40% lead-launch
         # boost. The learner remains bounded, but the two features serve
         # different purposes and must not compound each other.
         self.driving_style_gain = 1.0 if self.stop_accel_boost_active else self.driving_style_status.gain

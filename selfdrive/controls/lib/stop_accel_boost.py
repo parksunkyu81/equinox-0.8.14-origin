@@ -2,7 +2,7 @@ STOP_ACCEL_BOOST_MIN_SPEED_KPH = 1.0
 STOP_ACCEL_BOOST_MIN_SPEED_MS = STOP_ACCEL_BOOST_MIN_SPEED_KPH / 3.6
 STOP_ACCEL_BOOST_MAX_SPEED_KPH = 25.0
 STOP_ACCEL_BOOST_MAX_SPEED_MS = STOP_ACCEL_BOOST_MAX_SPEED_KPH / 3.6
-STOP_ACCEL_BOOST_FACTOR = 1.30
+STOP_ACCEL_BOOST_FACTOR = 1.40
 STOP_ACCEL_ZERO_EPS = 1e-3
 # A confirmed, safely receding lead may need a small launch request before the
 # normal longitudinal PID becomes positive. Ramp to the known-effective

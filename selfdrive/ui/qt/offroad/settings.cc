@@ -817,7 +817,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
 
   toggles.append(new ParamControl("ActiveStopAccelBoost",
                                             "Activate stop accel boost",
-                                            "Reduce lead-start delay and add up to 30% initial acceleration boost above 1 km/h.",
+                                            "Reduce lead-start delay and add up to 40% initial acceleration boost above 1 km/h.",
                                             "../assets/offroad/icon_road.png",
                                             this));
 
