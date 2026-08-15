@@ -3,6 +3,8 @@ from selfdrive.controls.lib.dynamic_follow.support import dfProfiles
 from common.realtime import sec_since_boot
 from common.params import Params
 
+PARAM_REFRESH_S = 1.0
+
 
 class dfReturn:
   user_profile = None  # stays at user selected profile (사용자가 선택한 프로필에 유지)
@@ -34,7 +36,11 @@ class dfManager:
     else:
       self.cur_user_profile = self.df_profiles.to_idx[self.cur_user_profile]"""
 
-    self.cur_user_profile = self.df_profiles.to_idx[Params().get("DynamicTRGap", encoding="utf8")]  # String to idx
+    self.params = Params()
+    self._last_param_refresh = -PARAM_REFRESH_S
+    profile_text = self.params.get("DynamicTRGap", encoding="utf8")
+    self.cur_user_profile = self.df_profiles.to_idx.get(
+      profile_text, self.df_profiles.default)
 
     self.last_user_profile = self.cur_user_profile
 
@@ -62,7 +68,12 @@ class dfManager:
     if self.button_updated:  # only update when button is first pressed
       self.cur_user_profile = self.sm['dynamicFollowButton'].status"""
 
-    self.cur_user_profile = self.df_profiles.to_idx[Params().get("DynamicTRGap", encoding="utf8")]
+    now = sec_since_boot()
+    if now - self._last_param_refresh >= PARAM_REFRESH_S:
+      self._last_param_refresh = now
+      profile_text = self.params.get("DynamicTRGap", encoding="utf8")
+      self.cur_user_profile = self.df_profiles.to_idx.get(
+        profile_text, self.df_profiles.default)
 
     df_out.user_profile = self.cur_user_profile
     df_out.user_profile_text = self.df_profiles.to_profile[df_out.user_profile]

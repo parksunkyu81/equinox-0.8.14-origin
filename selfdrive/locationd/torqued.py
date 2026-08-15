@@ -4347,7 +4347,15 @@ def main(sm=None, pm=None):
     config_realtime_process(2, Priority.CTRL_LOW)
 
     if sm is None:
-        sm = messaging.SubMaster(['carControl', 'carState', 'controlsState', 'liveLocationKalman'], poll=['liveLocationKalman'])
+        # Liveness and message validity remain mandatory. Do not make the
+        # learner's output invalid merely because a controlsd-owned stream is a
+        # few Hz below its nominal average rate under EON load; doing so creates
+        # a circular commIssue (controlsd slowdown -> liveTorque invalid ->
+        # controlsd commIssue) even though torqued is alive and has fresh data.
+        sm = messaging.SubMaster(
+            ['carControl', 'carState', 'controlsState', 'liveLocationKalman'],
+            poll=['liveLocationKalman'],
+            ignore_avg_freq=['carControl', 'carState', 'controlsState'])
 
     if pm is None:
         pm = messaging.PubMaster(['liveTorqueParameters'])

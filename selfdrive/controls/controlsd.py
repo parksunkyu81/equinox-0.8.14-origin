@@ -39,7 +39,6 @@ from selfdrive.road_speed_limiter import road_speed_limiter_get_max_speed, road_
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, V_CRUISE_ENABLE_MIN, CONTROL_N
 from selfdrive.car.gm.values import MIN_CURVE_SPEED
 #from decimal import Decimal
-from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.stop_accel_boost import (
   STOP_ACCEL_BOOST_FACTOR, StopAccelBoostLatch,
   boost_floor_context_allowed, speed_limit_decel_requested,
@@ -75,7 +74,9 @@ SOFT_DISABLE_TIME = 3  # seconds
 PANDA_SAFETY_MATCH_FRAMES = 10  # 100 ms at 100 Hz
 CONTROLS_ALLOWED_MISMATCH_FRAMES = 25  # 250 ms at 100 Hz
 PROCESS_NOT_RUNNING_CONSECUTIVE_UPDATES = 3
+COMM_ISSUE_CONSECUTIVE_FRAMES = max(1, int(0.30 / DT_CTRL))
 COMMA_PEDAL_PARAM_REFRESH_FRAMES = max(1, int(0.2 / DT_CTRL))
+DISPLAY_PARAM_REFRESH_FRAMES = max(1, int(1.0 / DT_CTRL))
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
@@ -143,8 +144,6 @@ class Controls:
                  'driverMonitoringState', 'longitudinalPlan', 'lateralPlan', 'liveLocationKalman', 'dynamicFollowData',
                  'managerState', 'liveParameters', 'radarState', 'liveTorqueParameters'] + self.camera_packets + joystick_packet,
                 ignore_alive=ignore, ignore_avg_freq=ignore_avg_freq)
-
-        self.df_manager = dfManager()
 
         self.can_sock = can_sock
         if can_sock is None:
@@ -284,6 +283,14 @@ class Controls:
         self.events_prev = []
         self.current_alert_types = [ET.PERMANENT]
         self.logged_comm_issue = False
+        self.comm_issue_counter = 0
+        # UI-only settings do not belong on the 100 Hz control path. Params.get
+        # opens files, so reading these values for every controlsState message
+        # caused hundreds of filesystem operations per second on EON.
+        self._display_param_refresh_frame = -DISPLAY_PARAM_REFRESH_FRAMES
+        self._display_min_tr = 0.9
+        self._display_dynamic_tr_mode = "auto"
+        self._display_global_df_mod = 1.0
         self.button_timers = {ButtonEvent.Type.decelCruise: 0, ButtonEvent.Type.accelCruise: 0}
         self.last_actuators = car.CarControl.Actuators.new_message()
 
@@ -924,7 +931,9 @@ class Controls:
 
         self.update_max_speed(int(max_speed_clu + 0.5), CS,
                               curv_limit != 0 and curv_limit == int(max_speed_clu))
-        self._log_curve_speed(vEgo, max_speed_clu, road_limit_speed, apply_limit_speed, curv_limit)
+        # Synchronous curve_speed JSON file logging is intentionally disabled.
+        # Curve recognition/control remains active; only the controlsd disk write
+        # is stopped to protect the EON control loop.
         # print("update_max_speed() value : ", self.max_speed_clu)
 
         return road_limit_speed, left_dist, max_speed_log
@@ -1098,18 +1107,34 @@ class Controls:
             self.events.add(EventName.usbError)
         # self.sm.all_checks()
         # self.sm.all_alive_and_valid()
-        elif not self.sm.all_checks() or self.can_rcv_error:
-            self.events.add(EventName.commIssue)
-            if not self.logged_comm_issue:
-                invalid = [s for s, valid in self.sm.valid.items() if not valid]
-                not_alive = [s for s, alive in self.sm.alive.items() if not alive]
-                bad_frequency = [s for s, freq_ok in self.sm.freq_ok.items()
-                                 if not freq_ok and s not in self.sm.ignore_average_freq]
-                cloudlog.event("commIssue", invalid=invalid, not_alive=not_alive, can_error=self.can_rcv_error,
-                               bad_frequency=bad_frequency, error=True)
-                self.logged_comm_issue = True
         else:
-            self.logged_comm_issue = False
+            communication_bad = not self.sm.all_checks()
+            if communication_bad:
+                self.comm_issue_counter = min(
+                    self.comm_issue_counter + 1, COMM_ISSUE_CONSECUTIVE_FRAMES)
+            else:
+                self.comm_issue_counter = 0
+
+            # CAN receive failures remain immediate. A service-health failure
+            # must persist for 300 ms, which rejects scheduler jitter without
+            # hiding an actually stopped or invalid process.
+            comm_issue_active = bool(
+                self.can_rcv_error or
+                self.comm_issue_counter >= COMM_ISSUE_CONSECUTIVE_FRAMES)
+            if comm_issue_active:
+                self.events.add(EventName.commIssue)
+                if not self.logged_comm_issue:
+                    invalid = [s for s, valid in self.sm.valid.items() if not valid]
+                    not_alive = [s for s, alive in self.sm.alive.items() if not alive]
+                    bad_frequency = [s for s, freq_ok in self.sm.freq_ok.items()
+                                     if not freq_ok and s not in self.sm.ignore_average_freq]
+                    cloudlog.event("commIssue", invalid=invalid, not_alive=not_alive,
+                                   can_error=self.can_rcv_error,
+                                   consecutive_frames=self.comm_issue_counter,
+                                   bad_frequency=bad_frequency, error=True)
+                    self.logged_comm_issue = True
+            elif self.comm_issue_counter == 0:
+                self.logged_comm_issue = False
 
         if not self.sm['liveParameters'].valid:
             self.events.add(EventName.vehicleModelInvalid)
@@ -1214,8 +1239,6 @@ class Controls:
         # if CS.brakePressed and v_future >= self.CP.vEgoStarting \
         #  and self.CP.openpilotLongitudinalControl and CS.vEgo < 0.3:
         #  self.events.add(EventName.noTarget)
-
-        self.df_manager.update()
 
     def data_sample(self):
         """Receive data from sockets and update carState"""
@@ -1974,10 +1997,23 @@ class Controls:
 
         # Dynamic TR
         #controlsState.cruiseGap = int(Params().get("cruiseGap", encoding="utf8"))
-        controlsState.minTR = float(Params().get("minTR", encoding="utf8"))
+        if self.sm.frame - self._display_param_refresh_frame >= DISPLAY_PARAM_REFRESH_FRAMES:
+            self._display_param_refresh_frame = self.sm.frame
+            try:
+                self._display_min_tr = float(
+                    self.params.get("minTR", encoding="utf8") or self._display_min_tr)
+                self._display_dynamic_tr_mode = (
+                    self.params.get("DynamicTRGap", encoding="utf8") or
+                    self._display_dynamic_tr_mode)
+                self._display_global_df_mod = float(
+                    self.params.get("globalDfMod", encoding="utf8") or
+                    self._display_global_df_mod)
+            except (TypeError, ValueError, OSError):
+                cloudlog.exception("invalid dynamic-follow display params")
+        controlsState.minTR = self._display_min_tr
         #controlsState.dynamicTRMode = int(self.sm['longitudinalPlan'].dynamicTRMode)
-        controlsState.dynamicTRMode = Params().get("DynamicTRGap", encoding="utf8")
-        controlsState.globalDfMod = float(Params().get("globalDfMod", encoding="utf8"))
+        controlsState.dynamicTRMode = self._display_dynamic_tr_mode
+        controlsState.globalDfMod = self._display_global_df_mod
         # self.sm['liveTorqueParameters']
         controlsState.dynamicTRValue = float(self.sm['dynamicFollowData'].mpcTR)
         controlsState.followingDistanceProfile = str(

@@ -122,6 +122,9 @@ class LatControlTorque(LatControl):
         self.use_steering_angle = CP.lateralTuning.torque.useSteeringAngle
         self.steering_angle_deadzone_deg = CP.lateralTuning.torque.steeringAngleDeadzoneDeg
         self._is_equinox_torque_profile = str(getattr(CP, 'carFingerprint', '')) == "CHEVROLET EQUINOX NO RADAR"
+        # This offroad setting is static for a drive. Avoid opening its Params
+        # file from every 100 Hz lateral-control update.
+        self._is_low_speed_factor = Params().get_bool('IsLowSpeedFactor')
         self.update_live_torque_params(CP.lateralTuning.torque.latAccelFactor, CP.lateralTuning.torque.latAccelOffset,
                                        CP.lateralTuning.torque.friction)
 
@@ -580,8 +583,7 @@ class LatControlTorque(LatControl):
             actual_lateral_accel = actual_curvature * CS.vEgo ** 2
             lateral_accel_deadzone = curvature_deadzone * CS.vEgo ** 2
 
-            isLowSpeed = Params().get_bool('IsLowSpeedFactor')
-            if isLowSpeed:
+            if self._is_low_speed_factor:
                 low_speed_factor = interp(CS.vEgo, [0.0, 3.0, 5.0, 8.33, 13.89], [420.0, 420.0, 260.0, 80.0, 0.0])
             else:
                 low_speed_factor = interp(CS.vEgo, [0.0, 3.0, 5.0, 8.33], [300.0, 300.0, 120.0, 0.0])

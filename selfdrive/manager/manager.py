@@ -4,6 +4,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 import traceback
 from multiprocessing import Process
 from typing import List, Tuple, Union
@@ -193,6 +194,8 @@ def manager_thread() -> None:
 
   started_prev = False
   logged_dead_processes = set()
+  last_running_status = None
+  last_running_log_time = -1e9
   sm = messaging.SubMaster(['deviceState'])
   pm = messaging.PubMaster(['managerState'])
 
@@ -242,8 +245,16 @@ def manager_thread() -> None:
 
     running = ' '.join("%s%s\u001b[0m" % ("\u001b[32m" if p.proc.is_alive() else "\u001b[31m", p.name)
                        for p in managed_processes.values() if p.proc)
-    print(running)
-    cloudlog.debug(running)
+    running_status = tuple(
+      (p.name, bool(p.proc.is_alive())) for p in managed_processes.values() if p.proc)
+    now = time.monotonic()
+    # Preserve process visibility while avoiding continuous terminal/log spam
+    # from the manager loop on resource-constrained EON hardware.
+    if running_status != last_running_status or now - last_running_log_time >= 30.0:
+      print(running)
+      cloudlog.debug(running)
+      last_running_status = running_status
+      last_running_log_time = now
 
     # send managerState
     msg = messaging.new_message('managerState')
