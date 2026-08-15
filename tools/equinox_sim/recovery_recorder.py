@@ -24,12 +24,16 @@ POST_EVENT_SECONDS = 10.0
 # Traffic-light launches are normally farther apart than this, while the
 # cooldown still prevents repeated files from one continuous activation.
 MIN_EVENT_INTERVAL_SECONDS = 20.0
-EXPECTED_CONTROL_HZ = 50
-PRE_EVENT_SAMPLES = int(PRE_EVENT_SECONDS * EXPECTED_CONTROL_HZ) + 50
+CONTROL_STATE_HZ = 100
+# 25 Hz preserves the 40 ms launch-handoff diagnostic requirement while
+# avoiding the cost of building a large JSON-ready snapshot at 50 Hz.
+RECORDER_HZ = 25
+CONTROL_FRAME_DIVISOR = CONTROL_STATE_HZ // RECORDER_HZ
+PRE_EVENT_SAMPLES = int(PRE_EVENT_SECONDS * RECORDER_HZ) + RECORDER_HZ
 POST_ARBITRATION_ZERO_SECONDS = 0.16
-# The recorder samples every other controlsState frame (25 Hz).
+# Four consecutive 40 ms samples reject one-frame arbitration transitions.
 POST_ARBITRATION_ZERO_SAMPLES = max(2, int(round(
-  POST_ARBITRATION_ZERO_SECONDS * EXPECTED_CONTROL_HZ / 2.0)))
+  POST_ARBITRATION_ZERO_SECONDS * RECORDER_HZ)))
 DEFAULT_LOG_DIR = "/data/media/0/pedal_recovery_logs"
 FALLBACK_LOG_DIR = "/tmp/pedal_recovery_logs"
 
@@ -48,8 +52,11 @@ class PedalRecoveryRecorder:
        "driverMonitoringState", "dynamicFollowData", "radarState"],
       poll=["controlsState"],
     )
-    self.sendcan_sock = messaging.sub_sock("sendcan")
-    self.can_sock = messaging.sub_sock("can")
+    # Only the latest observed actuator state is needed for a 40 ms snapshot.
+    # Conflation prevents this low-priority recorder from decoding every CAN
+    # publication and competing with controlsd on resource-constrained EON.
+    self.sendcan_sock = messaging.sub_sock("sendcan", conflate=True)
+    self.can_sock = messaging.sub_sock("can", conflate=True)
     dbc_name = DBC[CAR.EQUINOX_NR]["pt"]
     self.sendcan_parser = CANParser(
       dbc_name,
@@ -400,6 +407,7 @@ class PedalRecoveryRecorder:
       "preEventSeconds": PRE_EVENT_SECONDS,
       "postEventSeconds": POST_EVENT_SECONDS,
       "minimumEventIntervalSeconds": MIN_EVENT_INTERVAL_SECONDS,
+      "sampleFrequencyHz": RECORDER_HZ,
       "sampleCount": len(self.event_samples),
       "triggerReason": self.current_trigger_reason,
     }
@@ -424,9 +432,10 @@ class PedalRecoveryRecorder:
         self.sm.update(1000)
         if not self.sm.updated["controlsState"]:
           continue
-        # Keep 20 ms diagnostic resolution (enough for the 40 ms acceptance
-        # limit) while halving Python/JSON work on resource-constrained EON.
-        if self.sm.frame % 2:
+        # A 40 ms snapshot interval is sufficient for the launch-handoff
+        # acceptance limit and halves steady-state work versus the old 50 Hz
+        # recorder. Liveness and trigger inputs are still polled at 100 Hz.
+        if self.sm.frame % CONTROL_FRAME_DIVISOR:
           continue
         self._update_sendcan()
         self._update_panda_can()

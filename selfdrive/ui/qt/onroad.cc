@@ -454,8 +454,9 @@ void NvgWindow::paintEvent(QPaintEvent *event) {
   double cur_draw_t = millis_since_boot();
   double dt = cur_draw_t - prev_draw_t;
   double fps = fps_filter.update(1. / dt * 1000);
-  if (fps < 15) {
+  if (fps < 15 && cur_draw_t - last_slow_frame_log_t >= 5000.) {
     LOGW("slow frame rate: %.2f fps", fps);
+    last_slow_frame_log_t = cur_draw_t;
   }
   prev_draw_t = cur_draw_t;
 }

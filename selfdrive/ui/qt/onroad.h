@@ -47,6 +47,7 @@ protected:
   inline QColor whiteColor(int alpha = 255) { return QColor(255, 255, 255, alpha); }
   inline QColor blackColor(int alpha = 255) { return QColor(0, 0, 0, alpha); }
   double prev_draw_t = 0;
+  double last_slow_frame_log_t = 0;
   FirstOrderFilter fps_filter;
 
   uint64_t last_update_params;

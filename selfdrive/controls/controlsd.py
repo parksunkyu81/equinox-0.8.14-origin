@@ -130,11 +130,19 @@ class Controls:
         self.sm = sm
         if self.sm is None:
             ignore = ['driverCameraState', 'managerState'] if SIMULATION else None
+            # These derived EON services can briefly miss their nominal average
+            # rate under load while remaining alive and valid. Their liveness and
+            # validity are still checked; only the noisy average-rate gate is
+            # relaxed to avoid false "device process" alerts.
+            ignore_avg_freq = ['radarState', 'longitudinalPlan']
+            if EON:
+                ignore_avg_freq += ['driverMonitoringState', 'lateralPlan',
+                                    'dynamicFollowData', 'liveTorqueParameters']
             self.sm = messaging.SubMaster(
                 ['deviceState', 'pandaStates', 'peripheralState', 'modelV2', 'liveCalibration',
                  'driverMonitoringState', 'longitudinalPlan', 'lateralPlan', 'liveLocationKalman', 'dynamicFollowData',
                  'managerState', 'liveParameters', 'radarState', 'liveTorqueParameters'] + self.camera_packets + joystick_packet,
-                ignore_alive=ignore, ignore_avg_freq=['radarState', 'longitudinalPlan'])
+                ignore_alive=ignore, ignore_avg_freq=ignore_avg_freq)
 
         self.df_manager = dfManager()
 
@@ -1095,8 +1103,10 @@ class Controls:
             if not self.logged_comm_issue:
                 invalid = [s for s, valid in self.sm.valid.items() if not valid]
                 not_alive = [s for s, alive in self.sm.alive.items() if not alive]
+                bad_frequency = [s for s, freq_ok in self.sm.freq_ok.items()
+                                 if not freq_ok and s not in self.sm.ignore_average_freq]
                 cloudlog.event("commIssue", invalid=invalid, not_alive=not_alive, can_error=self.can_rcv_error,
-                               error=True)
+                               bad_frequency=bad_frequency, error=True)
                 self.logged_comm_issue = True
         else:
             self.logged_comm_issue = False
