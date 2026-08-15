@@ -2,6 +2,7 @@ import math
 
 from cereal import log
 from common.numpy_fast import interp, clip
+from common.realtime import sec_since_boot
 from selfdrive.controls.lib.latcontrol import LatControl, MIN_STEER_SPEED
 from selfdrive.controls.lib.pid import PIDController
 from selfdrive.controls.lib.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
@@ -84,6 +85,12 @@ DYN_DRIVER_TORQUE_HARD_DISABLE = 2.0
 DYN_RATE_LIMITED_STRONG_TRACKING_GAP = 0.45
 DYN_RATE_LIMITED_STRONG_OUTPUT_GAP = 0.18
 
+# Preserve short low-speed learning opportunities. Periodic writes remain
+# rate-limited, while leaving lateral control forces any dirty per-speed state
+# to be queued before the transient learner is reset.
+RESPONSE_SAVE_MIN_UPDATES = 25
+RESPONSE_SAVE_INTERVAL_S = 15.0
+
 # 절대 파라미터 클램프는 torque_authority.py에서 단일 관리한다.
 # A learned center offset is applied to feedforward even on a straight road.
 # Keep the final controller-side clamp independent from torqued so a stale or
@@ -163,9 +170,28 @@ class LatControlTorque(LatControl):
             response_state = None
         self._response_compensator = LateralResponseCompensator(response_state)
         self._response_last_saved_count = self._response_compensator.update_count
+        self._response_last_saved_t = sec_since_boot()
+        self._response_was_active = False
         self._dir_torque_assist_left = 1.0
         self._dir_torque_assist_right = 1.0
         self._dir_torque_last_side = 0
+
+    def _save_response_state(self, force=False):
+        if not self._response_compensator.dirty:
+            return
+        now = sec_since_boot()
+        update_delta = self._response_compensator.update_count - self._response_last_saved_count
+        periodic_ready = (update_delta >= RESPONSE_SAVE_MIN_UPDATES and
+                          now - self._response_last_saved_t >= RESPONSE_SAVE_INTERVAL_S)
+        if not force and not periodic_ready:
+            return
+        try:
+            put_nonblocking('TorqueResponseBins', self._response_compensator.serialize())
+            self._response_last_saved_count = self._response_compensator.update_count
+            self._response_last_saved_t = now
+            self._response_compensator.dirty = False
+        except Exception:
+            pass
 
     def set_path_stability(self, active, range_m=0.0, flips=0):
         self._path_stability_active = bool(active)
@@ -378,14 +404,7 @@ class LatControlTorque(LatControl):
         eff_lat = float(clip(eff_lat / response_scale, LAT_FACTOR_ABS_MIN, eff_lat))
         eff_fric = float(clip(eff_fric * (1.0 + 0.15 * (response_scale - 1.0)),
                               eff_fric, FRICTION_ABS_MAX))
-        if (self._response_compensator.dirty and
-                self._response_compensator.update_count - self._response_last_saved_count >= 300):
-            try:
-                put_nonblocking('TorqueResponseBins', self._response_compensator.serialize())
-                self._response_last_saved_count = self._response_compensator.update_count
-                self._response_compensator.dirty = False
-            except Exception:
-                pass
+        self._save_response_state()
         self._dyn_last_blend = float(blend)
 
         self._dyn_last_corner_strength = float(dyn['cornerStrength'])
@@ -508,6 +527,11 @@ class LatControlTorque(LatControl):
     def update(self, active, CS, VM, params, last_actuators, steer_limited, desired_curvature, desired_curvature_rate,
                llk):
         pid_log = log.ControlsState.LateralTorqueState.new_message()
+
+        response_active = bool(active and CS.vEgo >= MIN_STEER_SPEED)
+        if self._response_was_active and not response_active:
+            self._save_response_state(force=True)
+        self._response_was_active = response_active
 
         if CS.vEgo < MIN_STEER_SPEED or not active:
             output_torque = 0.0

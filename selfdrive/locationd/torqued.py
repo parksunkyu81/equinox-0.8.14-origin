@@ -998,6 +998,9 @@ class TorqueEstimator:
         self._dyn_response_stable = False
         self._dyn_response_frozen = True
         self._dyn_response_update_count = 0
+        self._dyn_response_lateral_state_valid = False
+        self._dyn_response_actual_lat_accel = 0.0
+        self._dyn_response_desired_lat_accel = 0.0
         self._dyn_path_stability_active = False
         self._dyn_path_wobble_range = 0.0
         self._dyn_path_wobble_flips = 0
@@ -2708,11 +2711,14 @@ class TorqueEstimator:
                 self.raw_points['lkas_enable'].append(False)
 
         elif which == "controlsState":
-            # Read latcontrol-decided epsEvt/epsDamp from ControlsState.lateralTorqueState (capnp fields @14/@15)
+            # Lateral torque state is a member of the lateralControlState union.
+            # The old top-level lookup always returned None and exited before
+            # copying any of the real dynamic-response diagnostics.
             try:
-                lts = getattr(msg, "lateralTorqueState", None)
-                if lts is None:
-                    return
+                lts = None
+                lateral_state = getattr(msg, "lateralControlState", None)
+                if lateral_state is not None and lateral_state.which() == "torqueState":
+                    lts = lateral_state.torqueState
                 # dt from logMonoTime spacing
                 if self._lc_prev_t is not None and np.isfinite(self._lc_prev_t):
                     self._lc_dt = float(t - float(self._lc_prev_t))
@@ -2720,8 +2726,12 @@ class TorqueEstimator:
                     self._lc_dt = None
                 self._lc_prev_t = float(t)
 
-                self._lc_eps_evt = bool(getattr(lts, "epsEvt", False))
-                self._lc_eps_damp = bool(getattr(lts, "epsDamp", False))
+                self._dyn_response_lateral_state_valid = bool(lts is not None)
+                if lts is not None:
+                    self._dyn_response_actual_lat_accel = float(
+                        getattr(lts, "actualLateralAccel", 0.0) or 0.0)
+                    self._dyn_response_desired_lat_accel = float(
+                        getattr(lts, "desiredLateralAccel", 0.0) or 0.0)
                 actual_lat = float(getattr(msg, "dynamicTorqueLatAccelFactor", 0.0) or 0.0)
                 actual_fric = float(getattr(msg, "dynamicTorqueFriction", 0.0) or 0.0)
                 if np.isfinite(actual_lat) and np.isfinite(actual_fric) and actual_lat > 0.0 and actual_fric > 0.0:
@@ -3636,6 +3646,12 @@ class TorqueEstimator:
                 "dyn_response_frozen": bool(getattr(self, "_dyn_response_frozen", True)),
                 "dyn_response_update_count": int(getattr(
                     self, "_dyn_response_update_count", 0) or 0),
+                "dyn_response_lateral_state_valid": bool(getattr(
+                    self, "_dyn_response_lateral_state_valid", False)),
+                "dyn_response_actual_lat_accel": round(float(getattr(
+                    self, "_dyn_response_actual_lat_accel", 0.0) or 0.0), 5),
+                "dyn_response_desired_lat_accel": round(float(getattr(
+                    self, "_dyn_response_desired_lat_accel", 0.0) or 0.0), 5),
                 "dyn_path_stability_active": bool(getattr(
                     self, "_dyn_path_stability_active", False)),
                 "dyn_path_wobble_range": round(float(getattr(
