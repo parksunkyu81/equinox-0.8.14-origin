@@ -8,9 +8,7 @@ from cereal import car, messaging
 from common.conversions import Conversions as CV
 from common.params import Params
 from common.realtime import sec_since_boot
-from opendbc.can.parser import CANParser
 from selfdrive.car import crc8_pedal
-from selfdrive.car.gm.values import CAR, DBC, CanBus
 from selfdrive.controls.lib.pedal_force_recovery import (
   PEDAL_FORCE_RECOVERY_SPEED_ERROR,
   recovery_log_trigger,
@@ -37,6 +35,11 @@ POST_ARBITRATION_ZERO_SAMPLES = max(2, int(round(
 DEFAULT_LOG_DIR = "/data/media/0/pedal_recovery_logs"
 FALLBACK_LOG_DIR = "/tmp/pedal_recovery_logs"
 
+GAS_COMMAND_1_SCALE = 0.125677
+GAS_COMMAND_1_OFFSET = -75.909
+GAS_COMMAND_2_SCALE = 0.251976
+GAS_COMMAND_2_OFFSET = -76.601
+
 
 class PedalRecoveryRecorder:
   """Read-only event recorder for pedal recovery and stop-boost diagnosis.
@@ -57,33 +60,6 @@ class PedalRecoveryRecorder:
     # publication and competing with controlsd on resource-constrained EON.
     self.sendcan_sock = messaging.sub_sock("sendcan", conflate=True)
     self.can_sock = messaging.sub_sock("can", conflate=True)
-    dbc_name = DBC[CAR.EQUINOX_NR]["pt"]
-    self.sendcan_parser = CANParser(
-      dbc_name,
-      [
-        ("GAS_COMMAND", "GAS_COMMAND"),
-        ("GAS_COMMAND2", "GAS_COMMAND"),
-        ("ENABLE", "GAS_COMMAND"),
-        ("COUNTER_PEDAL", "GAS_COMMAND"),
-        ("CHECKSUM_PEDAL", "GAS_COMMAND"),
-      ],
-      [("GAS_COMMAND", 0)],
-      CanBus.POWERTRAIN,
-    )
-    # Panda marks a successfully transmitted frame as bus + 0x80. Frames
-    # rejected by the safety hook use bus + 0xC0 and are tracked separately.
-    self.panda_can_parser = CANParser(
-      dbc_name,
-      [
-        ("GAS_COMMAND", "GAS_COMMAND"),
-        ("GAS_COMMAND2", "GAS_COMMAND"),
-        ("ENABLE", "GAS_COMMAND"),
-        ("COUNTER_PEDAL", "GAS_COMMAND"),
-        ("CHECKSUM_PEDAL", "GAS_COMMAND"),
-      ],
-      [("GAS_COMMAND", 0)],
-      CanBus.POWERTRAIN + 0x80,
-    )
     car_params_bytes = Params().get("CarParams", block=True)
     self.enable_gas_interceptor = bool(
       car.CarParams.from_bytes(car_params_bytes).enableGasInterceptor
@@ -121,59 +97,59 @@ class PedalRecoveryRecorder:
       "monoTime": 0.0,
     }
 
+  @staticmethod
+  def _decode_pedal_frame(data):
+    """Decode one 0x200 command without a sequential-counter CANParser.
+
+    The recorder intentionally conflates CAN publications to reduce EON CPU
+    load, so skipped counter values are expected and must not be reported as
+    vehicle CAN faults.
+    """
+    data = bytes(data)
+    if len(data) != 6:
+      return None
+    raw_gas_1 = (data[0] << 8) | data[1]
+    raw_gas_2 = (data[2] << 8) | data[3]
+    gas_1 = (raw_gas_1 * GAS_COMMAND_1_SCALE + GAS_COMMAND_1_OFFSET) / 255.0
+    gas_2 = (raw_gas_2 * GAS_COMMAND_2_SCALE + GAS_COMMAND_2_OFFSET) / 255.0
+    return {
+      "gasCommand": max(0.0, gas_1),
+      "gasCommand2": max(0.0, gas_2),
+      "enable": bool(data[4] & 0x80),
+      "counter": int(data[4] & 0x0F),
+      "checksum": int(data[5]),
+      "checksumValid": crc8_pedal(data[:-1]) == data[-1],
+    }
+
   def _update_sendcan(self):
     for raw in messaging.drain_sock_raw(self.sendcan_sock):
-      updated = self.sendcan_parser.update_string(raw, sendcan=True)
-      if 512 in updated:
-        values = self.sendcan_parser.vl["GAS_COMMAND"]
-        checksum_valid = False
-        event = messaging.log_from_bytes(raw)
-        for can_message in event.sendcan:
-          if can_message.address == 512:
-            data = bytes(can_message.dat)
-            checksum_valid = len(data) == 6 and crc8_pedal(data[:-1]) == data[-1]
-            break
-        self.latest_sendcan = {
-          "gasCommand": max(0.0, float(values["GAS_COMMAND"]) / 255.0),
-          "gasCommand2": max(0.0, float(values["GAS_COMMAND2"]) / 255.0),
-          "enable": bool(values["ENABLE"]),
-          "counter": int(values["COUNTER_PEDAL"]),
-          "checksum": int(values["CHECKSUM_PEDAL"]),
-          "checksumValid": checksum_valid,
-          "monoTime": sec_since_boot(),
-        }
+      event = messaging.log_from_bytes(raw)
+      for can_message in event.sendcan:
+        if can_message.address != 512:
+          continue
+        decoded = self._decode_pedal_frame(can_message.dat)
+        if decoded is not None:
+          decoded["monoTime"] = sec_since_boot()
+          self.latest_sendcan = decoded
 
   def _update_panda_can(self):
     for raw in messaging.drain_sock_raw(self.can_sock):
       event = messaging.log_from_bytes(raw)
-      rejected = any(
-        can_message.address == 512 and 0xC0 <= can_message.src < 0x100
-        for can_message in event.can
-      )
-      updated = self.panda_can_parser.update_string(raw)
-      if 512 in updated:
-        values = self.panda_can_parser.vl["GAS_COMMAND"]
-        checksum_valid = False
-        for can_message in event.can:
-          if can_message.address == 512 and 0x80 <= can_message.src < 0xC0:
-            data = bytes(can_message.dat)
-            checksum_valid = len(data) == 6 and crc8_pedal(data[:-1]) == data[-1]
-            break
-        self.latest_panda_can = {
-          "gasCommand": max(0.0, float(values["GAS_COMMAND"]) / 255.0),
-          "gasCommand2": max(0.0, float(values["GAS_COMMAND2"]) / 255.0),
-          "enable": bool(values["ENABLE"]),
-          "counter": int(values["COUNTER_PEDAL"]),
-          "checksum": int(values["CHECKSUM_PEDAL"]),
-          "checksumValid": checksum_valid,
-          "accepted": True,
-          "rejected": False,
-          "monoTime": sec_since_boot(),
-        }
-      elif rejected:
-        self.latest_panda_can["rejected"] = True
-        self.latest_panda_can["accepted"] = False
-        self.latest_panda_can["monoTime"] = sec_since_boot()
+      for can_message in event.can:
+        if can_message.address != 512:
+          continue
+        accepted = 0x80 <= can_message.src < 0xC0
+        rejected = 0xC0 <= can_message.src < 0x100
+        if not accepted and not rejected:
+          continue
+        decoded = self._decode_pedal_frame(can_message.dat)
+        if decoded is not None:
+          decoded.update({
+            "accepted": bool(accepted),
+            "rejected": bool(rejected),
+            "monoTime": sec_since_boot(),
+          })
+          self.latest_panda_can = decoded
 
   def _snapshot(self, now):
     car_state = self.sm["carState"]
