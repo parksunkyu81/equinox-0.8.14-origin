@@ -1083,8 +1083,9 @@ void NvgWindow::drawSpeed(QPainter &p) {
   // -------------------------
   const auto car_state = sm["carState"].getCarState();
   const float v_ego = car_state.getVEgo();
-  const float conv = s->scene.is_metric ? (float)MS_TO_KPH : (float)MS_TO_MPH;
-  const float cur_speed = std::max(0.0f, v_ego * conv);
+  // This compact driving panel is always expressed in km/h. carState.vEgo
+  // is m/s, while cruiseMaxSpeed/applyMaxSpeed below are already km/h.
+  const float cur_speed = std::max(0.0f, v_ego * (float)MS_TO_KPH);
 
   const float accel = car_state.getAEgo();
 
@@ -1159,10 +1160,9 @@ void NvgWindow::drawSpeed(QPainter &p) {
   const float cruiseMaxSpeed_kph = controls_state.getCruiseMaxSpeed();
   const bool is_cruise_set = (cruiseMaxSpeed_kph > 0.f && cruiseMaxSpeed_kph < 255.f);
 
-  auto to_display_speed = [&](float kph) -> int {
+  auto to_display_speed = [](float kph) -> int {
     if (kph <= 0.f) return 0;
-    if (s->scene.is_metric) return (int)(kph + 0.5f);
-    return (int)(kph * (float)KM_TO_MILE + 0.5f);
+    return (int)(kph + 0.5f);
   };
 
   // ✅ 패널 폭 10% 증가 (콘텐츠 폭 기준으로 같이 확대)
