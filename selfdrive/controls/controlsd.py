@@ -51,7 +51,10 @@ from selfdrive.controls.lib.curve_pedal_coordinator import CurvePedalCoordinator
 from selfdrive.controls.lib.predictive_coasting import PredictiveCoastingCoordinator
 from selfdrive.controls.lib.natural_decel_learner import NaturalDecelLearner, select_road_pitch
 from selfdrive.controls.lib.panda_safety import panda_safety_config_matches, update_panda_safety_readiness
-from selfdrive.controls.lib.process_health import expected_not_running_processes, update_process_not_running_state
+from selfdrive.controls.lib.process_health import (
+  controlsd_communication_ok, expected_not_running_processes,
+  update_process_not_running_state,
+)
 from selfdrive.controls.lib.driving_style_learner import DrivingStyleLearner
 from selfdrive.controls.lib.comma_pedal_profile import (
   CommaPedalProfileController, combine_comma_pedal_gain,
@@ -75,6 +78,7 @@ SOFT_DISABLE_TIME = 3  # seconds
 PANDA_SAFETY_MATCH_FRAMES = 10  # 100 ms at 100 Hz
 CONTROLS_ALLOWED_MISMATCH_FRAMES = 25  # 250 ms at 100 Hz
 PROCESS_NOT_RUNNING_CONSECUTIVE_UPDATES = 3
+COMM_ISSUE_CONSECUTIVE_FRAMES = max(1, int(0.30 / DT_CTRL))
 COMMA_PEDAL_PARAM_REFRESH_FRAMES = max(1, int(0.2 / DT_CTRL))
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
@@ -84,7 +88,7 @@ SIMULATION = "SIMULATION" in os.environ
 NOSENSOR = "NOSENSOR" in os.environ
 IGNORE_PROCESSES = {"rtshield", "uploader", "deleter", "loggerd", "logmessaged", "tombstoned",
                     "logcatd", "proclogd", "clocksd", "updated", "timezoned", "manage_athenad",
-                    "statsd", "shutdownd"} | \
+                    "statsd", "shutdownd", "recoverylogger", "perceptionlogger"} | \
                    {k for k, v in managed_processes.items() if not v.enabled}
 
 ACTUATOR_FIELDS = set(car.CarControl.Actuators.schema.fields.keys())
@@ -284,6 +288,7 @@ class Controls:
         self.events_prev = []
         self.current_alert_types = [ET.PERMANENT]
         self.logged_comm_issue = False
+        self.comm_issue_counter = 0
         self.button_timers = {ButtonEvent.Type.decelCruise: 0, ButtonEvent.Type.accelCruise: 0}
         self.last_actuators = car.CarControl.Actuators.new_message()
 
@@ -1098,18 +1103,40 @@ class Controls:
             self.events.add(EventName.usbError)
         # self.sm.all_checks()
         # self.sm.all_alive_and_valid()
-        elif not self.sm.all_checks() or self.can_rcv_error:
-            self.events.add(EventName.commIssue)
-            if not self.logged_comm_issue:
-                invalid = [s for s, valid in self.sm.valid.items() if not valid]
-                not_alive = [s for s, alive in self.sm.alive.items() if not alive]
-                bad_frequency = [s for s, freq_ok in self.sm.freq_ok.items()
-                                 if not freq_ok and s not in self.sm.ignore_average_freq]
-                cloudlog.event("commIssue", invalid=invalid, not_alive=not_alive, can_error=self.can_rcv_error,
-                               bad_frequency=bad_frequency, error=True)
-                self.logged_comm_issue = True
         else:
-            self.logged_comm_issue = False
+            # liveTorqueParameters is a derived learner output. If its payload
+            # is temporarily invalid, state_control keeps the last valid torque
+            # values. Treating that fallback state as a device-process failure
+            # creates false commIssue alerts on EON. The service must still be
+            # alive, and managerState independently detects a dead torqued.
+            communication_bad = not controlsd_communication_ok(
+                self.sm, optional_validity_services={'liveTorqueParameters'})
+            if communication_bad:
+                self.comm_issue_counter = min(
+                    self.comm_issue_counter + 1, COMM_ISSUE_CONSECUTIVE_FRAMES)
+            else:
+                self.comm_issue_counter = 0
+
+            # CAN receive failures remain immediate. A service-health failure
+            # must persist for 300 ms, which rejects scheduler jitter without
+            # hiding an actually stopped or invalid process.
+            comm_issue_active = bool(
+                self.can_rcv_error or
+                self.comm_issue_counter >= COMM_ISSUE_CONSECUTIVE_FRAMES)
+            if comm_issue_active:
+                self.events.add(EventName.commIssue)
+                if not self.logged_comm_issue:
+                    invalid = [s for s, valid in self.sm.valid.items() if not valid]
+                    not_alive = [s for s, alive in self.sm.alive.items() if not alive]
+                    bad_frequency = [s for s, freq_ok in self.sm.freq_ok.items()
+                                     if not freq_ok and s not in self.sm.ignore_average_freq]
+                    cloudlog.event("commIssue", invalid=invalid, not_alive=not_alive,
+                                   can_error=self.can_rcv_error,
+                                   consecutive_frames=self.comm_issue_counter,
+                                   bad_frequency=bad_frequency, error=True)
+                    self.logged_comm_issue = True
+            elif self.comm_issue_counter == 0:
+                self.logged_comm_issue = False
 
         if not self.sm['liveParameters'].valid:
             self.events.add(EventName.vehicleModelInvalid)
