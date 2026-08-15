@@ -50,10 +50,7 @@ from selfdrive.controls.lib.curve_pedal_coordinator import CurvePedalCoordinator
 from selfdrive.controls.lib.predictive_coasting import PredictiveCoastingCoordinator
 from selfdrive.controls.lib.natural_decel_learner import NaturalDecelLearner, select_road_pitch
 from selfdrive.controls.lib.panda_safety import panda_safety_config_matches, update_panda_safety_readiness
-from selfdrive.controls.lib.process_health import (
-  controlsd_communication_ok, expected_not_running_processes,
-  update_process_not_running_state,
-)
+from selfdrive.controls.lib.process_health import expected_not_running_processes, update_process_not_running_state
 from selfdrive.controls.lib.driving_style_learner import DrivingStyleLearner
 from selfdrive.controls.lib.comma_pedal_profile import (
   CommaPedalProfileController, combine_comma_pedal_gain,
@@ -1111,13 +1108,7 @@ class Controls:
         # self.sm.all_checks()
         # self.sm.all_alive_and_valid()
         else:
-            # liveTorqueParameters is a derived learner output. If its payload
-            # is temporarily invalid, state_control keeps the last valid torque
-            # values. Treating that fallback state as a device-process failure
-            # creates false commIssue alerts on EON. The service must still be
-            # alive, and managerState independently detects a dead torqued.
-            communication_bad = not controlsd_communication_ok(
-                self.sm, optional_validity_services={'liveTorqueParameters'})
+            communication_bad = not self.sm.all_checks()
             if communication_bad:
                 self.comm_issue_counter = min(
                     self.comm_issue_counter + 1, COMM_ISSUE_CONSECUTIVE_FRAMES)
