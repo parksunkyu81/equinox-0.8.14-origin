@@ -10,20 +10,8 @@ import cereal.messaging as messaging
 from cereal import log
 from common.params import Params
 from selfdrive.controls.lib.model_data_validation import as_finite_vector, validated_model_trajectory
-from selfdrive.controls.lib.lateral_path_stability import PathStabilityMonitor
 
 TRAJECTORY_SIZE = 33
-STALE_PATH_MAX_BLEND_DELTA_M = 0.75
-
-
-def stale_path_blend_allowed(near_lane_pair_reliable, curve_direction,
-                             old_path_y_20m, current_path_y_20m):
-  old_opposes_curve = bool(
-    int(curve_direction) != 0 and
-    float(old_path_y_20m) * int(curve_direction) < -0.05)
-  large_path_change = abs(
-    float(current_path_y_20m) - float(old_path_y_20m)) > STALE_PATH_MAX_BLEND_DELTA_M
-  return not (bool(near_lane_pair_reliable) or old_opposes_curve or large_path_change)
 
 class LateralPlanner:
   def __init__(self, CP):
@@ -47,9 +35,6 @@ class LateralPlanner:
     self.t_idxs = np.arange(TRAJECTORY_SIZE)
     self.y_pts = np.zeros(TRAJECTORY_SIZE)
     self.model_data_valid = False
-    self._path_stability = PathStabilityMonitor()
-    self._stable_path_xyz = None
-    self._stability_curve_direction = 0
 
     self.lat_mpc = LateralMpc()
     self.reset_mpc(np.zeros(4))
@@ -110,53 +95,13 @@ class LateralPlanner:
       heading_cost = interp(v_ego, [5.0, 10.0], [MPC_COST_LAT.HEADING, 0.15])
       self.lat_mpc.set_weights(MPC_COST_LAT.PATH, heading_cost, MPC_COST_LAT.STEER_RATE)
 
-    path_y_20m = float(np.interp(20.0, d_path_xyz[:, 0], d_path_xyz[:, 1]))
-    curve_direction = (1 if measured_curvature > 0.0 else -1) \
-      if abs(measured_curvature) >= 0.00080 else 0
-    curve_direction_changed = bool(
-      curve_direction != 0 and self._stability_curve_direction != 0 and
-      curve_direction != self._stability_curve_direction)
-    if curve_direction != 0:
-      self._stability_curve_direction = curve_direction
-
-    # A reliable lane pair makes lane-relative motion the useful instability
-    # signal. Absolute y at 20 m naturally moves by metres through a real turn
-    # and previously kept this monitor active for most of the route.
-    stability_y_20m = path_y_20m
-    if self.LP.near_lane_pair_reliable:
-      stability_y_20m -= float(self.LP.near_lane_center_y_20m)
-
-    if lane_change_active or curve_direction_changed:
-      self._path_stability.reset()
-      path_unstable = False
-    else:
-      path_unstable = self._path_stability.update(stability_y_20m)
-    if path_unstable and self._stable_path_xyz is not None and self._stable_path_xyz.shape == d_path_xyz.shape:
-      old_path_y_20m = float(np.interp(
-        20.0, self._stable_path_xyz[:, 0], self._stable_path_xyz[:, 1]))
-
-      # Never let a stale path override a reliable near-lane path, survive a
-      # direction change, or remain on the wrong side of an established turn.
-      # For the remaining small model-only wobble, keep only 35% history so
-      # recovery takes frames instead of seconds.
-      if stale_path_blend_allowed(
-          self.LP.near_lane_pair_reliable, curve_direction,
-          old_path_y_20m, path_y_20m):
-        d_path_xyz[:, 1] = 0.35 * self._stable_path_xyz[:, 1] + 0.65 * d_path_xyz[:, 1]
-    self._stable_path_xyz = d_path_xyz.copy()
-
+    # Match the official planner: the current model/lane blend goes directly
+    # to MPC. Do not retain or blend a previous path across real curve changes.
     d_path_distance = np.linalg.norm(d_path_xyz, axis=1)
     y_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], d_path_distance, d_path_xyz[:, 1])
-    if self.LP.near_lane_pair_reliable:
-      # Do not let a model heading that points toward the inside fight a clean
-      # lane-centered path. Derive heading from the same final path used by MPC.
-      d_path_heading = np.arctan2(
-        np.gradient(d_path_xyz[:, 1]),
-        np.maximum(np.gradient(d_path_xyz[:, 0]), 1e-3))
-      heading_pts = np.interp(
-        v_ego * self.t_idxs[:LAT_MPC_N + 1], d_path_distance, d_path_heading)
-    else:
-      heading_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], np.linalg.norm(self.path_xyz, axis=1), self.plan_yaw)
+    heading_pts = np.interp(
+      v_ego * self.t_idxs[:LAT_MPC_N + 1],
+      np.linalg.norm(self.path_xyz, axis=1), self.plan_yaw)
     curv_rate_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], np.linalg.norm(self.path_xyz, axis=1), self.plan_curv_rate)
     self.y_pts = y_pts
 
@@ -219,10 +164,11 @@ class LateralPlanner:
     lateralPlan.autoLaneChangeTimer = int(AUTO_LCA_START_TIME) - int(self.DH.auto_lane_change_timer)
 
     lateralPlan.totalCameraOffset = float(self.LP.total_camera_offset)
-    path_stability = self._path_stability.diagnostics()
-    lateralPlan.pathStabilityActive = bool(path_stability['active'])
-    lateralPlan.pathWobbleRangeM = float(path_stability['rangeM'])
-    lateralPlan.pathWobbleFlips = int(path_stability['flips'])
+    # Compatibility diagnostics. The official-style planner no longer blocks
+    # or filters the current path with a custom instability state machine.
+    lateralPlan.pathStabilityActive = False
+    lateralPlan.pathWobbleRangeM = 0.0
+    lateralPlan.pathWobbleFlips = 0
     lateralPlan.laneCenterCorrectionM = float(self.LP.lane_center_correction_m)
     lateralPlan.laneCenterCorrectionActive = bool(self.LP.lane_center_correction_active)
 

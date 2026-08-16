@@ -169,7 +169,9 @@ class Controls:
 
 
         # read params
-        self.is_live_torque = params.get_bool('IsLiveTorque')
+        # Use fixed CarParams torque tuning. The live learner may continue to
+        # publish diagnostics, but it must not modify steering authority.
+        self.is_live_torque = False
         self.is_metric = params.get_bool("IsMetric")
         self.is_ldw_enabled = params.get_bool("IsLdwEnabled")
         openpilot_enabled_toggle = params.get_bool("OpenpilotEnabledToggle")
@@ -1397,26 +1399,17 @@ class Controls:
 
         # Update Torque Params
         if self.CP.lateralTuning.which() == 'torque':
-            if self.is_live_torque:
-                torque_params = self.sm['liveTorqueParameters']
-
-                if (torque_params.latAccelFactorFiltered > 0) and (self.sm.valid['liveTorqueParameters']):
-                    self.torque_latAccelFactor = torque_params.latAccelFactorFiltered
-                    self.torque_latAccelOffset = torque_params.latAccelOffsetFiltered
-                    self.torque_friction = torque_params.frictionCoefficientFiltered
-                    self.totalBucketPoints = torque_params.totalBucketPoints
-
-                    self.LaC.update_live_torque_params(torque_params.latAccelFactorFiltered,
-                                                       torque_params.latAccelOffsetFiltered,
-                                                       torque_params.frictionCoefficientFiltered,
-                                                       torque_params.totalBucketPoints)
-
+            if hasattr(self.LaC, 'get_fixed_torque_params'):
+                fixed_torque = self.LaC.get_fixed_torque_params()
+                self.torque_latAccelFactor = fixed_torque['latAccelFactor']
+                self.torque_friction = fixed_torque['friction']
+                self.torque_latAccelOffset = fixed_torque['latAccelOffset']
+                self.totalBucketPoints = 0
             else:
-                self.torque_latAccelFactor = ntune_torque_get('latAccelFactor')  # LAT_ACCEL_FACTOR
-                self.torque_friction = ntune_torque_get('friction')  # FRICTION
+                self.torque_latAccelFactor = ntune_torque_get('latAccelFactor')
+                self.torque_friction = ntune_torque_get('friction')
                 self.torque_latAccelOffset = 0.0
-                self.LaC.update_live_torque_params(self.torque_latAccelFactor, self.torque_latAccelOffset,
-                                                   self.torque_friction, 0)
+                self.totalBucketPoints = 0
 
 
         lat_plan = self.sm['lateralPlan']
