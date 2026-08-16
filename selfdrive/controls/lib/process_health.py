@@ -25,6 +25,17 @@ def controlsd_communication_ok(submaster, optional_validity_services=()):
   return submaster.all_checks(service_list=required_services) and optional_services_alive
 
 
+def panda_power_down_in_progress(charging_disabled, controls_enabled):
+  """True only for an intentional, disengaged EON Panda power transition.
+
+  Switching a Black Panda from CDP to CLIENT briefly removes the CAN USB
+  device. That expected offroad transition must not be surfaced as a process
+  communication failure, but a disconnect while controls are enabled remains
+  an immediate fault.
+  """
+  return bool(charging_disabled and not controls_enabled)
+
+
 def update_process_not_running_state(counter, candidates, not_running, required_updates):
   """Track processes that remain expected-but-not-running across managerState updates."""
   not_running = set(not_running)

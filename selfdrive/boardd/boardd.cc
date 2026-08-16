@@ -55,6 +55,11 @@
 #define CUTOFF_IL 200
 #define SATURATE_IL 1600
 #define NIBBLE_TO_HEX(n) ((n) < 10 ? (n) + '0' : ((n) - 10) + 'a')
+// Give panda_state_thread time to publish ignition before honoring a stale
+// offroad charging-disable request. Without this grace period, EON can switch
+// a Black Panda to CLIENT during startup, drop USB, and never get enough CAN
+// time to observe that the ignition is actually on.
+constexpr uint64_t USB_POWER_MODE_STARTUP_GRACE_NS = 5ULL * 1000ULL * 1000ULL * 1000ULL;
 using namespace std::chrono_literals;
 
 std::atomic<bool> ignition(false);
@@ -414,11 +419,20 @@ void send_peripheral_state(PubMaster *pm, Panda *panda) {
   pm->send("peripheralState", msg);
 }
 
-void update_usb_power_mode(Panda *panda, bool charging_disabled) {
+void update_usb_power_mode(Panda *panda, bool charging_disabled, bool ignition_on,
+                           bool startup_grace_active) {
   const auto desired_mode = charging_disabled ?
     cereal::PeripheralState::UsbPowerMode::CLIENT :
     cereal::PeripheralState::UsbPowerMode::CDP;
   const auto panda_state = panda->get_state();
+
+  // chargingDisabled is published by thermald at 2 Hz and can still contain
+  // the previous offroad value when boardd reconnects. Never tear down the
+  // only CAN link while ignition is already known to be on, and wait briefly
+  // after USB enumeration so panda_state_thread can establish that state.
+  if (charging_disabled && (ignition_on || startup_grace_active)) {
+    return;
+  }
 
   // Changing power mode briefly re-enumerates USB. Panda retains the selected
   // mode, so boardd must compare against device state before writing it. An
@@ -504,6 +518,7 @@ void peripheral_control_thread(Panda *panda) {
   uint16_t ir_pwr = 0;
   uint16_t prev_ir_pwr = 999;
   unsigned int cnt = 0;
+  const uint64_t connected_at = nanos_since_boot();
 
   FirstOrderFilter integ_lines_filter(0, 30.0, 0.05);
 
@@ -512,8 +527,11 @@ void peripheral_control_thread(Panda *panda) {
     sm.update(1000); // TODO: what happens if EINTR is sent while in sm.update?
 
     if (!Hardware::PC() && sm.updated("deviceState")) {
+      const bool startup_grace_active =
+        nanos_since_boot() - connected_at < USB_POWER_MODE_STARTUP_GRACE_NS;
       update_usb_power_mode(
-        panda, sm["deviceState"].getDeviceState().getChargingDisabled());
+        panda, sm["deviceState"].getDeviceState().getChargingDisabled(),
+        ignition.load(), startup_grace_active);
     }
 
     // Other pandas don't have fan/IR to control

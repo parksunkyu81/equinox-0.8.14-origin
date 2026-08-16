@@ -376,7 +376,10 @@ class Android(HardwareBase):
     if self.get_battery_status() == 'Discharging':
       # If the battery is discharging, we can use this measurement
       # On C2: this is low by about 10-15%, probably mostly due to UNO draw not being factored in
-      return ((self.get_battery_voltage() / 1000000) * (self.get_battery_current() / 1000000))
+      # Android kernels disagree on the sign of current_now. Since this branch
+      # is entered only for a discharging battery, power consumption is always
+      # a positive magnitude.
+      return abs((self.get_battery_voltage() / 1000000) * (self.get_battery_current() / 1000000))
     else:
       # We don't have a good direct way to measure this if it's not "discharging"
       return None

@@ -53,7 +53,7 @@ from selfdrive.controls.lib.natural_decel_learner import NaturalDecelLearner, se
 from selfdrive.controls.lib.panda_safety import panda_safety_config_matches, update_panda_safety_readiness
 from selfdrive.controls.lib.process_health import (
   controlsd_communication_ok, expected_not_running_processes,
-  update_process_not_running_state,
+  panda_power_down_in_progress, update_process_not_running_state,
 )
 from selfdrive.controls.lib.driving_style_learner import DrivingStyleLearner
 from selfdrive.controls.lib.comma_pedal_profile import (
@@ -1097,9 +1097,11 @@ class Controls:
             self.events.add(EventName.controlsMismatch)
 
         # Check for HW or system issues
+        panda_powering_down = panda_power_down_in_progress(
+            self.sm['deviceState'].chargingDisabled, self.enabled)
         if len(self.sm['radarState'].radarErrors):
             self.events.add(EventName.radarFault)
-        elif not self.sm.valid["pandaStates"]:
+        elif not self.sm.valid["pandaStates"] and not panda_powering_down:
             self.events.add(EventName.usbError)
         # self.sm.all_checks()
         # self.sm.all_alive_and_valid()
@@ -1111,7 +1113,9 @@ class Controls:
             # alive, and managerState independently detects a dead torqued.
             communication_bad = not controlsd_communication_ok(
                 self.sm, optional_validity_services={'liveTorqueParameters'})
-            if communication_bad:
+            if panda_powering_down:
+                self.comm_issue_counter = 0
+            elif communication_bad:
                 self.comm_issue_counter = min(
                     self.comm_issue_counter + 1, COMM_ISSUE_CONSECUTIVE_FRAMES)
             else:
@@ -1121,8 +1125,9 @@ class Controls:
             # must persist for 300 ms, which rejects scheduler jitter without
             # hiding an actually stopped or invalid process.
             comm_issue_active = bool(
-                self.can_rcv_error or
-                self.comm_issue_counter >= COMM_ISSUE_CONSECUTIVE_FRAMES)
+                not panda_powering_down and
+                (self.can_rcv_error or
+                 self.comm_issue_counter >= COMM_ISSUE_CONSECUTIVE_FRAMES))
             if comm_issue_active:
                 self.events.add(EventName.commIssue)
                 if not self.logged_comm_issue:

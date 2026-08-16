@@ -22,6 +22,11 @@ VBATT_PAUSE_CHARGING = 11.0           # Lower limit on the LPF car battery volta
 VBATT_INSTANT_PAUSE_CHARGING = 7.0    # Lower limit on the instant car battery voltage measurements to avoid triggering on instant power loss
 MAX_TIME_OFFROAD_S = 30*3600
 MIN_ON_TIME_S = 3600
+# A CLIENT request intentionally re-enumerates Panda USB. Some Black Panda/EON
+# power paths reset back to CDP before peripheralState can confirm CLIENT. Do
+# not wait forever in that reconnect loop: after the request has remained
+# active long enough, finish the already-requested low-voltage shutdown.
+CHARGING_DISABLE_SHUTDOWN_DELAY_S = 10.0
 
 class PowerMonitoring:
   def __init__(self):
@@ -33,6 +38,7 @@ class PowerMonitoring:
     self.car_voltage_mV = 12e3                  # Low-passed version of peripheralState voltage
     self.car_voltage_instant_mV = 12e3          # Last value of peripheralState voltage
     self.integration_lock = threading.Lock()
+    self.charging_disabled_since = None
 
     car_battery_capacity_uWh = self.params.get("CarBatteryCapacity")
     if car_battery_capacity_uWh is None:
@@ -158,6 +164,7 @@ class PowerMonitoring:
   # See if we need to disable charging
   def should_disable_charging(self, ignition: bool, in_car: bool, offroad_timestamp: Optional[float]) -> bool:
     if offroad_timestamp is None:
+      self.charging_disabled_since = None
       return False
 
     now = sec_since_boot()
@@ -169,6 +176,11 @@ class PowerMonitoring:
     disable_charging &= (not self.params.get_bool("DisablePowerDown"))
     disable_charging &= in_car
     disable_charging |= self.params.get_bool("ForcePowerDown")
+    if disable_charging:
+      if self.charging_disabled_since is None:
+        self.charging_disabled_since = now
+    else:
+      self.charging_disabled_since = None
     return disable_charging
 
   # See if we need to shutdown
@@ -178,11 +190,15 @@ class PowerMonitoring:
 
     now = sec_since_boot()
     panda_charging = (peripheralState.usbPowerMode != log.PeripheralState.UsbPowerMode.client)
+    charging_disabled = self.should_disable_charging(ignition, in_car, offroad_timestamp)
+    charging_disable_timed_out = (
+      self.charging_disabled_since is not None and
+      now - self.charging_disabled_since >= CHARGING_DISABLE_SHUTDOWN_DELAY_S)
     BATT_PERC_OFF = 10
 
     should_shutdown = False
     # Wait until we have shut down charging before powering down
-    should_shutdown |= (not panda_charging and self.should_disable_charging(ignition, in_car, offroad_timestamp))
+    should_shutdown |= charging_disabled and (not panda_charging or charging_disable_timed_out)
     should_shutdown |= ((HARDWARE.get_battery_capacity() < BATT_PERC_OFF) and (not HARDWARE.get_battery_charging()) and ((now - offroad_timestamp) > 60))
     should_shutdown &= started_seen or (now > MIN_ON_TIME_S)
     return should_shutdown
