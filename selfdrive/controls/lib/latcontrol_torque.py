@@ -28,10 +28,11 @@ from selfdrive.controls.lib.v0813_lateral_compat import V0813CurvatureGuard
 # friction in the steering wheel that needs to be overcome to
 # move it at all, this is compensated for too.
 
-# LOW_SPEED_X = [0, 10, 20, 30] #comma
-# LOW_SPEED_Y = [15, 13, 10, 5] #comma
-LOW_SPEED_X = [0, 5, 10, 20, 30]
-LOW_SPEED_Y = [15, 10, 0, 0, 5]
+# Conservative squared low-speed curvature weighting. The previous custom map
+# used 420 at 10 kph and still exceeded 200 near 20 kph, turning small
+# steering-angle lag into full-scale, alternating torque requests.
+LOW_SPEED_FACTOR_BP_MS = [0.0, 10.0 / 3.6, 20.0 / 3.6, 30.0 / 3.6, 50.0 / 3.6]
+LOW_SPEED_FACTOR_V = [225.0, 169.0, 100.0, 25.0, 0.0]
 
 # steer_limited / saturated 직후 몇 프레임 더 보수적으로 유지할지
 HS_LIMIT_HOLD_BP = [30.0, 60.0, 90.0, 110.0, 130.0]
@@ -169,6 +170,12 @@ class LatControlTorque(LatControl):
         except Exception:
             response_state = None
         self._response_compensator = LateralResponseCompensator(response_state)
+        if self._response_compensator.migrated:
+            try:
+                put_nonblocking('TorqueResponseBins', self._response_compensator.serialize())
+                self._response_compensator.dirty = False
+            except Exception:
+                pass
         self._response_last_saved_count = self._response_compensator.update_count
         self._response_last_saved_t = sec_since_boot()
         self._response_was_active = False
@@ -580,11 +587,7 @@ class LatControlTorque(LatControl):
             actual_lateral_accel = actual_curvature * CS.vEgo ** 2
             lateral_accel_deadzone = curvature_deadzone * CS.vEgo ** 2
 
-            isLowSpeed = Params().get_bool('IsLowSpeedFactor')
-            if isLowSpeed:
-                low_speed_factor = interp(CS.vEgo, [0.0, 3.0, 5.0, 8.33, 13.89], [420.0, 420.0, 260.0, 80.0, 0.0])
-            else:
-                low_speed_factor = interp(CS.vEgo, [0.0, 3.0, 5.0, 8.33], [300.0, 300.0, 120.0, 0.0])
+            low_speed_factor = interp(CS.vEgo, LOW_SPEED_FACTOR_BP_MS, LOW_SPEED_FACTOR_V)
 
             setpoint = desired_lateral_accel + low_speed_factor * desired_curvature
             measurement = actual_lateral_accel + low_speed_factor * actual_curvature

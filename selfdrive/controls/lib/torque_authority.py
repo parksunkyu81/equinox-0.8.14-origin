@@ -30,8 +30,11 @@ AUTHORITY_FRICTION_UP_V = [0.000, 0.015, 0.040, 0.060, 0.080, 0.080,
 # Even a strong corner may only use part of the profile. This bounds the
 # learned 1.948/0.168 values seen in the 2026-08-13 log to roughly 1.872/0.177
 # at 25-30 km/h instead of the previous 1.75/0.202 extreme.
-AUTHORITY_MAX_BP = [0.0, 8.0, 10.0, 15.0, 25.0, 35.0, 45.0, 60.0, 80.0, 130.0]
-AUTHORITY_MAX_V = [0.00, 0.00, 0.30, 0.55, 0.65, 0.62, 0.55, 0.50, 0.12, 0.00]
+AUTHORITY_MAX_BP = [0.0, 8.0, 10.0, 15.0, 25.0, 30.0, 35.0, 45.0, 60.0, 80.0, 130.0]
+# Never add transient authority below 30 kph. Logged 10-20 kph model-path
+# oscillations were being converted into full-scale torque requests in this
+# band. Ramp authority back in gradually after 30 kph.
+AUTHORITY_MAX_V = [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.30, 0.50, 0.45, 0.12, 0.00]
 
 CORNER_CURVATURE_BP = [0.00030, 0.00180]
 CORNER_LAT_ACCEL_BP = [0.08, 0.85]
@@ -68,6 +71,8 @@ RESPONSE_SPEED_UPPER_KPH = [20.0, 30.0, 40.0, 60.0, 80.0]
 RESPONSE_INITIAL_V = [0.846, 0.914, 0.867, 0.843, 0.906]
 RESPONSE_MAX_SCALE_V = [1.06, 1.04, 1.09, 1.12, 1.06]
 RESPONSE_TARGET = 0.97
+RESPONSE_STATE_VERSION = 2
+RESPONSE_MIN_ACTIVE_KPH = 30.0
 # Lateral acceleration is curvature * speed^2, so one global minimum excluded
 # valid low-speed corners even after long drives.  The 2026-08-14 18:00+ EON
 # log showed path-stable 10-20 km/h corner demand concentrated at 0.010-0.023;
@@ -97,6 +102,7 @@ class LateralResponseCompensator:
     self.frozen = True
     self.update_count = 0
     self.dirty = False
+    self.migrated = False
     self.load(serialized_state)
 
   def reset_transient(self):
@@ -124,6 +130,7 @@ class LateralResponseCompensator:
       if isinstance(serialized_state, bytes):
         serialized_state = serialized_state.decode('utf8')
       state = json.loads(serialized_state)
+      old_version = int(state.get('version', 0))
       responses = state.get('responses', [])
       counts = state.get('counts', [])
       if len(responses) == len(self.responses):
@@ -131,12 +138,27 @@ class LateralResponseCompensator:
       if len(counts) == len(self.counts):
         self.counts = [max(0, int(v)) for v in counts]
       self.update_count = max(0, int(state.get('updateCount', sum(self.counts))))
+
+      # v1 learned 10-30 kph response from steering-angle lag while the model
+      # path was unstable. Those two bins reached the hard 0.72 floor and must
+      # never be restored as extra steering authority.
+      disabled_bins = sum(upper <= RESPONSE_MIN_ACTIVE_KPH
+                          for upper in RESPONSE_SPEED_UPPER_KPH)
+      low_bins_dirty = any(
+        abs(self.responses[i] - 1.0) > 1e-6 or self.counts[i] != 0
+        for i in range(disabled_bins))
+      for i in range(disabled_bins):
+        self.responses[i] = 1.0
+        self.counts[i] = 0
+      if old_version < RESPONSE_STATE_VERSION or low_bins_dirty:
+        self.migrated = True
+        self.dirty = True
     except Exception:
       pass
 
   def serialize(self):
     return json.dumps({
-      'version': 1,
+      'version': RESPONSE_STATE_VERSION,
       'speedUpperBoundsKph': RESPONSE_SPEED_UPPER_KPH,
       'responses': [round(v, 6) for v in self.responses],
       'counts': self.counts,
@@ -150,6 +172,16 @@ class LateralResponseCompensator:
     desired = float(desired_lat)
     actual = float(actual_lat)
     self.bin_index = self._bin_for_speed(speed)
+    if speed < RESPONSE_MIN_ACTIVE_KPH:
+      self.stable_seconds = 0.0
+      self.last_direction = 0
+      self.last_desired = desired
+      self.last_bin_index = self.bin_index
+      self.scale = 1.0
+      self.ratio = 1.0
+      self.stable = False
+      self.frozen = True
+      return self.scale
     min_desired_lat_accel = RESPONSE_MIN_DESIRED_LAT_ACCEL_V[self.bin_index]
     bin_changed = self.bin_index != self.last_bin_index
     direction = 1 if desired > 0.0 else (-1 if desired < 0.0 else 0)
@@ -326,6 +358,12 @@ class DynamicTorqueAuthorityScheduler:
       self.boost = min(self.boost, DIRECTION_REVERSAL_BOOST_CAP)
       target = min(target, DIRECTION_REVERSAL_BOOST_CAP)
     target = min(target, ceiling)
+
+    # Do not carry a held boost across the protected low-speed boundary.
+    if ceiling <= 0.0:
+      self.boost = 0.0
+      self.hold_frames = 0
+      target = 0.0
 
     if target > 0.10 and not direction_damping and not output_reversal_active:
       self.hold_frames = BOOST_HOLD_FRAMES

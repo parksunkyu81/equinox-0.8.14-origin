@@ -32,6 +32,42 @@ TRAJECTORY_SIZE = 33
 PATH_OFFSET = ntune_common_get('pathOffset')
 CAMERA_OFFSET = -0.055   # 카메라 오른쪽으로 5.5cm 이동
 
+# When both near lane lines are strong, do not allow the model-only path to
+# cut materially toward the inside of a curve. The correction is distance
+# weighted and slew limited so confidence transitions cannot jerk the wheel.
+CURVE_INSIDE_GUARD_MIN_CURVATURE = 0.00045
+CURVE_INSIDE_GUARD_MAX_OFFSET_M = 0.10
+CURVE_INSIDE_GUARD_MIN_LANE_PROB = 0.50
+CURVE_INSIDE_GUARD_MAX_LANE_STD = 0.20
+CURVE_INSIDE_GUARD_MIN_LANE_WIDTH_M = 2.5
+CURVE_INSIDE_GUARD_MAX_LANE_WIDTH_M = 4.2
+CURVE_INSIDE_GUARD_MAX_CORRECTION_M = 0.50
+CURVE_INSIDE_GUARD_SLEW_MPS = 0.25
+
+
+def curve_inside_guard_target(path_y_20m, lane_center_y_20m, measured_curvature,
+                              left_prob, right_prob, left_std, right_std,
+                              lane_width_20m, lane_change_active=False):
+  """Return a bounded outward correction for a reliable curved-road sample."""
+  curvature = float(measured_curvature)
+  eligible = bool(
+    not lane_change_active and
+    abs(curvature) >= CURVE_INSIDE_GUARD_MIN_CURVATURE and
+    float(left_prob) >= CURVE_INSIDE_GUARD_MIN_LANE_PROB and
+    float(right_prob) >= CURVE_INSIDE_GUARD_MIN_LANE_PROB and
+    float(left_std) <= CURVE_INSIDE_GUARD_MAX_LANE_STD and
+    float(right_std) <= CURVE_INSIDE_GUARD_MAX_LANE_STD and
+    CURVE_INSIDE_GUARD_MIN_LANE_WIDTH_M <= float(lane_width_20m) <= CURVE_INSIDE_GUARD_MAX_LANE_WIDTH_M
+  )
+  if not eligible:
+    return 0.0, False
+
+  curve_direction = 1.0 if curvature > 0.0 else -1.0
+  inside_offset = (float(path_y_20m) - float(lane_center_y_20m)) * curve_direction
+  excess_inside = max(0.0, inside_offset - CURVE_INSIDE_GUARD_MAX_OFFSET_M)
+  target = -curve_direction * min(excess_inside, CURVE_INSIDE_GUARD_MAX_CORRECTION_M)
+  return float(target), bool(excess_inside > 0.0)
+
 class LanePlanner:
   def __init__(self, wide_camera=False):
     self.ll_t = np.zeros((TRAJECTORY_SIZE,))
@@ -76,6 +112,8 @@ class LanePlanner:
     self._lane_center = LaneCenterCorrection()
     self.lane_center_correction_m = 0.0
     self.lane_center_correction_active = False
+    self.curve_inside_correction_m = 0.0
+    self.curve_inside_correction_active = False
 
   def parse_model(self, md):
 
@@ -159,7 +197,8 @@ class LanePlanner:
     # Reduce reliance on lanelines that are too far apart or
     # will be in a few seconds
     path_xyz[:, 1] += self.path_offset
-    l_prob, r_prob = self.lll_prob, self.rll_prob
+    raw_l_prob, raw_r_prob = self.lll_prob, self.rll_prob
+    l_prob, r_prob = raw_l_prob, raw_r_prob
     width_pts = self.rll_y - self.lll_y
     prob_mods = []
     for t_check in (0.0, 1.5, 3.0):
@@ -220,12 +259,38 @@ class LanePlanner:
       lane_path_y_interp = np.interp(path_t, self.ll_t[safe_idxs], lane_path_y[safe_idxs])
       path_xyz[:,1] = self.d_prob * lane_path_y_interp + (1.0 - self.d_prob) * path_xyz[:,1]
 
+      lane_center_y = (self.lll_y + self.rll_y) / 2.0
+      center_safe_idxs = safe_idxs & np.isfinite(self.ll_x) & np.isfinite(lane_center_y) & np.isfinite(width_pts)
+      path_safe_idxs = np.isfinite(path_xyz[:, 0]) & np.isfinite(path_xyz[:, 1])
+      if np.count_nonzero(center_safe_idxs) >= 2 and np.count_nonzero(path_safe_idxs) >= 2:
+        lane_center_y_20m = float(np.interp(
+          20.0, self.ll_x[center_safe_idxs], lane_center_y[center_safe_idxs]))
+        lane_width_20m = abs(float(np.interp(
+          20.0, self.ll_x[center_safe_idxs], width_pts[center_safe_idxs])))
+        path_y_20m_before_guard = float(np.interp(
+          20.0, path_xyz[path_safe_idxs, 0], path_xyz[path_safe_idxs, 1]))
+        curve_target, curve_target_active = curve_inside_guard_target(
+          path_y_20m_before_guard, lane_center_y_20m, measured_curvature,
+          raw_l_prob, raw_r_prob, self.lll_std, self.rll_std, lane_width_20m,
+          lane_change_active=lane_change_active)
+      else:
+        curve_target, curve_target_active = 0.0, False
+      curve_step = CURVE_INSIDE_GUARD_SLEW_MPS * DT_MDL
+      self.curve_inside_correction_m += float(np.clip(
+        curve_target - self.curve_inside_correction_m, -curve_step, curve_step))
+      if abs(self.curve_inside_correction_m) < 1e-6:
+        self.curve_inside_correction_m = 0.0
+      curve_distance_weight = np.clip(path_xyz[:, 0] / 20.0, 0.0, 1.0)
+      path_xyz[:, 1] += self.curve_inside_correction_m * curve_distance_weight
+      self.curve_inside_correction_active = bool(
+        curve_target_active or abs(self.curve_inside_correction_m) > 0.002)
+
       lane_y_20m = float(np.interp(20.0, self.ll_x, lane_path_y))
       path_y_20m = float(np.interp(20.0, path_xyz[:, 0], path_xyz[:, 1]))
       residual_20m = lane_y_20m - path_y_20m
       center_eligible = bool(
         float(v_ego) * 3.6 >= 30.0 and
-        abs(float(measured_curvature)) <= 0.0012 and
+        abs(float(measured_curvature)) < CURVE_INSIDE_GUARD_MIN_CURVATURE and
         not bool(lane_change_active) and
         l_prob >= 0.50 and r_prob >= 0.50 and
         self.lll_std <= 0.20 and self.rll_std <= 0.20 and
@@ -238,5 +303,9 @@ class LanePlanner:
     else:
       cloudlog.warning("Lateral mpc - NaNs in laneline times, ignoring")
       self.lane_center_correction_m = self._lane_center.update(0.0, False, DT_MDL)
+      curve_step = CURVE_INSIDE_GUARD_SLEW_MPS * DT_MDL
+      self.curve_inside_correction_m += float(np.clip(
+        -self.curve_inside_correction_m, -curve_step, curve_step))
+      self.curve_inside_correction_active = bool(abs(self.curve_inside_correction_m) > 0.002)
     self.lane_center_correction_active = bool(self._lane_center.active)
     return path_xyz

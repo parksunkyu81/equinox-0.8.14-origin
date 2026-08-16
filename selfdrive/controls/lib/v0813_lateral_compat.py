@@ -14,16 +14,16 @@ from common.numpy_fast import clip, interp
 V0813_EXTRA_STEER_DELAY_S = 0.20
 V0813_MAX_STEER_DELAY_S = 1.00
 
-V0813_CURV_GUARD_ON_KPH = 55.0
-V0813_CURV_DELTA_BP = [55.0, 70.0, 90.0, 110.0, 130.0]
-V0813_CURV_DELTA_V = [0.00062, 0.00052, 0.00038, 0.00024, 0.00016]
-V0813_CURV_RATE_BP = [55.0, 70.0, 90.0, 110.0, 130.0]
-V0813_CURV_RATE_V = [0.020, 0.017, 0.012, 0.008, 0.005]
+V0813_CURV_GUARD_ON_KPH = 10.0
+V0813_CURV_DELTA_BP = [10.0, 20.0, 30.0, 40.0, 55.0, 70.0, 90.0, 110.0, 130.0]
+V0813_CURV_DELTA_V = [0.0040, 0.0030, 0.0020, 0.0012, 0.00062, 0.00052, 0.00038, 0.00024, 0.00016]
+V0813_CURV_RATE_BP = [10.0, 20.0, 30.0, 40.0, 55.0, 70.0, 90.0, 110.0, 130.0]
+V0813_CURV_RATE_V = [0.080, 0.060, 0.045, 0.030, 0.020, 0.017, 0.012, 0.008, 0.005]
 # A real time constant is used instead of a per-control-frame blend. The model
 # publishes at 20 Hz while controls runs at 100 Hz; this keeps filtering
 # consistent across the five repeated control frames for each model plan.
-V0813_CURV_RC_BP = [55.0, 70.0, 90.0, 110.0, 130.0]
-V0813_CURV_RC_V = [0.025, 0.045, 0.070, 0.100, 0.130]
+V0813_CURV_RC_BP = [10.0, 20.0, 30.0, 40.0, 55.0, 70.0, 90.0, 110.0, 130.0]
+V0813_CURV_RC_V = [0.020, 0.025, 0.030, 0.030, 0.025, 0.045, 0.070, 0.100, 0.130]
 V0813_CONTROL_DT_S = 0.01
 V0813_SIGN_FLIP_MIN_CURVATURE = 0.00045
 V0813_LIMIT_DELTA_SHRINK = 0.55
@@ -43,7 +43,7 @@ def compensated_steer_delay(steer_actuator_delay):
 
 
 class V0813CurvatureGuard:
-  """Smooth v0.8.13 high-speed curvature without weakening steady corners."""
+  """Smooth v0.8.13 curvature changes without weakening steady corners."""
 
   def __init__(self):
     self.reset()
