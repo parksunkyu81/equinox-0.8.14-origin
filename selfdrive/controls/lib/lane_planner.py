@@ -175,14 +175,16 @@ class LanePlanner:
     if len(lane_lines) == 4 and lane_line_probs is not None and lane_line_stds is not None:
       lane_data = tuple(
         as_finite_vector(values, expected_size=TRAJECTORY_SIZE)
-        for values in (lane_lines[1].t, lane_lines[2].t, lane_lines[1].x,
+        for values in (lane_lines[1].x, lane_lines[2].x,
                        lane_lines[1].y, lane_lines[2].y)
       )
     if lane_data is not None and all(values is not None for values in lane_data):
-      left_t, right_t, left_x, left_y, right_y = lane_data
-      self.ll_t = (left_t + right_t) / 2.0
-      # left and right ll x is the same
-      self.ll_x = left_x
+      left_x, right_x, left_y, right_y = lane_data
+      # This model exposes only three finite lane-line time points and NaNs for
+      # the remaining 30, while all spatial x/y points are valid. Rejecting the
+      # whole pair from that unrelated time field forced l/rProb and dProb to
+      # zero. Lane geometry is spatial, so keep and interpolate it by x.
+      self.ll_x = (left_x + right_x) / 2.0
       # only offset left and right lane lines; offsetting path does not make sense
 
       self.lll_y = left_y + self.total_camera_offset
@@ -297,9 +299,12 @@ class LanePlanner:
       lane_path_y = lane_center_y
     else:
       lane_path_y = (l_prob * path_from_left_lane + r_prob * path_from_right_lane) / (l_prob + r_prob + 0.0001)
-    safe_idxs = np.isfinite(self.ll_t)
-    if safe_idxs[0]:
-      lane_path_y_interp = np.interp(path_t, self.ll_t[safe_idxs], lane_path_y[safe_idxs])
+    safe_idxs = np.isfinite(self.ll_x) & np.isfinite(lane_path_y)
+    if np.count_nonzero(safe_idxs) >= 2:
+      # Match the lane and model trajectories in metres. model lane-line t is
+      # sparse/non-finite on this EON and must never gate otherwise valid x/y.
+      lane_path_y_interp = np.interp(
+        path_xyz[:, 0], self.ll_x[safe_idxs], lane_path_y[safe_idxs])
       path_xyz[:,1] = self.d_prob * lane_path_y_interp + (1.0 - self.d_prob) * path_xyz[:,1]
 
       center_safe_idxs = safe_idxs & np.isfinite(self.ll_x) & np.isfinite(lane_center_y) & np.isfinite(width_pts)
@@ -389,7 +394,7 @@ class LanePlanner:
       distance_weight = np.clip(path_xyz[:, 0] / 20.0, 0.0, 1.0)
       path_xyz[:, 1] += self.lane_center_correction_m * distance_weight
     else:
-      cloudlog.warning("Lateral mpc - NaNs in laneline times, ignoring")
+      cloudlog.warning("Lateral mpc - incomplete laneline x/y geometry, ignoring")
       self.lane_center_correction_m = self._lane_center.update(0.0, False, DT_MDL)
       self.near_lane_pair_reliable = False
       self.curve_inside_target_m = 0.0
