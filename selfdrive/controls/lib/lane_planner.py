@@ -32,17 +32,28 @@ TRAJECTORY_SIZE = 33
 PATH_OFFSET = ntune_common_get('pathOffset')
 CAMERA_OFFSET = -0.055   # 카메라 오른쪽으로 5.5cm 이동
 
+# Near lane lines are the only lane geometry trusted for lateral-path blending.
+# The old 3 second width check reached 50-70 m at normal road speed; one noisy
+# far-field lane point then forced dProb to zero even when both lines were clean
+# at 20 m.
+NEAR_LANE_WIDTH_CHECK_DISTANCES_M = (5.0, 10.0, 20.0)
+NEAR_LANE_WIDTH_MOD_START_M = 4.2
+NEAR_LANE_WIDTH_MOD_END_M = 5.0
+
 # When both near lane lines are strong, do not allow the model-only path to
-# cut materially toward the inside of a curve. The correction is distance
-# weighted and slew limited so confidence transitions cannot jerk the wheel.
+# cut materially toward the inside of a curve. Attack is deliberately faster
+# than release, and a brief confidence hold prevents one weak frame from
+# dropping a correction in the middle of a corner.
 CURVE_INSIDE_GUARD_MIN_CURVATURE = 0.00045
 CURVE_INSIDE_GUARD_MAX_OFFSET_M = 0.10
 CURVE_INSIDE_GUARD_MIN_LANE_PROB = 0.50
 CURVE_INSIDE_GUARD_MAX_LANE_STD = 0.20
 CURVE_INSIDE_GUARD_MIN_LANE_WIDTH_M = 2.5
 CURVE_INSIDE_GUARD_MAX_LANE_WIDTH_M = 4.2
-CURVE_INSIDE_GUARD_MAX_CORRECTION_M = 0.50
-CURVE_INSIDE_GUARD_SLEW_MPS = 0.25
+CURVE_INSIDE_GUARD_MAX_CORRECTION_M = 1.00
+CURVE_INSIDE_GUARD_ATTACK_MPS = 1.50
+CURVE_INSIDE_GUARD_RELEASE_MPS = 0.35
+CURVE_INSIDE_GUARD_CONFIDENCE_HOLD_S = 0.80
 
 
 def curve_inside_guard_target(path_y_20m, lane_center_y_20m, measured_curvature,
@@ -114,6 +125,11 @@ class LanePlanner:
     self.lane_center_correction_active = False
     self.curve_inside_correction_m = 0.0
     self.curve_inside_correction_active = False
+    self.curve_inside_target_m = 0.0
+    self.curve_inside_hold_s = 0.0
+    self.curve_inside_direction = 0
+    self.near_lane_pair_reliable = False
+    self.near_lane_center_y_20m = 0.0
 
   def parse_model(self, md):
 
@@ -194,17 +210,39 @@ class LanePlanner:
 
   def get_d_path(self, v_ego, path_t, path_xyz, measured_curvature=0.0,
                  lane_change_active=False):
-    # Reduce reliance on lanelines that are too far apart or
-    # will be in a few seconds
+    # Reduce reliance only from near-field lane geometry. Far model lane-line
+    # divergence is common on curves and must not erase a clean 5-20 m pair.
     path_xyz[:, 1] += self.path_offset
     raw_l_prob, raw_r_prob = self.lll_prob, self.rll_prob
     l_prob, r_prob = raw_l_prob, raw_r_prob
     width_pts = self.rll_y - self.lll_y
-    prob_mods = []
-    for t_check in (0.0, 1.5, 3.0):
-      width_at_t = interp(t_check * (v_ego + 7), self.ll_x, width_pts)
-      prob_mods.append(interp(width_at_t, [4.0, 5.0], [1.0, 0.0]))
-    mod = min(prob_mods)
+    lane_center_y = (self.lll_y + self.rll_y) / 2.0
+    lane_geometry_idxs = np.isfinite(self.ll_x) & np.isfinite(width_pts) & np.isfinite(lane_center_y)
+    near_widths = []
+    if np.count_nonzero(lane_geometry_idxs) >= 2:
+      lane_x_safe = self.ll_x[lane_geometry_idxs]
+      width_safe = width_pts[lane_geometry_idxs]
+      center_safe = lane_center_y[lane_geometry_idxs]
+      near_widths = [abs(float(np.interp(distance, lane_x_safe, width_safe)))
+                     for distance in NEAR_LANE_WIDTH_CHECK_DISTANCES_M]
+      self.near_lane_center_y_20m = float(np.interp(20.0, lane_x_safe, center_safe))
+    else:
+      self.near_lane_center_y_20m = 0.0
+
+    near_width_valid = bool(
+      len(near_widths) == len(NEAR_LANE_WIDTH_CHECK_DISTANCES_M) and
+      all(CURVE_INSIDE_GUARD_MIN_LANE_WIDTH_M <= width <= CURVE_INSIDE_GUARD_MAX_LANE_WIDTH_M
+          for width in near_widths))
+    self.near_lane_pair_reliable = bool(
+      not lane_change_active and near_width_valid and
+      raw_l_prob >= CURVE_INSIDE_GUARD_MIN_LANE_PROB and
+      raw_r_prob >= CURVE_INSIDE_GUARD_MIN_LANE_PROB and
+      self.lll_std <= CURVE_INSIDE_GUARD_MAX_LANE_STD and
+      self.rll_std <= CURVE_INSIDE_GUARD_MAX_LANE_STD)
+
+    prob_mods = [interp(width, [NEAR_LANE_WIDTH_MOD_START_M, NEAR_LANE_WIDTH_MOD_END_M], [1.0, 0.0])
+                 for width in near_widths]
+    mod = min(prob_mods) if prob_mods else 0.0
     l_prob *= mod
     r_prob *= mod
 
@@ -253,15 +291,21 @@ class LanePlanner:
     target_d_prob = enhance_lane_probability(raw_d_prob, ENABLE_INC_LANE_PROB)
     self.d_prob = limit_lane_probability_rise(self.d_prob, target_d_prob, v_ego, DT_MDL)
 
-    lane_path_y = (l_prob * path_from_left_lane + r_prob * path_from_right_lane) / (l_prob + r_prob + 0.0001)
+    if self.near_lane_pair_reliable:
+      # With two good lines, their geometric center is safer than weighting
+      # two independently shifted boundaries by slightly different probs.
+      lane_path_y = lane_center_y
+    else:
+      lane_path_y = (l_prob * path_from_left_lane + r_prob * path_from_right_lane) / (l_prob + r_prob + 0.0001)
     safe_idxs = np.isfinite(self.ll_t)
     if safe_idxs[0]:
       lane_path_y_interp = np.interp(path_t, self.ll_t[safe_idxs], lane_path_y[safe_idxs])
       path_xyz[:,1] = self.d_prob * lane_path_y_interp + (1.0 - self.d_prob) * path_xyz[:,1]
 
-      lane_center_y = (self.lll_y + self.rll_y) / 2.0
       center_safe_idxs = safe_idxs & np.isfinite(self.ll_x) & np.isfinite(lane_center_y) & np.isfinite(width_pts)
       path_safe_idxs = np.isfinite(path_xyz[:, 0]) & np.isfinite(path_xyz[:, 1])
+      curve_geometry_valid = False
+      curve_geometry_inside = 0.0
       if np.count_nonzero(center_safe_idxs) >= 2 and np.count_nonzero(path_safe_idxs) >= 2:
         lane_center_y_20m = float(np.interp(
           20.0, self.ll_x[center_safe_idxs], lane_center_y[center_safe_idxs]))
@@ -269,13 +313,56 @@ class LanePlanner:
           20.0, self.ll_x[center_safe_idxs], width_pts[center_safe_idxs])))
         path_y_20m_before_guard = float(np.interp(
           20.0, path_xyz[path_safe_idxs, 0], path_xyz[path_safe_idxs, 1]))
+        curve_geometry_valid = bool(
+          CURVE_INSIDE_GUARD_MIN_LANE_WIDTH_M <= lane_width_20m <=
+          CURVE_INSIDE_GUARD_MAX_LANE_WIDTH_M)
         curve_target, curve_target_active = curve_inside_guard_target(
           path_y_20m_before_guard, lane_center_y_20m, measured_curvature,
           raw_l_prob, raw_r_prob, self.lll_std, self.rll_std, lane_width_20m,
           lane_change_active=lane_change_active)
       else:
         curve_target, curve_target_active = 0.0, False
-      curve_step = CURVE_INSIDE_GUARD_SLEW_MPS * DT_MDL
+      curve_direction = (1 if float(measured_curvature) > 0.0 else -1) \
+        if abs(float(measured_curvature)) >= CURVE_INSIDE_GUARD_MIN_CURVATURE else 0
+      if curve_geometry_valid and curve_direction != 0:
+        curve_geometry_inside = (
+          path_y_20m_before_guard - lane_center_y_20m) * curve_direction
+      previous_curve_direction = self.curve_inside_direction
+      curve_direction_changed = bool(
+        previous_curve_direction != 0 and curve_direction != previous_curve_direction)
+      if curve_target_active:
+        self.curve_inside_target_m = float(curve_target)
+        self.curve_inside_hold_s = CURVE_INSIDE_GUARD_CONFIDENCE_HOLD_S
+        self.curve_inside_direction = curve_direction
+      elif (not self.near_lane_pair_reliable and self.curve_inside_hold_s > 0.0 and
+            curve_direction != 0 and curve_direction == self.curve_inside_direction and
+            not lane_change_active):
+        # Keep the last outward target across a brief confidence dip.
+        self.curve_inside_hold_s = max(0.0, self.curve_inside_hold_s - DT_MDL)
+        if curve_geometry_valid:
+          held_required = max(
+            0.0, curve_geometry_inside - CURVE_INSIDE_GUARD_MAX_OFFSET_M)
+          held_target = -curve_direction * min(
+            held_required, CURVE_INSIDE_GUARD_MAX_CORRECTION_M)
+          if held_target * self.curve_inside_target_m > 0.0:
+            curve_target = np.sign(self.curve_inside_target_m) * min(
+              abs(self.curve_inside_target_m), abs(held_target))
+          else:
+            curve_target = 0.0
+        else:
+          curve_target = self.curve_inside_target_m
+      else:
+        self.curve_inside_target_m = 0.0
+        self.curve_inside_hold_s = 0.0
+        if curve_direction != self.curve_inside_direction:
+          self.curve_inside_direction = curve_direction
+        curve_target = 0.0
+
+      same_direction = self.curve_inside_correction_m * curve_target >= 0.0
+      increasing = same_direction and abs(curve_target) > abs(self.curve_inside_correction_m)
+      curve_slew_mps = CURVE_INSIDE_GUARD_ATTACK_MPS if curve_direction_changed or increasing or not same_direction \
+        else CURVE_INSIDE_GUARD_RELEASE_MPS
+      curve_step = curve_slew_mps * DT_MDL
       self.curve_inside_correction_m += float(np.clip(
         curve_target - self.curve_inside_correction_m, -curve_step, curve_step))
       if abs(self.curve_inside_correction_m) < 1e-6:
@@ -283,7 +370,8 @@ class LanePlanner:
       curve_distance_weight = np.clip(path_xyz[:, 0] / 20.0, 0.0, 1.0)
       path_xyz[:, 1] += self.curve_inside_correction_m * curve_distance_weight
       self.curve_inside_correction_active = bool(
-        curve_target_active or abs(self.curve_inside_correction_m) > 0.002)
+        curve_target_active or self.curve_inside_hold_s > 0.0 or
+        abs(self.curve_inside_correction_m) > 0.002)
 
       lane_y_20m = float(np.interp(20.0, self.ll_x, lane_path_y))
       path_y_20m = float(np.interp(20.0, path_xyz[:, 0], path_xyz[:, 1]))
@@ -303,7 +391,10 @@ class LanePlanner:
     else:
       cloudlog.warning("Lateral mpc - NaNs in laneline times, ignoring")
       self.lane_center_correction_m = self._lane_center.update(0.0, False, DT_MDL)
-      curve_step = CURVE_INSIDE_GUARD_SLEW_MPS * DT_MDL
+      self.near_lane_pair_reliable = False
+      self.curve_inside_target_m = 0.0
+      self.curve_inside_hold_s = 0.0
+      curve_step = CURVE_INSIDE_GUARD_RELEASE_MPS * DT_MDL
       self.curve_inside_correction_m += float(np.clip(
         -self.curve_inside_correction_m, -curve_step, curve_step))
       self.curve_inside_correction_active = bool(abs(self.curve_inside_correction_m) > 0.002)

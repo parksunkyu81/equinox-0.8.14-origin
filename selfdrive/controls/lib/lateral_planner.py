@@ -13,6 +13,17 @@ from selfdrive.controls.lib.model_data_validation import as_finite_vector, valid
 from selfdrive.controls.lib.lateral_path_stability import PathStabilityMonitor
 
 TRAJECTORY_SIZE = 33
+STALE_PATH_MAX_BLEND_DELTA_M = 0.75
+
+
+def stale_path_blend_allowed(near_lane_pair_reliable, curve_direction,
+                             old_path_y_20m, current_path_y_20m):
+  old_opposes_curve = bool(
+    int(curve_direction) != 0 and
+    float(old_path_y_20m) * int(curve_direction) < -0.05)
+  large_path_change = abs(
+    float(current_path_y_20m) - float(old_path_y_20m)) > STALE_PATH_MAX_BLEND_DELTA_M
+  return not (bool(near_lane_pair_reliable) or old_opposes_curve or large_path_change)
 
 class LateralPlanner:
   def __init__(self, CP):
@@ -38,6 +49,7 @@ class LateralPlanner:
     self.model_data_valid = False
     self._path_stability = PathStabilityMonitor()
     self._stable_path_xyz = None
+    self._stability_curve_direction = 0
 
     self.lat_mpc = LateralMpc()
     self.reset_mpc(np.zeros(4))
@@ -99,19 +111,52 @@ class LateralPlanner:
       self.lat_mpc.set_weights(MPC_COST_LAT.PATH, heading_cost, MPC_COST_LAT.STEER_RATE)
 
     path_y_20m = float(np.interp(20.0, d_path_xyz[:, 0], d_path_xyz[:, 1]))
-    if lane_change_active:
+    curve_direction = (1 if measured_curvature > 0.0 else -1) \
+      if abs(measured_curvature) >= 0.00080 else 0
+    curve_direction_changed = bool(
+      curve_direction != 0 and self._stability_curve_direction != 0 and
+      curve_direction != self._stability_curve_direction)
+    if curve_direction != 0:
+      self._stability_curve_direction = curve_direction
+
+    # A reliable lane pair makes lane-relative motion the useful instability
+    # signal. Absolute y at 20 m naturally moves by metres through a real turn
+    # and previously kept this monitor active for most of the route.
+    stability_y_20m = path_y_20m
+    if self.LP.near_lane_pair_reliable:
+      stability_y_20m -= float(self.LP.near_lane_center_y_20m)
+
+    if lane_change_active or curve_direction_changed:
       self._path_stability.reset()
       path_unstable = False
     else:
-      path_unstable = self._path_stability.update(path_y_20m)
+      path_unstable = self._path_stability.update(stability_y_20m)
     if path_unstable and self._stable_path_xyz is not None and self._stable_path_xyz.shape == d_path_xyz.shape:
-      # Filter only lateral position. Keeping model x/z current avoids changing
-      # MPC timing or longitudinal distance while an alternating path settles.
-      d_path_xyz[:, 1] = 0.90 * self._stable_path_xyz[:, 1] + 0.10 * d_path_xyz[:, 1]
+      old_path_y_20m = float(np.interp(
+        20.0, self._stable_path_xyz[:, 0], self._stable_path_xyz[:, 1]))
+
+      # Never let a stale path override a reliable near-lane path, survive a
+      # direction change, or remain on the wrong side of an established turn.
+      # For the remaining small model-only wobble, keep only 35% history so
+      # recovery takes frames instead of seconds.
+      if stale_path_blend_allowed(
+          self.LP.near_lane_pair_reliable, curve_direction,
+          old_path_y_20m, path_y_20m):
+        d_path_xyz[:, 1] = 0.35 * self._stable_path_xyz[:, 1] + 0.65 * d_path_xyz[:, 1]
     self._stable_path_xyz = d_path_xyz.copy()
 
-    y_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], np.linalg.norm(d_path_xyz, axis=1), d_path_xyz[:, 1])
-    heading_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], np.linalg.norm(self.path_xyz, axis=1), self.plan_yaw)
+    d_path_distance = np.linalg.norm(d_path_xyz, axis=1)
+    y_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], d_path_distance, d_path_xyz[:, 1])
+    if self.LP.near_lane_pair_reliable:
+      # Do not let a model heading that points toward the inside fight a clean
+      # lane-centered path. Derive heading from the same final path used by MPC.
+      d_path_heading = np.arctan2(
+        np.gradient(d_path_xyz[:, 1]),
+        np.maximum(np.gradient(d_path_xyz[:, 0]), 1e-3))
+      heading_pts = np.interp(
+        v_ego * self.t_idxs[:LAT_MPC_N + 1], d_path_distance, d_path_heading)
+    else:
+      heading_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], np.linalg.norm(self.path_xyz, axis=1), self.plan_yaw)
     curv_rate_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], np.linalg.norm(self.path_xyz, axis=1), self.plan_curv_rate)
     self.y_pts = y_pts
 

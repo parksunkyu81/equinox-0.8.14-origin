@@ -411,7 +411,10 @@ class LatControlTorque(LatControl):
         eff_lat = float(clip(eff_lat / response_scale, LAT_FACTOR_ABS_MIN, eff_lat))
         eff_fric = float(clip(eff_fric * (1.0 + 0.15 * (response_scale - 1.0)),
                               eff_fric, FRICTION_ABS_MAX))
-        self._save_response_state()
+        if self._response_compensator.consume_reset_completed():
+            self._save_response_state(force=True)
+        else:
+            self._save_response_state()
         self._dyn_last_blend = float(blend)
 
         self._dyn_last_corner_strength = float(dyn['cornerStrength'])

@@ -65,14 +65,16 @@ LAT_FACTOR_ABS_MAX = 2.42
 FRICTION_ABS_MIN = 0.165
 FRICTION_ABS_MAX = 0.305
 
-# Closed-loop response compensation. Initial response values come from the
-# 2026-08-14 Equinox log and are subsequently adapted independently per bin.
+# Closed-loop response compensation. v3 learns left and right independently
+# and never restores the path-contaminated 2026-08-16 response floors.
 RESPONSE_SPEED_UPPER_KPH = [20.0, 30.0, 40.0, 60.0, 80.0]
 RESPONSE_INITIAL_V = [0.846, 0.914, 0.867, 0.843, 0.906]
+RESPONSE_NEUTRAL_V = [1.0] * len(RESPONSE_SPEED_UPPER_KPH)
 RESPONSE_MAX_SCALE_V = [1.06, 1.04, 1.09, 1.12, 1.06]
 RESPONSE_TARGET = 0.97
-RESPONSE_STATE_VERSION = 2
+RESPONSE_STATE_VERSION = 3
 RESPONSE_MIN_ACTIVE_KPH = 30.0
+RESPONSE_PATH_STABLE_RESET_SECONDS = 5.0
 # Lateral acceleration is curvature * speed^2, so one global minimum excluded
 # valid low-speed corners even after long drives.  The 2026-08-14 18:00+ EON
 # log showed path-stable 10-20 km/h corner demand concentrated at 0.010-0.023;
@@ -86,12 +88,20 @@ RESPONSE_EMA_ALPHA = 0.015
 
 
 class LateralResponseCompensator:
-  """Learn bounded actual/desired lateral response in independent speed bins."""
+  """Learn bounded left/right response only after a stable-path reset."""
 
   def __init__(self, serialized_state=None):
-    self.responses = list(RESPONSE_INITIAL_V)
+    self.left_responses = list(RESPONSE_NEUTRAL_V)
+    self.right_responses = list(RESPONSE_NEUTRAL_V)
+    self.left_counts = [0] * len(RESPONSE_SPEED_UPPER_KPH)
+    self.right_counts = [0] * len(RESPONSE_SPEED_UPPER_KPH)
+    self.responses = list(RESPONSE_NEUTRAL_V)
     self.counts = [0] * len(RESPONSE_SPEED_UPPER_KPH)
     self.stable_seconds = 0.0
+    self.path_stable_seconds = 0.0
+    self.path_stable_reset_complete = False
+    self.reset_pending = True
+    self.reset_just_completed = False
     self.last_direction = 0
     self.last_desired = 0.0
     self.last_bin_index = 0
@@ -105,6 +115,26 @@ class LateralResponseCompensator:
     self.migrated = False
     self.load(serialized_state)
 
+  def _refresh_aggregates(self):
+    for index in range(len(self.responses)):
+      total = self.left_counts[index] + self.right_counts[index]
+      self.counts[index] = total
+      if total > 0:
+        self.responses[index] = (
+          self.left_responses[index] * self.left_counts[index] +
+          self.right_responses[index] * self.right_counts[index]
+        ) / float(total)
+      else:
+        self.responses[index] = 1.0
+
+  def _reset_directional_learning(self):
+    self.left_responses = list(RESPONSE_NEUTRAL_V)
+    self.right_responses = list(RESPONSE_NEUTRAL_V)
+    self.left_counts = [0] * len(RESPONSE_SPEED_UPPER_KPH)
+    self.right_counts = [0] * len(RESPONSE_SPEED_UPPER_KPH)
+    self.update_count = 0
+    self._refresh_aggregates()
+
   def reset_transient(self):
     self.stable_seconds = 0.0
     self.last_direction = 0
@@ -114,6 +144,8 @@ class LateralResponseCompensator:
     self.ratio = 1.0
     self.stable = False
     self.frozen = True
+    if self.reset_pending:
+      self.path_stable_seconds = 0.0
 
   @staticmethod
   def _bin_for_speed(v_kph):
@@ -131,28 +163,47 @@ class LateralResponseCompensator:
         serialized_state = serialized_state.decode('utf8')
       state = json.loads(serialized_state)
       old_version = int(state.get('version', 0))
-      responses = state.get('responses', [])
-      counts = state.get('counts', [])
-      if len(responses) == len(self.responses):
-        self.responses = [float(clip(float(v), 0.72, 1.08)) for v in responses]
-      if len(counts) == len(self.counts):
-        self.counts = [max(0, int(v)) for v in counts]
-      self.update_count = max(0, int(state.get('updateCount', sum(self.counts))))
-
-      # v1 learned 10-30 kph response from steering-angle lag while the model
-      # path was unstable. Those two bins reached the hard 0.72 floor and must
-      # never be restored as extra steering authority.
-      disabled_bins = sum(upper <= RESPONSE_MIN_ACTIVE_KPH
-                          for upper in RESPONSE_SPEED_UPPER_KPH)
-      low_bins_dirty = any(
-        abs(self.responses[i] - 1.0) > 1e-6 or self.counts[i] != 0
-        for i in range(disabled_bins))
-      for i in range(disabled_bins):
-        self.responses[i] = 1.0
-        self.counts[i] = 0
-      if old_version < RESPONSE_STATE_VERSION or low_bins_dirty:
+      if old_version >= RESPONSE_STATE_VERSION:
+        left_responses = state.get('responsesLeft', [])
+        right_responses = state.get('responsesRight', [])
+        left_counts = state.get('countsLeft', [])
+        right_counts = state.get('countsRight', [])
+        if (len(left_responses) == len(self.left_responses) and
+            len(right_responses) == len(self.right_responses) and
+            len(left_counts) == len(self.left_counts) and
+            len(right_counts) == len(self.right_counts)):
+          self.left_responses = [float(clip(float(v), 0.72, 1.08)) for v in left_responses]
+          self.right_responses = [float(clip(float(v), 0.72, 1.08)) for v in right_responses]
+          self.left_counts = [max(0, int(v)) for v in left_counts]
+          self.right_counts = [max(0, int(v)) for v in right_counts]
+          self.path_stable_reset_complete = bool(state.get('pathStableResetComplete', False))
+          self.reset_pending = not self.path_stable_reset_complete
+          self.update_count = max(0, int(state.get(
+            'updateCount', sum(self.left_counts) + sum(self.right_counts))))
+        else:
+          self._reset_directional_learning()
+          self.reset_pending = True
+          self.path_stable_reset_complete = False
+          self.migrated = True
+          self.dirty = True
+      else:
+        # All v1/v2 bins were learned while the selected path was unstable for
+        # most of the route. Keep neutral authority and wait for a continuous
+        # stable-path window before permitting any new response learning.
+        self._reset_directional_learning()
+        self.reset_pending = True
+        self.path_stable_reset_complete = False
         self.migrated = True
         self.dirty = True
+
+      disabled_bins = sum(upper <= RESPONSE_MIN_ACTIVE_KPH
+                          for upper in RESPONSE_SPEED_UPPER_KPH)
+      for index in range(disabled_bins):
+        self.left_responses[index] = 1.0
+        self.right_responses[index] = 1.0
+        self.left_counts[index] = 0
+        self.right_counts[index] = 0
+      self._refresh_aggregates()
     except Exception:
       pass
 
@@ -162,6 +213,11 @@ class LateralResponseCompensator:
       'speedUpperBoundsKph': RESPONSE_SPEED_UPPER_KPH,
       'responses': [round(v, 6) for v in self.responses],
       'counts': self.counts,
+      'responsesLeft': [round(v, 6) for v in self.left_responses],
+      'responsesRight': [round(v, 6) for v in self.right_responses],
+      'countsLeft': self.left_counts,
+      'countsRight': self.right_counts,
+      'pathStableResetComplete': bool(self.path_stable_reset_complete),
       'updateCount': self.update_count,
     }, separators=(',', ':'))
 
@@ -181,6 +237,27 @@ class LateralResponseCompensator:
       self.ratio = 1.0
       self.stable = False
       self.frozen = True
+      return self.scale
+
+    reset_window_safe = bool(
+      speed <= 80.0 and not steering_pressed and not steer_limited and
+      not rate_limited and not reversal_active and not path_unstable)
+    if self.reset_pending:
+      if reset_window_safe:
+        self.path_stable_seconds += max(0.0, float(dt))
+      else:
+        self.path_stable_seconds = 0.0
+      self.scale = 1.0
+      self.ratio = 1.0
+      self.stable = False
+      self.frozen = True
+      if self.path_stable_seconds >= RESPONSE_PATH_STABLE_RESET_SECONDS:
+        self._reset_directional_learning()
+        self.path_stable_reset_complete = True
+        self.reset_pending = False
+        self.reset_just_completed = True
+        self.path_stable_seconds = RESPONSE_PATH_STABLE_RESET_SECONDS
+        self.dirty = True
       return self.scale
     min_desired_lat_accel = RESPONSE_MIN_DESIRED_LAT_ACCEL_V[self.bin_index]
     bin_changed = self.bin_index != self.last_bin_index
@@ -210,13 +287,17 @@ class LateralResponseCompensator:
     raw_ratio = float(clip(abs(actual) / max(abs(desired), 1e-3), 0.55, 1.20))
     if self.stable:
       idx = self.bin_index
-      self.responses[idx] += RESPONSE_EMA_ALPHA * (raw_ratio - self.responses[idx])
-      self.responses[idx] = float(clip(self.responses[idx], 0.72, 1.08))
-      self.counts[idx] += 1
+      direction_responses = self.left_responses if direction > 0 else self.right_responses
+      direction_counts = self.left_counts if direction > 0 else self.right_counts
+      direction_responses[idx] += RESPONSE_EMA_ALPHA * (raw_ratio - direction_responses[idx])
+      direction_responses[idx] = float(clip(direction_responses[idx], 0.72, 1.08))
+      direction_counts[idx] += 1
       self.update_count += 1
       self.dirty = True
+      self._refresh_aggregates()
 
-    self.ratio = float(self.responses[self.bin_index])
+    direction_responses = self.left_responses if direction > 0 else self.right_responses
+    self.ratio = float(direction_responses[self.bin_index])
     max_scale = float(RESPONSE_MAX_SCALE_V[self.bin_index])
     requested_scale = float(clip(RESPONSE_TARGET / max(self.ratio, 0.01), 1.0, max_scale))
     # Do not add learned authority while the sample is unsafe. Ramp down much
@@ -227,6 +308,11 @@ class LateralResponseCompensator:
     self.scale = float(clip(self.scale, 1.0, max_scale))
     return self.scale
 
+  def consume_reset_completed(self):
+    completed = bool(self.reset_just_completed)
+    self.reset_just_completed = False
+    return completed
+
   def diagnostics(self):
     return {
       'scale': float(self.scale),
@@ -235,6 +321,8 @@ class LateralResponseCompensator:
       'stable': bool(self.stable),
       'frozen': bool(self.frozen),
       'updateCount': int(self.update_count),
+      'resetPending': bool(self.reset_pending),
+      'pathStableSeconds': float(self.path_stable_seconds),
     }
 
 
