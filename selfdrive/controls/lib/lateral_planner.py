@@ -139,7 +139,16 @@ class LateralPlanner:
   def publish(self, sm, pm):
     plan_solution_valid = self.solution_invalid_cnt < 2
     plan_send = messaging.new_message('lateralPlan')
-    plan_send.valid = self.model_data_valid and sm.all_checks(service_list=['carState', 'controlsState', 'modelV2'])
+    required_services = ['carState', 'controlsState', 'modelV2']
+    # Message validity describes whether this plan was built from present,
+    # valid inputs. Average-rate health is monitored independently by
+    # controlsd; folding its long rolling window into this flag can keep every
+    # lateralPlan invalid long after a brief EON scheduling delay has cleared.
+    plan_send.valid = (
+      self.model_data_valid and
+      sm.all_alive(service_list=required_services) and
+      sm.all_valid(service_list=required_services)
+    )
 
     lateralPlan = plan_send.lateralPlan
     lateralPlan.modelMonoTime = sm.logMonoTime['modelV2']
