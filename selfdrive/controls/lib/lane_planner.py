@@ -21,13 +21,27 @@ PATH_OFFSET = ntune_common_get('pathOffset')
 CAMERA_OFFSET = -0.055
 
 # Official 0.8.14 uses a soft standard-deviation weight from 0.15 to 0.30.
-# This EON model reports useful geometry above 0.30, so extend only the soft
-# tail. Values at 0.50 and above remain fully rejected.
+# The EON model observed on this car reports geometrically continuous lane
+# lines around 0.4-0.8, so retain a soft (bounded) contribution in that range.
 LANE_STD_FULL_CONFIDENCE = 0.15
-LANE_STD_ZERO_CONFIDENCE = 0.50
+LANE_STD_ZERO_CONFIDENCE = 1.20
 LANE_WIDTH_CHECK_DISTANCES_M = (5.0, 10.0, 20.0)
+LANE_WIDTH_MIN_START_M = 1.8
+LANE_WIDTH_MIN_END_M = 2.5
 LANE_WIDTH_MOD_START_M = 4.2
 LANE_WIDTH_MOD_END_M = 5.0
+
+# Low-speed EON fallback. A single continuous lane line may briefly anchor the
+# path, but its influence is capped so a weak prediction cannot pull the car
+# far away from the model path.
+LOW_SPEED_FALLBACK_MAX_MS = 12.0
+SINGLE_LANE_MIN_RAW_PROB = 0.20
+SINGLE_LANE_MAX_STD = 0.90
+SINGLE_LANE_DPROB_FLOOR = 0.30
+LANE_CONFIDENCE_FALL_RATE_PER_S = 1.25
+LANE_CENTER_CONTINUITY_MAX_M = 0.35
+LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M = 0.08
+LOW_CONFIDENCE_MAX_CORRECTION_M = 0.35
 
 
 class LanePlanner:
@@ -54,6 +68,31 @@ class LanePlanner:
     # Compatibility fields retained for the existing lateralPlan schema.
     self.lane_center_correction_m = 0.0
     self.lane_center_correction_active = False
+    self._last_lane_center_refs = None
+
+  def _update_d_prob(self, target_d_prob, v_ego, lane_center_refs,
+                     lane_change_active):
+    """Rate-limit only short, geometrically continuous confidence dropouts."""
+    target_d_prob = float(np.clip(target_d_prob, 0.0, 1.0))
+    refs_continuous = (
+      self._last_lane_center_refs is not None and
+      np.max(np.abs(lane_center_refs - self._last_lane_center_refs)) <=
+      LANE_CENTER_CONTINUITY_MAX_M
+    )
+
+    if target_d_prob >= self.d_prob:
+      next_d_prob = limit_lane_probability_rise(
+        self.d_prob, target_d_prob, v_ego, DT_MDL)
+    elif lane_change_active or not refs_continuous:
+      next_d_prob = target_d_prob
+    else:
+      max_fall = LANE_CONFIDENCE_FALL_RATE_PER_S * DT_MDL
+      next_d_prob = max(target_d_prob, self.d_prob - max_fall)
+
+    # Do not replace the continuity reference with a fully untrusted frame.
+    if target_d_prob >= 0.10:
+      self._last_lane_center_refs = lane_center_refs.copy()
+    return next_d_prob
 
   def parse_model(self, md):
     lane_lines = md.laneLines
@@ -98,7 +137,7 @@ class LanePlanner:
 
   def get_d_path(self, v_ego, path_t, path_xyz, measured_curvature=0.0,
                  lane_change_active=False):
-    del path_t, measured_curvature, lane_change_active
+    del path_t, measured_curvature
     path_xyz[:, 1] += self.path_offset
 
     width_pts = self.rll_y - self.lll_y
@@ -116,10 +155,30 @@ class LanePlanner:
     lane_right_y = self.rll_y[geometry_valid]
     lane_width_pts = width_pts[geometry_valid]
 
-    width_mod = min(
-      interp(abs(float(np.interp(distance, lane_x, lane_width_pts))),
-             [LANE_WIDTH_MOD_START_M, LANE_WIDTH_MOD_END_M], [1.0, 0.0])
+    # np.interp requires increasing x. Sorting here is the EON spatial-output
+    # compatibility layer and also prevents one malformed point from reversing
+    # the inferred lane center.
+    lane_order = np.argsort(lane_x)
+    lane_x = lane_x[lane_order]
+    lane_left_y = lane_left_y[lane_order]
+    lane_right_y = lane_right_y[lane_order]
+    lane_width_pts = lane_width_pts[lane_order]
+    lane_x, unique_indices = np.unique(lane_x, return_index=True)
+    lane_left_y = lane_left_y[unique_indices]
+    lane_right_y = lane_right_y[unique_indices]
+    lane_width_pts = lane_width_pts[unique_indices]
+    if lane_x.size < 2:
+      self.d_prob = 0.0
+      return path_xyz
+
+    width_samples = np.array([
+      abs(float(np.interp(distance, lane_x, lane_width_pts)))
       for distance in LANE_WIDTH_CHECK_DISTANCES_M
+    ])
+    width_mod = min(
+      interp(width, [LANE_WIDTH_MIN_START_M, LANE_WIDTH_MIN_END_M], [0.0, 1.0]) *
+      interp(width, [LANE_WIDTH_MOD_START_M, LANE_WIDTH_MOD_END_M], [1.0, 0.0])
+      for width in width_samples
     )
     l_prob = self.lll_prob * width_mod
     r_prob = self.rll_prob * width_mod
@@ -131,7 +190,7 @@ class LanePlanner:
                      [1.0, 0.0])
 
     self.lane_width_certainty.update(l_prob * r_prob)
-    current_lane_width = abs(float(lane_right_y[0] - lane_left_y[0]))
+    current_lane_width = float(np.median(width_samples))
     self.lane_width_estimate.update(current_lane_width)
     speed_lane_width = interp(v_ego, [0.0, 31.0], [2.8, 3.5])
     self.lane_width = (
@@ -146,12 +205,51 @@ class LanePlanner:
       l_prob * path_from_left_lane + r_prob * path_from_right_lane
     ) / (l_prob + r_prob + 0.0001)
 
-    target_d_prob = enhance_lane_probability(
+    raw_target_d_prob = enhance_lane_probability(
       combined_lane_probability(l_prob, r_prob), True)
-    self.d_prob = limit_lane_probability_rise(
-      self.d_prob, target_d_prob, v_ego, DT_MDL)
+    geometry_plausible = bool(
+      np.all(width_samples >= LANE_WIDTH_MIN_END_M) and
+      np.all(width_samples <= LANE_WIDTH_MOD_END_M)
+    )
+    single_lane_usable = bool(
+      (self.lll_prob >= SINGLE_LANE_MIN_RAW_PROB and
+       self.lll_std <= SINGLE_LANE_MAX_STD) or
+      (self.rll_prob >= SINGLE_LANE_MIN_RAW_PROB and
+       self.rll_std <= SINGLE_LANE_MAX_STD)
+    )
+    fallback_active = bool(
+      not lane_change_active and v_ego <= LOW_SPEED_FALLBACK_MAX_MS and
+      geometry_plausible and single_lane_usable and
+      raw_target_d_prob < SINGLE_LANE_DPROB_FLOOR
+    )
+    target_d_prob = max(raw_target_d_prob, SINGLE_LANE_DPROB_FLOOR) \
+      if fallback_active else raw_target_d_prob
+
+    # Continuity must use raw geometry, not the probability-weighted path.
+    # With both probabilities at zero the weighted path collapses toward zero
+    # and could otherwise hide a large one-frame lane-line jump.
+    lane_center_refs = 0.5 * (
+      np.interp(LANE_WIDTH_CHECK_DISTANCES_M, lane_x, lane_left_y) +
+      np.interp(LANE_WIDTH_CHECK_DISTANCES_M, lane_x, lane_right_y)
+    )
+    self.d_prob = self._update_d_prob(
+      target_d_prob, v_ego, lane_center_refs, lane_change_active)
 
     lane_path_y_interp = np.interp(path_xyz[:, 0], lane_x, lane_path_y)
+    if target_d_prob < 0.50:
+      max_correction = np.interp(
+        np.abs(path_xyz[:, 0]), [0.0, 20.0],
+        [LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M,
+         LOW_CONFIDENCE_MAX_CORRECTION_M])
+      lane_path_y_interp = path_xyz[:, 1] + np.clip(
+        lane_path_y_interp - path_xyz[:, 1], -max_correction, max_correction)
+
+    center_delta = lane_path_y_interp - path_xyz[:, 1]
+    self.lane_center_correction_m = float(
+      self.d_prob * np.interp(20.0, path_xyz[:, 0], center_delta))
+    self.lane_center_correction_active = bool(
+      self.d_prob > 0.05 and
+      abs(self.lane_center_correction_m) > 0.01)
     path_xyz[:, 1] = (
       self.d_prob * lane_path_y_interp +
       (1.0 - self.d_prob) * path_xyz[:, 1]
