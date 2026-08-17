@@ -57,10 +57,16 @@ class LatControlTorque(LatControl):
 
   def update_live_torque_params(self, latAccelFactor, latAccelOffset,
                                 friction, totalBucketPoints=0):
-    # Compatibility hook for controlsd. Live learner output is intentionally
-    # ignored; the controller always uses the fixed CarParams values captured
-    # at startup.
+    # The live learner does not override the ntune-controlled torque settings.
     del latAccelFactor, latAccelOffset, friction, totalBucketPoints
+    self.live_torque_params = dict(self.fixed_torque_params)
+
+  def update_ntune_torque_params(self, latAccelFactor, friction):
+    """Apply the current ntune request to the parameters used for torque control."""
+    self.fixed_torque_params['latAccelFactor'] = float(clip(
+      float(latAccelFactor), LAT_ACCEL_FACTOR_MIN, LAT_ACCEL_FACTOR_MAX))
+    self.fixed_torque_params['friction'] = float(clip(
+      float(friction), FRICTION_MIN, FRICTION_MAX))
     self.live_torque_params = dict(self.fixed_torque_params)
 
   def get_fixed_torque_params(self):

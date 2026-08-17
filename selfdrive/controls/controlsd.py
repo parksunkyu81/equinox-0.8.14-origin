@@ -1399,6 +1399,16 @@ class Controls:
 
         # Update Torque Params
         if self.CP.lateralTuning.which() == 'torque':
+            if hasattr(self.LaC, 'update_ntune_torque_params'):
+                try:
+                    self.LaC.update_ntune_torque_params(
+                        ntune_torque_get('latAccelFactor'),
+                        ntune_torque_get('friction'))
+                except Exception:
+                    # Keep the last valid torque parameters if ntune is
+                    # temporarily unavailable or contains an invalid value.
+                    pass
+
             if hasattr(self.LaC, 'get_fixed_torque_params'):
                 fixed_torque = self.LaC.get_fixed_torque_params()
                 self.torque_latAccelFactor = fixed_torque['latAccelFactor']
