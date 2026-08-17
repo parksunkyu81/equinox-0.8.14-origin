@@ -5,13 +5,12 @@ GM_MIN_STEER_SPEED_KPH = 10.0
 GM_MIN_STEER_SPEED_MS = GM_MIN_STEER_SPEED_KPH / 3.6
 
 
-# Keep the 10-30 kph band on the proven conservative envelope. The previous
-# 12-14/19-20 ramp let a noisy low-speed model path build and reverse torque
-# faster than the Equinox steering rack could settle. Extra response is
-# introduced only after 30 kph and tapered back before highway speeds.
+# Strong low/mid-speed steering response for Equinox, then taper back for
+# highway stability. Steering becomes active from 10 kph, peaks through
+# 30-40 kph, and progressively returns to the stable 7/17 envelope by 70 kph.
 STEER_DELTA_BP_KPH = (0.0, 10.0, 20.0, 30.0, 40.0, 45.0, 60.0, 70.0, 130.0)
-STEER_DELTA_UP_V = (7.0, 7.0, 7.0, 7.0, 9.0, 11.0, 8.0, 7.0, 7.0)
-STEER_DELTA_DOWN_V = (17.0, 17.0, 17.0, 17.0, 18.0, 19.0, 18.0, 17.0, 17.0)
+STEER_DELTA_UP_V = (7.0, 11.0, 13.0, 14.0, 14.0, 13.0, 9.0, 7.0, 7.0)
+STEER_DELTA_DOWN_V = (17.0, 18.0, 19.0, 20.0, 20.0, 19.0, 18.0, 17.0, 17.0)
 
 STEER_DELTA_UP_MAX = 14.0
 STEER_DELTA_DOWN_MAX = 20.0
