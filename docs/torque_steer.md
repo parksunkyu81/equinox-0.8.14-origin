@@ -82,10 +82,8 @@ Live Torque는 실제 주행에서 조향 토크와 횡가속도의 관계를 �
 ### 적용 순서
 
 1. `torqued.py`가 코너·직선 샘플을 수집하고 필터링된 학습값을 `liveTorqueParameters`로 발행합니다.
-2. `controlsd.py`는 `IsLiveTorque`가 활성화되어 있고 메시지가 정상이며 `latAccelFactorFiltered > 0`이면 필터링된 세 값을 토크 제어기에 전달합니다.
-3. Live Torque가 비활성화되어 있으면 ntune의 `latAccelFactor`, `friction`을 사용하고 `latAccelOffset`은 `0`으로 적용합니다.
-4. `latcontrol_torque.py`는 학습값을 기준값으로 보존하고, 매 프레임 속도와 코너 강도에 맞춘 유효 `latAccelFactor`와 `friction`을 별도로 계산합니다.
-5. 코너 보정이 끝나면 유효값은 원래 학습 기준값으로 복귀합니다. 따라서 동적 보정이 학습값에 누적되지는 않습니다.
+2. `latcontrol_torque.py`는 토크 제어에 사용할 `latAccelFactor`, `friction`을 유지합니다.
+3. 코너 보정이 끝나면 유효값은 원래 학습 기준값으로 복귀합니다. 따라서 동적 보정이 학습값에 누적되지는 않습니다.
 
 동적 권한은 학습 포인트가 없어도 최대값의 35%부터 시작하고, 500 포인트에서 60%, 2,500 포인트에서 100%까지 점진적으로 열립니다. 강한 토크 추종 오차가 감지되면 권한을 즉시 줄이며, 운전자 개입과 최종 GM 토크 제한은 항상 우선합니다.
 
@@ -100,8 +98,6 @@ Live Torque는 실제 주행에서 조향 토크와 횡가속도의 관계를 �
 
 ### 현재 소스의 주의사항
 
-- `controlsd.py`의 `IsLiveTorque` 상태는 시작할 때 읽습니다. 설정을 변경한 뒤 실제 제어 적용 상태를 확실하게 맞추려면 프로세스 또는 장치를 재시작해야 합니다.
-- `torqued.py`의 런타임 설정 갱신 코드에는 현재 `is_live = True`가 고정되어 있어, `IsLiveTorque`를 꺼도 학습 프로세스 내부는 활성 상태를 유지합니다. 실제 조향 제어에서 학습값을 사용할지는 시작 시 `controlsd.py`가 읽은 설정에 따라 결정됩니다.
 - `controlsd.py`는 현재 `liveValid` 필드가 아니라 메시지 유효성과 `latAccelFactorFiltered > 0` 조건으로 적용 여부를 판단합니다.
 - `liveTorqueParameters`에 보이는 학습 기준값과 코너에서 실제 사용되는 동적 유효값은 다를 수 있습니다. 조향감을 분석할 때는 둘을 구분해야 합니다.
 

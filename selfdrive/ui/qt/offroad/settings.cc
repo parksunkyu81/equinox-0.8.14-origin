@@ -840,18 +840,6 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                             "../assets/offroad/icon_road.png",
                                             this));
 
-  toggles.append(new ParamControl("IsLiveTorque",
-                                              "Enable Live Torque",
-                                              "",
-                                              "../assets/offroad/icon_shell.png",
-                                              this));
-
-  toggles.append(new ParamControl("IsLowSpeedFactor",
-                                          "Enable Low Speed Factor",
-                                          "",
-                                          "../assets/offroad/icon_shell.png",
-                                          this));
-
   /*toggles.append(new ParamControl("E2ELong",
                                           "Enable E2E Long",
                                           "Activate E2E Long. It may work unexpectedly. Be careful.",

@@ -220,8 +220,6 @@ std::unordered_map<std::string, uint32_t> keys = {
     {"FollowingDistanceProfile", PERSISTENT},
     {"CommaPedalResistance", PERSISTENT},
 
-    {"IsLiveTorque", PERSISTENT},
-    {"IsLowSpeedFactor", PERSISTENT},
     {"closeToRoadEdge", PERSISTENT},
     {"ActiveStopAccelBoost", PERSISTENT},
     {"DrivingStyleAI", PERSISTENT},
