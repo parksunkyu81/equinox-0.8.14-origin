@@ -766,8 +766,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     p.setOpacity(1.0);
   }
 
-  // 5. curv speed
+  // 5. AI driving profiles
   x = icon_start_x + (icon_step * 4);
+
+  /*
+  // Previous CURV status display (disabled, kept for easy restoration).
   bool curv = controls_state.getCurvDriving();
   int curvSpeed = (int)controls_state.getCurvSpeed();
 
@@ -799,7 +802,46 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   configFont(p, "Open Sans", 40.f, "Bold");
   drawTextWithColor(p, x, y1 + 50, strCurvSpeed, curvColor);
   p.setOpacity(1.0);
+  */
 
+  // Community menu values:
+  //   FollowingDistanceProfile = short | mid | long
+  //   CommaPedalResistance     = high  | mid | low
+  // Refresh once per second instead of reading Params on every UI frame.
+  static uint64_t last_ai_profile_update = 0;
+  static QString ai_distance_profile = "MID";
+  static QString ai_pedal_profile = "MID";
+  const uint64_t ai_profile_now = millis_since_boot();
+
+  if (last_ai_profile_update == 0 || ai_profile_now - last_ai_profile_update >= 1000) {
+    last_ai_profile_update = ai_profile_now;
+
+    QString distance_profile = QString::fromStdString(
+      Params().get("FollowingDistanceProfile")).toUpper();
+    if (distance_profile != "SHORT" && distance_profile != "MID" &&
+        distance_profile != "LONG") {
+      distance_profile = "MID";
+    }
+    ai_distance_profile = distance_profile;
+
+    QString pedal_profile = QString::fromStdString(
+      Params().get("CommaPedalResistance")).toUpper();
+    if (pedal_profile != "HIGH" && pedal_profile != "MID" &&
+        pedal_profile != "LOW") {
+      pedal_profile = "MID";
+    }
+    ai_pedal_profile = pedal_profile;
+  }
+
+  QColor aiProfileColor = QColor(120, 255, 120, 230);
+  configFont(p, "Open Sans", 30.f, "Bold");
+  drawTextWithColor(p, x, y1 - 18,
+                    QString("AI distance : %1").arg(ai_distance_profile),
+                    aiProfileColor);
+  drawTextWithColor(p, x, y1 + 34,
+                    QString("AI pedal : %1").arg(ai_pedal_profile),
+                    aiProfileColor);
+  p.setOpacity(1.0);
 
 
   // ================================================================================================================ //
