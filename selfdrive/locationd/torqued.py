@@ -175,7 +175,6 @@ BURST_SAMPLE_LIMIT = 2400
 # -----------------------------
 # 이쿼녹스 토크 디폴트값 (요청값)
 # -----------------------------
-LIVE_TORQUE_TUNING_ENABLED = True  # bounded live tuning; unsafe learned values are clipped below
 LAT_ACCEL_FACTOR_ANCHOR = 2.05
 FRICTION_ANCHOR = 0.230
 
@@ -2465,10 +2464,6 @@ class TorqueEstimator:
         )
 
     def handle_log(self, t, which, msg):
-        # Runtime toggle: when live tuning disabled, skip learning/update work
-        if not LIVE_TORQUE_TUNING_ENABLED:
-            return
-
         if self.start_time is None:
             self.start_time = t
 
@@ -3736,28 +3731,6 @@ class TorqueEstimator:
         liveTorqueParameters = msg.liveTorqueParameters
         liveTorqueParameters.version = VERSION
 
-        if not LIVE_TORQUE_TUNING_ENABLED:
-            fF = LAT_ACCEL_FACTOR_ANCHOR
-            fO = 0.0
-            fR = FRICTION_ANCHOR
-
-            liveTorqueParameters.liveValid = True
-            liveTorqueParameters.latAccelFactorRaw = fF
-            liveTorqueParameters.latAccelOffsetRaw = fO
-            liveTorqueParameters.frictionCoefficientRaw = fR
-            liveTorqueParameters.latAccelFactorFiltered = fF
-            liveTorqueParameters.latAccelOffsetFiltered = fO
-            liveTorqueParameters.frictionCoefficientFiltered = fR
-
-            liveTorqueParameters.totalBucketPoints = 0
-            liveTorqueParameters.bucketPoints = "[LiveTorqueTuningDisabled]\n"
-            liveTorqueParameters.decay = float(self.decay)
-            liveTorqueParameters.maxResets = int(self.resets)
-
-            if with_points:
-                liveTorqueParameters.points = []
-            return msg
-
         curF = _sanitize_num(self.filtered_params['latAccelFactor'].x, self.offline_latAccelFactor)
         curO = (_sanitize_num(self.filtered_params['latAccelOffset'].x, 0.0)
                 if self._offset_learning_enabled else 0.0)
@@ -4355,41 +4328,25 @@ def main(sm=None, pm=None):
     params = Params()
 
     # -----------------------------
-    # Load live torque tuning/anchors from Params (user settings)
-    #  - IsLiveTorque (bool): enable/disable live tuning
+    # Load live torque anchors from Params (user settings)
     #  - TorqueMaxLatAccel (int-like, x0.1): latAccelFactor anchor
     #  - TorqueFriction (int-like, x0.001): friction anchor
     #
     # ✅ Runtime reload support:
     #   When the Param values change while running, they will be reloaded periodically
-    #   and applied immediately (toggle + new anchors).
+    #   and applied immediately.
     # -----------------------------
-    global LIVE_TORQUE_TUNING_ENABLED, LAT_ACCEL_FACTOR_ANCHOR, FRICTION_ANCHOR
+    global LAT_ACCEL_FACTOR_ANCHOR, FRICTION_ANCHOR
 
     USER_PARAM_RELOAD_INTERVAL_S = float(os.environ.get("LTP_PARAMS_RELOAD_INTERVAL_S", "0.5"))
     _last_user_param_check_wall = time.monotonic()
 
-    _last_is_live = None
     _last_lat_raw = None
     _last_fric_raw = None
 
     def _reload_user_torque_params(estimator_ref=None, force_log: bool = False):
-        global LIVE_TORQUE_TUNING_ENABLED, LAT_ACCEL_FACTOR_ANCHOR, FRICTION_ANCHOR
-        nonlocal _last_is_live, _last_lat_raw, _last_fric_raw
-
-        def _param_bool(name, default):
-            try:
-                raw = params.get(name)
-                if raw is None:
-                    return bool(default)
-                val = raw.strip().lower()
-                if val in [b"1", b"true", b"yes", b"on"]:
-                    return True
-                if val in [b"0", b"false", b"no", b"off"]:
-                    return False
-            except Exception:
-                pass
-            return bool(default)
+        global LAT_ACCEL_FACTOR_ANCHOR, FRICTION_ANCHOR
+        nonlocal _last_lat_raw, _last_fric_raw
 
         def _param_float_scaled(name, default, scale_kind):
             try:
@@ -4414,8 +4371,6 @@ def main(sm=None, pm=None):
             except Exception:
                 return float(default), None
 
-        is_live_param = _param_bool("IsLiveTorque", True)
-        is_live = True
         lat_raw, lat_param_raw = _param_float_scaled("TorqueMaxLatAccel", 2.05, "lat")
         fric_raw, fric_param_raw = _param_float_scaled("TorqueFriction", 0.230, "friction")
 
@@ -4426,7 +4381,6 @@ def main(sm=None, pm=None):
             FRICTION_ABS_MIN <= float(fric_raw) <= FRICTION_ABS_MAX
         ) else 0.230
 
-        LIVE_TORQUE_TUNING_ENABLED = bool(is_live)
         LAT_ACCEL_FACTOR_ANCHOR = lat_anchor
         FRICTION_ANCHOR = fric_anchor
         try:
@@ -4447,22 +4401,19 @@ def main(sm=None, pm=None):
         except Exception:
             pass
         changed = (
-            _last_is_live != bool(is_live) or
             _last_lat_raw != lat_param_raw or
             _last_fric_raw != fric_param_raw
         )
         if force_log or changed:
             try:
                 cloudlog.info(
-                    f"LiveTorque: bounded live tuning IsLiveTorque={bool(is_live)} "
+                    "LiveTorque: bounded live tuning "
                     f"LAT_ACCEL_FACTOR_ANCHOR={LAT_ACCEL_FACTOR_ANCHOR:.5f} "
                     f"FRICTION_ANCHOR={FRICTION_ANCHOR:.5f} "
-                    f"rawIsLiveParam={bool(is_live_param)} "
                     f"rawLatParam={lat_param_raw!r} rawFricParam={fric_param_raw!r}"
                 )
             except Exception:
                 pass
-        _last_is_live = bool(is_live)
         _last_lat_raw = lat_param_raw
         _last_fric_raw = fric_param_raw
 
@@ -4578,7 +4529,7 @@ def main(sm=None, pm=None):
         sm.update()
         # ✅ runtime reset: LiveTorqueReset=1이면 즉시 warm-state 삭제 + 버킷/필터 리셋
         now_wall = time.monotonic()
-        # ✅ runtime params reload: apply IsLiveTorque/TorqueMaxLatAccel/TorqueFriction changes while running
+        # ✅ runtime params reload: apply TorqueMaxLatAccel/TorqueFriction changes while running
         if (now_wall - _last_user_param_check_wall) >= float(USER_PARAM_RELOAD_INTERVAL_S):
             _last_user_param_check_wall = now_wall
             try:
