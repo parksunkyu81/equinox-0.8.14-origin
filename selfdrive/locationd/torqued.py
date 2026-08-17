@@ -55,11 +55,7 @@ LTP_EPS_SAT_RATIO = 0.95       # steer_out_can close to steer_max => saturation 
 import os
 import sys
 import signal
-import atexit
 import time
-import json
-import pickle
-import tempfile
 import numpy as np
 import math
 from collections import deque, defaultdict
@@ -150,12 +146,10 @@ def adaptive_equinox_bands(lat_accel_anchor, friction_anchor, confidence):
             float(min_friction), float(max_friction))
 
 # -----------------------------
-# 로그 설정 (일자별 파일)
+# Burst diagnostics use KST timestamps in memory only.
+# Disk-backed ltp_logs output has been removed.
 # -----------------------------
-LTP_LOG_DIR = "/data/openpilot/ltp_logs"
 KST = timezone(timedelta(hours=9))
-LTP_FILE_LOGGING_ENABLED = True
-LTP_FILE_LOG_INTERVAL_S = 1.0
 
 # EPS proxy thresholds used by ltp_log snapshot/burst diagnostics
 LTP_EPS_ERR_NEAR_MAX = LTP_EPS_SAT_RATIO
@@ -163,7 +157,6 @@ LTP_EPS_CTRL_NEAR_MAX = LTP_EPS_SAT_RATIO
 LTP_EPS_CLIP_DEMAND = 0.70
 
 # Burst / event trace (snapshot log is kept; burst logs are only emitted around key events)
-LTP_BURST_LOG_DIR = os.path.join(LTP_LOG_DIR, "bursts")
 ENABLE_BURST_TRACE = False
 BURST_PRE_S = 2.0
 BURST_POST_S = 2.5
@@ -307,16 +300,6 @@ SOFT_LIVEVALID_MIN_S = 6.0  # 재시작/저속에서 빠르게 liveValid 진입(
 SOFT_LIVEVALID_MIN_POINTS_LOWSPD = 250
 SOFT_LIVEVALID_MIN_POINTS_MIDSPD = 450
 SOFT_LIVEVALID_MIN_POINTS_HISPD = 700
-
-# Warm start(재시작 복원) 상태 파일
-LTP_STATE_VERSION = 4
-LTP_STATE_SAVE_INTERVAL_S = 15.0  # faster warm-state persistence
-LTP_STATE_PATH = os.path.join(LTP_LOG_DIR, "ltp_state.json")
-LTP_STATE_PATH_PKL = os.path.join(LTP_LOG_DIR, "ltp_state.pkl")
-
-# Warm restore compatibility
-LTP_WARM_COMPAT_MAX_VERSION_GAP = 0  # strict reset: VERSION mismatch must not restore old live-torque state
-LTP_STATE_SAVE_MIN_DELTA_PTS = 150  # save sooner when many new points are added
 
 # Tunables
 # -----------------------------
@@ -1082,13 +1065,7 @@ class TorqueEstimator:
 
         self._last_valid_applied = None
 
-        self._log_dir = LTP_LOG_DIR
-        self._log_date = None
-        self._log_path = None
-        self._last_file_log_mono = -1e9
-
-        # snapshot + burst/event trace state
-        self._burst_dir = LTP_BURST_LOG_DIR
+        # in-memory burst/event trace state (disk output removed)
         self._burst_ring = deque(maxlen=BURST_RING_MAX)
         self._burst_active = None
         self._burst_seq = 0
@@ -1514,254 +1491,28 @@ class TorqueEstimator:
         return (CP.carFingerprint, which, version)
 
     def _clear_live_torque_persistent_cache(self, reason: str = "version_mismatch"):
-        """
-        VERSION을 올렸을 때 예전 warm-state/Params 캐시가 다시 복원되지 않도록
-        디스크 warm-state와 Params 캐시를 같이 삭제한다.
+        """Clear only the Params-backed LiveTorque cache.
 
-        기존 버그 원인:
-        - ltp_state.json의 ltpVersion 차이가 LTP_WARM_COMPAT_MAX_VERSION_GAP 이하이면
-          VERSION이 달라도 필터/버킷을 복원했다.
-        - 그래서 VERSION=25로 올려도 이전 학습값이 살아났다.
+        Disk-backed ltp_logs warm-state persistence was removed, so this method
+        intentionally performs no file access.
         """
         try:
-            for path in (str(LTP_STATE_PATH), str(LTP_STATE_PATH_PKL)):
-                try:
-                    if path and os.path.exists(path):
-                        os.remove(path)
-                        cloudlog.warning(f"LiveTorque: removed stale warm state {path} reason={reason}")
-                except Exception:
-                    cloudlog.exception(f"LiveTorque: failed to remove stale warm state {path}")
-
-            try:
-                params = Params()
-                params.remove("LiveTorqueCarParams")
-                params.remove("LiveTorqueParameters")
-                cloudlog.warning(f"LiveTorque: removed stale Params cache reason={reason}")
-            except Exception:
-                cloudlog.exception("LiveTorque: failed to remove stale Params cache")
+            params = Params()
+            params.remove("LiveTorqueCarParams")
+            params.remove("LiveTorqueParameters")
+            cloudlog.warning(f"LiveTorque: removed stale Params cache reason={reason}")
         except Exception:
-            cloudlog.exception("LiveTorque: clear persistent cache failed")
+            cloudlog.exception("LiveTorque: failed to remove stale Params cache")
 
     def _try_restore_warm_state(self, CP):
-        try:
-            path_json = str(LTP_STATE_PATH)
-            path_pkl = str(LTP_STATE_PATH_PKL)
-            st = None
-            src = None
-            if os.path.exists(path_json):
-                src = path_json
-                with open(path_json, "r", encoding="utf-8") as f:
-                    st = json.load(f)
-            elif os.path.exists(path_pkl):
-                src = path_pkl
-                with open(path_pkl, "rb") as f:
-                    st = pickle.load(f)
-            else:
-                return False, {}, self.decay
-
-            st_ver = int(st.get("version", -1))
-            # allow legacy warm-state schema versions (backward compatible)
-            if st_ver <= 0 or st_ver > int(LTP_STATE_VERSION):
-                return False, {}, self.decay
-
-            fp = st.get("carFingerprint", None)
-            if fp is not None and str(fp) != str(getattr(CP, "carFingerprint", None)):
-                return False, {}, self.decay
-
-            tune = st.get("tuneType", None)
-            cur_tune = CP.lateralTuning.which() if hasattr(CP, "lateralTuning") else None
-            if tune is not None and str(tune) != str(cur_tune):
-                return False, {}, self.decay
-
-            ltp_ver = st.get("ltpVersion", None)
-            restore_buckets = True
-            # VERSION을 올린 경우에는 예전 학습값/버킷/필터를 절대 복원하지 않는다.
-            # 기존 로직은 버전 차이가 3 이하이면 filtered-only 또는 bucket restore를 허용해서
-            # VERSION=25로 올려도 초기화가 되지 않는 문제가 있었다.
-            try:
-                if ltp_ver is None or int(ltp_ver) != int(self.version):
-                    self._clear_live_torque_persistent_cache(
-                        f"warm_state_ltp_version_mismatch:{ltp_ver}->{self.version}"
-                    )
-                    cloudlog.warning(
-                        f"LiveTorque: warm state ignored due to VERSION mismatch "
-                        f"ltpVersion={ltp_ver} current={self.version}"
-                    )
-                    return False, {}, self.decay
-            except Exception:
-                self._clear_live_torque_persistent_cache("warm_state_ltp_version_invalid")
-                return False, {}, self.decay
-
-            filt = st.get("filtered", {}) or {}
-            decay = float(filt.get("decay", self.decay))
-            decay = float(np.clip(decay, MIN_FILTER_DECAY, MAX_FILTER_DECAY))
-
-            init = {
-                'latAccelFactor': float(filt.get('latAccelFactor', self.base_params['latAccelFactor'])),
-                # Center offset is road/camber dependent. Relearn it from
-                # current-drive straight samples instead of restoring a bias
-                # learned on a previous route.
-                'latAccelOffset': 0.0,
-                'frictionCoefficient': float(filt.get('frictionCoefficient', self.base_params['frictionCoefficient'])),
-            }
-
-            b = st.get("buckets", {}) or {}
-
-            # Legacy compat: older warm-state may store mixed 'points' instead of bucket moments.
-            # If buckets are missing, split points by steer magnitude into corner vs straight buckets.
-            if restore_buckets:
-                try:
-                    has_bucket_keys = isinstance(b, dict) and any(
-                        k in b for k in ("corner", "straight", "limited_corner"))
-                except Exception:
-                    has_bucket_keys = False
-
-                if not has_bucket_keys:
-                    try:
-                        legacy_points = st.get("points", None) or st.get("pointsMixed", None) or st.get("allPoints",
-                                                                                                        None)
-                        legacy_corner = st.get("cornerPoints", None) or st.get("pointsCorner", None)
-                        legacy_straight = st.get("straightPoints", None) or st.get("pointsStraight", None)
-
-                        def _route_points(pts):
-                            c_list, s_list = [], []
-                            if not isinstance(pts, list):
-                                return c_list, s_list
-                            for pt in pts:
-                                if not isinstance(pt, (list, tuple)) or len(pt) < 2:
-                                    continue
-                                try:
-                                    x = float(pt[0]);
-                                    y = float(pt[1])
-                                except Exception:
-                                    continue
-                                if not (np.isfinite(x) and np.isfinite(y)):
-                                    continue
-                                if abs(x) <= float(STRAIGHT_STEER_MAX):
-                                    s_list.append((x, y))
-                                else:
-                                    c_list.append((x, y))
-                            return c_list, s_list
-
-                        if isinstance(legacy_points, list) and len(legacy_points) > 0:
-                            c_pts, s_pts = _route_points(legacy_points)
-                            if len(c_pts):
-                                self.corner_points.load_points(c_pts)
-                            if len(s_pts):
-                                self.straight_points.load_points(s_pts)
-
-                        if isinstance(legacy_corner, list) and len(legacy_corner) > 0:
-                            self.corner_points.load_points(
-                                [(p[0], p[1]) for p in legacy_corner if isinstance(p, (list, tuple)) and len(p) >= 2])
-                        if isinstance(legacy_straight, list) and len(legacy_straight) > 0:
-                            self.straight_points.load_points(
-                                [(p[0], p[1]) for p in legacy_straight if isinstance(p, (list, tuple)) and len(p) >= 2])
-                    except Exception:
-                        pass
-            if restore_buckets:
-                try:
-                    self.corner_points.from_state_dict(b.get("corner", None))
-                except Exception:
-                    pass
-                try:
-                    self.limited_corner_points.from_state_dict(b.get("limited_corner", None))
-                except Exception:
-                    pass
-                try:
-                    self.straight_points.from_state_dict(b.get("straight", None))
-                except Exception:
-                    pass
-            else:
-                # 버전 차이로 버킷 복원을 스킵했을 때도, 필터 값만으로 빠른 liveValid를 지원
-                pass
-
-            learning_state = st.get("learningState", {}) or {}
-            self._ltp_learning_converged = bool(learning_state.get("converged", False))
-
-            cloudlog.warning(
-                f"LiveTorque: warm state restored ({src})" + (" [filtered-only]" if not restore_buckets else ""))
-            self._warm_restored = True
-            self._warm_restore_source = src
-            return True, init, decay
-        except Exception as e:
-            cloudlog.exception(f"LiveTorque: warm restore failed: {e}")
-            return False, {}, self.decay
+        # Disk-backed warm restore (ltp_state.json/.pkl) removed.
+        # Startup uses the existing Params cache path only.
+        return False, {}, self.decay
 
     def save_warm_state(self, reason: str = "periodic"):
-        try:
-            os.makedirs(LTP_LOG_DIR, exist_ok=True)
-
-            t_ref = float(self.last_time) if (self.last_time is not None and np.isfinite(self.last_time)) else float(
-                time.monotonic())
-
-            try:
-                latF = float(self.filtered_params['latAccelFactor'].x)
-                fric = float(self.filtered_params['frictionCoefficient'].x)
-            except Exception:
-                latF = float(self.base_params['latAccelFactor'])
-                fric = float(self.base_params['frictionCoefficient'])
-
-            st = {
-                "version": int(LTP_STATE_VERSION),
-                "restoreKey": [str(getattr(self, "_car_fingerprint", None)),
-                               str(getattr(self, "_car_tune_type", None))],
-                "ltpVersion": int(self.version),
-                "carFingerprint": str(self._car_fingerprint),
-                "tuneType": str(self._car_tune_type),
-                "savedAtMono": float(t_ref),
-                "reason": str(reason),
-
-                "filtered": {
-                    "latAccelFactor": float(latF),
-                    # Persist no directional center bias across drives.
-                    "latAccelOffset": 0.0,
-                    "frictionCoefficient": float(fric),
-                    "decay": float(self.decay),
-                },
-
-                "buckets": {
-                    "corner": self.corner_points.to_state_dict(),
-                    "limited_corner": self.limited_corner_points.to_state_dict(),
-                    "straight": self.straight_points.to_state_dict(),
-                },
-
-                "straightWindow": {
-                    "win_s": float(self._straight_bias_win_s),
-                    "samples": [],
-                },
-                "learningState": {
-                    "converged": bool(getattr(self, "_ltp_learning_converged", False)),
-                    "candidateStatus": str(getattr(self, "_ltp_candidate_status", "idle")),
-                },
-            }
-
-            d = os.path.dirname(LTP_STATE_PATH)
-            os.makedirs(d, exist_ok=True)
-            with tempfile.NamedTemporaryFile("w", delete=False, dir=d, prefix="ltp_state_", suffix=".tmp",
-                                             encoding="utf-8") as tf:
-                json.dump(st, tf, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                tf.flush()
-                os.fsync(tf.fileno())
-                tmp_name = tf.name
-            os.replace(tmp_name, LTP_STATE_PATH)
-
-            d2 = os.path.dirname(LTP_STATE_PATH_PKL)
-            os.makedirs(d2, exist_ok=True)
-            with tempfile.NamedTemporaryFile("wb", delete=False, dir=d2, prefix="ltp_state_", suffix=".tmp") as tf2:
-                pickle.dump(st, tf2, protocol=pickle.HIGHEST_PROTOCOL)
-                tf2.flush()
-                os.fsync(tf2.fileno())
-                tmp2 = tf2.name
-            os.replace(tmp2, LTP_STATE_PATH_PKL)
-
-            try:
-                self._last_state_save_pts = int(
-                    len(self.corner_points) + len(self.straight_points) + len(self.limited_corner_points))
-            except Exception:
-                pass
-            cloudlog.info(f"LiveTorque: warm state saved ({reason})")
-        except Exception as e:
-            cloudlog.exception(f"LiveTorque: warm state save failed: {e}")
+        # Disk-backed warm-state persistence removed. Kept as a no-op for
+        # compatibility with older external callers.
+        return
 
     def reset(self):
         self.resets += 1
@@ -3008,13 +2759,6 @@ class TorqueEstimator:
                             self.last_straight_sampled = True
                             self._last_straight_sampled_t = float(t)
 
-                try:
-                    burst_sample = self._make_burst_sample(float(t), lateral_acc=float(lateral_acc), straight_ok=bool(straight_ok))
-                    self._append_burst_sample(burst_sample)
-                    self._detect_burst_triggers(float(t), burst_sample)
-                    self._flush_active_burst(reason="auto", t_now=float(t), force=False)
-                except Exception:
-                    pass
 
 
     def _eps_proxy_state(self, now_mono: float, update_state: bool = False):
@@ -3320,62 +3064,9 @@ class TorqueEstimator:
         self._burst_prev_flags = current_flags
 
     def _flush_active_burst(self, reason: str = "auto", t_now=None, force: bool = False):
-        if not ENABLE_BURST_TRACE or self._burst_active is None:
-            return None
-
-        active = self._burst_active
-        if t_now is None:
-            t_now = float(self.last_time) if (self.last_time is not None and np.isfinite(self.last_time)) else float(time.monotonic())
-        try:
-            t_now = float(t_now)
-        except Exception:
-            t_now = float(time.monotonic())
-
-        if (not force) and t_now < float(active.get("until", t_now)) and len(active.get("samples", [])) < int(BURST_SAMPLE_LIMIT):
-            return None
-
-        os.makedirs(self._burst_dir, exist_ok=True)
-        trigger_slug = _slugify_label(active.get("trigger", "burst"))
-        stamp = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(self._burst_dir, f"ltp_burst_{stamp}_{int(active.get('seq', 0)):04d}_{trigger_slug}.jsonl")
-
-        samples = list(active.get("samples", []))
-        if len(samples) > int(BURST_SAMPLE_LIMIT):
-            idx = np.linspace(0, len(samples) - 1, int(BURST_SAMPLE_LIMIT), dtype=int)
-            samples = [samples[int(i)] for i in idx]
-
-        meta = {
-            "kind": "meta",
-            "seq": int(active.get("seq", 0)),
-            "trigger": str(active.get("trigger", "burst")),
-            "trigger_reasons": list(active.get("trigger_reasons", [])),
-            "start_t": round(float(active.get("start_t", t_now)), 4),
-            "end_t": round(float(t_now), 4),
-            "started_wall": str(active.get("started_wall", "")),
-            "closed_wall": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-            "close_reason": str(reason),
-            "sample_count": int(len(samples)),
-            "event_count": int(len(active.get("events", []))),
-            "pre_s": float(BURST_PRE_S),
-            "post_s": float(BURST_POST_S),
-        }
-
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(meta, ensure_ascii=False) + "\n")
-            for ev in active.get("events", []):
-                rec = {"kind": "event"}
-                rec.update(ev)
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            for smp in samples:
-                rec = {"kind": "sample"}
-                rec.update(smp)
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-        self._last_burst_path = path
-        self._last_burst_meta = meta
-        self._burst_last_close_t = float(t_now)
+        # ltp_logs/bursts file output removed.
         self._burst_active = None
-        return path
+        return
 
     def _estimate_dynamic_display_params(self, base_lat: float, base_fric: float):
         """Return a stateless fallback until actual ControlsState values arrive."""
@@ -3421,309 +3112,8 @@ class TorqueEstimator:
         return eff_lat, eff_fric, blend, corner_strength, low_gate, mid_gate, high_gate
 
     def _log_to_file(self, msg):
-        if not LTP_FILE_LOGGING_ENABLED:
-            return
-        try:
-            log_mono = (float(self.last_time) if self.last_time is not None and np.isfinite(self.last_time)
-                        else float(time.monotonic()))
-            if (log_mono - float(getattr(self, "_last_file_log_mono", -1e9))) < float(LTP_FILE_LOG_INTERVAL_S):
-                return
-            self._last_file_log_mono = float(log_mono)
-
-            os.makedirs(self._log_dir, exist_ok=True)
-            now = datetime.now(KST)
-            date_str = now.strftime("%Y_%m_%d")
-            if self._log_date != date_str or self._log_path is None:
-                self._log_date = date_str
-                self._log_path = os.path.join(self._log_dir, f"ltp_log_{date_str}.log")
-
-            ltp = msg.liveTorqueParameters
-
-            v_kph = None
-            if self.last_vego is not None and np.isfinite(self.last_vego):
-                v_kph = round(float(self.last_vego) * 3.6, 2)
-
-            yaw = None
-            if self.last_yaw_rate is not None and np.isfinite(self.last_yaw_rate):
-                yaw = round(float(self.last_yaw_rate), 5)
-
-            win = list(self._straight_bias) if hasattr(self, "_straight_bias") else []
-            straight_ok_samples = [s for s in win if len(s) >= 6 and bool(s[5])]
-            steer_ok = [s[1] for s in straight_ok_samples if s[1] is not None]
-            latacc_ok = [s[3] for s in straight_ok_samples if s[3] is not None]
-            eligible = [s for s in win if
-                        len(s) >= 5 and s[4] is not None and np.isfinite(s[4]) and float(s[4]) >= MIN_VEL_MS_BIAS and s[
-                            2] is not None]
-            yaw_pass = [s for s in eligible if abs(float(s[2])) <= STRAIGHT_YAW_RATE_MAX]
-            straight_bias_mean = _mean_safe(steer_ok)
-            straight_bias_abs_med = _median_safe([abs(x) for x in steer_ok if x is not None])
-            straight_latacc_med = _median_safe(latacc_ok)
-            straight_yaw_pass_ratio = None
-            if len(eligible) >= 10:
-                straight_yaw_pass_ratio = float(len(yaw_pass) / len(eligible))
-
-
-            # --- LTP debug: EPS damping frequency and dt (schema-independent) ---
-            now_mono = float(self.last_time) if (self.last_time is not None and np.isfinite(self.last_time)) else float(time.monotonic())
-            eps_evt, eps_damp, ltp_dt = self._eps_proxy_state(now_mono, update_state=True)
-
-            try:
-                dyn_latAF, dyn_fric, dyn_blend, dyn_corner_strength, dyn_low_gate, dyn_mid_gate, dyn_high_gate = self._estimate_dynamic_display_params(
-                    float(ltp.latAccelFactorFiltered), float(ltp.frictionCoefficientFiltered)
-                )
-            except Exception:
-                dyn_latAF, dyn_fric, dyn_blend, dyn_corner_strength, dyn_low_gate, dyn_mid_gate, dyn_high_gate = (
-                    float(ltp.latAccelFactorFiltered), float(ltp.frictionCoefficientFiltered), 0.0, 0.0, 0.0, 0.0, 0.0
-                )
-            dyn_source = "estimate_fallback"
-            dyn_active = bool(dyn_blend > 1e-4)
-            dyn_ceiling = authority_ceiling(float(v_kph or 0.0))
-            dyn_direction_damping = False
-            actual_t = getattr(self, "_dyn_actual_t", None)
-            actual_fresh = bool(
-                actual_t is not None and np.isfinite(actual_t) and
-                abs(float(now_mono) - float(actual_t)) <= 1.0)
-            if actual_fresh:
-                actual_lat = getattr(self, "_dyn_actual_lat_factor", None)
-                actual_fric = getattr(self, "_dyn_actual_friction", None)
-                if (actual_lat is not None and actual_fric is not None and
-                        np.isfinite(actual_lat) and np.isfinite(actual_fric)):
-                    dyn_source = "controlsState_actual"
-                    dyn_active = bool(getattr(self, "_dyn_actual_active", False))
-                    dyn_latAF = float(actual_lat)
-                    dyn_fric = float(actual_fric)
-                    dyn_blend = float(getattr(self, "_dyn_actual_blend", 0.0) or 0.0)
-                    dyn_ceiling = float(getattr(self, "_dyn_actual_authority_ceiling", 0.0) or 0.0)
-                    dyn_corner_strength = float(getattr(self, "_dyn_actual_corner_strength", 0.0) or 0.0)
-                    dyn_direction_damping = bool(
-                        getattr(self, "_dyn_actual_direction_damping", False))
-
-            rec = {
-                "ts": now.strftime("%Y-%m-%d %H:%M:%S"),
-                "ltp_dt": (None if ltp_dt is None else round(float(ltp_dt), 4)),
-                "eps_evt": bool(getattr(self, "_lc_eps_evt", False)),
-                "eps_evt_proxy": bool(eps_evt),
-                "eps_damp": bool(getattr(self, "_lc_eps_damp", False)),
-                "eps_damp_proxy": bool(eps_damp),
-                "lc_dt": (None if getattr(self, "_lc_dt", None) is None else round(float(getattr(self, "_lc_dt", 0.0) or 0.0), 4)),
-                "lc_eps_evt": bool(getattr(self, "_lc_eps_evt", False)),
-                "lc_eps_damp": bool(getattr(self, "_lc_eps_damp", False)),
-                "liveValid": bool(ltp.liveValid),
-                "v_kph": v_kph,
-                "yaw_rate": yaw,
-                "latActive": bool(self._get_lat_active(float(self.last_time) if self.last_time is not None else 0.0)),
-                "latActive_src": str(getattr(self, "_lat_active_src", "unknown")),
-                "enabled_cs": (None if self._last_enabled_cc is None else bool(self._last_enabled_cc)),
-                "steeringPressed": (
-                    None if not hasattr(self, "_last_steer_override") else bool(self._last_steer_override)),
-                "steeringPressed_db": bool(getattr(self, "_last_steer_override_db", False)),
-                "latAO_evt": getattr(self, "_latAO_evt", None),
-                "latAO_blk": getattr(self, "_latAO_blk", None),
-                "driver_torque": (None if not hasattr(self, "_last_driver_torque") else round(
-                    float(getattr(self, "_last_driver_torque", 0.0) or 0.0), 3)),
-                "eps_torque": (None if not hasattr(self, "_last_eps_torque") else round(
-                    float(getattr(self, "_last_eps_torque", 0.0) or 0.0), 3)),
-                "allowed_torque": (None if not hasattr(self, "_last_allowed_torque") else round(
-                    float(getattr(self, "_last_allowed_torque", 0.0) or 0.0), 3)),
-                "steer_out_can": (None if not hasattr(self, "_last_steer_out_can") else round(
-                    float(getattr(self, "_last_steer_out_can", 0.0) or 0.0), 5)),
-                "steer_max": (None if not hasattr(self, "_last_steer_max") else round(
-                    float(getattr(self, "_last_steer_max", 0.0) or 0.0), 5)),
-                "steer_des": (None if self.last_steer_desired is None else round(float(self.last_steer_desired), 5)),
-                "steer_app": (None if self.last_steer_applied is None else round(float(self.last_steer_applied), 5)),
-                "steer_clip": bool(self.last_steer_clip),
-                "clip_quality": bool(getattr(self, "_last_clip_quality", self.last_steer_clip)),
-                "rate_limited": bool(self.last_rate_limited),
-                "rate_limited_strong": bool(getattr(self, "last_rate_limited_strong", False)),
-                "delta_err": round(float(getattr(self, "last_delta_err", 0.0)), 5),
-                "rate_lim_w": round(float(getattr(self, "last_rate_lim_w", 0.0)), 4),
-                "delta_lim_up_eff": round(float(getattr(self, "last_delta_lim_up", STEER_DELTA_UP_NORM)), 6),
-                "delta_lim_dn_eff": round(float(getattr(self, "last_delta_lim_dn", STEER_DELTA_DOWN_NORM)), 6),
-                "max_limited": bool(self.last_max_limited),
-                "rate_transient": bool(
-                    (self.last_rate_limited or getattr(self, "last_rate_limited_strong", False)) and (
-                                (self.last_time or 0.0) < float(
-                            getattr(self, "_rate_transient_until", 0.0) or 0.0) or bool(
-                            getattr(self, "last_rate_limited_strong", False)))),
-                "qual_freeze": bool((self.last_time or 0.0) < float(getattr(self, "_qual_freeze_until", 0.0) or 0.0)),
-
-                "qual_freeze_until": (None if not hasattr(self, "_qual_freeze_until") else round(float(getattr(self, "_qual_freeze_until", 0.0) or 0.0), 3)),
-                "qual_freeze_extend_cnt": int(getattr(self, "_qual_freeze_extend_cnt", 0) or 0),
-                "qual_freeze_ext_primary": (None if not getattr(self, "_qual_freeze_ext_evt", None) else str(getattr(self, "_qual_freeze_ext_evt", {}).get("primary", None))),
-                "qual_freeze_hold_s": (None if not getattr(self, "_qual_freeze_ext_evt", None) else float(getattr(self, "_qual_freeze_ext_evt", {}).get("hold_s", 0.0))),
-                "qual_n": int(getattr(self, "_qual_n", 0) or 0),
-                "qual_clip_ratio": (None if not hasattr(self, "_qual_clip_ratio") else round(
-                    float(getattr(self, "_qual_clip_ratio", 0.0) or 0.0), 4)),
-                "qual_clip_raw_ratio": (None if not hasattr(self, "_qual_clip_raw_ratio") else round(
-                    float(getattr(self, "_qual_clip_raw_ratio", 0.0) or 0.0), 4)),
-                "qual_clip_quality_ratio": (None if not hasattr(self, "_qual_clip_quality_ratio") else round(
-                    float(getattr(self, "_qual_clip_quality_ratio", 0.0) or 0.0), 4)),
-                "qual_rate_ratio": (None if not hasattr(self, "_qual_rate_ratio") else round(
-                    float(getattr(self, "_qual_rate_ratio", 0.0) or 0.0), 4)),
-                "qual_rate_strong_ratio": (None if not hasattr(self, "_qual_rate_strong_ratio") else round(
-                    float(getattr(self, "_qual_rate_strong_ratio", 0.0) or 0.0), 4)),
-                "qual_both_ratio": (None if not hasattr(self, "_qual_both_ratio") else round(
-                    float(getattr(self, "_qual_both_ratio", 0.0) or 0.0), 4)),
-                "qual_steer_pressed_ratio": (None if not hasattr(self, "_qual_steer_pressed_ratio") else round(
-                    float(getattr(self, "_qual_steer_pressed_ratio", 0.0) or 0.0), 4)),
-                "latAF_raw": round(float(ltp.latAccelFactorRaw), 5),
-                "latAF_f": round(float(ltp.latAccelFactorFiltered), 5),
-                "latAF_assist_active": bool(getattr(self, "_latAF_assist_active", False)),
-                "latAF_assist_base": round(float(getattr(self, "_latAF_assist_base", 0.0) or 0.0), 5),
-                "latAF_assist_scale": round(float(getattr(self, "_latAF_assist_scale", 1.0) or 1.0), 4),
-                "latAF_assist_delta": round(float(getattr(self, "_latAF_assist_delta", 0.0) or 0.0), 5),
-                "latAF_assist_clip_ratio": round(float(getattr(self, "_latAF_assist_clip_ratio", 0.0) or 0.0), 4),
-                "latAF_assist_big_corner": bool(getattr(self, "_latAF_assist_big_corner", False)),
-                "latAF_assist_wide_corner": bool(getattr(self, "_latAF_assist_wide_corner", False)),
-                "latAO_raw": round(float(ltp.latAccelOffsetRaw), 5),
-                "latAO_f": round(float(ltp.latAccelOffsetFiltered), 5),
-                "fric_raw": round(float(ltp.frictionCoefficientRaw), 5),
-                "fric_f": round(float(ltp.frictionCoefficientFiltered), 5),
-                "equinox_profile": bool(self._is_equinox_torque_profile),
-                "adaptive_band_confidence": round(float(getattr(self, "_adaptive_band_confidence", 0.0)), 5),
-                "adaptive_band_limits": (None if self._adaptive_band_limits is None else
-                                         [round(float(v), 6) for v in self._adaptive_band_limits]),
-                "paired_fit_valid": bool(getattr(self, "_ltp_paired_diag", {}).get("valid", False)),
-                "paired_fit_reason": str(getattr(self, "_ltp_paired_diag", {}).get("reason", "none")),
-                "paired_fit_method": str(getattr(self, "_ltp_paired_diag", {}).get("fit_method", "none")),
-                "paired_fit_pairs": int(getattr(self, "_ltp_paired_diag", {}).get("pair_count", 0) or 0),
-                "paired_fit_inliers": int(getattr(self, "_ltp_paired_diag", {}).get("inlier_pair_count", 0) or 0),
-                "paired_fit_points": int(getattr(self, "_ltp_paired_diag", {}).get("paired_points", 0) or 0),
-                "paired_effective_points": round(float(
-                    getattr(self, "_ltp_paired_diag", {}).get("effective_points", 0.0) or 0.0), 2),
-                "paired_direction_balance": round(float(
-                    getattr(self, "_ltp_paired_diag", {}).get("direction_balance", 0.0) or 0.0), 4),
-                "paired_factor_rel_mad": (None if getattr(self, "_ltp_paired_diag", {}).get(
-                    "factor_rel_mad", None) is None else round(float(
-                    getattr(self, "_ltp_paired_diag", {}).get("factor_rel_mad")), 5)),
-                "paired_error_improvement": (None if getattr(self, "_ltp_paired_diag", {}).get(
-                    "error_improvement", None) is None else round(float(
-                    getattr(self, "_ltp_paired_diag", {}).get("error_improvement")), 5)),
-                "paired_candidate_mse": (None if getattr(self, "_ltp_paired_diag", {}).get(
-                    "candidate_mse", None) is None else round(float(
-                    getattr(self, "_ltp_paired_diag", {}).get("candidate_mse")), 7)),
-                "paired_current_mse": (None if getattr(self, "_ltp_paired_diag", {}).get(
-                    "current_mse", None) is None else round(float(
-                    getattr(self, "_ltp_paired_diag", {}).get("current_mse")), 7)),
-                "paired_factor_at_bound": bool(getattr(
-                    self, "_ltp_paired_diag", {}).get("factor_at_bound", False)),
-                "paired_friction_at_bound": bool(getattr(
-                    self, "_ltp_paired_diag", {}).get("friction_at_bound", False)),
-                "candidate_status": str(getattr(self, "_ltp_candidate_status", "idle")),
-                "candidate_history": int(len(getattr(self, "_ltp_candidate_history", []))),
-                "learning_converged": bool(getattr(self, "_ltp_learning_converged", False)),
-                "update_min_points": int(getattr(
-                    self, "_ltp_update_min_points", CLEAN_PARAM_UPDATE_MIN_NEW_POINTS)),
-                "update_factor_step": round(float(getattr(
-                    self, "_ltp_update_factor_step", CLEAN_LAT_FACTOR_MAX_STEP)), 5),
-                "update_friction_step": round(float(getattr(
-                    self, "_ltp_update_friction_step", CLEAN_FRICTION_MAX_STEP)), 5),
-                "offset_learning_enabled": bool(self._offset_learning_enabled),
-                "dyn_latAF_eff_est": round(float(dyn_latAF), 5),
-                "dyn_fric_eff_est": round(float(dyn_fric), 5),
-                "dyn_blend_est": round(float(dyn_blend), 4),
-                "dyn_source": dyn_source,
-                "dyn_actual_active": bool(dyn_active),
-                "dyn_latAF_eff_actual": (
-                    round(float(dyn_latAF), 5) if dyn_source == "controlsState_actual" else None),
-                "dyn_fric_eff_actual": (
-                    round(float(dyn_fric), 5) if dyn_source == "controlsState_actual" else None),
-                "dyn_blend_actual": (
-                    round(float(dyn_blend), 4) if dyn_source == "controlsState_actual" else None),
-                "dyn_authority_ceiling": round(float(dyn_ceiling), 4),
-                "dyn_direction_damping": bool(dyn_direction_damping),
-                "dyn_response_scale": round(float(getattr(
-                    self, "_dyn_response_scale", 1.0) or 1.0), 5),
-                "dyn_response_ratio": round(float(getattr(
-                    self, "_dyn_response_ratio", 1.0) or 1.0), 5),
-                "dyn_response_bin": int(getattr(self, "_dyn_response_bin", 0) or 0),
-                "dyn_response_stable": bool(getattr(self, "_dyn_response_stable", False)),
-                "dyn_response_frozen": bool(getattr(self, "_dyn_response_frozen", True)),
-                "dyn_response_update_count": int(getattr(
-                    self, "_dyn_response_update_count", 0) or 0),
-                "dyn_response_lateral_state_valid": bool(getattr(
-                    self, "_dyn_response_lateral_state_valid", False)),
-                "dyn_response_actual_lat_accel": round(float(getattr(
-                    self, "_dyn_response_actual_lat_accel", 0.0) or 0.0), 5),
-                "dyn_response_desired_lat_accel": round(float(getattr(
-                    self, "_dyn_response_desired_lat_accel", 0.0) or 0.0), 5),
-                "dyn_path_stability_active": bool(getattr(
-                    self, "_dyn_path_stability_active", False)),
-                "dyn_path_wobble_range": round(float(getattr(
-                    self, "_dyn_path_wobble_range", 0.0) or 0.0), 5),
-                "dyn_path_wobble_flips": int(getattr(
-                    self, "_dyn_path_wobble_flips", 0) or 0),
-                "lane_center_correction_m": round(float(getattr(
-                    self, "_lane_center_correction_m", 0.0) or 0.0), 5),
-                "lane_center_correction_active": bool(getattr(
-                    self, "_lane_center_correction_active", False)),
-                "model_curvature_guard_active": bool(getattr(
-                    self, "_model_curvature_guard_active", False)),
-                "model_curvature_raw": round(float(getattr(
-                    self, "_model_curvature_raw", 0.0) or 0.0), 7),
-                "model_curvature_filtered": round(float(getattr(
-                    self, "_model_curvature_filtered", 0.0) or 0.0), 7),
-                "model_curvature_filter_alpha": round(float(getattr(
-                    self, "_model_curvature_filter_alpha", 1.0) or 1.0), 5),
-                "model_curvature_direction_reversal": bool(getattr(
-                    self, "_model_curvature_direction_reversal", False)),
-                "model_steer_delay_compensation": round(float(getattr(
-                    self, "_model_steer_delay_compensation", 0.0) or 0.0), 3),
-                "model_steer_delay_base": round(float(getattr(
-                    self, "_model_steer_delay_base", 0.0) or 0.0), 3),
-                "model_steer_delay_total": round(float(
-                    (getattr(self, "_model_steer_delay_base", 0.0) or 0.0) +
-                    (getattr(self, "_model_steer_delay_compensation", 0.0) or 0.0)), 3),
-                "ls_torque_guard_active": bool(getattr(
-                    self, "_ls_torque_guard_active", False)),
-                "ls_torque_guard_state": int(getattr(
-                    self, "_ls_torque_guard_state", 0) or 0),
-                "ls_torque_raw_steer": round(float(getattr(
-                    self, "_ls_torque_raw_steer", 0.0) or 0.0), 5),
-                "ls_torque_guarded_steer": round(float(getattr(
-                    self, "_ls_torque_guarded_steer", 0.0) or 0.0), 5),
-                "ls_torque_applied_steer": round(float(getattr(
-                    self, "_ls_torque_applied_steer", 0.0) or 0.0), 5),
-                "ls_torque_confirm_ms": int(getattr(
-                    self, "_ls_torque_confirm_ms", 0) or 0),
-                "ls_torque_reversal_count": int(getattr(
-                    self, "_ls_torque_reversal_count", 0) or 0),
-                "ls_torque_boost_suppressed": bool(getattr(
-                    self, "_ls_torque_boost_suppressed", False)),
-                "dyn_corner_strength_est": round(float(dyn_corner_strength), 4),
-                "dyn_low_gate_est": round(float(dyn_low_gate), 4),
-                "dyn_mid_gate_est": round(float(dyn_mid_gate), 4),
-                "dyn_high_gate_est": round(float(dyn_high_gate), 4),
-                "total_pts": int(ltp.totalBucketPoints),
-                "clean_corner_pts": int(len(self.corner_points)),
-                "clean_accepted_run": int(getattr(self, "_clean_points_accepted_total", 0) or 0),
-                "direction_coherent": bool(getattr(self, "_ltp_corner_direction_coherent", False)),
-                "direction_settled": bool(getattr(self, "_ltp_corner_direction_settled", False)),
-                "direction_rejected_run": int(getattr(self, "_ltp_direction_rejected", 0) or 0),
-                "limited_discarded_run": int(getattr(self, "_ltp_limited_discarded", 0) or 0),
-                "decay": round(float(ltp.decay), 3),
-                "resets": int(self.resets),
-
-                "straight_bias_mean": (None if straight_bias_mean is None else round(float(straight_bias_mean), 6)),
-                "straight_bias_abs_med": (
-                    None if straight_bias_abs_med is None else round(float(straight_bias_abs_med), 6)),
-                "straight_yaw_pass_ratio": (
-                    None if straight_yaw_pass_ratio is None else round(float(straight_yaw_pass_ratio), 4)),
-                "straight_latacc_med": (None if straight_latacc_med is None else round(float(straight_latacc_med), 6)),
-                "straight_samples": int(len(straight_ok_samples)),
-                "straight_sampled": bool(getattr(self, "last_straight_sampled", False)),
-                "straight_w_last": (
-                    None if not hasattr(self, "last_straight_w") else round(float(self.last_straight_w), 4)),
-                "burst_active": bool(self._burst_active is not None),
-                "burst_last_trigger": (None if self._last_burst_trigger is None else str(self._last_burst_trigger)),
-                "burst_last_path": (None if self._last_burst_path is None else str(self._last_burst_path)),
-            }
-
-            with open(self._log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-        except Exception:
-            cloudlog.exception("live torque: failed to write ltp log")
+        # Per-drive ltp_logs/ltp_log_*.log output removed.
+        return
 
     def get_msg(self, valid=True, with_points=False):
         msg = messaging.new_message('liveTorqueParameters')
@@ -4427,14 +3817,6 @@ def main(sm=None, pm=None):
         if do_reset:
             cloudlog.warning("LiveTorque: reset requested - clearing cached params")
 
-            # ✅ warm-state 파일 삭제(restore 스킵 목적)
-            try:
-                for pth in (LTP_STATE_PATH, LTP_STATE_PATH_PKL):
-                    if os.path.exists(pth):
-                        os.remove(pth)
-            except Exception:
-                pass
-
             try:
                 params.remove("LiveTorqueCarParams")
             except Exception:
@@ -4464,15 +3846,6 @@ def main(sm=None, pm=None):
 
         params = Params()
         params.put("LiveTorqueCarParams", CP.as_builder().to_bytes())
-
-        try:
-            estimator.save_warm_state(reason=f"signal {sig}")
-        except Exception:
-            pass
-        try:
-            estimator._flush_active_burst(reason=f"signal_{sig}", force=True)
-        except Exception:
-            pass
 
         msg = estimator.get_msg(with_points=False)
 
@@ -4510,20 +3883,7 @@ def main(sm=None, pm=None):
         except Exception:
             pass
 
-    def _atexit_save():
-        try:
-            estimator.save_warm_state(reason="atexit")
-        except Exception:
-            pass
-        try:
-            estimator._flush_active_burst(reason="atexit", force=True)
-        except Exception:
-            pass
-
-    atexit.register(_atexit_save)
-
-    last_state_save_wall = time.monotonic()
-    last_reset_check_wall = last_state_save_wall
+    last_reset_check_wall = time.monotonic()
 
     while True:
         sm.update()
@@ -4544,21 +3904,11 @@ def main(sm=None, pm=None):
                 if v is not None and v.strip() in [b"1", b"true", b"True", b"YES", b"yes"]:
                     cloudlog.warning("LiveTorque: runtime reset requested")
                     try:
-                        for pth in (LTP_STATE_PATH, LTP_STATE_PATH_PKL):
-                            if os.path.exists(pth):
-                                os.remove(pth)
-                    except Exception:
-                        pass
-                    try:
                         params.remove("LiveTorqueCarParams")
                     except Exception:
                         pass
                     try:
                         params.remove("LiveTorqueParameters")
-                    except Exception:
-                        pass
-                    try:
-                        estimator._flush_active_burst(reason="runtime_reset", force=True)
                     except Exception:
                         pass
                     try:
@@ -4583,24 +3933,6 @@ def main(sm=None, pm=None):
             if sm.updated[which]:
                 t = sm.logMonoTime[which] * 1e-9
                 estimator.handle_log(t, which, sm[which])
-
-        now_wall = time.monotonic()
-        # Periodic warm-state save + point-delta trigger (crash/restart 대비)
-        pts_now = 0
-        try:
-            pts_now = int(
-                len(estimator.corner_points) + len(estimator.straight_points) + len(estimator.limited_corner_points))
-        except Exception:
-            pts_now = 0
-
-        if ((now_wall - last_state_save_wall) >= float(LTP_STATE_SAVE_INTERVAL_S)) or (
-                (pts_now - int(getattr(estimator, '_last_state_save_pts', 0) or 0)) >= int(
-                LTP_STATE_SAVE_MIN_DELTA_PTS) and (now_wall - last_state_save_wall) >= 5.0):
-            try:
-                estimator.save_warm_state(reason="periodic")
-            except Exception:
-                pass
-            last_state_save_wall = now_wall
 
         if sm.frame % 5 == 0:
             pm.send('liveTorqueParameters', estimator.get_msg(valid=sm.all_checks()))
