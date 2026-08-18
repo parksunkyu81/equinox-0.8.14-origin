@@ -12,8 +12,8 @@ from selfdrive.controls.lib.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
 # Keep the official low-speed curvature-error idea, with a gradual reduction
 # that avoids the full constant 200 gain through the Equinox's low-speed band.
 LOW_SPEED_FACTOR_BP_MS = [0.0, 10.0 / 3.6, 20.0 / 3.6,
-                          30.0 / 3.6, 50.0 / 3.6]
-LOW_SPEED_FACTOR_V = [200.0, 160.0, 90.0, 25.0, 0.0]
+                          30.0 / 3.6, 40.0 / 3.6, 50.0 / 3.6]
+LOW_SPEED_FACTOR_V = [200.0, 170.0, 120.0, 60.0, 20.0, 0.0]
 LAT_ACCEL_FACTOR_MIN = 0.50
 LAT_ACCEL_FACTOR_MAX = 5.00
 FRICTION_MIN = 0.0
@@ -162,8 +162,11 @@ class LatControlTorque(LatControl):
         lateral_accel_error=error,
         lateral_accel_deadzone=lateral_accel_deadzone,
         friction_compensation=True)
+      # Keep the integrator frozen only at very low speed. Steering is already
+      # active from about 10 km/h on this GM setup, so freezing I all the way to
+      # 18 km/h can leave persistent curvature error in tight low-speed turns.
       freeze_integrator = bool(
-        steer_limited or CS.steeringPressed or CS.vEgo < 5.0)
+        steer_limited or CS.steeringPressed or CS.vEgo < 3.5)
       output_torque = self.pid.update(
         pid_log.error,
         feedforward=feedforward,
