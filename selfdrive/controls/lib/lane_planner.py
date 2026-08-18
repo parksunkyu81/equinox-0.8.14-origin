@@ -39,21 +39,21 @@ CURVE_FALLBACK_MAX_MS = 16.0
 SINGLE_LANE_MIN_RAW_PROB = 0.20
 SINGLE_LANE_MAX_STD = 0.90
 SINGLE_LANE_DPROB_FLOOR = 0.30
-CURVE_SINGLE_LANE_DPROB_FLOOR = 0.38
+CURVE_SINGLE_LANE_DPROB_FLOOR = 0.60
 LANE_CONFIDENCE_FALL_RATE_PER_S = 1.25
 LANE_CENTER_CONTINUITY_MAX_M = 0.35
 CURVE_LANE_CENTER_CONTINUITY_MAX_M = 0.55
 CURVE_CONFIDENCE_RISE_BONUS_PER_S = 1.00
-CURVE_ASSIST_FULL_BELOW_MS = 12.0
-CURVE_ASSIST_ZERO_ABOVE_MS = 18.0
+CURVE_ASSIST_FULL_BELOW_MS = 12.5  # Full assist through 45 km/h
+CURVE_ASSIST_ZERO_ABOVE_MS = 16.67  # Back to normal by 60 km/h
 CURVE_ASSIST_START_CURVATURE = 0.0075
 CURVE_ASSIST_FULL_CURVATURE = 0.025
 CURVE_ASSIST_START_BEND_M = 0.30
 CURVE_ASSIST_FULL_BEND_M = 1.50
 LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M = 0.08
 LOW_CONFIDENCE_MAX_CORRECTION_M = 0.35
-CURVE_LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M = 0.12
-CURVE_LOW_CONFIDENCE_MAX_CORRECTION_M = 0.45
+CURVE_LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M = 0.20
+CURVE_LOW_CONFIDENCE_MAX_CORRECTION_M = 0.70
 
 # Short temporal continuation for tight curves. Cache the last trustworthy
 # lane-path shape, compensate it for the car's short ego-motion, hold it
@@ -63,9 +63,9 @@ CURVE_TEMPORAL_HOLD_MAX_S = 0.30
 CURVE_TEMPORAL_MIN_ASSIST = 0.30
 CURVE_TEMPORAL_STORE_DPROB = 0.35
 CURVE_TEMPORAL_TRIGGER_DPROB = 0.22
-CURVE_TEMPORAL_DPROB_FLOOR = 0.32
-CURVE_TEMPORAL_MAX_CORRECTION_NEAR_M = 0.14
-CURVE_TEMPORAL_MAX_CORRECTION_M = 0.55
+CURVE_TEMPORAL_DPROB_FLOOR = 0.55
+CURVE_TEMPORAL_MAX_CORRECTION_NEAR_M = 0.22
+CURVE_TEMPORAL_MAX_CORRECTION_M = 0.75
 CURVE_TEMPORAL_MAX_YAW_RAD = 0.20
 
 
@@ -452,9 +452,10 @@ class LanePlanner:
       np.interp(LANE_WIDTH_CHECK_DISTANCES_M, lane_x, lane_right_y)
     )
 
-    # Tight-curve assist is deliberately limited to low/mid speed. It uses
-    # both measured vehicle curvature and visible lane bending so the assist
-    # can start before the car has fully rotated into the corner.
+    # Tight-curve assist is strongest through 45 km/h and fades back to the
+    # original planner behavior by 60 km/h. It uses both measured vehicle
+    # curvature and visible lane bending so the assist can start before the
+    # car has fully rotated into the corner.
     lane_bend_m = float(np.max(np.abs(lane_center_refs - lane_center_refs[0])))
     geometry_curve_strength = interp(
       lane_bend_m, [CURVE_ASSIST_START_BEND_M, CURVE_ASSIST_FULL_BEND_M],
