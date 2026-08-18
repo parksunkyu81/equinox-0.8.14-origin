@@ -57,16 +57,38 @@ CURVE_LOW_CONFIDENCE_MAX_CORRECTION_M = 0.70
 
 # Short temporal continuation for tight curves. Cache the last trustworthy
 # lane-path shape, compensate it for the car's short ego-motion, hold it
-# strongly for 0.10 s, then fade it out completely by 0.30 s.
+# strongly for 0.10 s, then fade it out completely by 0.60 s.
 CURVE_TEMPORAL_HOLD_FULL_S = 0.10
-CURVE_TEMPORAL_HOLD_MAX_S = 0.30
+CURVE_TEMPORAL_HOLD_MAX_S = 0.60
 CURVE_TEMPORAL_MIN_ASSIST = 0.30
 CURVE_TEMPORAL_STORE_DPROB = 0.35
 CURVE_TEMPORAL_TRIGGER_DPROB = 0.22
 CURVE_TEMPORAL_DPROB_FLOOR = 0.55
 CURVE_TEMPORAL_MAX_CORRECTION_NEAR_M = 0.22
 CURVE_TEMPORAL_MAX_CORRECTION_M = 0.75
-CURVE_TEMPORAL_MAX_YAW_RAD = 0.20
+CURVE_TEMPORAL_MAX_YAW_RAD = 0.24
+
+# Road-edge fallback is used only on low/mid-speed tight curves when lane
+# confidence is weak. It never blindly centers the whole road: both edges are
+# accepted only when the visible road width looks like a single-lane corridor;
+# otherwise only a nearby, trustworthy edge may anchor the last lane width.
+ROAD_EDGE_STD_FULL_CONFIDENCE = 0.20
+ROAD_EDGE_STD_ZERO_CONFIDENCE = 0.90
+ROAD_EDGE_MIN_CONFIDENCE = 0.30
+ROAD_EDGE_DPROB_FLOOR = 0.55
+ROAD_EDGE_SINGLE_ROAD_MIN_M = 2.5
+ROAD_EDGE_SINGLE_ROAD_MAX_M = 4.6
+ROAD_EDGE_NEAR_MODEL_MIN_M = 1.0
+ROAD_EDGE_NEAR_MODEL_MAX_M = 2.9
+ROAD_EDGE_MAX_CORRECTION_NEAR_M = 0.20
+ROAD_EDGE_MAX_CORRECTION_M = 0.70
+FRESH_LANE_RECOVERY_DPROB = 0.45
+
+# Curve detection can use multiple independent visual sources. Lane geometry
+# remains the strongest visual cue; model-path and road-edge bend are slightly
+# down-weighted so they can start curve assist early without dominating it.
+MODEL_PATH_CURVE_WEIGHT = 0.85
+ROAD_EDGE_CURVE_WEIGHT = 0.90
 
 
 class LanePlanner:
@@ -102,6 +124,19 @@ class LanePlanner:
     self._curve_hold_strength = 0.0
     self._curve_hold_curvature = 0.0
     self._curve_hold_sign = 0.0
+
+    # Road-edge geometry from modelV2. Kept separate from lane lines so it can
+    # act as a fallback only when lanes are weak.
+    self.le_x = np.zeros((TRAJECTORY_SIZE,))
+    self.re_x = np.zeros((TRAJECTORY_SIZE,))
+    self.le_y = np.zeros((TRAJECTORY_SIZE,))
+    self.re_y = np.zeros((TRAJECTORY_SIZE,))
+    self.le_std = 1.0
+    self.re_std = 1.0
+
+    # Used to immediately drop stale fallback geometry once a trustworthy lane
+    # path returns.
+    self._fallback_mode_active = False
 
   def _update_d_prob(self, target_d_prob, v_ego, lane_center_refs,
                      lane_change_active, curve_assist):
@@ -183,7 +218,7 @@ class LanePlanner:
 
   def _curve_temporal_prediction(self, path_x, v_ego, curve_assist,
                                  measured_curvature, lane_change_active):
-    """Predict the cached lane path in the current ego frame for <=0.30 s."""
+    """Predict the cached lane path in the current ego frame for <=0.60 s."""
     if lane_change_active:
       self._clear_curve_temporal_hold()
       return None, 0.0
@@ -215,8 +250,8 @@ class LanePlanner:
       return None, 0.0
 
     # Move the previously observed road geometry into the current vehicle
-    # frame. Constant curvature is only assumed for this very short 0.30 s
-    # bridge; the result is also bounded again before it reaches the planner.
+    # frame. Constant curvature is used only as a short bridge. The first
+    # 0.10 s is held strongly, then the stale path fades out to zero by 0.60 s.
     curvature = float(measured_curvature)
     if abs(curvature) < CURVE_ASSIST_START_CURVATURE:
       curvature = self._curve_hold_curvature
@@ -258,8 +293,8 @@ class LanePlanner:
 
     time_strength = interp(
       self._curve_hold_age_s,
-      [0.0, CURVE_TEMPORAL_HOLD_FULL_S, CURVE_TEMPORAL_HOLD_MAX_S],
-      [1.0, 1.0, 0.0])
+      [0.0, CURVE_TEMPORAL_HOLD_FULL_S, 0.30, CURVE_TEMPORAL_HOLD_MAX_S],
+      [1.0, 1.0, 0.55, 0.0])
     assist_strength = interp(
       active_assist, [CURVE_TEMPORAL_MIN_ASSIST, 1.0], [0.55, 1.0])
     strength = float(np.clip(time_strength * assist_strength, 0.0, 1.0))
@@ -273,6 +308,237 @@ class LanePlanner:
        CURVE_TEMPORAL_MAX_CORRECTION_M])
     return path_xyz[:, 1] + np.clip(
       predicted_lane_y - path_xyz[:, 1], -max_correction, max_correction)
+
+  def _spatial_curve_strength(self, x_values, y_values):
+    """Estimate visible bend strength from spatial x/y points."""
+    x_values = np.asarray(x_values, dtype=float)
+    y_values = np.asarray(y_values, dtype=float)
+    if x_values.size < 2 or x_values.size != y_values.size:
+      return 0.0
+
+    valid = np.isfinite(x_values) & np.isfinite(y_values)
+    x_values = x_values[valid]
+    y_values = y_values[valid]
+    if x_values.size < 2:
+      return 0.0
+
+    order = np.argsort(x_values)
+    x_values = x_values[order]
+    y_values = y_values[order]
+    x_values, unique_indices = np.unique(x_values, return_index=True)
+    y_values = y_values[unique_indices]
+    if x_values.size < 2:
+      return 0.0
+
+    refs = np.interp(
+      np.asarray(LANE_WIDTH_CHECK_DISTANCES_M, dtype=float),
+      x_values, y_values)
+    bend_m = float(np.max(np.abs(refs - refs[0])))
+    return float(np.clip(
+      interp(
+        bend_m,
+        [CURVE_ASSIST_START_BEND_M, CURVE_ASSIST_FULL_BEND_M],
+        [0.0, 1.0]),
+      0.0, 1.0))
+
+  def _model_path_curve_strength(self, path_xyz):
+    """Use the fresh model path as an early curve cue when lanes are weak."""
+    if path_xyz.ndim != 2 or path_xyz.shape[0] < 2 or path_xyz.shape[1] < 2:
+      return 0.0
+    return self._spatial_curve_strength(path_xyz[:, 0], path_xyz[:, 1])
+
+  def _road_edge_curve_strength(self):
+    """Return confidence-weighted bend from the best visible road edge."""
+    best_strength = 0.0
+    for edge_x, edge_y, edge_std in (
+        (self.le_x, self.le_y, self.le_std),
+        (self.re_x, self.re_y, self.re_std)):
+      edge_conf = interp(
+        edge_std,
+        [ROAD_EDGE_STD_FULL_CONFIDENCE, ROAD_EDGE_STD_ZERO_CONFIDENCE],
+        [1.0, 0.0])
+      if edge_conf < ROAD_EDGE_MIN_CONFIDENCE:
+        continue
+
+      bend_strength = self._spatial_curve_strength(edge_x, edge_y)
+      best_strength = max(
+        best_strength, float(bend_strength) * float(edge_conf))
+
+    return float(np.clip(best_strength, 0.0, 1.0))
+
+  def _road_edge_fallback_path(self, path_xyz, v_ego, curve_assist,
+                               lane_change_active):
+    """Build a bounded path from trustworthy road edges on a tight curve."""
+    if lane_change_active or v_ego >= CURVE_ASSIST_ZERO_ABOVE_MS:
+      return None, 0.0
+
+    def prepare_edge(edge_x, edge_y):
+      valid = np.isfinite(edge_x) & np.isfinite(edge_y)
+      edge_x = np.asarray(edge_x[valid], dtype=float)
+      edge_y = np.asarray(edge_y[valid], dtype=float)
+      if edge_x.size < 2:
+        return None, None
+      order = np.argsort(edge_x)
+      edge_x = edge_x[order]
+      edge_y = edge_y[order]
+      edge_x, unique_indices = np.unique(edge_x, return_index=True)
+      edge_y = edge_y[unique_indices]
+      if edge_x.size < 2:
+        return None, None
+      return edge_x, edge_y
+
+    left_x, left_y = prepare_edge(self.le_x, self.le_y)
+    right_x, right_y = prepare_edge(self.re_x, self.re_y)
+    if left_x is None and right_x is None:
+      return None, 0.0
+
+    left_conf = interp(
+      self.le_std,
+      [ROAD_EDGE_STD_FULL_CONFIDENCE, ROAD_EDGE_STD_ZERO_CONFIDENCE],
+      [1.0, 0.0])
+    right_conf = interp(
+      self.re_std,
+      [ROAD_EDGE_STD_FULL_CONFIDENCE, ROAD_EDGE_STD_ZERO_CONFIDENCE],
+      [1.0, 0.0])
+
+    path_x = np.asarray(path_xyz[:, 0], dtype=float)
+    model_y = np.asarray(path_xyz[:, 1], dtype=float)
+    check_x = np.asarray(LANE_WIDTH_CHECK_DISTANCES_M, dtype=float)
+    model_refs = np.interp(check_x, path_x, model_y)
+
+    left_interp = None
+    right_interp = None
+    left_refs = None
+    right_refs = None
+    if left_x is not None:
+      left_interp = np.interp(path_x, left_x, left_y)
+      left_refs = np.interp(check_x, left_x, left_y)
+    if right_x is not None:
+      right_interp = np.interp(path_x, right_x, right_y)
+      right_refs = np.interp(check_x, right_x, right_y)
+
+    speed_weight = interp(
+      v_ego, [CURVE_ASSIST_FULL_BELOW_MS, CURVE_ASSIST_ZERO_ABOVE_MS],
+      [1.0, 0.0])
+
+    # Road edges can reveal the curve before measured vehicle curvature catches
+    # up. Only trustworthy edges may contribute to this curve detector.
+    edge_curve_strength = 0.0
+    if left_refs is not None and left_conf >= ROAD_EDGE_MIN_CONFIDENCE:
+      left_bend = float(np.max(np.abs(left_refs - left_refs[0])))
+      edge_curve_strength = max(
+        edge_curve_strength,
+        interp(left_bend,
+               [CURVE_ASSIST_START_BEND_M, CURVE_ASSIST_FULL_BEND_M],
+               [0.0, 1.0]))
+    if right_refs is not None and right_conf >= ROAD_EDGE_MIN_CONFIDENCE:
+      right_bend = float(np.max(np.abs(right_refs - right_refs[0])))
+      edge_curve_strength = max(
+        edge_curve_strength,
+        interp(right_bend,
+               [CURVE_ASSIST_START_BEND_M, CURVE_ASSIST_FULL_BEND_M],
+               [0.0, 1.0]))
+
+    active_curve_assist = float(np.clip(
+      max(float(curve_assist), edge_curve_strength * speed_weight),
+      0.0, 1.0))
+    if active_curve_assist < CURVE_TEMPORAL_MIN_ASSIST:
+      return None, 0.0
+
+    lane_half_width = float(np.clip(self.lane_width * 0.5, 1.30, 2.00))
+    candidates = []
+    confidences = []
+
+    # Use the center between both road edges only if it looks like a true
+    # single-lane corridor. This deliberately rejects normal two-way/multi-lane
+    # road widths so we do not pull the car toward the whole-road center.
+    if (left_refs is not None and right_refs is not None and
+        left_conf >= ROAD_EDGE_MIN_CONFIDENCE and
+        right_conf >= ROAD_EDGE_MIN_CONFIDENCE):
+      road_width_refs = np.abs(right_refs - left_refs)
+      if (np.all(road_width_refs >= ROAD_EDGE_SINGLE_ROAD_MIN_M) and
+          np.all(road_width_refs <= ROAD_EDGE_SINGLE_ROAD_MAX_M)):
+        candidates.append(0.5 * (left_interp + right_interp))
+        confidences.append(min(left_conf, right_conf))
+
+    # On wider roads, use only an edge that stays approximately one half-lane
+    # from the fresh model path. This makes the fallback useful near a curb or
+    # shoulder without treating a distant road boundary as our lane boundary.
+    if left_refs is not None and left_conf >= ROAD_EDGE_MIN_CONFIDENCE:
+      left_sep = np.abs(model_refs - left_refs)
+      if (np.all(left_sep >= ROAD_EDGE_NEAR_MODEL_MIN_M) and
+          np.all(left_sep <= ROAD_EDGE_NEAR_MODEL_MAX_M)):
+        candidates.append(left_interp + lane_half_width)
+        confidences.append(left_conf)
+
+    if right_refs is not None and right_conf >= ROAD_EDGE_MIN_CONFIDENCE:
+      right_sep = np.abs(right_refs - model_refs)
+      if (np.all(right_sep >= ROAD_EDGE_NEAR_MODEL_MIN_M) and
+          np.all(right_sep <= ROAD_EDGE_NEAR_MODEL_MAX_M)):
+        candidates.append(right_interp - lane_half_width)
+        confidences.append(right_conf)
+
+    if not candidates:
+      return None, 0.0
+
+    weights = np.asarray(confidences, dtype=float)
+    edge_path = np.average(np.vstack(candidates), axis=0, weights=weights)
+
+    max_correction = np.interp(
+      np.abs(path_x), [0.0, 20.0],
+      [ROAD_EDGE_MAX_CORRECTION_NEAR_M, ROAD_EDGE_MAX_CORRECTION_M])
+    edge_path = model_y + np.clip(
+      edge_path - model_y, -max_correction, max_correction)
+
+    confidence = float(np.clip(
+      max(confidences) * active_curve_assist, 0.0, 1.0))
+    return edge_path, confidence
+
+  def _age_curve_temporal_hold(self):
+    if self._curve_hold_x is None:
+      return
+    self._curve_hold_age_s += DT_MDL
+    if self._curve_hold_age_s > CURVE_TEMPORAL_HOLD_MAX_S:
+      self._clear_curve_temporal_hold()
+
+  def _apply_missing_lane_fallback(self, path_xyz, v_ego, curve_assist,
+                                   measured_curvature, lane_change_active):
+    """Fallback order for missing lane geometry: road edge, then temporal."""
+    edge_path, edge_strength = self._road_edge_fallback_path(
+      path_xyz, v_ego, curve_assist, lane_change_active)
+    if edge_path is not None and edge_strength > 0.0:
+      applied_delta = (edge_path - path_xyz[:, 1]) * edge_strength
+      path_xyz[:, 1] += applied_delta
+      self.d_prob = max(
+        self.d_prob, ROAD_EDGE_DPROB_FLOOR * edge_strength)
+      self.lane_center_correction_m = float(
+        np.interp(20.0, path_xyz[:, 0], applied_delta))
+      self.lane_center_correction_active = bool(
+        abs(self.lane_center_correction_m) > 0.01)
+      self._fallback_mode_active = True
+      self._age_curve_temporal_hold()
+      return True
+
+    predicted_lane_y, temporal_strength = self._curve_temporal_prediction(
+      path_xyz[:, 0], v_ego, curve_assist,
+      measured_curvature, lane_change_active)
+    if predicted_lane_y is not None and temporal_strength > 0.0:
+      predicted_lane_y = self._bound_curve_temporal_path(
+        path_xyz, predicted_lane_y)
+      applied_delta = (
+        predicted_lane_y - path_xyz[:, 1]
+      ) * temporal_strength
+      path_xyz[:, 1] += applied_delta
+      self.d_prob = max(
+        self.d_prob, CURVE_TEMPORAL_DPROB_FLOOR * temporal_strength)
+      self.lane_center_correction_m = float(
+        np.interp(20.0, path_xyz[:, 0], applied_delta))
+      self.lane_center_correction_active = bool(
+        abs(self.lane_center_correction_m) > 0.01)
+      self._fallback_mode_active = True
+      return True
+
+    return False
 
   def parse_model(self, md):
     lane_lines = md.laneLines
@@ -303,6 +569,38 @@ class LanePlanner:
       self.lll_std = 1.0
       self.rll_std = 1.0
 
+    # modelV2 also carries two road edges and their standard deviations. They
+    # are parsed independently so lane failure does not erase edge geometry.
+    road_edge_data = None
+    try:
+      road_edges = md.roadEdges
+      road_edge_stds = as_finite_vector(md.roadEdgeStds, minimum_size=2)
+      if len(road_edges) == 2 and road_edge_stds is not None:
+        road_edge_data = tuple(
+          as_finite_vector(values, expected_size=TRAJECTORY_SIZE)
+          for values in (road_edges[0].x, road_edges[1].x,
+                         road_edges[0].y, road_edges[1].y)
+        )
+    except Exception:
+      road_edge_data = None
+
+    if (road_edge_data is not None and
+        all(values is not None for values in road_edge_data)):
+      left_edge_x, right_edge_x, left_edge_y, right_edge_y = road_edge_data
+      self.le_x = left_edge_x
+      self.re_x = right_edge_x
+      self.le_y = left_edge_y + self.total_camera_offset
+      self.re_y = right_edge_y + self.total_camera_offset
+      self.le_std = float(road_edge_stds[0])
+      self.re_std = float(road_edge_stds[1])
+    else:
+      self.le_x.fill(0.0)
+      self.re_x.fill(0.0)
+      self.le_y.fill(0.0)
+      self.re_y.fill(0.0)
+      self.le_std = 1.0
+      self.re_std = 1.0
+
     left_desire_idx = log.LateralPlan.Desire.laneChangeLeft
     right_desire_idx = log.LateralPlan.Desire.laneChangeRight
     desire_state = as_finite_vector(
@@ -327,8 +625,19 @@ class LanePlanner:
     speed_curve_weight = interp(
       v_ego, [CURVE_ASSIST_FULL_BELOW_MS, CURVE_ASSIST_ZERO_ABOVE_MS],
       [1.0, 0.0])
-    measured_curve_assist = float(np.clip(
-      measured_curve_strength * speed_curve_weight, 0.0, 1.0))
+
+    # Detect the curve before the car has fully rotated into it. The model path
+    # and road edges can remain informative even when lane confidence is weak.
+    model_curve_strength = self._model_path_curve_strength(path_xyz)
+    road_edge_curve_strength = self._road_edge_curve_strength()
+    pre_curve_strength = float(measured_curve_strength)
+    if not lane_change_active:
+      pre_curve_strength = max(
+        pre_curve_strength,
+        MODEL_PATH_CURVE_WEIGHT * model_curve_strength,
+        ROAD_EDGE_CURVE_WEIGHT * road_edge_curve_strength)
+    pre_curve_assist = float(np.clip(
+      pre_curve_strength * speed_curve_weight, 0.0, 1.0))
 
     width_pts = self.rll_y - self.lll_y
     geometry_valid = (
@@ -336,25 +645,15 @@ class LanePlanner:
       np.isfinite(self.rll_y) & np.isfinite(width_pts)
     )
     if np.count_nonzero(geometry_valid) < 2:
-      predicted_lane_y, temporal_strength = self._curve_temporal_prediction(
-        path_xyz[:, 0], v_ego, measured_curve_assist,
-        measured_curvature, lane_change_active)
-      if predicted_lane_y is not None and temporal_strength > 0.0:
-        predicted_lane_y = self._bound_curve_temporal_path(
-          path_xyz, predicted_lane_y)
-        applied_delta = (predicted_lane_y - path_xyz[:, 1]) * temporal_strength
-        path_xyz[:, 1] += applied_delta
-        self.d_prob = max(
-          self.d_prob, CURVE_TEMPORAL_DPROB_FLOOR * temporal_strength)
-        self.lane_center_correction_m = float(
-          np.interp(20.0, path_xyz[:, 0], applied_delta))
-        self.lane_center_correction_active = bool(
-          abs(self.lane_center_correction_m) > 0.01)
+      if self._apply_missing_lane_fallback(
+          path_xyz, v_ego, pre_curve_assist,
+          measured_curvature, lane_change_active):
         return path_xyz
 
       self.d_prob = 0.0
       self.lane_center_correction_m = 0.0
       self.lane_center_correction_active = False
+      self._fallback_mode_active = False
       cloudlog.warning("Lateral mpc - incomplete laneline x/y geometry, ignoring")
       return path_xyz
 
@@ -376,25 +675,15 @@ class LanePlanner:
     lane_right_y = lane_right_y[unique_indices]
     lane_width_pts = lane_width_pts[unique_indices]
     if lane_x.size < 2:
-      predicted_lane_y, temporal_strength = self._curve_temporal_prediction(
-        path_xyz[:, 0], v_ego, measured_curve_assist,
-        measured_curvature, lane_change_active)
-      if predicted_lane_y is not None and temporal_strength > 0.0:
-        predicted_lane_y = self._bound_curve_temporal_path(
-          path_xyz, predicted_lane_y)
-        applied_delta = (predicted_lane_y - path_xyz[:, 1]) * temporal_strength
-        path_xyz[:, 1] += applied_delta
-        self.d_prob = max(
-          self.d_prob, CURVE_TEMPORAL_DPROB_FLOOR * temporal_strength)
-        self.lane_center_correction_m = float(
-          np.interp(20.0, path_xyz[:, 0], applied_delta))
-        self.lane_center_correction_active = bool(
-          abs(self.lane_center_correction_m) > 0.01)
+      if self._apply_missing_lane_fallback(
+          path_xyz, v_ego, pre_curve_assist,
+          measured_curvature, lane_change_active):
         return path_xyz
 
       self.d_prob = 0.0
       self.lane_center_correction_m = 0.0
       self.lane_center_correction_active = False
+      self._fallback_mode_active = False
       return path_xyz
 
     width_samples = np.array([
@@ -453,16 +742,17 @@ class LanePlanner:
     )
 
     # Tight-curve assist is strongest through 45 km/h and fades back to the
-    # original planner behavior by 60 km/h. It uses both measured vehicle
-    # curvature and visible lane bending so the assist can start before the
-    # car has fully rotated into the corner.
+    # original planner behavior by 60 km/h. Combine measured curvature, lane
+    # bend, road-edge bend and the fresh model-path bend so weak lane paint
+    # does not delay curve recognition.
     lane_bend_m = float(np.max(np.abs(lane_center_refs - lane_center_refs[0])))
     geometry_curve_strength = interp(
       lane_bend_m, [CURVE_ASSIST_START_BEND_M, CURVE_ASSIST_FULL_BEND_M],
       [0.0, 1.0])
+    combined_curve_strength = max(
+      pre_curve_strength, geometry_curve_strength)
     curve_assist = float(np.clip(
-      max(measured_curve_strength, geometry_curve_strength) *
-      speed_curve_weight, 0.0, 1.0))
+      combined_curve_strength * speed_curve_weight, 0.0, 1.0))
 
     fallback_max_speed = interp(
       curve_assist, [0.0, 1.0],
@@ -478,8 +768,23 @@ class LanePlanner:
     target_d_prob = max(raw_target_d_prob, fallback_dprob_floor) \
       if fallback_active else raw_target_d_prob
 
-    self.d_prob = self._update_d_prob(
-      target_d_prob, v_ego, lane_center_refs, lane_change_active, curve_assist)
+    fresh_lane_recovered = bool(
+      self._fallback_mode_active and
+      not lane_change_active and
+      geometry_plausible and
+      raw_target_d_prob >= FRESH_LANE_RECOVERY_DPROB
+    )
+    if fresh_lane_recovered:
+      # A real lane is visible again: drop stale edge/temporal geometry
+      # immediately instead of waiting for the normal probability rise limiter.
+      self._clear_curve_temporal_hold()
+      self._fallback_mode_active = False
+      self.d_prob = float(np.clip(target_d_prob, 0.0, 1.0))
+      self._last_lane_center_refs = lane_center_refs.copy()
+    else:
+      self.d_prob = self._update_d_prob(
+        target_d_prob, v_ego, lane_center_refs,
+        lane_change_active, curve_assist)
 
     lane_path_y_interp = np.interp(path_xyz[:, 0], lane_x, lane_path_y)
     if target_d_prob < 0.50:
@@ -500,50 +805,76 @@ class LanePlanner:
     center_delta = lane_path_y_interp - path_xyz[:, 1]
 
     # Cache only trustworthy tight-curve frames. During a short camera/model
-    # confidence dropout, reuse the ego-motion-compensated lane path and fade
-    # smoothly back to the fresh model path by 0.30 s.
+    # confidence dropout, prefer current road edges; if those are unavailable,
+    # reuse the ego-motion-compensated lane path and fade it out by 0.60 s.
     trusted_curve_frame = bool(
       not lane_change_active and
       curve_assist >= CURVE_TEMPORAL_MIN_ASSIST and
       geometry_plausible and
       raw_target_d_prob >= CURVE_TEMPORAL_STORE_DPROB
     )
+    # Start fallback gradually as confidence falls below the temporal-store
+    # threshold (0.35), reaching full fallback by the trigger threshold (0.22).
+    # This removes the previous 0.22-0.35 dead zone.
     visual_dropout = bool(
       not lane_change_active and
       curve_assist >= CURVE_TEMPORAL_MIN_ASSIST and
-      raw_target_d_prob < CURVE_TEMPORAL_TRIGGER_DPROB
+      raw_target_d_prob < CURVE_TEMPORAL_STORE_DPROB
     )
 
     if trusted_curve_frame:
       self._store_curve_temporal_hold(
         path_xyz[:, 0], lane_path_y_interp,
         curve_assist, measured_curvature)
+      self._fallback_mode_active = False
     elif visual_dropout:
-      predicted_lane_y, temporal_strength = self._curve_temporal_prediction(
-        path_xyz[:, 0], v_ego, curve_assist,
-        measured_curvature, lane_change_active)
-      if predicted_lane_y is not None and temporal_strength > 0.0:
-        predicted_lane_y = self._bound_curve_temporal_path(
-          path_xyz, predicted_lane_y)
-        temporal_weight = (
-          1.0 - interp(
-            raw_target_d_prob,
-            [0.0, CURVE_TEMPORAL_TRIGGER_DPROB],
-            [0.0, 1.0])
-        ) * temporal_strength
+      dropout_weight = float(np.clip(
+        interp(
+          raw_target_d_prob,
+          [CURVE_TEMPORAL_TRIGGER_DPROB, CURVE_TEMPORAL_STORE_DPROB],
+          [1.0, 0.0]),
+        0.0, 1.0))
+
+      # Fallback priority: current road edges first, then the short-term cached
+      # lane path. A valid new visual edge is preferable to stale history.
+      edge_path, edge_strength = self._road_edge_fallback_path(
+        path_xyz, v_ego, curve_assist, lane_change_active)
+      if edge_path is not None and edge_strength > 0.0:
+        edge_weight = float(np.clip(
+          dropout_weight * edge_strength, 0.0, 1.0))
         lane_path_y_interp = (
-          temporal_weight * predicted_lane_y +
-          (1.0 - temporal_weight) * lane_path_y_interp
+          edge_weight * edge_path +
+          (1.0 - edge_weight) * lane_path_y_interp
         )
         self.d_prob = max(
-          self.d_prob, CURVE_TEMPORAL_DPROB_FLOOR * temporal_weight)
+          self.d_prob, ROAD_EDGE_DPROB_FLOOR * edge_weight)
         center_delta = lane_path_y_interp - path_xyz[:, 1]
+        self._fallback_mode_active = True
+        self._age_curve_temporal_hold()
+      else:
+        predicted_lane_y, temporal_strength = self._curve_temporal_prediction(
+          path_xyz[:, 0], v_ego, curve_assist,
+          measured_curvature, lane_change_active)
+        if predicted_lane_y is not None and temporal_strength > 0.0:
+          predicted_lane_y = self._bound_curve_temporal_path(
+            path_xyz, predicted_lane_y)
+          temporal_weight = float(np.clip(
+            dropout_weight * temporal_strength, 0.0, 1.0))
+          lane_path_y_interp = (
+            temporal_weight * predicted_lane_y +
+            (1.0 - temporal_weight) * lane_path_y_interp
+          )
+          self.d_prob = max(
+            self.d_prob, CURVE_TEMPORAL_DPROB_FLOOR * temporal_weight)
+          center_delta = lane_path_y_interp - path_xyz[:, 1]
+          self._fallback_mode_active = True
     else:
-      if self._curve_hold_x is not None:
-        self._curve_hold_age_s += DT_MDL
-        if (self._curve_hold_age_s > CURVE_TEMPORAL_HOLD_MAX_S or
-            lane_change_active or v_ego >= CURVE_ASSIST_ZERO_ABOVE_MS):
-          self._clear_curve_temporal_hold()
+      if lane_change_active or v_ego >= CURVE_ASSIST_ZERO_ABOVE_MS:
+        self._clear_curve_temporal_hold()
+      else:
+        self._age_curve_temporal_hold()
+      if lane_change_active or raw_target_d_prob >= FRESH_LANE_RECOVERY_DPROB:
+        self._fallback_mode_active = False
 
     self.lane_center_correction_m = float(
       self.d_prob * np.interp(20.0, path_xyz[:, 0], center_delta))
