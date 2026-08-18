@@ -35,13 +35,25 @@ LANE_WIDTH_MOD_END_M = 5.0
 # path, but its influence is capped so a weak prediction cannot pull the car
 # far away from the model path.
 LOW_SPEED_FALLBACK_MAX_MS = 12.0
+CURVE_FALLBACK_MAX_MS = 16.0
 SINGLE_LANE_MIN_RAW_PROB = 0.20
 SINGLE_LANE_MAX_STD = 0.90
 SINGLE_LANE_DPROB_FLOOR = 0.30
+CURVE_SINGLE_LANE_DPROB_FLOOR = 0.38
 LANE_CONFIDENCE_FALL_RATE_PER_S = 1.25
 LANE_CENTER_CONTINUITY_MAX_M = 0.35
+CURVE_LANE_CENTER_CONTINUITY_MAX_M = 0.55
+CURVE_CONFIDENCE_RISE_BONUS_PER_S = 1.00
+CURVE_ASSIST_FULL_BELOW_MS = 12.0
+CURVE_ASSIST_ZERO_ABOVE_MS = 18.0
+CURVE_ASSIST_START_CURVATURE = 0.0075
+CURVE_ASSIST_FULL_CURVATURE = 0.025
+CURVE_ASSIST_START_BEND_M = 0.30
+CURVE_ASSIST_FULL_BEND_M = 1.50
 LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M = 0.08
 LOW_CONFIDENCE_MAX_CORRECTION_M = 0.35
+CURVE_LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M = 0.12
+CURVE_LOW_CONFIDENCE_MAX_CORRECTION_M = 0.45
 
 
 class LanePlanner:
@@ -71,18 +83,31 @@ class LanePlanner:
     self._last_lane_center_refs = None
 
   def _update_d_prob(self, target_d_prob, v_ego, lane_center_refs,
-                     lane_change_active):
-    """Rate-limit only short, geometrically continuous confidence dropouts."""
+                     lane_change_active, curve_assist):
+    """Rate-limit short confidence dropouts, with extra continuity on tight low-speed curves."""
     target_d_prob = float(np.clip(target_d_prob, 0.0, 1.0))
+    curve_assist = float(np.clip(curve_assist, 0.0, 1.0))
+    continuity_limit = interp(
+      curve_assist, [0.0, 1.0],
+      [LANE_CENTER_CONTINUITY_MAX_M, CURVE_LANE_CENTER_CONTINUITY_MAX_M])
     refs_continuous = (
       self._last_lane_center_refs is not None and
       np.max(np.abs(lane_center_refs - self._last_lane_center_refs)) <=
-      LANE_CENTER_CONTINUITY_MAX_M
+      continuity_limit
     )
 
     if target_d_prob >= self.d_prob:
+      # Keep the existing speed-aware rise limiter on straights/high speed,
+      # but recover lane confidence faster when a tight low-speed curve
+      # temporarily pushes a lane line toward the edge of the camera view.
       next_d_prob = limit_lane_probability_rise(
         self.d_prob, target_d_prob, v_ego, DT_MDL)
+      if curve_assist > 0.0:
+        curve_max_rise = (
+          1.50 + CURVE_CONFIDENCE_RISE_BONUS_PER_S * curve_assist
+        ) * DT_MDL
+        next_d_prob = max(
+          next_d_prob, min(target_d_prob, self.d_prob + curve_max_rise))
     elif lane_change_active or not refs_continuous:
       next_d_prob = target_d_prob
     else:
@@ -137,7 +162,7 @@ class LanePlanner:
 
   def get_d_path(self, v_ego, path_t, path_xyz, measured_curvature=0.0,
                  lane_change_active=False):
-    del path_t, measured_curvature
+    del path_t
     path_xyz[:, 1] += self.path_offset
 
     width_pts = self.rll_y - self.lll_y
@@ -217,13 +242,6 @@ class LanePlanner:
       (self.rll_prob >= SINGLE_LANE_MIN_RAW_PROB and
        self.rll_std <= SINGLE_LANE_MAX_STD)
     )
-    fallback_active = bool(
-      not lane_change_active and v_ego <= LOW_SPEED_FALLBACK_MAX_MS and
-      geometry_plausible and single_lane_usable and
-      raw_target_d_prob < SINGLE_LANE_DPROB_FLOOR
-    )
-    target_d_prob = max(raw_target_d_prob, SINGLE_LANE_DPROB_FLOOR) \
-      if fallback_active else raw_target_d_prob
 
     # Continuity must use raw geometry, not the probability-weighted path.
     # With both probabilities at zero the weighted path collapses toward zero
@@ -232,15 +250,55 @@ class LanePlanner:
       np.interp(LANE_WIDTH_CHECK_DISTANCES_M, lane_x, lane_left_y) +
       np.interp(LANE_WIDTH_CHECK_DISTANCES_M, lane_x, lane_right_y)
     )
+
+    # Tight-curve assist is deliberately limited to low/mid speed. It uses
+    # both measured vehicle curvature and visible lane bending so the assist
+    # can start before the car has fully rotated into the corner.
+    measured_curve_strength = interp(
+      abs(float(measured_curvature)),
+      [CURVE_ASSIST_START_CURVATURE, CURVE_ASSIST_FULL_CURVATURE],
+      [0.0, 1.0])
+    lane_bend_m = float(np.max(np.abs(lane_center_refs - lane_center_refs[0])))
+    geometry_curve_strength = interp(
+      lane_bend_m, [CURVE_ASSIST_START_BEND_M, CURVE_ASSIST_FULL_BEND_M],
+      [0.0, 1.0])
+    speed_curve_weight = interp(
+      v_ego, [CURVE_ASSIST_FULL_BELOW_MS, CURVE_ASSIST_ZERO_ABOVE_MS],
+      [1.0, 0.0])
+    curve_assist = float(np.clip(
+      max(measured_curve_strength, geometry_curve_strength) *
+      speed_curve_weight, 0.0, 1.0))
+
+    fallback_max_speed = interp(
+      curve_assist, [0.0, 1.0],
+      [LOW_SPEED_FALLBACK_MAX_MS, CURVE_FALLBACK_MAX_MS])
+    fallback_dprob_floor = interp(
+      curve_assist, [0.0, 1.0],
+      [SINGLE_LANE_DPROB_FLOOR, CURVE_SINGLE_LANE_DPROB_FLOOR])
+    fallback_active = bool(
+      not lane_change_active and v_ego <= fallback_max_speed and
+      geometry_plausible and single_lane_usable and
+      raw_target_d_prob < fallback_dprob_floor
+    )
+    target_d_prob = max(raw_target_d_prob, fallback_dprob_floor) \
+      if fallback_active else raw_target_d_prob
+
     self.d_prob = self._update_d_prob(
-      target_d_prob, v_ego, lane_center_refs, lane_change_active)
+      target_d_prob, v_ego, lane_center_refs, lane_change_active, curve_assist)
 
     lane_path_y_interp = np.interp(path_xyz[:, 0], lane_x, lane_path_y)
     if target_d_prob < 0.50:
+      correction_near = interp(
+        curve_assist, [0.0, 1.0],
+        [LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M,
+         CURVE_LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M])
+      correction_far = interp(
+        curve_assist, [0.0, 1.0],
+        [LOW_CONFIDENCE_MAX_CORRECTION_M,
+         CURVE_LOW_CONFIDENCE_MAX_CORRECTION_M])
       max_correction = np.interp(
         np.abs(path_xyz[:, 0]), [0.0, 20.0],
-        [LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M,
-         LOW_CONFIDENCE_MAX_CORRECTION_M])
+        [correction_near, correction_far])
       lane_path_y_interp = path_xyz[:, 1] + np.clip(
         lane_path_y_interp - path_xyz[:, 1], -max_correction, max_correction)
 
