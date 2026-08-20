@@ -16,8 +16,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <fcntl.h>
 #include <future>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include <libusb-1.0/libusb.h>
 
@@ -60,12 +63,70 @@
 // a Black Panda to CLIENT during startup, drop USB, and never get enough CAN
 // time to observe that the ignition is actually on.
 constexpr uint64_t USB_POWER_MODE_STARTUP_GRACE_NS = 5ULL * 1000ULL * 1000ULL * 1000ULL;
+constexpr const char *BOARDD_SAFETY_DIAGNOSTICS_PATH = "/data/log/boardd_safety_diagnostics.jsonl";
 using namespace std::chrono_literals;
 
 std::atomic<bool> ignition(false);
 std::atomic<bool> pigeon_active(false);
 
 ExitHandler do_exit;
+
+// This file is intentionally independent from swaglog: the EON configuration can
+// run without logmessaged, but post-reboot safety failures still need evidence.
+static void append_boardd_safety_diagnostic(const char *event_type, const std::string &fields = "") {
+  const std::string line =
+    "{\"mono_time_ns\":" + std::to_string(nanos_since_boot()) +
+    ",\"event_type\":\"" + event_type + "\"" + fields + "}\n";
+  const int fd = open(BOARDD_SAFETY_DIAGNOSTICS_PATH, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+  if (fd < 0) return;
+
+  const char *data = line.data();
+  size_t remaining = line.size();
+  while (remaining > 0) {
+    const ssize_t written = write(fd, data, remaining);
+    if (written <= 0) break;
+    data += written;
+    remaining -= written;
+  }
+  fsync(fd);
+  close(fd);
+}
+
+static void append_boardd_panda_state_diagnostic(uint32_t index, const health_t &health,
+                                                  bool comms_healthy) {
+  char fields[1024];
+  std::snprintf(fields, sizeof(fields),
+                ",\"panda_index\":%u,\"comms_healthy\":%s,\"uptime\":%u"
+                ",\"ignition_line\":%u,\"ignition_can\":%u,\"controls_allowed\":%u"
+                ",\"safety_model\":%u,\"safety_param\":%d,\"alternative_experience\":%u"
+                ",\"heartbeat_lost\":%u,\"usb_power_mode\":%u,\"power_save_enabled\":%u"
+                ",\"can_rx_errs\":%u,\"can_send_errs\":%u,\"can_fwd_errs\":%u"
+                ",\"blocked_cnt\":%u,\"faults\":%u,\"interrupt_load\":%.3f",
+                index, comms_healthy ? "true" : "false", health.uptime_pkt,
+                health.ignition_line_pkt, health.ignition_can_pkt, health.controls_allowed_pkt,
+                health.safety_mode_pkt, health.safety_param_pkt, health.alternative_experience_pkt,
+                health.heartbeat_lost_pkt, health.usb_power_mode_pkt, health.power_save_enabled_pkt,
+                health.can_rx_errs_pkt, health.can_send_errs_pkt, health.can_fwd_errs_pkt,
+                health.blocked_msg_cnt_pkt, health.faults_pkt, health.interrupt_load);
+  append_boardd_safety_diagnostic("boardd_panda_state_changed", fields);
+}
+
+static bool panda_diagnostic_state_changed(const health_t &before, const health_t &after) {
+  return before.ignition_line_pkt != after.ignition_line_pkt ||
+         before.ignition_can_pkt != after.ignition_can_pkt ||
+         before.controls_allowed_pkt != after.controls_allowed_pkt ||
+         before.safety_mode_pkt != after.safety_mode_pkt ||
+         before.safety_param_pkt != after.safety_param_pkt ||
+         before.alternative_experience_pkt != after.alternative_experience_pkt ||
+         before.heartbeat_lost_pkt != after.heartbeat_lost_pkt ||
+         before.usb_power_mode_pkt != after.usb_power_mode_pkt ||
+         before.power_save_enabled_pkt != after.power_save_enabled_pkt ||
+         before.can_rx_errs_pkt != after.can_rx_errs_pkt ||
+         before.can_send_errs_pkt != after.can_send_errs_pkt ||
+         before.can_fwd_errs_pkt != after.can_fwd_errs_pkt ||
+         before.blocked_msg_cnt_pkt != after.blocked_msg_cnt_pkt ||
+         before.faults_pkt != after.faults_pkt;
+}
 
 static std::string get_time_str(const struct tm &time) {
   char s[30] = {'\0'};
@@ -76,6 +137,7 @@ static std::string get_time_str(const struct tm &time) {
 bool check_all_connected(const std::vector<Panda *> &pandas) {
   for (const auto& panda : pandas) {
     if (!panda->connected) {
+      append_boardd_safety_diagnostic("boardd_panda_disconnected");
       do_exit = true;
       return false;
     }
@@ -114,12 +176,19 @@ void sync_time(Panda *panda, SyncTimeDir dir) {
 
 bool safety_setter_thread(std::vector<Panda *> pandas) {
   LOGD("Starting safety setter thread");
+  append_boardd_safety_diagnostic("boardd_safety_setter_started",
+                                  ",\"panda_count\":" + std::to_string(pandas.size()));
 
   // there should be at least one panda connected
   if (pandas.size() == 0) {
+    append_boardd_safety_diagnostic("boardd_safety_setter_stopped", ",\"reason\":\"no_panda\"");
     return false;
   }
 
+  append_boardd_safety_diagnostic("boardd_safety_request",
+                                  ",\"panda_index\":0,\"safety_model\":" +
+                                  std::to_string((int)cereal::CarParams::SafetyModel::ELM327) +
+                                  ",\"safety_param\":0,\"stage\":\"initial_elm327\"");
   pandas[0]->set_safety_model(cereal::CarParams::SafetyModel::ELM327);
 
   Params p = Params();
@@ -127,6 +196,9 @@ bool safety_setter_thread(std::vector<Panda *> pandas) {
   // switch to SILENT when CarVin param is read
   while (true) {
     if (do_exit || !check_all_connected(pandas) || !ignition) {
+      append_boardd_safety_diagnostic("boardd_safety_setter_stopped",
+                                      std::string(",\"reason\":\"") +
+                                      (!ignition ? "ignition_off" : "exit_or_disconnect") + "\"");
       return false;
     }
 
@@ -135,17 +207,25 @@ bool safety_setter_thread(std::vector<Panda *> pandas) {
       // sanity check VIN format
       assert(value_vin.size() == 17);
       LOGW("got CarVin %s", value_vin.c_str());
+      append_boardd_safety_diagnostic("boardd_car_vin_ready", ",\"car_vin_present\":true");
       break;
     }
     util::sleep_for(20);
   }
 
+  append_boardd_safety_diagnostic("boardd_safety_request",
+                                  ",\"panda_index\":0,\"safety_model\":" +
+                                  std::to_string((int)cereal::CarParams::SafetyModel::ELM327) +
+                                  ",\"safety_param\":1,\"stage\":\"vin_ready_elm327\"");
   pandas[0]->set_safety_model(cereal::CarParams::SafetyModel::ELM327, 1);
 
   std::string params;
   LOGW("waiting for params to set safety model");
   while (true) {
     if (do_exit || !check_all_connected(pandas) || !ignition) {
+      append_boardd_safety_diagnostic("boardd_safety_setter_stopped",
+                                      std::string(",\"reason\":\"") +
+                                      (!ignition ? "ignition_off" : "exit_or_disconnect") + "\"");
       return false;
     }
 
@@ -156,6 +236,8 @@ bool safety_setter_thread(std::vector<Panda *> pandas) {
     util::sleep_for(100);
   }
   LOGW("got %d bytes CarParams", params.size());
+  append_boardd_safety_diagnostic("boardd_controls_ready",
+                                  ",\"car_params_bytes\":" + std::to_string(params.size()));
 
   AlignedBuffer aligned_buf;
   capnp::FlatArrayMessageReader cmsg(aligned_buf.align(params.data(), params.size()));
@@ -178,10 +260,17 @@ bool safety_setter_thread(std::vector<Panda *> pandas) {
     }
 
     LOGW("panda %d: setting safety model: %d, param: %d, alternative experience: %d", i, (int)safety_model, safety_param, alternative_experience);
+    append_boardd_safety_diagnostic("boardd_safety_request",
+                                    ",\"panda_index\":" + std::to_string(i) +
+                                    ",\"safety_model\":" + std::to_string((int)safety_model) +
+                                    ",\"safety_param\":" + std::to_string(safety_param) +
+                                    ",\"alternative_experience\":" + std::to_string(alternative_experience) +
+                                    ",\"stage\":\"car_params\"");
     panda->set_alternative_experience(alternative_experience);
     panda->set_safety_model(safety_model, safety_param);
   }
 
+  append_boardd_safety_diagnostic("boardd_safety_setter_complete");
   return true;
 }
 
@@ -295,6 +384,9 @@ void send_empty_panda_state(PubMaster *pm) {
 
 std::optional<bool> send_panda_states(PubMaster *pm, const std::vector<Panda *> &pandas, bool spoofing_started) {
   bool ignition_local = false;
+  static std::vector<health_t> last_diagnostic_health;
+  static std::vector<bool> last_diagnostic_comms_healthy;
+  static bool state_read_failed = false;
 
   // build msg
   MessageBuilder msg;
@@ -305,6 +397,13 @@ std::optional<bool> send_panda_states(PubMaster *pm, const std::vector<Panda *> 
   for (const auto& panda : pandas){
     auto health_opt = panda->get_state();
     if (!health_opt) {
+      if (!state_read_failed) {
+        append_boardd_safety_diagnostic("boardd_panda_state_read_failed",
+                                        ",\"panda_index\":" + std::to_string(pandaStates.size()) +
+                                        ",\"comms_healthy\":" +
+                                        (panda->comms_healthy ? "true" : "false"));
+      }
+      state_read_failed = true;
       return std::nullopt;
     }
 
@@ -317,6 +416,26 @@ std::optional<bool> send_panda_states(PubMaster *pm, const std::vector<Panda *> 
     ignition_local |= ((health.ignition_line_pkt != 0) || (health.ignition_can_pkt != 0));
 
     pandaStates.push_back(health);
+  }
+
+  state_read_failed = false;
+  if (last_diagnostic_health.size() != pandaStates.size()) {
+    last_diagnostic_health.clear();
+    last_diagnostic_comms_healthy.clear();
+  }
+  for (uint32_t i = 0; i < pandas.size(); i++) {
+    const bool first_state = last_diagnostic_health.size() <= i;
+    const bool state_changed = first_state ||
+      panda_diagnostic_state_changed(last_diagnostic_health[i], pandaStates[i]) ||
+      last_diagnostic_comms_healthy[i] != pandas[i]->comms_healthy;
+    if (state_changed) {
+      append_boardd_panda_state_diagnostic(i, pandaStates[i], pandas[i]->comms_healthy);
+    }
+  }
+  last_diagnostic_health = pandaStates;
+  last_diagnostic_comms_healthy.clear();
+  for (const auto &panda : pandas) {
+    last_diagnostic_comms_healthy.push_back(panda->comms_healthy);
   }
 
   for (uint32_t i = 0; i < pandas.size(); i++) {
@@ -444,6 +563,14 @@ void update_usb_power_mode(Panda *panda, bool charging_disabled, bool ignition_o
 
   LOGW("Changing Panda USB power mode from %d to %d (charging disabled: %d)",
        panda_state->usb_power_mode_pkt, static_cast<int>(desired_mode), charging_disabled);
+  append_boardd_safety_diagnostic("boardd_usb_power_mode_request",
+                                  ",\"from\":" + std::to_string(panda_state->usb_power_mode_pkt) +
+                                  ",\"to\":" + std::to_string(static_cast<int>(desired_mode)) +
+                                  ",\"charging_disabled\":" +
+                                  (charging_disabled ? "true" : "false") +
+                                  ",\"ignition\":" + (ignition_on ? "true" : "false") +
+                                  ",\"startup_grace_active\":" +
+                                  (startup_grace_active ? "true" : "false"));
   panda->set_usb_power_mode(desired_mode);
 }
 
@@ -483,13 +610,16 @@ void panda_state_thread(PubMaster *pm, std::vector<Panda *> pandas, bool spoofin
 
     // clear ignition-based params and set new safety on car start
     if (ignition && !ignition_last) {
+      append_boardd_safety_diagnostic("boardd_ignition_edge", ",\"ignition\":true");
       params.clearAll(CLEAR_ON_IGNITION_ON);
       if (!safety_future.valid() || safety_future.wait_for(0ms) == std::future_status::ready) {
         safety_future = std::async(std::launch::async, safety_setter_thread, pandas);
       } else {
         LOGW("Safety setter thread already running");
+        append_boardd_safety_diagnostic("boardd_safety_setter_already_running");
       }
     } else if (!ignition && ignition_last) {
+      append_boardd_safety_diagnostic("boardd_ignition_edge", ",\"ignition\":false");
       params.clearAll(CLEAR_ON_IGNITION_OFF);
     }
 
@@ -633,6 +763,8 @@ void pigeon_thread(Panda *panda) {
 void boardd_main_thread(std::vector<std::string> serials) {
   PubMaster pm({"pandaStates", "peripheralState"});
   LOGW("attempting to connect");
+  append_boardd_safety_diagnostic("boardd_started",
+                                  ",\"requested_panda_count\":" + std::to_string(serials.size()));
 
   if (serials.size() == 0) {
     // connect to all
@@ -641,6 +773,7 @@ void boardd_main_thread(std::vector<std::string> serials) {
     // exit if no pandas are connected
     if (serials.size() == 0) {
       LOGW("no pandas found, exiting");
+      append_boardd_safety_diagnostic("boardd_no_panda_found");
       return;
     }
   }
@@ -663,6 +796,8 @@ void boardd_main_thread(std::vector<std::string> serials) {
 
   if (!do_exit) {
     LOGW("connected to board");
+    append_boardd_safety_diagnostic("boardd_pandas_connected",
+                                    ",\"panda_count\":" + std::to_string(pandas.size()));
     Panda *peripheral_panda = pandas[0];
     std::vector<std::thread> threads;
 
@@ -677,6 +812,10 @@ void boardd_main_thread(std::vector<std::string> serials) {
 
     for (auto &t : threads) t.join();
   }
+
+  append_boardd_safety_diagnostic("boardd_stopped",
+                                  std::string(",\"exit_requested\":") +
+                                  (do_exit ? "true" : "false"));
 
   // we have exited, clean up pandas
   for (Panda *panda : pandas) {

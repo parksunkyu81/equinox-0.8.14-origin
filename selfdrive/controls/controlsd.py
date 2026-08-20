@@ -4,6 +4,7 @@ import math
 import json
 import time
 import numpy as np
+from collections import deque
 from numbers import Number
 
 from cereal import car, log
@@ -67,7 +68,7 @@ from selfdrive.controls.lib.pedal_force_recovery import (
   LeadLossCruiseAssist, MovingGapCatchupAssist, PedalForceRecovery,
   recovery_speed_demand,
 )
-from selfdrive.process_diagnostics import append_process_diagnostic
+from selfdrive.process_diagnostics import append_controls_mismatch_diagnostic, append_process_diagnostic
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
@@ -77,6 +78,8 @@ SOFT_DISABLE_TIME = 3  # seconds
 # debounce only the short controlsAllowed message skew; safety configuration changes stay immediate.
 PANDA_SAFETY_MATCH_FRAMES = 10  # 100 ms at 100 Hz
 CONTROLS_ALLOWED_MISMATCH_FRAMES = 25  # 250 ms at 100 Hz
+CONTROLS_MISMATCH_HISTORY_SECONDS = 5
+CONTROLS_MISMATCH_SAMPLE_FRAMES = max(1, int(0.05 / DT_CTRL))  # 20 Hz
 PROCESS_NOT_RUNNING_CONSECUTIVE_UPDATES = 3
 COMM_ISSUE_CONSECUTIVE_FRAMES = max(1, int(0.30 / DT_CTRL))
 COMMA_PEDAL_PARAM_REFRESH_FRAMES = max(1, int(0.2 / DT_CTRL))
@@ -278,6 +281,10 @@ class Controls:
         self.panda_safety_match_counter = 0
         self.last_safety_mismatch_log_frame = -1000000
         self.last_controls_allowed_mismatch_log_frame = -1000000
+        self.controls_mismatch_history = deque(maxlen=int(
+            CONTROLS_MISMATCH_HISTORY_SECONDS / (CONTROLS_MISMATCH_SAMPLE_FRAMES * DT_CTRL)))
+        self.controls_mismatch_last_sample_frame = -CONTROLS_MISMATCH_SAMPLE_FRAMES
+        self.controls_mismatch_active = False
         self.process_not_running_counter = 0
         self.process_not_running_candidates = set()
         self.process_not_running_active = False
@@ -288,6 +295,7 @@ class Controls:
         self.distance_traveled = 0
         self.last_functional_fan_frame = 0
         self.events_prev = []
+
         self.current_alert_types = [ET.PERMANENT]
         self.logged_comm_issue = False
         self.comm_issue_counter = 0
@@ -363,6 +371,100 @@ class Controls:
         # controlsd is driven by can recv, expected at 100Hz
         self.rk = Ratekeeper(100, print_delay_threshold=None)
         self.prof = Profiler(False)  # off by default
+
+    def _controls_mismatch_panda_snapshot(self, panda_state, index):
+        return {
+            "index": index,
+            "safety_model": int(panda_state.safetyModel),
+            "safety_param": int(panda_state.safetyParam),
+            "alternative_experience": int(panda_state.alternativeExperience),
+            "controls_allowed": bool(panda_state.controlsAllowed),
+            "heartbeat_lost": bool(panda_state.heartbeatLost),
+            "uptime": int(panda_state.uptime),
+            "fault_status": int(panda_state.faultStatus),
+            "faults": [int(fault) for fault in panda_state.faults],
+            "can_rx_errs": int(panda_state.canRxErrs),
+            "can_send_errs": int(panda_state.canSendErrs),
+            "can_fwd_errs": int(panda_state.canFwdErrs),
+            "blocked_cnt": int(panda_state.blockedCnt),
+            "power_save_enabled": bool(panda_state.powerSaveEnabled),
+            "interrupt_load": float(panda_state.interruptLoad),
+        }
+
+    def _controls_mismatch_service_snapshot(self, service):
+        rcv_time = self.sm.rcv_time[service]
+        return {
+            "valid": bool(self.sm.valid[service]),
+            "alive": bool(self.sm.alive[service]),
+            "frequency_ok": bool(self.sm.freq_ok[service]),
+            "updated": bool(self.sm.updated[service]),
+            "receive_age_s": max(0.0, sec_since_boot() - rcv_time) if rcv_time else None,
+            "receive_frame": int(self.sm.rcv_frame[service]),
+            "log_mono_time": int(self.sm.logMonoTime[service]),
+        }
+
+    def _controls_mismatch_snapshot(self, panda_safety_matches, include_manager_processes=False):
+        panda_states = self.sm['pandaStates']
+        snapshot = {
+            "frame": int(self.sm.frame),
+            "started": bool(self.sm['deviceState'].started),
+            "enabled": bool(self.enabled),
+            "active": bool(self.active),
+            "controls_ready": bool(self.params.get_bool("ControlsReady")),
+            "panda_safety_ready": bool(self.panda_safety_ready),
+            "panda_safety_match_counter": int(self.panda_safety_match_counter),
+            "panda_safety_matches": bool(panda_safety_matches),
+            "controls_allowed_mismatch_counter": int(self.mismatch_counter),
+            "can_receive_error": bool(self.can_rcv_error),
+            "can_receive_error_counter": int(self.can_rcv_error_counter),
+            "charging_disabled": bool(self.sm['deviceState'].chargingDisabled),
+            "panda_count": len(panda_states),
+            "peripheral_usb_power_mode": int(self.sm['peripheralState'].usbPowerMode),
+            "car": {
+                "fingerprint": str(self.CP.carFingerprint),
+                "name": str(self.CP.carName),
+                "alternative_experience": int(self.CP.alternativeExperience),
+                "safety_configs": [{
+                    "index": i,
+                    "safety_model": int(config.safetyModel),
+                    "safety_param": int(config.safetyParam),
+                } for i, config in enumerate(self.CP.safetyConfigs)],
+            },
+            "pandas": [self._controls_mismatch_panda_snapshot(panda_state, i)
+                       for i, panda_state in enumerate(panda_states)],
+            "services": {service: self._controls_mismatch_service_snapshot(service)
+                         for service in ("pandaStates", "deviceState", "managerState")},
+        }
+        if include_manager_processes:
+            snapshot["manager_processes"] = [{
+                "name": process.name,
+                "running": bool(process.running),
+                "should_be_running": bool(process.shouldBeRunning),
+                "pid": int(process.pid),
+                "exit_code": int(process.exitCode),
+            } for process in self.sm['managerState'].processes]
+        return snapshot
+
+    def _record_controls_mismatch_snapshot(self, snapshot):
+        if self.sm.frame - self.controls_mismatch_last_sample_frame < CONTROLS_MISMATCH_SAMPLE_FRAMES:
+            return
+        self.controls_mismatch_history.append(snapshot)
+        self.controls_mismatch_last_sample_frame = self.sm.frame
+
+    def _record_controls_mismatch_episode(self, reasons, snapshot):
+        if not reasons:
+            self.controls_mismatch_active = False
+            return
+        if self.controls_mismatch_active:
+            return
+
+        self.controls_mismatch_active = True
+        append_controls_mismatch_diagnostic(
+            "controls_mismatch",
+            reasons=list(reasons),
+            trigger=snapshot,
+            history=list(self.controls_mismatch_history),
+        )
 
     def reset(self):
         self.max_speed_clu = 0.
@@ -963,6 +1065,7 @@ class Controls:
         panda_safety_matches = panda_states_valid and panda_safety_config_matches(
             self.sm['pandaStates'], self.CP.safetyConfigs, self.CP.alternativeExperience,
             IGNORED_SAFETY_MODES)
+        controls_mismatch_reasons = []
 
         # ControlsReady lets boardd apply CarParams. Do not allow engagement until the
         # resulting Panda safety configuration has remained correct for a short period.
@@ -1072,6 +1175,8 @@ class Controls:
 
                 if self.panda_safety_ready and safety_mismatch:
                     self.events.add(EventName.controlsMismatch)
+                    controls_mismatch_reasons.append(
+                        "safety_config" if i < len(self.CP.safetyConfigs) else "unexpected_extra_panda")
 
                 if log.PandaState.FaultType.relayMalfunction in pandaState.faults:
                     self.events.add(EventName.relayMalfunction)
@@ -1086,6 +1191,7 @@ class Controls:
                     )
                     self.last_safety_mismatch_log_frame = self.sm.frame
                 self.events.add(EventName.controlsMismatch)
+                controls_mismatch_reasons.append("missing_expected_panda")
 
         # controlsAllowed mismatch는 순간값 누적이 아니라 연속 프레임만 카운트한다.
         if self.mismatch_counter >= CONTROLS_ALLOWED_MISMATCH_FRAMES:
@@ -1097,6 +1203,12 @@ class Controls:
                 )
                 self.last_controls_allowed_mismatch_log_frame = self.sm.frame
             self.events.add(EventName.controlsMismatch)
+            controls_mismatch_reasons.append("controls_allowed")
+
+        controls_mismatch_snapshot = self._controls_mismatch_snapshot(
+            panda_safety_matches, include_manager_processes=bool(controls_mismatch_reasons))
+        self._record_controls_mismatch_snapshot(controls_mismatch_snapshot)
+        self._record_controls_mismatch_episode(controls_mismatch_reasons, controls_mismatch_snapshot)
 
         # Check for HW or system issues
         panda_powering_down = panda_power_down_in_progress(

@@ -8,6 +8,11 @@ import time
 PROCESS_DIAGNOSTICS_PATH = os.getenv(
   "PROCESS_DIAGNOSTICS_PATH", "/data/log/process_diagnostics.jsonl"
 )
+# This is intentionally separate from process_diagnostics.jsonl: a controls mismatch
+# can include a five-second state history, while the process log should stay compact.
+CONTROLS_MISMATCH_DIAGNOSTICS_PATH = os.getenv(
+  "CONTROLS_MISMATCH_DIAGNOSTICS_PATH", "/data/log/controls_mismatch_diagnostics.jsonl"
+)
 ABORT_PROCESS_LOG_DIR = os.getenv("ABORT_PROCESS_LOG_DIR", "/data/log")
 KST = datetime.timezone(datetime.timedelta(hours=9), name="KST")
 
@@ -101,8 +106,8 @@ def append_abort_process_log(process_name, pid, exit_code, reason=None,
     return False
 
 
-def append_process_diagnostic(event_type, **fields):
-  """Persist one process/communication diagnostic as a single JSON line."""
+def _append_json_diagnostic(path, event_type, **fields):
+  """Persist one diagnostic as a single JSON line."""
   record = {
     "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "mono_time": time.monotonic(),
@@ -110,10 +115,19 @@ def append_process_diagnostic(event_type, **fields):
   }
   record.update(fields)
 
-  path = PROCESS_DIAGNOSTICS_PATH
   try:
     line = (json.dumps(record, ensure_ascii=False, separators=(",", ":"), default=str) + "\n").encode("utf-8")
     _append_bytes(path, line)
     return True
   except Exception:
     return False
+
+
+def append_process_diagnostic(event_type, **fields):
+  """Persist one process/communication diagnostic as a single JSON line."""
+  return _append_json_diagnostic(PROCESS_DIAGNOSTICS_PATH, event_type, **fields)
+
+
+def append_controls_mismatch_diagnostic(event_type, **fields):
+  """Persist a controls-mismatch episode without relying on logmessaged."""
+  return _append_json_diagnostic(CONTROLS_MISMATCH_DIAGNOSTICS_PATH, event_type, **fields)
