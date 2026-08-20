@@ -13,21 +13,20 @@ from selfdrive.controls.lib.model_data_validation import as_finite_vector, valid
 
 TRAJECTORY_SIZE = 33
 
-# A short virtual path is permitted only after a trusted curve estimate loses
-# perception confidence. It is intentionally a decaying re-projection of the
-# previous path, not a new curvature or a torque-authority increase.
-CURVE_HOLD_MIN_SPEED_MS = 5.0
-CURVE_HOLD_MAX_DURATION_S = 0.35
-CURVE_HOLD_REFERENCE_MAX_AGE_S = 0.45
-CURVE_HOLD_MIN_REFERENCE_CURVATURE = 0.0035
-CURVE_HOLD_MIN_ACTUAL_CURVATURE = 0.0015
-CURVE_HOLD_MODEL_CONFIDENCE_MIN = 0.55
-CURVE_HOLD_MODEL_CONFIDENCE_TRUSTED = 0.75
-CURVE_HOLD_LANE_RAW_DPROB_TRUSTED = 0.45
-CURVE_HOLD_LANE_CONTINUITY_MAX_AGE_S = 0.45
-CURVE_HOLD_BLEND = 0.65
-CURVE_HOLD_MAX_CORRECTION_NEAR_M = 0.12
-CURVE_HOLD_MAX_CORRECTION_FAR_M = 0.75
+# Camera-edge curve extension. A trusted curvature is used to draw a new,
+# short virtual arc from the current vehicle pose; no previous path is reused.
+CURVE_EXTENSION_MIN_SPEED_MS = 5.0
+CURVE_EXTENSION_MAX_DURATION_S = 0.75
+CURVE_EXTENSION_MAX_DISTANCE_M = 6.0
+CURVE_EXTENSION_REFERENCE_MAX_AGE_S = 0.90
+CURVE_EXTENSION_MIN_REFERENCE_CURVATURE = 0.0035
+CURVE_EXTENSION_MIN_ACTUAL_CURVATURE = 0.0015
+CURVE_EXTENSION_MODEL_CONFIDENCE_TRUSTED = 0.75
+CURVE_EXTENSION_LANE_RAW_DPROB_TRUSTED = 0.45
+CURVE_EXTENSION_LANE_CONTINUITY_MAX_AGE_S = 0.90
+CURVE_EXTENSION_BLEND = 0.75
+CURVE_EXTENSION_MAX_CORRECTION_NEAR_M = 0.15
+CURVE_EXTENSION_MAX_CORRECTION_FAR_M = 1.00
 
 class LateralPlanner:
   def __init__(self, CP):
@@ -54,12 +53,13 @@ class LateralPlanner:
     self.model_position_stds_valid = False
     self.model_confidence = 0.0
 
-    self._curve_hold_path = None
-    self._curve_hold_curvature = 0.0
-    self._curve_hold_reference_t = -np.inf
-    self._curve_hold_start_t = None
-    self.virtual_curve_hold_active = False
-    self.virtual_curve_hold_weight = 0.0
+    self._curve_extension_curvature = 0.0
+    self._curve_extension_reference_t = -np.inf
+    self._curve_extension_start_t = None
+    self._curve_extension_last_t = None
+    self._curve_extension_distance_m = 0.0
+    self.virtual_curve_extension_active = False
+    self.virtual_curve_extension_weight = 0.0
 
     self.lat_mpc = LateralMpc()
     self.reset_mpc(np.zeros(4))
@@ -89,19 +89,19 @@ class LateralPlanner:
       reference_curvature * yaw_curvature > 0.0
     )
 
-  def _vehicle_matches_curve_hold(self, car_state, measured_curvature):
-    """Require independent steering-model and yaw evidence of the held turn."""
+  def _vehicle_matches_curve_extension(self, car_state, measured_curvature):
+    """Require independent steering-model and yaw evidence of the saved turn."""
     v_ego = float(car_state.vEgo)
     yaw_rate = float(car_state.yawRate)
     if (not np.isfinite(measured_curvature) or not np.isfinite(yaw_rate) or
-        v_ego < CURVE_HOLD_MIN_SPEED_MS):
+        v_ego < CURVE_EXTENSION_MIN_SPEED_MS):
       return False
 
     yaw_curvature = yaw_rate / max(v_ego, 1.0)
-    reference = self._curve_hold_curvature
-    if (abs(reference) < CURVE_HOLD_MIN_REFERENCE_CURVATURE or
-        abs(measured_curvature) < CURVE_HOLD_MIN_ACTUAL_CURVATURE or
-        abs(yaw_curvature) < CURVE_HOLD_MIN_ACTUAL_CURVATURE or
+    reference = self._curve_extension_curvature
+    if (abs(reference) < CURVE_EXTENSION_MIN_REFERENCE_CURVATURE or
+        abs(measured_curvature) < CURVE_EXTENSION_MIN_ACTUAL_CURVATURE or
+        abs(yaw_curvature) < CURVE_EXTENSION_MIN_ACTUAL_CURVATURE or
         not self._same_curve_direction(reference, measured_curvature,
                                        yaw_curvature)):
       return False
@@ -114,119 +114,124 @@ class LateralPlanner:
       abs(yaw_curvature - reference) <= max_error
     )
 
-  def _curve_hold_conditions_met(self, car_state, controls_active,
-                                 measured_curvature, lane_change_active, t):
+  def _model_indicates_curve_exit(self):
+    """Trust a confident model immediately when it says the saved turn ended."""
+    if self.model_confidence < CURVE_EXTENSION_MODEL_CONFIDENCE_TRUSTED:
+      return False
+
+    model_curvature = float(np.median(self.plan_curv[1:4]))
+    if not np.isfinite(model_curvature):
+      return False
+    if abs(model_curvature) < CURVE_EXTENSION_MIN_REFERENCE_CURVATURE * 0.5:
+      return True
+    return bool(model_curvature * self._curve_extension_curvature < 0.0)
+
+  @staticmethod
+  def _virtual_arc_y(path_x, curvature):
+    """Return a constant-curvature arc starting at the current vehicle pose."""
+    forward_x = np.maximum(np.asarray(path_x, dtype=float), 0.0)
+    curvature_x = np.clip(curvature * forward_x, -0.95, 0.95)
+    return (1.0 - np.sqrt(1.0 - curvature_x ** 2)) / curvature
+
+  def _curve_extension_conditions_met(self, car_state, controls_active,
+                                      measured_curvature, lane_change_active, t):
     if (not self.use_lanelines or not controls_active or
         car_state.steeringPressed or lane_change_active or
         not self.model_data_valid or
-        self.model_confidence < CURVE_HOLD_MODEL_CONFIDENCE_MIN or
-        t - self.LP.lane_center_last_continuous_t >
-        CURVE_HOLD_LANE_CONTINUITY_MAX_AGE_S or
-        self._curve_hold_path is None or
-        t - self._curve_hold_reference_t > CURVE_HOLD_REFERENCE_MAX_AGE_S):
+        t - self.LP.curve_extension_lane_center_last_continuous_t >
+        CURVE_EXTENSION_LANE_CONTINUITY_MAX_AGE_S or
+        t - self._curve_extension_reference_t >
+        CURVE_EXTENSION_REFERENCE_MAX_AGE_S or
+        self._model_indicates_curve_exit()):
       return False
 
-    # Hold is only a bridge for a confidence transition. A normally trusted
-    # frame must continue to use its current model/lane path directly.
+    # Extension begins only as confidence is lost. The current trajectory is
+    # still finite, but the saved curvature came from a trusted model frame.
     perception_degraded = bool(
-      self.model_confidence < CURVE_HOLD_MODEL_CONFIDENCE_TRUSTED or
-      self.LP.raw_lane_d_prob < CURVE_HOLD_LANE_RAW_DPROB_TRUSTED)
+      self.model_confidence < CURVE_EXTENSION_MODEL_CONFIDENCE_TRUSTED or
+      self.LP.raw_lane_d_prob < CURVE_EXTENSION_LANE_RAW_DPROB_TRUSTED)
     return bool(perception_degraded and
-                self._vehicle_matches_curve_hold(car_state,
-                                                  measured_curvature))
+                self._vehicle_matches_curve_extension(car_state,
+                                                       measured_curvature))
 
-  def _apply_virtual_curve_hold(self, d_path_xyz, car_state,
-                                controls_active, measured_curvature,
-                                lane_change_active):
-    """Blend a re-projected trusted path for a strictly bounded dropout hold."""
-    self.virtual_curve_hold_active = False
-    self.virtual_curve_hold_weight = 0.0
+  def _apply_virtual_curve_extension(self, d_path_xyz, car_state,
+                                     controls_active, measured_curvature,
+                                     lane_change_active):
+    """Draw a bounded virtual arc from the verified entry curvature."""
+    self.virtual_curve_extension_active = False
+    self.virtual_curve_extension_weight = 0.0
     t = sec_since_boot()
-    if not self._curve_hold_conditions_met(
+    if not self._curve_extension_conditions_met(
         car_state, controls_active, measured_curvature, lane_change_active, t):
       return d_path_xyz
 
-    if self._curve_hold_start_t is None:
-      self._curve_hold_start_t = t
-    elapsed = t - self._curve_hold_start_t
-    if elapsed >= CURVE_HOLD_MAX_DURATION_S:
-      self._curve_hold_start_t = None
-      self._curve_hold_path = None
+    if self._curve_extension_start_t is None:
+      self._curve_extension_start_t = t
+      self._curve_extension_last_t = t
+      self._curve_extension_distance_m = 0.0
+    else:
+      frame_dt = max(0.0, t - self._curve_extension_last_t)
+      self._curve_extension_distance_m += float(car_state.vEgo) * frame_dt
+      self._curve_extension_last_t = t
+    elapsed = t - self._curve_extension_start_t
+    if (elapsed >= CURVE_EXTENSION_MAX_DURATION_S or
+        self._curve_extension_distance_m >= CURVE_EXTENSION_MAX_DISTANCE_M):
+      self._curve_extension_start_t = None
+      self._curve_extension_last_t = None
+      self._curve_extension_distance_m = 0.0
+      self._curve_extension_curvature = 0.0
       return d_path_xyz
 
-    # Transform the previous ego-relative path into the current ego frame.
-    # The hold window is short enough that the present speed/yaw-rate provide
-    # a conservative re-projection without inventing a future road shape.
-    reference_age = max(0.0, t - self._curve_hold_reference_t)
-    travel = float(car_state.vEgo) * reference_age
-    yaw_change = float(car_state.yawRate) * reference_age
-    old_x = self._curve_hold_path[:, 0] - travel
-    old_y = self._curve_hold_path[:, 1]
-    cos_yaw = np.cos(yaw_change)
-    sin_yaw = np.sin(yaw_change)
-    held_x = cos_yaw * old_x + sin_yaw * old_y
-    held_y = -sin_yaw * old_x + cos_yaw * old_y
-
-    order = np.argsort(held_x)
-    held_x, unique_indices = np.unique(held_x[order], return_index=True)
-    held_y = held_y[order][unique_indices]
-    if held_x.size < 2 or not np.isfinite(held_y).all():
-      self._curve_hold_start_t = None
-      self._curve_hold_path = None
+    virtual_path_y = self._virtual_arc_y(
+      d_path_xyz[:, 0], self._curve_extension_curvature)
+    if not np.isfinite(virtual_path_y).all():
+      self._curve_extension_start_t = None
+      self._curve_extension_last_t = None
+      self._curve_extension_distance_m = 0.0
+      self._curve_extension_curvature = 0.0
       return d_path_xyz
 
-    in_reference_range = ((d_path_xyz[:, 0] >= held_x[0]) &
-                          (d_path_xyz[:, 0] <= held_x[-1]))
-    if not np.any(in_reference_range):
-      self._curve_hold_start_t = None
-      self._curve_hold_path = None
-      return d_path_xyz
-
-    held_path_y = np.interp(d_path_xyz[:, 0], held_x, held_y)
-    decay = 1.0 - elapsed / CURVE_HOLD_MAX_DURATION_S
-    weight = CURVE_HOLD_BLEND * decay
+    time_decay = 1.0 - elapsed / CURVE_EXTENSION_MAX_DURATION_S
+    distance_decay = 1.0 - self._curve_extension_distance_m / CURVE_EXTENSION_MAX_DISTANCE_M
+    decay = max(0.0, min(time_decay, distance_decay))
+    weight = CURVE_EXTENSION_BLEND * decay
     max_correction = np.interp(
       np.abs(d_path_xyz[:, 0]), [0.0, 25.0],
-      [CURVE_HOLD_MAX_CORRECTION_NEAR_M,
-       CURVE_HOLD_MAX_CORRECTION_FAR_M])
+      [CURVE_EXTENSION_MAX_CORRECTION_NEAR_M,
+       CURVE_EXTENSION_MAX_CORRECTION_FAR_M])
     correction = np.clip(
-      held_path_y - d_path_xyz[:, 1], -max_correction, max_correction)
-    d_path_xyz[in_reference_range, 1] += (
-      weight * correction[in_reference_range])
-    self.virtual_curve_hold_active = True
-    self.virtual_curve_hold_weight = float(weight)
+      virtual_path_y - d_path_xyz[:, 1], -max_correction, max_correction)
+    d_path_xyz[:, 1] += weight * correction
+    self.virtual_curve_extension_active = True
+    self.virtual_curve_extension_weight = float(weight)
     return d_path_xyz
 
-  def _refresh_curve_hold_reference(self, d_path_xyz, car_state,
-                                    controls_active, measured_curvature,
-                                    lane_change_active, mpc_valid):
-    """Arm the next dropout only from a current, independently confirmed turn."""
+  def _refresh_curve_extension_reference(self, car_state, controls_active,
+                                         measured_curvature, lane_change_active,
+                                         mpc_valid):
+    """Save curvature only from a current, independently confirmed turn."""
     if (not self.use_lanelines or not controls_active or
         car_state.steeringPressed or lane_change_active or not mpc_valid or
         not self.model_data_valid or
-        self.model_confidence < CURVE_HOLD_MODEL_CONFIDENCE_TRUSTED or
-        self.LP.raw_lane_d_prob < CURVE_HOLD_LANE_RAW_DPROB_TRUSTED or
-        not self.LP.lane_center_continuous):
+        self.model_confidence < CURVE_EXTENSION_MODEL_CONFIDENCE_TRUSTED or
+        self.LP.raw_lane_d_prob < CURVE_EXTENSION_LANE_RAW_DPROB_TRUSTED or
+        not self.LP.curve_extension_lane_center_continuous):
       return
 
     reference_curvature = float(self.lat_mpc.x_sol[1, 3])
     if not np.isfinite(reference_curvature):
       return
 
-    previous_curvature = self._curve_hold_curvature
-    self._curve_hold_curvature = reference_curvature
-    if not self._vehicle_matches_curve_hold(car_state, measured_curvature):
-      self._curve_hold_curvature = previous_curvature
+    previous_curvature = self._curve_extension_curvature
+    self._curve_extension_curvature = reference_curvature
+    if not self._vehicle_matches_curve_extension(car_state, measured_curvature):
+      self._curve_extension_curvature = previous_curvature
       return
 
-    reference_path = d_path_xyz[:, :2]
-    if not np.isfinite(reference_path).all():
-      self._curve_hold_curvature = previous_curvature
-      return
-
-    self._curve_hold_path = reference_path.copy()
-    self._curve_hold_reference_t = sec_since_boot()
-    self._curve_hold_start_t = None
+    self._curve_extension_reference_t = sec_since_boot()
+    self._curve_extension_start_t = None
+    self._curve_extension_last_t = None
+    self._curve_extension_distance_m = 0.0
 
   def update(self, sm):
     car_state = sm['carState']
@@ -284,19 +289,19 @@ class LateralPlanner:
       heading_cost = interp(v_ego, [5.0, 10.0], [MPC_COST_LAT.HEADING, 0.15])
       self.lat_mpc.set_weights(MPC_COST_LAT.PATH, heading_cost, MPC_COST_LAT.STEER_RATE)
 
-    d_path_xyz = self._apply_virtual_curve_hold(
+    d_path_xyz = self._apply_virtual_curve_extension(
       d_path_xyz, car_state, controls_active, measured_curvature,
       lane_change_active)
 
     # The current model/lane blend normally goes directly to MPC. The only
-    # exception is the bounded virtual hold above, which is disabled as soon
+    # exception is the bounded virtual curve extension above, which is disabled as soon
     # as model confidence, lane continuity, yaw, or curvature disagree.
     d_path_distance = np.linalg.norm(d_path_xyz, axis=1)
     y_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], d_path_distance, d_path_xyz[:, 1])
     heading_pts = np.interp(
       v_ego * self.t_idxs[:LAT_MPC_N + 1],
       np.linalg.norm(self.path_xyz, axis=1), self.plan_yaw)
-    if (self.virtual_curve_hold_active and
+    if (self.virtual_curve_extension_active and
         np.all(np.diff(d_path_distance) > 1e-3)):
       # While the held path is active, give MPC a heading reference derived
       # from that same blended path. Keeping the current-model heading here
@@ -337,9 +342,8 @@ class LateralPlanner:
         self.last_cloudlog_t = t
         cloudlog.warning("Lateral mpc - nan: True")
 
-    self._refresh_curve_hold_reference(
-      d_path_xyz, car_state, controls_active, measured_curvature,
-      lane_change_active,
+    self._refresh_curve_extension_reference(
+      car_state, controls_active, measured_curvature, lane_change_active,
       mpc_valid=mpc_solution_valid)
 
     if self.lat_mpc.cost > 20000. or mpc_nans:

@@ -54,7 +54,7 @@ LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M = 0.08
 LOW_CONFIDENCE_MAX_CORRECTION_M = 0.35
 CURVE_LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M = 0.12
 CURVE_LOW_CONFIDENCE_MAX_CORRECTION_M = 0.45
-CURVE_HOLD_LANE_CENTER_CONTINUITY_MAX_M = 0.45
+CURVE_EXTENSION_LANE_CENTER_CONTINUITY_MAX_M = 0.45
 
 
 class LanePlanner:
@@ -85,13 +85,13 @@ class LanePlanner:
     self._last_lane_center_refs = None
 
     # Export only the raw, frame-to-frame geometry continuity needed by the
-    # lateral planner's short virtual-curve hold. This deliberately does not
+    # lateral planner's short virtual-curve extension. This deliberately does not
     # use a retained lane line after the model has stopped publishing one.
     self.lane_data_valid = False
     self.lane_geometry_plausible = False
-    self.lane_center_continuous = False
-    self.lane_center_last_continuous_t = -np.inf
-    self._last_curve_hold_lane_center_refs = None
+    self.curve_extension_lane_center_continuous = False
+    self.curve_extension_lane_center_last_continuous_t = -np.inf
+    self._last_curve_extension_lane_center_refs = None
 
   def _update_d_prob(self, target_d_prob, v_ego, lane_center_refs,
                      lane_change_active, curve_assist):
@@ -177,7 +177,7 @@ class LanePlanner:
                  lane_change_active=False):
     del path_t
     self.lane_geometry_plausible = False
-    self.lane_center_continuous = False
+    self.curve_extension_lane_center_continuous = False
     path_xyz[:, 1] += self.path_offset
 
     width_pts = self.rll_y - self.lll_y
@@ -269,23 +269,23 @@ class LanePlanner:
       np.interp(LANE_WIDTH_CHECK_DISTANCES_M, lane_x, lane_right_y)
     )
 
-    # The virtual curve hold may only use a short history when the current
+    # The virtual curve extension may only use a short history when the current
     # raw lane geometry is physically plausible and agrees with the preceding
     # raw lane frame. Probability can fall during a camera-edge dropout, but
     # stale geometry from an absent model frame must never qualify.
     self.lane_geometry_plausible = bool(
       self.lane_data_valid and geometry_plausible)
-    self.lane_center_continuous = bool(
+    self.curve_extension_lane_center_continuous = bool(
       self.lane_geometry_plausible and
-      self._last_curve_hold_lane_center_refs is not None and
+      self._last_curve_extension_lane_center_refs is not None and
       np.max(np.abs(
-        lane_center_refs - self._last_curve_hold_lane_center_refs)) <=
-      CURVE_HOLD_LANE_CENTER_CONTINUITY_MAX_M
+        lane_center_refs - self._last_curve_extension_lane_center_refs)) <=
+      CURVE_EXTENSION_LANE_CENTER_CONTINUITY_MAX_M
     )
     if self.lane_geometry_plausible:
-      self._last_curve_hold_lane_center_refs = lane_center_refs.copy()
-    if self.lane_center_continuous:
-      self.lane_center_last_continuous_t = sec_since_boot()
+      self._last_curve_extension_lane_center_refs = lane_center_refs.copy()
+    if self.curve_extension_lane_center_continuous:
+      self.curve_extension_lane_center_last_continuous_t = sec_since_boot()
 
     # Tight-curve assist is deliberately limited to low/mid speed. It uses
     # both measured vehicle curvature and visible lane bending so the assist
