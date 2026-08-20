@@ -372,17 +372,34 @@ class Controls:
         self.rk = Ratekeeper(100, print_delay_threshold=None)
         self.prof = Profiler(False)  # off by default
 
+    @staticmethod
+    def _diagnostic_enum_value(value):
+        """Serialize Python and pycapnp enum values without affecting control."""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            # pycapnp's _DynamicEnum is not necessarily int-convertible.
+            # Keep diagnostics best-effort: a snapshot must never stop
+            # controlsd merely because an enum representation differs.
+            raw_value = getattr(value, "raw", None)
+            if raw_value is not None:
+                try:
+                    return int(raw_value)
+                except (TypeError, ValueError):
+                    pass
+            return str(value)
+
     def _controls_mismatch_panda_snapshot(self, panda_state, index):
         return {
             "index": index,
-            "safety_model": int(panda_state.safetyModel),
+            "safety_model": self._diagnostic_enum_value(panda_state.safetyModel),
             "safety_param": int(panda_state.safetyParam),
             "alternative_experience": int(panda_state.alternativeExperience),
             "controls_allowed": bool(panda_state.controlsAllowed),
             "heartbeat_lost": bool(panda_state.heartbeatLost),
             "uptime": int(panda_state.uptime),
-            "fault_status": int(panda_state.faultStatus),
-            "faults": [int(fault) for fault in panda_state.faults],
+            "fault_status": self._diagnostic_enum_value(panda_state.faultStatus),
+            "faults": [self._diagnostic_enum_value(fault) for fault in panda_state.faults],
             "can_rx_errs": int(panda_state.canRxErrs),
             "can_send_errs": int(panda_state.canSendErrs),
             "can_fwd_errs": int(panda_state.canFwdErrs),
@@ -419,14 +436,15 @@ class Controls:
             "can_receive_error_counter": int(self.can_rcv_error_counter),
             "charging_disabled": bool(self.sm['deviceState'].chargingDisabled),
             "panda_count": len(panda_states),
-            "peripheral_usb_power_mode": int(self.sm['peripheralState'].usbPowerMode),
+            "peripheral_usb_power_mode": self._diagnostic_enum_value(
+                self.sm['peripheralState'].usbPowerMode),
             "car": {
                 "fingerprint": str(self.CP.carFingerprint),
                 "name": str(self.CP.carName),
                 "alternative_experience": int(self.CP.alternativeExperience),
                 "safety_configs": [{
                     "index": i,
-                    "safety_model": int(config.safetyModel),
+                    "safety_model": self._diagnostic_enum_value(config.safetyModel),
                     "safety_param": int(config.safetyParam),
                 } for i, config in enumerate(self.CP.safetyConfigs)],
             },
