@@ -10,6 +10,7 @@ import cereal.messaging as messaging
 from cereal import log
 from common.params import Params
 from selfdrive.controls.lib.model_data_validation import as_finite_vector, validated_model_trajectory
+from selfdrive.process_diagnostics import append_process_diagnostic
 
 TRAJECTORY_SIZE = 33
 
@@ -27,6 +28,7 @@ CURVE_EXTENSION_LANE_CONTINUITY_MAX_AGE_S = 0.90
 CURVE_EXTENSION_BLEND = 0.75
 CURVE_EXTENSION_MAX_CORRECTION_NEAR_M = 0.15
 CURVE_EXTENSION_MAX_CORRECTION_FAR_M = 1.00
+CURVE_EXTENSION_LOG_INTERVAL_S = 0.10
 
 class LateralPlanner:
   def __init__(self, CP):
@@ -60,6 +62,13 @@ class LateralPlanner:
     self._curve_extension_distance_m = 0.0
     self.virtual_curve_extension_active = False
     self.virtual_curve_extension_weight = 0.0
+    self._curve_extension_log_active = False
+    self._curve_extension_last_log_t = -np.inf
+    self._curve_extension_virtual_y_5m = 0.0
+    self._curve_extension_virtual_y_10m = 0.0
+    self._curve_extension_correction_5m = 0.0
+    self._curve_extension_correction_10m = 0.0
+    self._curve_extension_last_mpc_target_curvature = None
 
     self.lat_mpc = LateralMpc()
     self.reset_mpc(np.zeros(4))
@@ -114,17 +123,19 @@ class LateralPlanner:
       abs(yaw_curvature - reference) <= max_error
     )
 
-  def _model_indicates_curve_exit(self):
+  def _model_curve_exit_reason(self):
     """Trust a confident model immediately when it says the saved turn ended."""
     if self.model_confidence < CURVE_EXTENSION_MODEL_CONFIDENCE_TRUSTED:
-      return False
+      return None
 
     model_curvature = float(np.median(self.plan_curv[1:4]))
     if not np.isfinite(model_curvature):
-      return False
+      return None
     if abs(model_curvature) < CURVE_EXTENSION_MIN_REFERENCE_CURVATURE * 0.5:
-      return True
-    return bool(model_curvature * self._curve_extension_curvature < 0.0)
+      return "model_curve_ended"
+    if model_curvature * self._curve_extension_curvature < 0.0:
+      return "model_curve_reversed"
+    return None
 
   @staticmethod
   def _virtual_arc_y(path_x, curvature):
@@ -133,26 +144,106 @@ class LateralPlanner:
     curvature_x = np.clip(curvature * forward_x, -0.95, 0.95)
     return (1.0 - np.sqrt(1.0 - curvature_x ** 2)) / curvature
 
-  def _curve_extension_conditions_met(self, car_state, controls_active,
-                                      measured_curvature, lane_change_active, t):
-    if (not self.use_lanelines or not controls_active or
-        car_state.steeringPressed or lane_change_active or
-        not self.model_data_valid or
-        t - self.LP.curve_extension_lane_center_last_continuous_t >
-        CURVE_EXTENSION_LANE_CONTINUITY_MAX_AGE_S or
-        t - self._curve_extension_reference_t >
-        CURVE_EXTENSION_REFERENCE_MAX_AGE_S or
-        self._model_indicates_curve_exit()):
-      return False
+  @staticmethod
+  def _diagnostic_float(value):
+    try:
+      value = float(value)
+      return value if np.isfinite(value) else None
+    except (TypeError, ValueError):
+      return None
+
+  def _curve_extension_log_fields(self, car_state, measured_curvature, t,
+                                  reason=None, mpc_target_curvature=None):
+    v_ego = self._diagnostic_float(car_state.vEgo)
+    yaw_rate = self._diagnostic_float(car_state.yawRate)
+    yaw_curvature = None
+    if v_ego is not None and yaw_rate is not None:
+      yaw_curvature = yaw_rate / max(v_ego, 1.0)
+    model_curvature = self._diagnostic_float(np.median(self.plan_curv[1:4]))
+    reference_age = t - self._curve_extension_reference_t
+    lane_continuity_age = t - self.LP.curve_extension_lane_center_last_continuous_t
+    return {
+      "reason": reason,
+      "v_ego": v_ego,
+      "steering_angle_deg": self._diagnostic_float(car_state.steeringAngleDeg),
+      "steering_rate_deg": self._diagnostic_float(car_state.steeringRateDeg),
+      "steering_torque": self._diagnostic_float(car_state.steeringTorque),
+      "measured_curvature": self._diagnostic_float(measured_curvature),
+      "yaw_rate": yaw_rate,
+      "yaw_curvature": self._diagnostic_float(yaw_curvature),
+      "saved_curvature": self._diagnostic_float(self._curve_extension_curvature),
+      "model_curvature": model_curvature,
+      "mpc_target_curvature": self._diagnostic_float(mpc_target_curvature),
+      "model_data_valid": bool(self.model_data_valid),
+      "model_confidence": self._diagnostic_float(self.model_confidence),
+      "raw_lane_d_prob": self._diagnostic_float(self.LP.raw_lane_d_prob),
+      "lane_continuity_age_s": self._diagnostic_float(lane_continuity_age),
+      "reference_age_s": self._diagnostic_float(reference_age),
+      "extension_elapsed_s": self._diagnostic_float(
+        0.0 if self._curve_extension_start_t is None else t - self._curve_extension_start_t),
+      "extension_distance_m": self._diagnostic_float(self._curve_extension_distance_m),
+      "extension_weight": self._diagnostic_float(self.virtual_curve_extension_weight),
+      "virtual_arc_y_5m": self._diagnostic_float(self._curve_extension_virtual_y_5m),
+      "virtual_arc_y_10m": self._diagnostic_float(self._curve_extension_virtual_y_10m),
+      "path_correction_5m": self._diagnostic_float(self._curve_extension_correction_5m),
+      "path_correction_10m": self._diagnostic_float(self._curve_extension_correction_10m),
+    }
+
+  def _write_curve_extension_log(self, event_type, car_state,
+                                 measured_curvature, t, reason=None,
+                                 mpc_target_curvature=None):
+    # Diagnostics must never affect planning if storage or serialization fails.
+    try:
+      append_process_diagnostic(
+        event_type,
+        **self._curve_extension_log_fields(
+          car_state, measured_curvature, t, reason,
+          mpc_target_curvature))
+    except Exception:
+      pass
+
+  def _stop_curve_extension(self, car_state, measured_curvature, t, reason):
+    if self._curve_extension_log_active:
+      self._write_curve_extension_log(
+        "virtual_curve_extension_stopped", car_state, measured_curvature,
+        t, reason, self._curve_extension_last_mpc_target_curvature)
+    self._curve_extension_log_active = False
+    self._curve_extension_start_t = None
+    self._curve_extension_last_t = None
+    self._curve_extension_distance_m = 0.0
+    self._curve_extension_curvature = 0.0
+
+  def _curve_extension_block_reason(self, car_state, controls_active,
+                                    measured_curvature, lane_change_active, t):
+    if not self.use_lanelines:
+      return "lane_lines_disabled"
+    if not controls_active:
+      return "controls_inactive"
+    if car_state.steeringPressed:
+      return "driver_steering"
+    if lane_change_active:
+      return "lane_change_active"
+    if not self.model_data_valid:
+      return "model_path_invalid"
+    if (t - self.LP.curve_extension_lane_center_last_continuous_t >
+        CURVE_EXTENSION_LANE_CONTINUITY_MAX_AGE_S):
+      return "lane_continuity_expired"
+    if t - self._curve_extension_reference_t > CURVE_EXTENSION_REFERENCE_MAX_AGE_S:
+      return "saved_curve_expired"
+    model_exit_reason = self._model_curve_exit_reason()
+    if model_exit_reason is not None:
+      return model_exit_reason
 
     # Extension begins only as confidence is lost. The current trajectory is
     # still finite, but the saved curvature came from a trusted model frame.
     perception_degraded = bool(
       self.model_confidence < CURVE_EXTENSION_MODEL_CONFIDENCE_TRUSTED or
       self.LP.raw_lane_d_prob < CURVE_EXTENSION_LANE_RAW_DPROB_TRUSTED)
-    return bool(perception_degraded and
-                self._vehicle_matches_curve_extension(car_state,
-                                                       measured_curvature))
+    if not perception_degraded:
+      return "perception_recovered"
+    if not self._vehicle_matches_curve_extension(car_state, measured_curvature):
+      return "vehicle_curve_disagrees"
+    return None
 
   def _apply_virtual_curve_extension(self, d_path_xyz, car_state,
                                      controls_active, measured_curvature,
@@ -161,8 +252,11 @@ class LateralPlanner:
     self.virtual_curve_extension_active = False
     self.virtual_curve_extension_weight = 0.0
     t = sec_since_boot()
-    if not self._curve_extension_conditions_met(
-        car_state, controls_active, measured_curvature, lane_change_active, t):
+    block_reason = self._curve_extension_block_reason(
+      car_state, controls_active, measured_curvature, lane_change_active, t)
+    if block_reason is not None:
+      self._stop_curve_extension(
+        car_state, measured_curvature, t, block_reason)
       return d_path_xyz
 
     if self._curve_extension_start_t is None:
@@ -176,19 +270,18 @@ class LateralPlanner:
     elapsed = t - self._curve_extension_start_t
     if (elapsed >= CURVE_EXTENSION_MAX_DURATION_S or
         self._curve_extension_distance_m >= CURVE_EXTENSION_MAX_DISTANCE_M):
-      self._curve_extension_start_t = None
-      self._curve_extension_last_t = None
-      self._curve_extension_distance_m = 0.0
-      self._curve_extension_curvature = 0.0
+      limit_reason = ("distance_limit" if
+                      self._curve_extension_distance_m >= CURVE_EXTENSION_MAX_DISTANCE_M
+                      else "time_limit")
+      self._stop_curve_extension(
+        car_state, measured_curvature, t, limit_reason)
       return d_path_xyz
 
     virtual_path_y = self._virtual_arc_y(
       d_path_xyz[:, 0], self._curve_extension_curvature)
     if not np.isfinite(virtual_path_y).all():
-      self._curve_extension_start_t = None
-      self._curve_extension_last_t = None
-      self._curve_extension_distance_m = 0.0
-      self._curve_extension_curvature = 0.0
+      self._stop_curve_extension(
+        car_state, measured_curvature, t, "virtual_arc_invalid")
       return d_path_xyz
 
     time_decay = 1.0 - elapsed / CURVE_EXTENSION_MAX_DURATION_S
@@ -202,9 +295,38 @@ class LateralPlanner:
     correction = np.clip(
       virtual_path_y - d_path_xyz[:, 1], -max_correction, max_correction)
     d_path_xyz[:, 1] += weight * correction
+    self._curve_extension_virtual_y_5m = float(np.interp(
+      5.0, d_path_xyz[:, 0], virtual_path_y))
+    self._curve_extension_virtual_y_10m = float(np.interp(
+      10.0, d_path_xyz[:, 0], virtual_path_y))
+    self._curve_extension_correction_5m = float(np.interp(
+      5.0, d_path_xyz[:, 0], correction))
+    self._curve_extension_correction_10m = float(np.interp(
+      10.0, d_path_xyz[:, 0], correction))
     self.virtual_curve_extension_active = True
     self.virtual_curve_extension_weight = float(weight)
+    if not self._curve_extension_log_active:
+      self._curve_extension_log_active = True
+      self._curve_extension_last_log_t = t
+      self._curve_extension_last_mpc_target_curvature = None
+      self._write_curve_extension_log(
+        "virtual_curve_extension_started", car_state, measured_curvature, t)
     return d_path_xyz
+
+  def _log_curve_extension_sample(self, car_state, measured_curvature):
+    if not self._curve_extension_log_active:
+      return
+    t = sec_since_boot()
+    if t - self._curve_extension_last_log_t < CURVE_EXTENSION_LOG_INTERVAL_S:
+      return
+    mpc_target_curvature = None
+    if self.lat_mpc.x_sol.shape[0] > 1:
+      mpc_target_curvature = self.lat_mpc.x_sol[1, 3]
+    self._curve_extension_last_mpc_target_curvature = mpc_target_curvature
+    self._curve_extension_last_log_t = t
+    self._write_curve_extension_log(
+      "virtual_curve_extension_sample", car_state, measured_curvature, t,
+      mpc_target_curvature=mpc_target_curvature)
 
   def _refresh_curve_extension_reference(self, car_state, controls_active,
                                          measured_curvature, lane_change_active,
@@ -325,6 +447,7 @@ class LateralPlanner:
                      y_pts,
                      heading_pts,
                      np.zeros_like(curv_rate_pts))
+    self._log_curve_extension_sample(car_state, measured_curvature)
     # init state for next
     # mpc.u_sol is the desired curvature rate given x0 curv state.
     # with x0[3] = measured_curvature, this would be the actual desired rate.
