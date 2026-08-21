@@ -103,7 +103,7 @@ int default_rx_hook(CANPacket_t *to_push) {
 
 static const addr_checks* nooutput_init(int16_t param) {
   UNUSED(param);
-  controls_allowed = false;
+  set_controls_allowed(false, CONTROLS_ALLOWED_REASON_SAFETY_MODE_CHANGED, 0U, 0xFFU, 0U);
   relay_malfunction_reset();
   if (current_board->has_obd && Fwd_obd) {
     current_board->set_can_mode(CAN_MODE_OBD_CAN2);

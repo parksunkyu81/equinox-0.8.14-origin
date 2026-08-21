@@ -92,6 +92,18 @@ static void append_boardd_safety_diagnostic(const char *event_type, const std::s
   close(fd);
 }
 
+static const char *controls_allowed_reason_name(uint8_t reason) {
+  switch (reason) {
+    case 1: return "safety_mode_changed";
+    case 2: return "rx_checksum";
+    case 3: return "rx_counter";
+    case 4: return "rx_timeout";
+    case 5: return "gas_pressed";
+    case 6: return "heartbeat_mismatch";
+    default: return "none";
+  }
+}
+
 static void append_boardd_panda_state_diagnostic(uint32_t index, const health_t &health,
                                                   bool comms_healthy) {
   char fields[1024];
@@ -101,13 +113,21 @@ static void append_boardd_panda_state_diagnostic(uint32_t index, const health_t 
                 ",\"safety_model\":%u,\"safety_param\":%d,\"alternative_experience\":%u"
                 ",\"heartbeat_lost\":%u,\"usb_power_mode\":%u,\"power_save_enabled\":%u"
                 ",\"can_rx_errs\":%u,\"can_send_errs\":%u,\"can_fwd_errs\":%u"
-                ",\"blocked_cnt\":%u,\"faults\":%u,\"interrupt_load\":%.3f",
+                ",\"blocked_cnt\":%u,\"faults\":%u,\"interrupt_load\":%.3f"
+                ",\"controls_allowed_reason\":%u,\"controls_allowed_reason_name\":\"%s\""
+                ",\"controls_allowed_event_addr\":%u,\"controls_allowed_event_bus\":%u"
+                ",\"controls_allowed_event_ts_us\":%u,\"controls_allowed_event_detail\":%u"
+                ",\"last_cruise_button\":%u,\"last_cruise_button_ts_us\":%u",
                 index, comms_healthy ? "true" : "false", health.uptime_pkt,
                 health.ignition_line_pkt, health.ignition_can_pkt, health.controls_allowed_pkt,
                 health.safety_mode_pkt, health.safety_param_pkt, health.alternative_experience_pkt,
                 health.heartbeat_lost_pkt, health.usb_power_mode_pkt, health.power_save_enabled_pkt,
                 health.can_rx_errs_pkt, health.can_send_errs_pkt, health.can_fwd_errs_pkt,
-                health.blocked_msg_cnt_pkt, health.faults_pkt, health.interrupt_load);
+                health.blocked_msg_cnt_pkt, health.faults_pkt, health.interrupt_load,
+                health.controls_allowed_reason_pkt, controls_allowed_reason_name(health.controls_allowed_reason_pkt),
+                health.controls_allowed_event_addr_pkt, health.controls_allowed_event_bus_pkt,
+                health.controls_allowed_event_ts_pkt, health.controls_allowed_event_detail_pkt,
+                health.controls_allowed_last_button_pkt, health.controls_allowed_last_button_ts_pkt);
   append_boardd_safety_diagnostic("boardd_panda_state_changed", fields);
 }
 

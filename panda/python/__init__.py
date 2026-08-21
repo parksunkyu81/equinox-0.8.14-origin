@@ -170,8 +170,8 @@ class Panda(object):
   HW_TYPE_RED_PANDA = b'\x07'
 
   CAN_PACKET_VERSION = 2
-  HEALTH_PACKET_VERSION = 5
-  HEALTH_STRUCT = struct.Struct("<IIIIIIIIBBBBBBBHBBBHIf")
+  HEALTH_PACKET_VERSION = 6
+  HEALTH_STRUCT = struct.Struct("<IIIIIIIIBBBBBBBHBBBHIfBBIBIII")
 
   F2_DEVICES = (HW_TYPE_PEDAL, )
   F4_DEVICES = (HW_TYPE_WHITE_PANDA, HW_TYPE_GREY_PANDA, HW_TYPE_BLACK_PANDA, HW_TYPE_UNO, HW_TYPE_DOS)
@@ -388,6 +388,13 @@ class Panda(object):
       "alternative_experience": a[19],
       "blocked_msg_cnt": a[20],
       "interrupt_load": a[21],
+      "controls_allowed_reason": a[22],
+      "controls_allowed_last_button": a[23],
+      "controls_allowed_event_addr": a[24],
+      "controls_allowed_event_bus": a[25],
+      "controls_allowed_event_ts_us": a[26],
+      "controls_allowed_event_detail": a[27],
+      "controls_allowed_last_button_ts_us": a[28],
     }
 
   # ******************* control *******************

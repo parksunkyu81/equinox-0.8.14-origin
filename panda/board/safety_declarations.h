@@ -54,6 +54,16 @@ typedef struct {
   int len;
 } addr_checks;
 
+typedef enum {
+  CONTROLS_ALLOWED_REASON_NONE = 0U,
+  CONTROLS_ALLOWED_REASON_SAFETY_MODE_CHANGED = 1U,
+  CONTROLS_ALLOWED_REASON_RX_CHECKSUM = 2U,
+  CONTROLS_ALLOWED_REASON_RX_COUNTER = 3U,
+  CONTROLS_ALLOWED_REASON_RX_TIMEOUT = 4U,
+  CONTROLS_ALLOWED_REASON_GAS_PRESSED = 5U,
+  CONTROLS_ALLOWED_REASON_HEARTBEAT_MISMATCH = 6U,
+} controls_allowed_reason;
+
 int safety_rx_hook(CANPacket_t *to_push);
 int safety_tx_hook(CANPacket_t *to_send);
 int safety_tx_lin_hook(int lin_num, uint8_t *data, int len);
@@ -83,6 +93,7 @@ bool addr_safety_check(CANPacket_t *to_push,
 void generic_rx_checks(bool stock_ecu_detected);
 void relay_malfunction_set(void);
 void relay_malfunction_reset(void);
+void set_controls_allowed(bool allowed, controls_allowed_reason reason, uint32_t addr, uint8_t bus, uint32_t detail);
 
 typedef const addr_checks* (*safety_hook_init)(int16_t param);
 typedef int (*rx_hook)(CANPacket_t *to_push);
@@ -102,6 +113,13 @@ void safety_tick(const addr_checks *addr_checks);
 
 // This can be set by the safety hooks
 bool controls_allowed = false;
+uint8_t controls_allowed_last_reason = CONTROLS_ALLOWED_REASON_NONE;
+uint8_t controls_allowed_last_button = 0xFFU;
+uint32_t controls_allowed_last_event_addr = 0U;
+uint8_t controls_allowed_last_event_bus = 0xFFU;
+uint32_t controls_allowed_last_event_ts = 0U;
+uint32_t controls_allowed_last_event_detail = 0U;
+uint32_t controls_allowed_last_button_ts = 0U;
 bool relay_malfunction = false;
 bool gas_interceptor_detected = false;
 int gas_interceptor_prev = 0;

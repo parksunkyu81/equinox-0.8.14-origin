@@ -206,7 +206,8 @@ void tick_handler(void) {
       if (controls_allowed && !heartbeat_engaged) {
         heartbeat_engaged_mismatches += 1U;
         if (heartbeat_engaged_mismatches >= 3U) {
-          controls_allowed = 0U;
+          set_controls_allowed(false, CONTROLS_ALLOWED_REASON_HEARTBEAT_MISMATCH, 0U, 0xFFU,
+                               heartbeat_engaged_mismatches);
         }
       } else {
         heartbeat_engaged_mismatches = 0U;

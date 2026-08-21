@@ -69,6 +69,20 @@ bool get_longitudinal_allowed(void) {
   return controls_allowed && !gas_pressed_prev;
 }
 
+// Preserve the first safety cause that transitions controls_allowed from true
+// to false. The data is exported through the health packet for post-drive
+// diagnosis and deliberately has no effect on the safety decision itself.
+void set_controls_allowed(bool allowed, controls_allowed_reason reason, uint32_t addr, uint8_t bus, uint32_t detail) {
+  if (!allowed && controls_allowed) {
+    controls_allowed_last_reason = (uint8_t)reason;
+    controls_allowed_last_event_addr = addr;
+    controls_allowed_last_event_bus = bus;
+    controls_allowed_last_event_ts = microsecond_timer_get();
+    controls_allowed_last_event_detail = detail;
+  }
+  controls_allowed = allowed;
+}
+
 // Given a CRC-8 poly, generate a static lookup table to use with a fast CRC-8
 // algorithm. Called at init time for safety modes using CRC-8.
 void gen_crc_lookup_table(uint8_t poly, uint8_t crc_lut[]) {
@@ -140,7 +154,8 @@ void safety_tick(const addr_checks *rx_checks) {
       bool lagging = elapsed_time > MAX(rx_checks->check[i].msg[rx_checks->check[i].index].expected_timestep * MAX_MISSED_MSGS, 1e6);
       rx_checks->check[i].lagging = lagging;
       if (lagging) {
-        controls_allowed = 0;
+        const CanMsgCheck *msg = &rx_checks->check[i].msg[rx_checks->check[i].index];
+        set_controls_allowed(false, CONTROLS_ALLOWED_REASON_RX_TIMEOUT, msg->addr, msg->bus, elapsed_time);
       }
     }
   }
@@ -160,7 +175,10 @@ bool is_msg_valid(AddrCheckStruct addr_list[], int index) {
   if (index != -1) {
     if ((!addr_list[index].valid_checksum) || (addr_list[index].wrong_counters >= MAX_WRONG_COUNTERS)) {
       valid = false;
-      controls_allowed = 0;
+      const CanMsgCheck *msg = &addr_list[index].msg[addr_list[index].index];
+      const controls_allowed_reason reason = !addr_list[index].valid_checksum ?
+        CONTROLS_ALLOWED_REASON_RX_CHECKSUM : CONTROLS_ALLOWED_REASON_RX_COUNTER;
+      set_controls_allowed(false, reason, msg->addr, msg->bus, (uint32_t)addr_list[index].wrong_counters);
     }
   }
   return valid;
@@ -206,7 +224,7 @@ bool addr_safety_check(CANPacket_t *to_push,
 void generic_rx_checks(bool stock_ecu_detected) {
   // exit controls on rising edge of gas press
   if (gas_pressed && !gas_pressed_prev && !(alternative_experience & ALT_EXP_DISABLE_DISENGAGE_ON_GAS)) {
-    controls_allowed = 0;
+    set_controls_allowed(false, CONTROLS_ALLOWED_REASON_GAS_PRESSED, 0U, 0xFFU, 0U);
   }
   gas_pressed_prev = gas_pressed;
 

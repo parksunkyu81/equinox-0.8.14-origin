@@ -38,6 +38,13 @@ int get_health_pkt(void *dat) {
   health->faults_pkt = faults;
 
   health->interrupt_load = interrupt_load;
+  health->controls_allowed_reason_pkt = controls_allowed_last_reason;
+  health->controls_allowed_last_button_pkt = controls_allowed_last_button;
+  health->controls_allowed_event_addr_pkt = controls_allowed_last_event_addr;
+  health->controls_allowed_event_bus_pkt = controls_allowed_last_event_bus;
+  health->controls_allowed_event_ts_pkt = controls_allowed_last_event_ts;
+  health->controls_allowed_event_detail_pkt = controls_allowed_last_event_detail;
+  health->controls_allowed_last_button_ts_pkt = controls_allowed_last_button_ts;
 
   return sizeof(*health);
 }

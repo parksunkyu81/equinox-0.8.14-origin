@@ -83,11 +83,13 @@ static int gm_rx_hook(CANPacket_t *to_push) {
     // ACC steering wheel buttons
     if (addr == MSG_RX_BUTTON) {
       int button = (GET_BYTE(to_push, 5) & 0x70) >> 4;
+      controls_allowed_last_button = (uint8_t)button;
+      controls_allowed_last_button_ts = microsecond_timer_get();
       switch (button) {
         case 2:  // resume
         case 3:  // set
         case 5:  // main on
-          controls_allowed = 1;
+          set_controls_allowed(true, CONTROLS_ALLOWED_REASON_NONE, MSG_RX_BUTTON, 0U, (uint32_t)button);
           break;
         default:
           break;  // any other button is irrelevant
@@ -272,7 +274,7 @@ static int gm_fwd_hook(int bus_num, CANPacket_t *to_fwd) {
 
 static const addr_checks* gm_init(int16_t param) {
   UNUSED(param);
-  controls_allowed = false;
+  set_controls_allowed(false, CONTROLS_ALLOWED_REASON_SAFETY_MODE_CHANGED, 0U, 0xFFU, 0U);
   relay_malfunction_reset();
   gas_interceptor_detected = 0;
   cam_can_bus = -1;

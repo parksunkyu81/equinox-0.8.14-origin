@@ -1,5 +1,5 @@
 // When changing this struct, python/__init__.py needs to be kept up to date!
-#define HEALTH_PACKET_VERSION 5
+#define HEALTH_PACKET_VERSION 6
 struct __attribute__((packed)) health_t {
   uint32_t uptime_pkt;
   uint32_t voltage_pkt;
@@ -23,4 +23,13 @@ struct __attribute__((packed)) health_t {
   uint16_t alternative_experience_pkt;
   uint32_t blocked_msg_cnt_pkt;
   float interrupt_load;
+  // Most recent true -> false controls_allowed transition. These fields are
+  // diagnostic only; they never alter Panda safety behavior.
+  uint8_t controls_allowed_reason_pkt;
+  uint8_t controls_allowed_last_button_pkt;
+  uint32_t controls_allowed_event_addr_pkt;
+  uint8_t controls_allowed_event_bus_pkt;
+  uint32_t controls_allowed_event_ts_pkt;
+  uint32_t controls_allowed_event_detail_pkt;
+  uint32_t controls_allowed_last_button_ts_pkt;
 };
