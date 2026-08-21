@@ -1,3 +1,5 @@
+import math
+
 from cereal import car
 from common.numpy_fast import mean
 from opendbc.can.can_define import CANDefine
@@ -65,6 +67,10 @@ class CarState(CarStateBase):
 
     ret.steeringAngleDeg = pt_cp.vl["PSCMSteeringAngle"]["SteeringWheelAngle"]
     ret.steeringRateDeg = pt_cp.vl["PSCMSteeringAngle"]["SteeringWheelRate"]
+    # EBCM reports yaw in grad/s (400 grad = one full turn). Publish the
+    # vehicle-frame value expected by CarState in rad/s so downstream path
+    # validation can use the physical yaw measurement instead of a silent 0.
+    ret.yawRate = pt_cp.vl["EBCMVehicleDynamic"]["YawRate2"] * math.pi / 200.0
     ret.steeringTorque = pt_cp.vl["PSCMStatus"]["LKADriverAppldTrq"]
     ret.steeringTorqueEps = pt_cp.vl["PSCMStatus"]["LKATorqueDelivered"]
     ret.steeringPressed = abs(ret.steeringTorque) > STEER_THRESHOLD
@@ -129,6 +135,7 @@ class CarState(CarStateBase):
       ("ACCButtons", "ASCMSteeringButton"),
       ("SteeringWheelAngle", "PSCMSteeringAngle"),
       ("SteeringWheelRate", "PSCMSteeringAngle"),
+      ("YawRate2", "EBCMVehicleDynamic"),
       ("FLWheelSpd", "EBCMWheelSpdFront"),
       ("FRWheelSpd", "EBCMWheelSpdFront"),
       ("RLWheelSpd", "EBCMWheelSpdRear"),
@@ -156,6 +163,7 @@ class CarState(CarStateBase):
       ("ASCMSteeringButton", 33),
       ("ECMEngineStatus", 100),
       ("PSCMSteeringAngle", 100),
+      ("EBCMVehicleDynamic", 50),
       ("EBCMBrakePedalPosition", 100),
     ]
 
