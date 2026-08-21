@@ -14,6 +14,25 @@
 #include "selfdrive/ui/qt/maps/map_helpers.h"
 #endif
 
+namespace {
+constexpr float COMFORT_BRAKE = 2.5f;
+constexpr float STOP_DISTANCE = 5.5f;
+
+float desired_follow_distance(float v_ego, float v_lead, float t_follow) {
+  float v_diff_offset = 0.0f;
+  if (v_lead > v_ego) {
+    v_diff_offset = std::clamp(v_lead - v_ego, 0.0f, STOP_DISTANCE / 2.0f);
+    v_diff_offset = std::max(v_diff_offset * ((10.0f - v_ego) / 10.0f), 0.0f);
+  }
+
+  const float safe_obstacle_distance =
+    (v_ego * v_ego) / (2.0f * COMFORT_BRAKE) + t_follow * v_ego + STOP_DISTANCE;
+  const float stopped_equivalence_distance =
+    (v_lead * v_lead) / (2.0f * COMFORT_BRAKE) + v_diff_offset;
+  return std::max(safe_obstacle_distance - stopped_equivalence_distance, 0.0f);
+}
+}  // namespace
+
 OnroadWindow::OnroadWindow(QWidget *parent) : QWidget(parent) {
   QVBoxLayout *main_layout  = new QVBoxLayout(this);
   main_layout->setMargin(bdr_s);
@@ -401,7 +420,8 @@ void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
 }
 
 
-void NvgWindow::drawLead(QPainter &painter, const cereal::ModelDataV2::LeadDataV3::Reader &lead_data, const QPointF &vd, bool is_radar) {
+void NvgWindow::drawLead(QPainter &painter, const cereal::ModelDataV2::LeadDataV3::Reader &lead_data,
+                         const QPointF &vd, bool is_radar, const QString &info_text) {
   const float speedBuff = 10.;
   const float leadBuff = 40.;
   const float d_rel = lead_data.getX()[0];
@@ -431,6 +451,27 @@ void NvgWindow::drawLead(QPainter &painter, const cereal::ModelDataV2::LeadDataV
   QPointF chevron[] = {{x + (sz * 1.25), y + sz}, {x, y}, {x - (sz * 1.25), y + sz}};
   painter.setBrush(redColor(fillAlpha));
   painter.drawPolygon(chevron, std::size(chevron));
+
+  if (!info_text.isEmpty()) {
+    painter.save();
+    configFont(painter, "Open Sans", 36, "Bold");
+    QFontMetrics metrics(painter.font());
+    const int text_width = metrics.horizontalAdvance(info_text) + 32;
+    const int text_height = metrics.height() + 20;
+    QRect text_rect(static_cast<int>(x - text_width / 2), static_cast<int>(y + sz + 12),
+                    text_width, text_height);
+    if (text_rect.bottom() > height() - 12) {
+      text_rect.moveBottom(static_cast<int>(y - 12));
+    }
+    text_rect.moveLeft(std::clamp(text_rect.left(), 12, width() - text_rect.width() - 12));
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0, 0, 0, 160));
+    painter.drawRoundedRect(text_rect, 8, 8);
+    painter.setPen(whiteColor());
+    painter.drawText(text_rect, Qt::AlignCenter, info_text);
+    painter.restore();
+  }
 }
 
 void NvgWindow::paintGL() {
@@ -528,8 +569,22 @@ void NvgWindow::drawHud(QPainter &p) {
   drawLaneLines(p, s);
 
   auto leads = sm["modelV2"].getModelV2().getLeadsV3();
+  const auto lead_one = sm["radarState"].getRadarState().getLeadOne();
+  const auto car_state = sm["carState"].getCarState();
+  const auto controls_state = sm["controlsState"].getControlsState();
+  QString lead_info;
+  if (lead_one.getStatus()) {
+    const float v_ego = std::max(car_state.getVEgo(), 0.0f);
+    const float d_rel = std::max(lead_one.getDRel(), 0.0f);
+    const float v_lead = std::max(lead_one.getVLead(), 0.0f);
+    const float desired_distance = desired_follow_distance(v_ego, v_lead,
+                                                           controls_state.getDynamicTRValue());
+    const float time_gap = d_rel / std::max(v_ego, 0.1f);
+    lead_info.sprintf("%.0f meters (Desired:%.0f) | %.0f km/h | %.2f s",
+                      d_rel, desired_distance, v_lead * MS_TO_KPH, time_gap);
+  }
   if (leads[0].getProb() > .5) {
-    drawLead(p, leads[0], s->scene.lead_vertices[0], s->scene.lead_radar[0]);
+    drawLead(p, leads[0], s->scene.lead_vertices[0], s->scene.lead_radar[0], lead_info);
   }
   if (leads[1].getProb() > .5 && (std::abs(leads[1].getX()[0] - leads[0].getX()[0]) > 3.0)) {
     drawLead(p, leads[1], s->scene.lead_vertices[1], s->scene.lead_radar[1]);
@@ -546,7 +601,6 @@ void NvgWindow::drawHud(QPainter &p) {
   if(s->show_debug && width() > 1200)
     drawDebugText(p);
 
-  const auto controls_state = sm["controlsState"].getControlsState();
   const auto device_state = sm["deviceState"].getDeviceState();
   //const auto car_control = sm["carControl"].getCarControl();
   //const auto live_params = sm["liveParameters"].getLiveParameters();
