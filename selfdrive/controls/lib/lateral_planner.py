@@ -25,7 +25,6 @@ CURVE_EXTENSION_MAX_DISTANCE_M = 6.0
 CURVE_EXTENSION_REFERENCE_MAX_AGE_S = 1.20
 CURVE_EXTENSION_MIN_REFERENCE_CURVATURE = 0.0035
 CURVE_EXTENSION_MIN_ACTUAL_CURVATURE = 0.0015
-CURVE_EXTENSION_MODEL_CONFIDENCE_TRUSTED = 0.75
 CURVE_EXTENSION_LANE_RAW_DPROB_TRUSTED = 0.35
 CURVE_EXTENSION_LANE_CONTINUITY_MAX_AGE_S = 1.20
 CURVE_EXTENSION_BLEND = 0.75
@@ -35,6 +34,12 @@ CURVE_EXTENSION_LOG_INTERVAL_S = 0.10
 CURVE_EXTENSION_LLK_MAX_AGE_S = 0.25
 CURVE_EXTENSION_LLK_MAX_YAW_RATE_RAD_S = 1.0
 CURVE_EXTENSION_MIN_YAW_RATE_RAD_S = 1e-4
+MODEL_PATH_QUALITY_TRUSTED = 0.75
+MODEL_PATH_QUALITY_EDGE_STD_TRUSTED = 1.0
+MODEL_PATH_QUALITY_EDGE_STD_LIMIT = 3.0
+MODEL_PATH_QUALITY_CURVATURE_ERROR_MIN = 0.010
+MODEL_PATH_QUALITY_CURVATURE_JUMP = 0.025
+CURVE_EXTENSION_FUSED_MODEL_WEIGHT = 0.65
 
 class LateralPlanner:
   def __init__(self, CP):
@@ -79,6 +84,13 @@ class LateralPlanner:
     self._curve_extension_yaw_rate = None
     self._curve_extension_yaw_source = "unavailable"
     self._curve_extension_yaw_age_s = None
+    self._curve_extension_fused_curvature = 0.0
+    self.model_path_quality = 0.0
+    self.model_path_quality_reason = "unavailable"
+    self.model_near_curvature = 0.0
+    self._previous_model_near_curvature = None
+    self._previous_vehicle_curvature = None
+    self._previous_model_quality_t = None
 
     self.lat_mpc = LateralMpc()
     self.reset_mpc(np.zeros(4))
@@ -149,6 +161,112 @@ class LateralPlanner:
       # No IMU fallback is safer than accepting a malformed or stale value.
       pass
 
+  def _yaw_curvature(self, car_state):
+    if self._curve_extension_yaw_rate is None:
+      return None
+    v_ego = self._diagnostic_float(car_state.vEgo)
+    if v_ego is None:
+      return None
+    return self._diagnostic_float(
+      self._curve_extension_yaw_rate / max(v_ego, 1.0))
+
+  def _vehicle_curve_estimate(self, car_state, measured_curvature):
+    """Use only agreeing physical sources as a curvature confirmation."""
+    measured = self._diagnostic_float(measured_curvature)
+    yaw_curvature = self._yaw_curvature(car_state)
+    if measured is None:
+      return yaw_curvature
+    if yaw_curvature is None:
+      return measured
+    if measured * yaw_curvature <= 0.0:
+      return None
+    max_error = max(0.004, 1.25 * max(abs(measured), abs(yaw_curvature)))
+    if abs(measured - yaw_curvature) > max_error:
+      return None
+    return 0.5 * (measured + yaw_curvature)
+
+  def _update_model_path_quality(self, md, car_state, measured_curvature, t):
+    """Score whether the model trajectory agrees with independent vehicle motion."""
+    reasons = []
+    if not self.model_data_valid or self.plan_curv.size < 4:
+      self.model_path_quality = 0.0
+      self.model_path_quality_reason = "model_path_invalid"
+      return
+
+    model_curvature = self._diagnostic_float(np.median(self.plan_curv[1:4]))
+    vehicle_curvature = self._vehicle_curve_estimate(car_state, measured_curvature)
+    if model_curvature is None:
+      self.model_path_quality = 0.0
+      self.model_path_quality_reason = "model_curvature_invalid"
+      return
+    self.model_near_curvature = model_curvature
+
+    lane_score = float(np.clip(
+      self.LP.raw_lane_d_prob / CURVE_EXTENSION_LANE_RAW_DPROB_TRUSTED, 0.0, 1.0))
+    if lane_score < 1.0:
+      reasons.append("lane_low")
+
+    edge_score = 1.0
+    road_edge_stds = as_finite_vector(getattr(md, 'roadEdgeStds', []), minimum_size=2)
+    if road_edge_stds is not None:
+      edge_score = float(np.clip(
+        (MODEL_PATH_QUALITY_EDGE_STD_LIMIT - np.max(road_edge_stds[:2])) /
+        (MODEL_PATH_QUALITY_EDGE_STD_LIMIT - MODEL_PATH_QUALITY_EDGE_STD_TRUSTED),
+        0.0, 1.0))
+      if edge_score < 0.5:
+        reasons.append("road_edge_uncertain")
+
+    agreement_score = 1.0
+    if vehicle_curvature is None:
+      agreement_score = 0.0
+      reasons.append("vehicle_curve_unconfirmed")
+    else:
+      max_error = max(
+        MODEL_PATH_QUALITY_CURVATURE_ERROR_MIN,
+        1.25 * max(abs(model_curvature), abs(vehicle_curvature)))
+      if (model_curvature * vehicle_curvature < 0.0 or
+          abs(model_curvature - vehicle_curvature) > max_error):
+        agreement_score = 0.0
+        reasons.append("model_vehicle_disagree")
+
+    temporal_score = 1.0
+    if (self._previous_model_quality_t is not None and
+        0.0 < t - self._previous_model_quality_t <= 0.30 and
+        self._previous_model_near_curvature is not None and
+        self._previous_vehicle_curvature is not None and
+        vehicle_curvature is not None):
+      model_jump = abs(model_curvature - self._previous_model_near_curvature)
+      vehicle_jump = abs(vehicle_curvature - self._previous_vehicle_curvature)
+      if (model_jump > MODEL_PATH_QUALITY_CURVATURE_JUMP and
+          model_jump > vehicle_jump + MODEL_PATH_QUALITY_CURVATURE_ERROR_MIN):
+        temporal_score = 0.0
+        reasons.append("model_curvature_jump")
+
+    # A poor lane/edge observation lowers confidence, while a disagreement with
+    # vehicle motion rejects the model immediately. This never raises model
+    # confidence above its native uncertainty estimate.
+    visual_score = min(lane_score, edge_score)
+    self.model_path_quality = float(np.clip(
+      min(self.model_confidence, visual_score, agreement_score, temporal_score), 0.0, 1.0))
+    self.model_path_quality_reason = "trusted" if not reasons else ",".join(reasons)
+    self._previous_model_near_curvature = model_curvature
+    self._previous_vehicle_curvature = vehicle_curvature
+    self._previous_model_quality_t = t
+
+  def _fused_curve_extension_curvature(self, car_state, measured_curvature):
+    """Blend a trusted model curve with agreeing IMU/steering motion only."""
+    reference = self._curve_extension_curvature
+    vehicle_curvature = self._vehicle_curve_estimate(car_state, measured_curvature)
+    if vehicle_curvature is None:
+      return reference
+
+    max_error = max(0.004, 1.25 * abs(reference))
+    vehicle_curvature = float(np.clip(
+      vehicle_curvature, reference - max_error, reference + max_error))
+    return float(
+      CURVE_EXTENSION_FUSED_MODEL_WEIGHT * reference +
+      (1.0 - CURVE_EXTENSION_FUSED_MODEL_WEIGHT) * vehicle_curvature)
+
   def _vehicle_matches_curve_extension(self, car_state, measured_curvature):
     """Require independent steering-model and yaw evidence of the saved turn."""
     v_ego = float(car_state.vEgo)
@@ -177,7 +295,7 @@ class LateralPlanner:
 
   def _model_curve_exit_reason(self):
     """Trust a confident model immediately when it says the saved turn ended."""
-    if self.model_confidence < CURVE_EXTENSION_MODEL_CONFIDENCE_TRUSTED:
+    if self.model_path_quality < MODEL_PATH_QUALITY_TRUSTED:
       return None
 
     model_curvature = float(np.median(self.plan_curv[1:4]))
@@ -232,6 +350,9 @@ class LateralPlanner:
       "mpc_target_curvature": self._diagnostic_float(mpc_target_curvature),
       "model_data_valid": bool(self.model_data_valid),
       "model_confidence": self._diagnostic_float(self.model_confidence),
+      "model_path_quality": self._diagnostic_float(self.model_path_quality),
+      "model_path_quality_reason": self.model_path_quality_reason,
+      "model_near_curvature": self._diagnostic_float(self.model_near_curvature),
       "raw_lane_d_prob": self._diagnostic_float(self.LP.raw_lane_d_prob),
       "lane_continuity_age_s": self._diagnostic_float(lane_continuity_age),
       "reference_age_s": self._diagnostic_float(reference_age),
@@ -239,6 +360,7 @@ class LateralPlanner:
         0.0 if self._curve_extension_start_t is None else t - self._curve_extension_start_t),
       "extension_distance_m": self._diagnostic_float(self._curve_extension_distance_m),
       "extension_weight": self._diagnostic_float(self.virtual_curve_extension_weight),
+      "fused_curvature": self._diagnostic_float(self._curve_extension_fused_curvature),
       "virtual_arc_y_5m": self._diagnostic_float(self._curve_extension_virtual_y_5m),
       "virtual_arc_y_10m": self._diagnostic_float(self._curve_extension_virtual_y_10m),
       "path_correction_5m": self._diagnostic_float(self._curve_extension_correction_5m),
@@ -268,6 +390,7 @@ class LateralPlanner:
     self._curve_extension_last_t = None
     self._curve_extension_distance_m = 0.0
     self._curve_extension_curvature = 0.0
+    self._curve_extension_fused_curvature = 0.0
 
   def _log_curve_extension_block(self, car_state, measured_curvature, t, reason):
     """Record block-reason transitions without writing once per model frame."""
@@ -302,8 +425,7 @@ class LateralPlanner:
     # Extension begins only as confidence is lost. The current trajectory is
     # still finite, but the saved curvature came from a trusted model frame.
     perception_degraded = bool(
-      self.model_confidence < CURVE_EXTENSION_MODEL_CONFIDENCE_TRUSTED or
-      self.LP.raw_lane_d_prob < CURVE_EXTENSION_LANE_RAW_DPROB_TRUSTED)
+      self.model_path_quality < MODEL_PATH_QUALITY_TRUSTED)
     if not perception_degraded:
       return "perception_recovered"
     if not self._vehicle_matches_curve_extension(car_state, measured_curvature):
@@ -346,8 +468,14 @@ class LateralPlanner:
         car_state, measured_curvature, t, limit_reason)
       return d_path_xyz
 
-    virtual_path_y = self._virtual_arc_y(
-      d_path_xyz[:, 0], self._curve_extension_curvature)
+    fused_curvature = self._fused_curve_extension_curvature(
+      car_state, measured_curvature)
+    if abs(fused_curvature) < CURVE_EXTENSION_MIN_REFERENCE_CURVATURE:
+      self._stop_curve_extension(
+        car_state, measured_curvature, t, "fused_curve_invalid")
+      return d_path_xyz
+    self._curve_extension_fused_curvature = fused_curvature
+    virtual_path_y = self._virtual_arc_y(d_path_xyz[:, 0], fused_curvature)
     if not np.isfinite(virtual_path_y).all():
       self._stop_curve_extension(
         car_state, measured_curvature, t, "virtual_arc_invalid")
@@ -404,8 +532,7 @@ class LateralPlanner:
     if (not self.use_lanelines or not controls_active or
         car_state.steeringPressed or lane_change_active or not mpc_valid or
         not self.model_data_valid or
-        self.model_confidence < CURVE_EXTENSION_MODEL_CONFIDENCE_TRUSTED or
-        self.LP.raw_lane_d_prob < CURVE_EXTENSION_LANE_RAW_DPROB_TRUSTED or
+        self.model_path_quality < MODEL_PATH_QUALITY_TRUSTED or
         not self.LP.curve_extension_lane_center_continuous):
       return
 
@@ -455,6 +582,8 @@ class LateralPlanner:
       self.path_xyz_stds = np.column_stack(position_stds)
     self._update_model_confidence(
       all(position_std is not None for position_std in position_stds))
+    self._update_model_path_quality(
+      md, car_state, measured_curvature, sec_since_boot())
 
     # Lane change logic
     lane_change_prob = self.LP.l_lane_change_prob + self.LP.r_lane_change_prob
