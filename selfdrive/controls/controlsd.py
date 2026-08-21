@@ -253,6 +253,11 @@ class Controls:
         self._curve_log_last_t = -1e9
         self._curve_log_date = None
         self._curve_log_path = None
+        self._lateral_diag_log_last_t = -1e9
+        self._lateral_diag_log_last_flush_t = -1e9
+        self._lateral_diag_log_date = None
+        self._lateral_diag_log_path = None
+        self._lateral_diag_log_buffer = deque(maxlen=200)
         self.v_cruise_kph_limit = 0
         self.applyMaxSpeed = 0
         self.roadLimitSpeedActive = 0
@@ -753,6 +758,117 @@ class Controls:
           "curvature_factor": float(curvature_factor),
         })
         self.curve_speed_limiter.last_diag.update(model_profile_diag)
+
+    def _flush_lateral_diagnostics(self):
+        if not self._lateral_diag_log_buffer or self._lateral_diag_log_path is None:
+            return
+        try:
+            with open(self._lateral_diag_log_path, "a", encoding="utf-8") as f:
+                f.write("\n".join(self._lateral_diag_log_buffer) + "\n")
+            self._lateral_diag_log_buffer.clear()
+            self._lateral_diag_log_last_flush_t = sec_since_boot()
+        except Exception:
+            cloudlog.exception("lateral diagnostic log flush failed")
+
+    def _log_lateral_diagnostics(self, CS, actuators, lac_log, curvature):
+        """Record lateral control signals at 10 Hz without blocking every control-loop tick."""
+        if not (self.active and lac_log.active):
+            self._flush_lateral_diagnostics()
+            return
+
+        now_mono = sec_since_boot()
+        if (now_mono - self._lateral_diag_log_last_t) < 0.1:
+            return
+        self._lateral_diag_log_last_t = float(now_mono)
+
+        try:
+            def _number(value, digits=6):
+                try:
+                    value = float(value)
+                    return round(value, digits) if np.isfinite(value) else None
+                except (TypeError, ValueError):
+                    return None
+
+            date_key = time.strftime("%Y_%m_%d", time.localtime())
+            if self._lateral_diag_log_date != date_key:
+                log_dir = "/data/lateral_diagnostics"
+                os.makedirs(log_dir, exist_ok=True)
+                self._lateral_diag_log_date = date_key
+                self._lateral_diag_log_path = os.path.join(
+                  log_dir, "lateral_%s.jsonl" % date_key)
+
+            lat_plan = self.sm['lateralPlan']
+            live_params = self.sm['liveParameters']
+            command_output_error = float(actuators.steer) - float(self.last_actuators.steer)
+            rec = {
+              "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+              "mono": _number(now_mono, 3),
+              "frame": int(self.sm.frame),
+              "enabled": bool(self.enabled),
+              "active": bool(self.active),
+              "lat_active": bool(lac_log.active),
+              "can_valid": bool(CS.canValid),
+              "controller": str(self.CP.lateralTuning.which()),
+              "v_ego_ms": _number(CS.vEgo),
+              "v_ego_kph": _number(CS.vEgo * CV.MS_TO_KPH, 3),
+              "a_ego_ms2": _number(CS.aEgo),
+              "steering_angle_deg": _number(CS.steeringAngleDeg),
+              "steering_rate_deg_s": _number(CS.steeringRateDeg),
+              "steering_torque_driver": _number(CS.steeringTorque),
+              "steering_torque_eps": _number(CS.steeringTorqueEps),
+              "steering_pressed": bool(CS.steeringPressed),
+              "steer_fault_temporary": bool(CS.steerFaultTemporary),
+              "steer_fault_permanent": bool(CS.steerFaultPermanent),
+              "live_parameters_valid": bool(self.sm.valid['liveParameters']),
+              "angle_offset_deg": _number(live_params.angleOffsetDeg),
+              "roll_rad": _number(live_params.roll),
+              "actual_curvature": _number(curvature),
+              "desired_curvature": _number(self.desired_curvature),
+              "desired_curvature_rate": _number(self.desired_curvature_rate),
+              "curvature_error": _number(self.desired_curvature - curvature),
+              "lateral_plan_valid": bool(self.sm.valid['lateralPlan']),
+              "lateral_plan_mpc_valid": bool(lat_plan.mpcSolutionValid),
+              "lateral_plan_mono_time": int(self.sm.logMonoTime['lateralPlan']),
+              "lateral_plan_curvatures": [_number(v) for v in lat_plan.curvatures],
+              "lateral_plan_curvature_rates": [_number(v) for v in lat_plan.curvatureRates],
+              "steer_command": _number(actuators.steer),
+              "steer_command_angle_deg": _number(actuators.steeringAngleDeg),
+              "steer_output": _number(self.last_actuators.steer),
+              "steer_output_angle_deg": _number(self.last_actuators.steeringAngleDeg),
+              "steer_command_output_error": _number(command_output_error),
+              "steer_limited": bool(self.steer_limited),
+              "lateral_saturated": bool(lac_log.saturated),
+              "torque_error": None,
+              "torque_p": None,
+              "torque_i": None,
+              "torque_d": None,
+              "torque_f": None,
+              "torque_output": None,
+              "actual_lateral_accel": None,
+              "desired_lateral_accel": None,
+              "lat_accel_factor": _number(self.torque_latAccelFactor),
+              "lat_accel_offset": _number(self.torque_latAccelOffset),
+              "friction": _number(self.torque_friction),
+            }
+            if self.CP.lateralTuning.which() == 'torque':
+                rec.update({
+                  "torque_error": _number(lac_log.error),
+                  "torque_p": _number(lac_log.p),
+                  "torque_i": _number(lac_log.i),
+                  "torque_d": _number(lac_log.d),
+                  "torque_f": _number(lac_log.f),
+                  "torque_output": _number(lac_log.output),
+                  "actual_lateral_accel": _number(lac_log.actualLateralAccel),
+                  "desired_lateral_accel": _number(lac_log.desiredLateralAccel),
+                })
+
+            self._lateral_diag_log_buffer.append(
+              json.dumps(rec, ensure_ascii=False, separators=(",", ":")))
+            if (now_mono - self._lateral_diag_log_last_flush_t) < 1.0:
+                return
+            self._flush_lateral_diagnostics()
+        except Exception:
+            cloudlog.exception("lateral diagnostic logging failed")
 
     def _log_curve_speed(self, v_ego, target_speed_clu, road_limit_speed,
                          apply_limit_speed, curv_limit):
@@ -2018,6 +2134,7 @@ class Controls:
 
         steer_angle_without_offset = math.radians(CS.steeringAngleDeg - params.angleOffsetDeg)
         curvature = -self.VM.calc_curvature(steer_angle_without_offset, CS.vEgo, params.roll)
+        self._log_lateral_diagnostics(CS, actuators, lac_log, curvature)
 
         # NDA Add.. (PSK)
         road_limit_speed, left_dist, max_speed_log = self.cal_max_speed(
