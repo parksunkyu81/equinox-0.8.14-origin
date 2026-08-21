@@ -16,15 +16,18 @@ TRAJECTORY_SIZE = 33
 
 # Camera-edge curve extension. A trusted curvature is used to draw a new,
 # short virtual arc from the current vehicle pose; no previous path is reused.
-CURVE_EXTENSION_MIN_SPEED_MS = 5.0
-CURVE_EXTENSION_MAX_DURATION_S = 0.75
+# Tight urban corners often happen below 18 km/h, precisely where an inside
+# lane line can leave the camera view. Keep this aid available down to
+# 12.6 km/h, but only with the independent steering/yaw checks below.
+CURVE_EXTENSION_MIN_SPEED_MS = 3.5
+CURVE_EXTENSION_MAX_DURATION_S = 1.0
 CURVE_EXTENSION_MAX_DISTANCE_M = 6.0
-CURVE_EXTENSION_REFERENCE_MAX_AGE_S = 0.90
+CURVE_EXTENSION_REFERENCE_MAX_AGE_S = 1.20
 CURVE_EXTENSION_MIN_REFERENCE_CURVATURE = 0.0035
 CURVE_EXTENSION_MIN_ACTUAL_CURVATURE = 0.0015
 CURVE_EXTENSION_MODEL_CONFIDENCE_TRUSTED = 0.75
-CURVE_EXTENSION_LANE_RAW_DPROB_TRUSTED = 0.45
-CURVE_EXTENSION_LANE_CONTINUITY_MAX_AGE_S = 0.90
+CURVE_EXTENSION_LANE_RAW_DPROB_TRUSTED = 0.35
+CURVE_EXTENSION_LANE_CONTINUITY_MAX_AGE_S = 1.20
 CURVE_EXTENSION_BLEND = 0.75
 CURVE_EXTENSION_MAX_CORRECTION_NEAR_M = 0.15
 CURVE_EXTENSION_MAX_CORRECTION_FAR_M = 1.00
@@ -69,6 +72,7 @@ class LateralPlanner:
     self._curve_extension_correction_5m = 0.0
     self._curve_extension_correction_10m = 0.0
     self._curve_extension_last_mpc_target_curvature = None
+    self._curve_extension_last_block_reason = None
 
     self.lat_mpc = LateralMpc()
     self.reset_mpc(np.zeros(4))
@@ -213,6 +217,13 @@ class LateralPlanner:
     self._curve_extension_distance_m = 0.0
     self._curve_extension_curvature = 0.0
 
+  def _log_curve_extension_block(self, car_state, measured_curvature, t, reason):
+    """Record block-reason transitions without writing once per model frame."""
+    if reason != self._curve_extension_last_block_reason:
+      self._write_curve_extension_log(
+        "virtual_curve_extension_blocked", car_state, measured_curvature, t, reason)
+      self._curve_extension_last_block_reason = reason
+
   def _curve_extension_block_reason(self, car_state, controls_active,
                                     measured_curvature, lane_change_active, t):
     if not self.use_lanelines:
@@ -255,9 +266,13 @@ class LateralPlanner:
     block_reason = self._curve_extension_block_reason(
       car_state, controls_active, measured_curvature, lane_change_active, t)
     if block_reason is not None:
+      self._log_curve_extension_block(
+        car_state, measured_curvature, t, block_reason)
       self._stop_curve_extension(
         car_state, measured_curvature, t, block_reason)
       return d_path_xyz
+
+    self._curve_extension_last_block_reason = None
 
     if self._curve_extension_start_t is None:
       self._curve_extension_start_t = t
