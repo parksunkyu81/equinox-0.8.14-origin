@@ -242,10 +242,15 @@ class LateralPlanner:
         temporal_score = 0.0
         reasons.append("model_curvature_jump")
 
-    # A poor lane/edge observation lowers confidence, while a disagreement with
-    # vehicle motion rejects the model immediately. This never raises model
-    # confidence above its native uncertainty estimate.
-    visual_score = min(lane_score, edge_score)
+    # Road-edge uncertainty measures confidence in the *edge locations*, not
+    # confidence in the model trajectory. On tight or bounded curves an edge
+    # is routinely occluded or outside the camera view, which made the old
+    # min(lane_score, edge_score) gate withdraw torque authority exactly when
+    # the independently confirmed path needed it most. Keep edge_score as a
+    # diagnostic, but do not let it veto path confidence. Model uncertainty,
+    # lane confidence, vehicle agreement, and temporal stability remain hard
+    # gates.
+    visual_score = lane_score
     self.model_path_quality = float(np.clip(
       min(self.model_confidence, visual_score, agreement_score, temporal_score), 0.0, 1.0))
     self.model_path_quality_reason = "trusted" if not reasons else ",".join(reasons)
