@@ -84,7 +84,6 @@ static int gm_rx_hook(CANPacket_t *to_push) {
     if (addr == MSG_RX_BUTTON) {
       int button = (GET_BYTE(to_push, 5) & 0x70) >> 4;
       controls_allowed_last_button = (uint8_t)button;
-      controls_allowed_last_button_ts = microsecond_timer_get();
       switch (button) {
         case 2:  // resume
         case 3:  // set

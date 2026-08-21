@@ -77,7 +77,6 @@ void set_controls_allowed(bool allowed, controls_allowed_reason reason, uint32_t
     controls_allowed_last_reason = (uint8_t)reason;
     controls_allowed_last_event_addr = addr;
     controls_allowed_last_event_bus = bus;
-    controls_allowed_last_event_ts = microsecond_timer_get();
     controls_allowed_last_event_detail = detail;
   }
   controls_allowed = allowed;

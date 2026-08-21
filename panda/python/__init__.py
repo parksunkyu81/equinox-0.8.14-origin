@@ -171,7 +171,7 @@ class Panda(object):
 
   CAN_PACKET_VERSION = 2
   HEALTH_PACKET_VERSION = 6
-  HEALTH_STRUCT = struct.Struct("<IIIIIIIIBBBBBBBHBBBHIfBBIBIII")
+  HEALTH_STRUCT = struct.Struct("<IIIIIIIIBBBBBBBHBBBHIfBBHBI")
 
   F2_DEVICES = (HW_TYPE_PEDAL, )
   F4_DEVICES = (HW_TYPE_WHITE_PANDA, HW_TYPE_GREY_PANDA, HW_TYPE_BLACK_PANDA, HW_TYPE_UNO, HW_TYPE_DOS)
@@ -392,9 +392,7 @@ class Panda(object):
       "controls_allowed_last_button": a[23],
       "controls_allowed_event_addr": a[24],
       "controls_allowed_event_bus": a[25],
-      "controls_allowed_event_ts_us": a[26],
-      "controls_allowed_event_detail": a[27],
-      "controls_allowed_last_button_ts_us": a[28],
+      "controls_allowed_event_detail": a[26],
     }
 
   # ******************* control *******************

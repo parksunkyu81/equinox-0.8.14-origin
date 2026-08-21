@@ -27,9 +27,7 @@ struct __attribute__((packed)) health_t {
   // diagnostic only; they never alter Panda safety behavior.
   uint8_t controls_allowed_reason_pkt;
   uint8_t controls_allowed_last_button_pkt;
-  uint32_t controls_allowed_event_addr_pkt;
+  uint16_t controls_allowed_event_addr_pkt;
   uint8_t controls_allowed_event_bus_pkt;
-  uint32_t controls_allowed_event_ts_pkt;
   uint32_t controls_allowed_event_detail_pkt;
-  uint32_t controls_allowed_last_button_ts_pkt;
 };
