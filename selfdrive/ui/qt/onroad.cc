@@ -579,9 +579,14 @@ void NvgWindow::drawHud(QPainter &p) {
     const float v_lead = std::max(lead_one.getVLead(), 0.0f);
     const float desired_distance = desired_follow_distance(v_ego, v_lead,
                                                            controls_state.getDynamicTRValue());
-    const float time_gap = d_rel / std::max(v_ego, 0.1f);
-    lead_info.sprintf("%.0f meters (Desired:%.0f) | %.0f km/h | %.2f s",
-                      d_rel, desired_distance, v_lead * MS_TO_KPH, time_gap);
+    if (v_ego > 1.0f) {
+      const float time_gap = d_rel / v_ego;
+      lead_info.sprintf("%.0f meters (Desired:%.0f) | %.0f km/h | %.2f s",
+                        d_rel, desired_distance, v_lead * MS_TO_KPH, time_gap);
+    } else {
+      lead_info.sprintf("%.0f meters (Desired:%.0f) | %.0f km/h | -- s",
+                        d_rel, desired_distance, v_lead * MS_TO_KPH);
+    }
   }
   if (leads[0].getProb() > .5) {
     drawLead(p, leads[0], s->scene.lead_vertices[0], s->scene.lead_radar[0], lead_info);
