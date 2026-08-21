@@ -32,6 +32,9 @@ CURVE_EXTENSION_BLEND = 0.75
 CURVE_EXTENSION_MAX_CORRECTION_NEAR_M = 0.15
 CURVE_EXTENSION_MAX_CORRECTION_FAR_M = 1.00
 CURVE_EXTENSION_LOG_INTERVAL_S = 0.10
+CURVE_EXTENSION_LLK_MAX_AGE_S = 0.25
+CURVE_EXTENSION_LLK_MAX_YAW_RATE_RAD_S = 1.0
+CURVE_EXTENSION_MIN_YAW_RATE_RAD_S = 1e-4
 
 class LateralPlanner:
   def __init__(self, CP):
@@ -73,6 +76,9 @@ class LateralPlanner:
     self._curve_extension_correction_10m = 0.0
     self._curve_extension_last_mpc_target_curvature = None
     self._curve_extension_last_block_reason = None
+    self._curve_extension_yaw_rate = None
+    self._curve_extension_yaw_source = "unavailable"
+    self._curve_extension_yaw_age_s = None
 
     self.lat_mpc = LateralMpc()
     self.reset_mpc(np.zeros(4))
@@ -102,11 +108,53 @@ class LateralPlanner:
       reference_curvature * yaw_curvature > 0.0
     )
 
+  def _update_curve_extension_yaw_rate(self, sm, car_state, t):
+    """Select a fresh vehicle-frame yaw rate without trusting a silent zero."""
+    car_yaw_rate = self._diagnostic_float(getattr(car_state, 'yawRate', None))
+    self._curve_extension_yaw_rate = None
+    self._curve_extension_yaw_source = "unavailable"
+    self._curve_extension_yaw_age_s = None
+
+    # carState is synchronized with the control loop. A real non-zero value is
+    # preferred, but several vehicle interfaces leave this optional field at 0.
+    if (car_yaw_rate is not None and
+        CURVE_EXTENSION_MIN_YAW_RATE_RAD_S <= abs(car_yaw_rate) <=
+        CURVE_EXTENSION_LLK_MAX_YAW_RATE_RAD_S):
+      self._curve_extension_yaw_rate = car_yaw_rate
+      self._curve_extension_yaw_source = "carState"
+      self._curve_extension_yaw_age_s = 0.0
+      return
+
+    # locationd publishes calibrated angular velocity in the vehicle frame and
+    # is already used by the torque controller. Require its service validity,
+    # measurement validity, finite uncertainty, and a recent timestamp before
+    # using it as the independent turn confirmation.
+    try:
+      llk = sm['liveLocationKalman']
+      llk_age_s = t - float(sm.logMonoTime['liveLocationKalman']) * 1e-9
+      angular_velocity = llk.angularVelocityCalibrated
+      yaw_rate = float(angular_velocity.value[2])
+      yaw_rate_std = float(angular_velocity.std[2])
+      llk_valid = bool(sm.valid['liveLocationKalman'])
+      measurement_valid = bool(angular_velocity.valid)
+      if (llk_valid and measurement_valid and
+          0.0 <= llk_age_s <= CURVE_EXTENSION_LLK_MAX_AGE_S and
+          np.isfinite(yaw_rate) and np.isfinite(yaw_rate_std) and
+          0.0 < yaw_rate_std < 10.0 and
+          abs(yaw_rate) <= CURVE_EXTENSION_LLK_MAX_YAW_RATE_RAD_S):
+        self._curve_extension_yaw_rate = yaw_rate
+        self._curve_extension_yaw_source = "liveLocationKalman"
+        self._curve_extension_yaw_age_s = llk_age_s
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+      # No IMU fallback is safer than accepting a malformed or stale value.
+      pass
+
   def _vehicle_matches_curve_extension(self, car_state, measured_curvature):
     """Require independent steering-model and yaw evidence of the saved turn."""
     v_ego = float(car_state.vEgo)
-    yaw_rate = float(car_state.yawRate)
-    if (not np.isfinite(measured_curvature) or not np.isfinite(yaw_rate) or
+    yaw_rate = self._curve_extension_yaw_rate
+    if (not np.isfinite(measured_curvature) or yaw_rate is None or
+        not np.isfinite(yaw_rate) or
         v_ego < CURVE_EXTENSION_MIN_SPEED_MS):
       return False
 
@@ -159,7 +207,8 @@ class LateralPlanner:
   def _curve_extension_log_fields(self, car_state, measured_curvature, t,
                                   reason=None, mpc_target_curvature=None):
     v_ego = self._diagnostic_float(car_state.vEgo)
-    yaw_rate = self._diagnostic_float(car_state.yawRate)
+    car_yaw_rate = self._diagnostic_float(getattr(car_state, 'yawRate', None))
+    yaw_rate = self._diagnostic_float(self._curve_extension_yaw_rate)
     yaw_curvature = None
     if v_ego is not None and yaw_rate is not None:
       yaw_curvature = yaw_rate / max(v_ego, 1.0)
@@ -174,6 +223,9 @@ class LateralPlanner:
       "steering_torque": self._diagnostic_float(car_state.steeringTorque),
       "measured_curvature": self._diagnostic_float(measured_curvature),
       "yaw_rate": yaw_rate,
+      "car_state_yaw_rate": car_yaw_rate,
+      "yaw_rate_source": self._curve_extension_yaw_source,
+      "yaw_rate_age_s": self._diagnostic_float(self._curve_extension_yaw_age_s),
       "yaw_curvature": self._diagnostic_float(yaw_curvature),
       "saved_curvature": self._diagnostic_float(self._curve_extension_curvature),
       "model_curvature": model_curvature,
@@ -236,6 +288,8 @@ class LateralPlanner:
       return "lane_change_active"
     if not self.model_data_valid:
       return "model_path_invalid"
+    if self._curve_extension_yaw_rate is None:
+      return "yaw_rate_unavailable"
     if (t - self.LP.curve_extension_lane_center_last_continuous_t >
         CURVE_EXTENSION_LANE_CONTINUITY_MAX_AGE_S):
       return "lane_continuity_expired"
@@ -375,6 +429,7 @@ class LateralPlanner:
     v_ego = car_state.vEgo
     measured_curvature = sm['controlsState'].curvature
     controls_active = bool(sm['controlsState'].active)
+    self._update_curve_extension_yaw_rate(sm, car_state, sec_since_boot())
 
     # Parse model predictions
     md = sm['modelV2']
