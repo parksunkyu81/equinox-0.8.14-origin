@@ -1675,6 +1675,11 @@ class Controls:
               bool(getattr(lat_plan, 'pathStabilityActive', False)),
               float(getattr(lat_plan, 'pathWobbleRangeM', 0.0)),
               int(getattr(lat_plan, 'pathWobbleFlips', 0)))
+        if hasattr(self.LaC, 'set_model_path_quality'):
+            self.LaC.set_model_path_quality(
+              float(getattr(lat_plan, 'modelPathQuality', 0.0)),
+              bool(getattr(lat_plan, 'modelPathQualityTrusted', False)),
+              float(getattr(lat_plan, 'modelNearCurvature', 0.0)))
 
         CC = car.CarControl.new_message()
         CC.enabled = self.enabled

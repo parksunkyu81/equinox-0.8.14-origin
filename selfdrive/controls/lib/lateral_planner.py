@@ -717,5 +717,9 @@ class LateralPlanner:
     lateralPlan.pathWobbleFlips = 0
     lateralPlan.laneCenterCorrectionM = float(self.LP.lane_center_correction_m)
     lateralPlan.laneCenterCorrectionActive = bool(self.LP.lane_center_correction_active)
+    lateralPlan.modelPathQuality = float(self.model_path_quality)
+    lateralPlan.modelPathQualityTrusted = bool(
+      self.model_path_quality >= MODEL_PATH_QUALITY_TRUSTED)
+    lateralPlan.modelNearCurvature = float(self.model_near_curvature)
 
     pm.send('lateralPlan', plan_send)

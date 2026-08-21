@@ -1129,6 +1129,10 @@ struct LateralPlan @0xe1e9318e2ae8b51e {
   pathWobbleFlips @37 :UInt8;
   laneCenterCorrectionM @38 :Float32;
   laneCenterCorrectionActive @39 :Bool;
+  # Quality of the current vision trajectory after lane/edge/vehicle-motion checks.
+  modelPathQuality @40 :Float32;
+  modelPathQualityTrusted @41 :Bool;
+  modelNearCurvature @42 :Float32;
 
   enum Desire {
     none @0;
