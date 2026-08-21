@@ -1201,6 +1201,16 @@ class Controls:
             IGNORED_SAFETY_MODES)
         controls_mismatch_reasons = []
 
+        # A Panda can temporarily enter noOutput while it is being reset or
+        # reconfigured offroad. A previously latched ready state must not turn
+        # that expected transition into controlsMismatch; require the normal
+        # consecutive-frame handshake again before a subsequent engagement.
+        # A mismatch while controls are enabled remains an immediate safety
+        # event below.
+        if not self.enabled and not panda_safety_matches:
+            self.panda_safety_ready = False
+            self.panda_safety_match_counter = 0
+
         # ControlsReady lets boardd apply CarParams. Do not allow engagement until the
         # resulting Panda safety configuration has remained correct for a short period.
         if not self.panda_safety_ready:
