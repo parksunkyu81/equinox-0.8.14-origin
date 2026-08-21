@@ -547,7 +547,7 @@ void NvgWindow::drawHud(QPainter &p) {
     drawDebugText(p);
 
   const auto controls_state = sm["controlsState"].getControlsState();
-  //const auto device_State = sm["deviceState"].getDeviceState();
+  const auto device_state = sm["deviceState"].getDeviceState();
   //const auto car_control = sm["carControl"].getCarControl();
   //const auto live_params = sm["liveParameters"].getLiveParameters();
   //const auto live_torque_params = sm["liveTorqueParameters"].getLiveTorqueParameters();
@@ -555,39 +555,23 @@ void NvgWindow::drawHud(QPainter &p) {
 
   //QColor orangeColor = QColor(52, 197, 66, 255);
 
-  /*float cpuTemp = 0;
-  auto cpuList = device_State.getCpuTempC();
+  float cpu_usage = 0.0f;
+  const auto cpu_usage_list = device_state.getCpuUsagePercent();
 
-  if (cpuList.size() > 0) {
-     for(int i = 0; i < cpuList.size(); i++)
-         cpuTemp += cpuList[i];
-     cpuTemp /= cpuList.size();
+  if (cpu_usage_list.size() > 0) {
+    for (const auto usage : cpu_usage_list) {
+      cpu_usage += usage;
+    }
+    cpu_usage /= cpu_usage_list.size();
   }
 
-  int cpuUsage = 0;
-  auto cpuUsageList = device_State.getCpuUsagePercent();
-
-  if (cpuUsageList.size() > 0) {
-     for(int i = 0; i < cpuUsageList.size(); i++)
-         cpuUsage += cpuUsageList[i];
-     cpuUsage /= cpuUsageList.size();
-  }*/
-
-  // BAT(%d) HW(CPU %.1f ℃, %d, MEM %d)
-  /*
-  device_State.getBatteryPercent(),
-                      cpuTemp,
-                      cpuUsage,
-                      device_State.getMemoryUsagePercent(),
-  */
   QString infoText;
-  infoText.sprintf("(LatA:%.3f,Fri:%.3f,PT:%.0f) TCO(%.2f) SR(%.2f) SAD(%.2f) MIN_TR(%.1f) DF_MOD(%.1f)",
+  infoText.sprintf("CPU(%.0f%%) MEM(%d%%) (LatA:%.3f,Fri:%.3f) SR(%.2f) MIN_TR(%.1f) DF_MOD(%.1f)",
+                      cpu_usage,
+                      device_state.getMemoryUsagePercent(),
                       controls_state.getLatAccelFactor(),
                       controls_state.getFriction(),
-                      controls_state.getTotalBucketPoints(),
-                      controls_state.getTotalCameraOffset(),
                       controls_state.getSteerRatio(),
-                      controls_state.getSteerActuatorDelay(),
                       controls_state.getMinTR(),
                       controls_state.getGlobalDfMod()
                       );
