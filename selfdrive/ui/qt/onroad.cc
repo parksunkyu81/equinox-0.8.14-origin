@@ -655,11 +655,12 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // 하단 원형 2줄 시작점
   const int icon_start_x = 600;
   const int icon_step = radius + 50;
+  const int row_gap = 25;
 
-  // 1. 핸들 토크 각도
+  // Keep the inter-row gap at half of its former 50 px value.
   int x = icon_start_x;
   const int y1 = rect().bottom() - footer_h / 2 - 10;
-  const int y2 = rect().bottom() - (footer_h / 2) - (radius + 50) - 10;
+  const int y2 = y1 - radius - row_gap;
 
   float cur_speed = std::max(0.0, car_state.getVEgo() * MS_TO_KPH);
   QString str;
@@ -701,34 +702,34 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
                                         comma_pedal_min, comma_pedal_max);
   const float comma_pedal_ratio = (comma_pedal - comma_pedal_min) /
                                   (comma_pedal_max - comma_pedal_min);
-  const QRectF pedal_ring(x - radius / 2 + 10, y1 - radius / 2 + 10,
-                          radius - 20, radius - 20);
+  const QRectF pedal_ring(x - radius / 2 + 7, y1 - radius / 2 + 7,
+                          radius - 14, radius - 14);
 
-  p.setPen(QPen(QColor(55, 61, 74, 255), 4));
+  p.setPen(QPen(QColor(55, 61, 74, 255), 3));
   p.setBrush(QColor(55, 61, 74, 235));
   p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
 
   // Full-scale background ring and clockwise live comma-pedal command ring.
   p.setBrush(Qt::NoBrush);
-  p.setPen(QPen(QColor(118, 126, 139, 180), 13, Qt::SolidLine, Qt::FlatCap));
+  p.setPen(QPen(QColor(118, 126, 139, 180), 9, Qt::SolidLine, Qt::FlatCap));
   p.drawEllipse(pedal_ring);
-  p.setPen(QPen(QColor(255, 0, 0, 255), 13, Qt::SolidLine, Qt::FlatCap));
+  p.setPen(QPen(QColor(255, 0, 0, 255), 9, Qt::SolidLine, Qt::FlatCap));
   p.drawArc(pedal_ring, 90 * 16,
             -static_cast<int>(comma_pedal_ratio * 360.0f * 16.0f));
 
   str = "PEDAL MAX";
-  configFont(p, "Open Sans", 28, "Bold");
-  drawText(p, x, y1 - 24, str, 230);
+  configFont(p, "Open Sans", 20, "Bold");
+  drawText(p, x, y1 - 17, str, 230);
 
   str2.sprintf("%.0f", comma_pedal * 100.0f);
   textColor = QColor(255, 255, 255, 245);
-  configFont(p, "Open Sans", 52, "Bold");
-  drawTextWithColor(p, x, y1 + 30, str2, textColor);
+  configFont(p, "Open Sans", 36, "Bold");
+  drawTextWithColor(p, x, y1 + 21, str2, textColor);
   p.setOpacity(1.0);
   p.setBrush(Qt::NoBrush);
   p.setPen(Qt::NoPen);
 
-  float textSize = 48.f;
+  float textSize = 34.f;
 
   // 2. VISION DIST
   x = icon_start_x + (icon_step * 4);
@@ -759,11 +760,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     str = "──";
   }
 
-  configFont(p, "Open Sans", 38, "Bold");
-  drawText(p, x, y2-20, "DIST", 200);
+  configFont(p, "Open Sans", 27, "Bold");
+  drawText(p, x, y2-14, "DIST", 200);
 
   configFont(p, "Open Sans", textSize, "Bold");
-  drawTextWithColor(p, x, y2+50, str, textColor);
+  drawTextWithColor(p, x, y2+35, str, textColor);
   p.setOpacity(1.0);
 
   // 3. LKAS
@@ -791,11 +792,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     textColor = QColor(254, 32, 32, 200);
   }
 
-  configFont(p, "Open Sans", 38, "Bold");
-  drawText(p, x, y1-20, "LKAS", 200);
+  configFont(p, "Open Sans", 27, "Bold");
+  drawText(p, x, y1-14, "LKAS", 200);
 
   configFont(p, "Open Sans", textSize, "Bold");
-  drawTextWithColor(p, x, y1+50, str, textColor);
+  drawTextWithColor(p, x, y1+35, str, textColor);
   p.setOpacity(1.0);
 
   // 4.auto hold
@@ -877,11 +878,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   }
 
   QColor aiProfileColor = QColor(120, 255, 120, 230);
-  configFont(p, "Open Sans", 30.f, "Bold");
-  drawTextWithColor(p, x, y1 - 18,
+  configFont(p, "Open Sans", 21.f, "Bold");
+  drawTextWithColor(p, x, y1 - 13,
                     QString("AI distance : %1").arg(ai_distance_profile),
                     aiProfileColor);
-  drawTextWithColor(p, x, y1 + 34,
+  drawTextWithColor(p, x, y1 + 24,
                     QString("AI pedal : %1").arg(ai_pedal_profile),
                     aiProfileColor);
   p.setOpacity(1.0);
@@ -909,11 +910,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   textColor = QColor(120, 255, 120, 200);   // green
 
 
-  configFont(p, "Open Sans", 38, "Bold");
-  drawText(p, x, y2-20, str, 200);
+  configFont(p, "Open Sans", 27, "Bold");
+  drawText(p, x, y2-14, str, 200);
 
   configFont(p, "Open Sans", textSize, "Bold");
-  drawTextWithColor(p, x, y2+50, str2, textColor);
+  drawTextWithColor(p, x, y2+35, str2, textColor);
   p.setOpacity(1.0);
 
   /*
@@ -979,11 +980,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     textColor = QColor(225, 255, 239, 255);
   }
 
-  configFont(p, "Open Sans", 28, "Bold");
-  drawText(p, x, y2-20, "PEDAL STATUS", 200);
+  configFont(p, "Open Sans", 20, "Bold");
+  drawText(p, x, y2-14, "PEDAL STATUS", 200);
 
   configFont(p, "Open Sans", textSize, "Bold");
-  drawTextWithColor(p, x, y2+50, str, textColor);
+  drawTextWithColor(p, x, y2+35, str, textColor);
   p.setOpacity(1.0);
 
   // 3. ACC
@@ -1004,11 +1005,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     textColor = QColor(254, 32, 32, 200);
   }
 
-  configFont(p, "Open Sans", 38, "Bold");
-  drawText(p, x, y2-20, "ACC", 200);
+  configFont(p, "Open Sans", 27, "Bold");
+  drawText(p, x, y2-14, "ACC", 200);
 
   configFont(p, "Open Sans", textSize, "Bold");
-  drawTextWithColor(p, x, y2+50, str, textColor);
+  drawTextWithColor(p, x, y2+35, str, textColor);
   p.setOpacity(1.0);
 
   // 4. brake
@@ -1045,28 +1046,28 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   const float steer_command = std::clamp(std::abs(car_control.getActuators().getSteer()) * steer_max,
                                          0.0f, steer_max);
   const float steer_ratio = steer_command / steer_max;
-  const QRectF steer_ring(x - radius / 2 + 10, y1 - radius / 2 + 10,
-                          radius - 20, radius - 20);
+  const QRectF steer_ring(x - radius / 2 + 7, y1 - radius / 2 + 7,
+                          radius - 14, radius - 14);
 
-  p.setPen(QPen(QColor(55, 61, 74, 255), 4));
+  p.setPen(QPen(QColor(55, 61, 74, 255), 3));
   p.setBrush(QColor(55, 61, 74, 235));
   p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
 
   // Full-scale background ring and clockwise live-command ring.
   p.setBrush(Qt::NoBrush);
-  p.setPen(QPen(QColor(118, 126, 139, 180), 13, Qt::SolidLine, Qt::FlatCap));
+  p.setPen(QPen(QColor(118, 126, 139, 180), 9, Qt::SolidLine, Qt::FlatCap));
   p.drawEllipse(steer_ring);
-  p.setPen(QPen(QColor(164, 210, 70, 255), 13, Qt::SolidLine, Qt::FlatCap));
+  p.setPen(QPen(QColor(164, 210, 70, 255), 9, Qt::SolidLine, Qt::FlatCap));
   p.drawArc(steer_ring, 90 * 16, -static_cast<int>(steer_ratio * 360.0f * 16.0f));
 
   str = "STEER MAX";
-  configFont(p, "Open Sans", 28, "Bold");
-  drawText(p, x, y1 - 24, str, 230);
+  configFont(p, "Open Sans", 20, "Bold");
+  drawText(p, x, y1 - 17, str, 230);
 
   str2.sprintf("%.0f", steer_command);
   textColor = QColor(255, 255, 255, 245);
-  configFont(p, "Open Sans", 52, "Bold");
-  drawTextWithColor(p, x, y1 + 30, str2, textColor);
+  configFont(p, "Open Sans", 36, "Bold");
+  drawTextWithColor(p, x, y1 + 21, str2, textColor);
   p.setOpacity(1.0);
   p.setBrush(Qt::NoBrush);
   p.setPen(Qt::NoPen);
