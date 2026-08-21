@@ -22,8 +22,13 @@ LAT_ACCEL_OFFSET_MAX = 0.03
 CONFIDENT_CORNER_BOOST_MAX = 0.18
 CONFIDENT_CORNER_CURVATURE_BP = [0.003, 0.030]
 CONFIDENT_CORNER_LAT_ACCEL_BP = [0.08, 1.20]
-CONFIDENT_CORNER_SPEED_BP = [0.0, 3.5, 7.0, 22.0, 28.0]
-CONFIDENT_CORNER_SPEED_V = [0.0, 0.0, 0.80, 1.00, 0.0]
+# The GM command path is enabled at MIN_STEER_SPEED (10 km/h).  Previously
+# this independent boost gate stayed at zero until 3.5 m/s (12.6 km/h), which
+# made a confirmed tight corner receive no additional authority for the first
+# 2.6 km/h of valid LKAS operation.  Start modestly at the same threshold and
+# ramp smoothly; this does not alter the normal actuator limit.
+CONFIDENT_CORNER_SPEED_BP = [0.0, MIN_STEER_SPEED, 4.0, 5.0, 7.0, 22.0, 28.0]
+CONFIDENT_CORNER_SPEED_V = [0.0, 0.35, 0.55, 0.70, 0.80, 1.00, 0.0]
 CONFIDENT_CORNER_BOOST_RISE = 0.006
 CONFIDENT_CORNER_BOOST_FALL = 0.020
 CONFIDENT_CORNER_HOLD_FRAMES = 100  # one second at the control rate
