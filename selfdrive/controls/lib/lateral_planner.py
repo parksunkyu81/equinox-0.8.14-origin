@@ -34,7 +34,12 @@ CURVE_EXTENSION_LOG_INTERVAL_S = 0.10
 CURVE_EXTENSION_LLK_MAX_AGE_S = 0.25
 CURVE_EXTENSION_LLK_MAX_YAW_RATE_RAD_S = 1.0
 CURVE_EXTENSION_MIN_YAW_RATE_RAD_S = 1e-4
+CURVE_EXTENSION_STEERING_ONLY_MAX_DURATION_S = 0.50
+CURVE_EXTENSION_STEERING_ONLY_MAX_DISTANCE_M = 3.00
+CURVE_EXTENSION_STEERING_ONLY_BLEND = 0.45
 MODEL_PATH_QUALITY_TRUSTED = 0.75
+MODEL_PATH_QUALITY_CURVE_CONFIRMED_MIN_CONFIDENCE = 0.80
+MODEL_PATH_QUALITY_CURVE_CONFIRMED_FLOOR = 0.80
 MODEL_PATH_QUALITY_EDGE_STD_TRUSTED = 1.0
 MODEL_PATH_QUALITY_EDGE_STD_LIMIT = 3.0
 MODEL_PATH_QUALITY_CURVATURE_ERROR_MIN = 0.010
@@ -244,13 +249,24 @@ class LateralPlanner:
 
     # Road-edge uncertainty measures confidence in the *edge locations*, not
     # confidence in the model trajectory. On tight or bounded curves an edge
-    # is routinely occluded or outside the camera view, which made the old
-    # min(lane_score, edge_score) gate withdraw torque authority exactly when
-    # the independently confirmed path needed it most. Keep edge_score as a
-    # diagnostic, but do not let it veto path confidence. Model uncertainty,
-    # lane confidence, vehicle agreement, and temporal stability remain hard
-    # gates.
+    # is routinely occluded or outside the camera view, so keep edge_score as
+    # a diagnostic only. Likewise, a low lane-line probability must not veto a
+    # curve that the model and independent vehicle curvature both confirm.
+    # The override requires a stronger model confidence and leaves agreement
+    # and temporal-stability checks as hard gates.
     visual_score = lane_score
+    curve_confirmed = bool(
+      self.model_confidence >= MODEL_PATH_QUALITY_CURVE_CONFIRMED_MIN_CONFIDENCE and
+      agreement_score > 0.0 and
+      temporal_score > 0.0 and
+      vehicle_curvature is not None and
+      abs(model_curvature) >= CURVE_EXTENSION_MIN_REFERENCE_CURVATURE and
+      abs(vehicle_curvature) >= CURVE_EXTENSION_MIN_ACTUAL_CURVATURE and
+      model_curvature * vehicle_curvature > 0.0)
+    if curve_confirmed and lane_score < MODEL_PATH_QUALITY_CURVE_CONFIRMED_FLOOR:
+      visual_score = MODEL_PATH_QUALITY_CURVE_CONFIRMED_FLOOR
+      reasons = [reason for reason in reasons if reason != "lane_low"]
+      reasons.append("lane_low_curve_confirmed")
     self.model_path_quality = float(np.clip(
       min(self.model_confidence, visual_score, agreement_score, temporal_score), 0.0, 1.0))
     self.model_path_quality_reason = "trusted" if not reasons else ",".join(reasons)
@@ -273,30 +289,33 @@ class LateralPlanner:
       (1.0 - CURVE_EXTENSION_FUSED_MODEL_WEIGHT) * vehicle_curvature)
 
   def _vehicle_matches_curve_extension(self, car_state, measured_curvature):
-    """Require independent steering-model and yaw evidence of the saved turn."""
+    """Confirm a saved turn with yaw when available, otherwise steering only."""
     v_ego = float(car_state.vEgo)
     yaw_rate = self._curve_extension_yaw_rate
-    if (not np.isfinite(measured_curvature) or yaw_rate is None or
-        not np.isfinite(yaw_rate) or
+    if (not np.isfinite(measured_curvature) or
         v_ego < CURVE_EXTENSION_MIN_SPEED_MS):
       return False
 
-    yaw_curvature = yaw_rate / max(v_ego, 1.0)
     reference = self._curve_extension_curvature
     if (abs(reference) < CURVE_EXTENSION_MIN_REFERENCE_CURVATURE or
         abs(measured_curvature) < CURVE_EXTENSION_MIN_ACTUAL_CURVATURE or
-        abs(yaw_curvature) < CURVE_EXTENSION_MIN_ACTUAL_CURVATURE or
-        not self._same_curve_direction(reference, measured_curvature,
-                                       yaw_curvature)):
+        reference * measured_curvature <= 0.0):
       return False
 
     # The car may still be catching up to the reference, so permit lag but
-    # reject a material disagreement from either independent measurement.
+    # reject a material disagreement from the available physical measurement.
     max_error = max(0.004, 1.25 * abs(reference))
+    if abs(measured_curvature - reference) > max_error:
+      return False
+
+    if yaw_rate is None or not np.isfinite(yaw_rate):
+      return True
+
+    yaw_curvature = yaw_rate / max(v_ego, 1.0)
     return bool(
-      abs(measured_curvature - reference) <= max_error and
-      abs(yaw_curvature - reference) <= max_error
-    )
+      abs(yaw_curvature) >= CURVE_EXTENSION_MIN_ACTUAL_CURVATURE and
+      self._same_curve_direction(reference, measured_curvature, yaw_curvature) and
+      abs(yaw_curvature - reference) <= max_error)
 
   def _model_curve_exit_reason(self):
     """Trust a confident model immediately when it says the saved turn ended."""
@@ -416,8 +435,6 @@ class LateralPlanner:
       return "lane_change_active"
     if not self.model_data_valid:
       return "model_path_invalid"
-    if self._curve_extension_yaw_rate is None:
-      return "yaw_rate_unavailable"
     if (t - self.LP.curve_extension_lane_center_last_continuous_t >
         CURVE_EXTENSION_LANE_CONTINUITY_MAX_AGE_S):
       return "lane_continuity_expired"
@@ -464,10 +481,15 @@ class LateralPlanner:
       self._curve_extension_distance_m += float(car_state.vEgo) * frame_dt
       self._curve_extension_last_t = t
     elapsed = t - self._curve_extension_start_t
-    if (elapsed >= CURVE_EXTENSION_MAX_DURATION_S or
-        self._curve_extension_distance_m >= CURVE_EXTENSION_MAX_DISTANCE_M):
+    steering_only = self._curve_extension_yaw_rate is None
+    max_duration = (CURVE_EXTENSION_STEERING_ONLY_MAX_DURATION_S if steering_only
+                    else CURVE_EXTENSION_MAX_DURATION_S)
+    max_distance = (CURVE_EXTENSION_STEERING_ONLY_MAX_DISTANCE_M if steering_only
+                    else CURVE_EXTENSION_MAX_DISTANCE_M)
+    if (elapsed >= max_duration or
+        self._curve_extension_distance_m >= max_distance):
       limit_reason = ("distance_limit" if
-                      self._curve_extension_distance_m >= CURVE_EXTENSION_MAX_DISTANCE_M
+                      self._curve_extension_distance_m >= max_distance
                       else "time_limit")
       self._stop_curve_extension(
         car_state, measured_curvature, t, limit_reason)
@@ -486,10 +508,11 @@ class LateralPlanner:
         car_state, measured_curvature, t, "virtual_arc_invalid")
       return d_path_xyz
 
-    time_decay = 1.0 - elapsed / CURVE_EXTENSION_MAX_DURATION_S
-    distance_decay = 1.0 - self._curve_extension_distance_m / CURVE_EXTENSION_MAX_DISTANCE_M
+    time_decay = 1.0 - elapsed / max_duration
+    distance_decay = 1.0 - self._curve_extension_distance_m / max_distance
     decay = max(0.0, min(time_decay, distance_decay))
-    weight = CURVE_EXTENSION_BLEND * decay
+    blend = CURVE_EXTENSION_STEERING_ONLY_BLEND if steering_only else CURVE_EXTENSION_BLEND
+    weight = blend * decay
     max_correction = np.interp(
       np.abs(d_path_xyz[:, 0]), [0.0, 25.0],
       [CURVE_EXTENSION_MAX_CORRECTION_NEAR_M,
