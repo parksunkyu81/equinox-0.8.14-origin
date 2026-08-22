@@ -961,7 +961,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   increaseTorqueLatAccelBtn->setObjectName("torqueLatAccelAdjustBtn");
   auto cityTorqueLatAccelBtn = new QPushButton("City", homeWidget);
   cityTorqueLatAccelBtn->setObjectName("torqueLatAccelPresetBtn");
-  auto expressTorqueLatAccelBtn = new QPushButton("Express", homeWidget);
+  auto expressTorqueLatAccelBtn = new QPushButton("Highway", homeWidget);
   expressTorqueLatAccelBtn->setObjectName("torqueLatAccelPresetBtn");
 
   for (auto button : {decreaseTorqueLatAccelBtn, increaseTorqueLatAccelBtn,
