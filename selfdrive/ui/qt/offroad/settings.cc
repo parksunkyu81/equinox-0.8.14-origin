@@ -34,6 +34,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QScroller>
+#include <QTimer>
 #include <QListView>
 #include <QListWidget>
 
@@ -48,33 +49,48 @@ double clampTorqueLatAccelFactor(double value) {
   return std::max(kTorqueLatAccelFactorMin, std::min(value, kTorqueLatAccelFactorMax));
 }
 
-double readTorqueLatAccelFactor(Params &params) {
-  // Torque live tuning reads this file first. The Params value is retained as
-  // a fallback for initial car setup and for compatibility with older builds.
-  double value = kTorqueLatAccelFactorDefault;
+bool readTorqueLatAccelFactorFromParam(Params &params, double &value) {
   bool param_ok = false;
   const double param_value = QString::fromStdString(params.get("TorqueMaxLatAccel")).toDouble(&param_ok);
   if (param_ok) {
-    value = param_value * 0.1;
+    value = clampTorqueLatAccelFactor(param_value * 0.1);
   }
+  return param_ok;
+}
 
+bool readTorqueLatAccelFactorFromTune(double &value) {
   QFile tune_file(kTorqueTunePath);
   if (tune_file.open(QIODevice::ReadOnly)) {
     const QJsonDocument document = QJsonDocument::fromJson(tune_file.readAll());
     const QJsonValue tune_value = document.object().value("latAccelFactor");
     if (tune_value.isDouble()) {
-      value = tune_value.toDouble();
+      value = clampTorqueLatAccelFactor(tune_value.toDouble());
+      return true;
     }
   }
-  return clampTorqueLatAccelFactor(value);
+  return false;
+}
+
+double readTorqueLatAccelFactor(Params &params) {
+  // nTune is the value used by the active torque controller. Params is only a
+  // fallback for first-run and older configurations.
+  double value = kTorqueLatAccelFactorDefault;
+  readTorqueLatAccelFactorFromParam(params, value);
+  readTorqueLatAccelFactorFromTune(value);
+  return value;
+}
+
+void writeTorqueLatAccelFactorParam(Params &params, double value) {
+  value = std::round(clampTorqueLatAccelFactor(value) * 100.0) / 100.0;
+  // The legacy value uses a 0.1 scale, but supports decimals (for example
+  // 1.61 is stored as 16.1), preserving the nTune value exactly.
+  params.put("TorqueMaxLatAccel", QString::number(value * 10.0, 'f', 1).toStdString());
 }
 
 void writeTorqueLatAccelFactor(Params &params, double value) {
   value = clampTorqueLatAccelFactor(value);
   value = std::round(value * 100.0) / 100.0;
-  // The legacy value uses a 0.1 scale, but supports decimals (for example
-  // 1.61 is stored as 16.1), preserving the nTune value exactly.
-  params.put("TorqueMaxLatAccel", QString::number(value * 10.0, 'f', 1).toStdString());
+  writeTorqueLatAccelFactorParam(params, value);
 
   QJsonObject tune;
   QFile existing_tune(kTorqueTunePath);
@@ -89,6 +105,8 @@ void writeTorqueLatAccelFactor(Params &params, double value) {
   QFile tune_file(kTorqueTunePath);
   if (tune_file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
     tune_file.write(QJsonDocument(tune).toJson(QJsonDocument::Indented));
+    tune_file.flush();
+    tune_file.close();
   }
 }
 }  // namespace
@@ -1000,6 +1018,27 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   };
   Params initial_torque_params;
   updateTorqueLatAccelLabel(readTorqueLatAccelFactor(initial_torque_params));
+
+  // nTune can also be edited outside this menu. Keep the displayed value and
+  // legacy Params value synchronized with the active nTune value.
+  auto syncTorqueLatAccelFactor = [=]() {
+    double tune_value = 0.0;
+    if (!readTorqueLatAccelFactorFromTune(tune_value)) {
+      return;
+    }
+    Params params;
+    double param_value = 0.0;
+    if (!readTorqueLatAccelFactorFromParam(params, param_value) ||
+        std::abs(param_value - tune_value) > 0.0001) {
+      writeTorqueLatAccelFactorParam(params, tune_value);
+    }
+    updateTorqueLatAccelLabel(tune_value);
+  };
+  auto torqueLatAccelSyncTimer = new QTimer(this);
+  torqueLatAccelSyncTimer->setInterval(250);
+  connect(torqueLatAccelSyncTimer, &QTimer::timeout, syncTorqueLatAccelFactor);
+  torqueLatAccelSyncTimer->start();
+
   connect(decreaseTorqueLatAccelBtn, &QPushButton::clicked, [=]() {
     Params params;
     setTorqueLatAccelFactor(readTorqueLatAccelFactor(params) - kTorqueLatAccelFactorStep);
