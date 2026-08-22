@@ -1,8 +1,6 @@
  #!/usr/bin/env python3
 import os
 import math
-import json
-import time
 import numpy as np
 from collections import deque
 from numbers import Number
@@ -250,14 +248,6 @@ class Controls:
         self.curve_pedal_final_accel = 0.0
         self.is_curv_driving = False
         self.curv_speed = 0.0
-        self._curve_log_last_t = -1e9
-        self._curve_log_date = None
-        self._curve_log_path = None
-        self._lateral_diag_log_last_t = -1e9
-        self._lateral_diag_log_last_flush_t = -1e9
-        self._lateral_diag_log_date = None
-        self._lateral_diag_log_path = None
-        self._lateral_diag_log_buffer = deque(maxlen=200)
         self.v_cruise_kph_limit = 0
         self.applyMaxSpeed = 0
         self.roadLimitSpeedActive = 0
@@ -759,304 +749,6 @@ class Controls:
         })
         self.curve_speed_limiter.last_diag.update(model_profile_diag)
 
-    def _flush_lateral_diagnostics(self):
-        if not self._lateral_diag_log_buffer or self._lateral_diag_log_path is None:
-            return
-        try:
-            with open(self._lateral_diag_log_path, "a", encoding="utf-8") as f:
-                f.write("\n".join(self._lateral_diag_log_buffer) + "\n")
-            self._lateral_diag_log_buffer.clear()
-            self._lateral_diag_log_last_flush_t = sec_since_boot()
-        except Exception:
-            cloudlog.exception("lateral diagnostic log flush failed")
-
-    def _log_lateral_diagnostics(self, CS, actuators, lac_log, curvature):
-        """Record lateral control signals at 10 Hz without blocking every control-loop tick."""
-        if not (self.active and lac_log.active):
-            self._flush_lateral_diagnostics()
-            return
-
-        now_mono = sec_since_boot()
-        if (now_mono - self._lateral_diag_log_last_t) < 0.1:
-            return
-        self._lateral_diag_log_last_t = float(now_mono)
-
-        try:
-            def _number(value, digits=6):
-                try:
-                    value = float(value)
-                    return round(value, digits) if np.isfinite(value) else None
-                except (TypeError, ValueError):
-                    return None
-
-            date_key = time.strftime("%Y_%m_%d", time.localtime())
-            if self._lateral_diag_log_date != date_key:
-                log_dir = "/data/lateral_diagnostics"
-                os.makedirs(log_dir, exist_ok=True)
-                self._lateral_diag_log_date = date_key
-                self._lateral_diag_log_path = os.path.join(
-                  log_dir, "lateral_%s.jsonl" % date_key)
-
-            lat_plan = self.sm['lateralPlan']
-            live_params = self.sm['liveParameters']
-            command_output_error = float(actuators.steer) - float(self.last_actuators.steer)
-            rec = {
-              "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-              "mono": _number(now_mono, 3),
-              "frame": int(self.sm.frame),
-              "enabled": bool(self.enabled),
-              "active": bool(self.active),
-              "lat_active": bool(lac_log.active),
-              "can_valid": bool(CS.canValid),
-              "controller": str(self.CP.lateralTuning.which()),
-              "v_ego_ms": _number(CS.vEgo),
-              "v_ego_kph": _number(CS.vEgo * CV.MS_TO_KPH, 3),
-              "a_ego_ms2": _number(CS.aEgo),
-              "steering_angle_deg": _number(CS.steeringAngleDeg),
-              "steering_rate_deg_s": _number(CS.steeringRateDeg),
-              "steering_torque_driver": _number(CS.steeringTorque),
-              "steering_torque_eps": _number(CS.steeringTorqueEps),
-              "steering_pressed": bool(CS.steeringPressed),
-              "steer_fault_temporary": bool(CS.steerFaultTemporary),
-              "steer_fault_permanent": bool(CS.steerFaultPermanent),
-              "live_parameters_valid": bool(self.sm.valid['liveParameters']),
-              "angle_offset_deg": _number(live_params.angleOffsetDeg),
-              "roll_rad": _number(live_params.roll),
-              "actual_curvature": _number(curvature),
-              "desired_curvature": _number(self.desired_curvature),
-              "desired_curvature_rate": _number(self.desired_curvature_rate),
-              "curvature_error": _number(self.desired_curvature - curvature),
-              "lateral_plan_valid": bool(self.sm.valid['lateralPlan']),
-              "lateral_plan_mpc_valid": bool(lat_plan.mpcSolutionValid),
-              "lateral_plan_mono_time": int(self.sm.logMonoTime['lateralPlan']),
-              "lateral_plan_curvatures": [_number(v) for v in lat_plan.curvatures],
-              "lateral_plan_curvature_rates": [_number(v) for v in lat_plan.curvatureRates],
-              "steer_command": _number(actuators.steer),
-              "steer_command_angle_deg": _number(actuators.steeringAngleDeg),
-              "steer_output": _number(self.last_actuators.steer),
-              "steer_output_angle_deg": _number(self.last_actuators.steeringAngleDeg),
-              "steer_command_output_error": _number(command_output_error),
-              "steer_limited": bool(self.steer_limited),
-              "lateral_saturated": bool(lac_log.saturated),
-              "torque_error": None,
-              "torque_p": None,
-              "torque_i": None,
-              "torque_d": None,
-              "torque_f": None,
-              "torque_output": None,
-              "actual_lateral_accel": None,
-              "desired_lateral_accel": None,
-              "lat_accel_factor": _number(self.torque_latAccelFactor),
-              "lat_accel_offset": _number(self.torque_latAccelOffset),
-              "friction": _number(self.torque_friction),
-            }
-            if self.CP.lateralTuning.which() == 'torque':
-                rec.update({
-                  "torque_error": _number(lac_log.error),
-                  "torque_p": _number(lac_log.p),
-                  "torque_i": _number(lac_log.i),
-                  "torque_d": _number(lac_log.d),
-                  "torque_f": _number(lac_log.f),
-                  "torque_output": _number(lac_log.output),
-                  "actual_lateral_accel": _number(lac_log.actualLateralAccel),
-                  "desired_lateral_accel": _number(lac_log.desiredLateralAccel),
-                })
-
-            self._lateral_diag_log_buffer.append(
-              json.dumps(rec, ensure_ascii=False, separators=(",", ":")))
-            if (now_mono - self._lateral_diag_log_last_flush_t) < 1.0:
-                return
-            self._flush_lateral_diagnostics()
-        except Exception:
-            cloudlog.exception("lateral diagnostic logging failed")
-
-    def _log_curve_speed(self, v_ego, target_speed_clu, road_limit_speed,
-                         apply_limit_speed, curv_limit):
-        now_mono = sec_since_boot()
-        curve_transition_active = bool(
-          self.curve_pedal_coordinator.engaged or
-          self.curve_pedal_coordinator.pedal_intervening or
-          self.predictive_coasting.intervening or
-          self.curve_plan_speed_ms < CURVE_SPEED_DISABLED)
-        log_interval = 0.2 if curve_transition_active else 1.0
-        if v_ego < 1.0 or (now_mono - self._curve_log_last_t) < log_interval:
-            return
-        self._curve_log_last_t = float(now_mono)
-        try:
-            date_key = time.strftime("%Y_%m_%d", time.localtime())
-            if self._curve_log_date != date_key:
-                log_dir = "/data/curve_speed_logs"
-                os.makedirs(log_dir, exist_ok=True)
-                self._curve_log_date = date_key
-                self._curve_log_path = os.path.join(log_dir, "curve_speed_%s.log" % date_key)
-
-            diag = dict(getattr(self.curve_speed_limiter, "last_diag", {}) or {})
-            def _kph_from_ms(value):
-                try:
-                    return None if float(value) >= CURVE_SPEED_DISABLED else round(float(value) * 3.6, 3)
-                except (TypeError, ValueError):
-                    return None
-            def _number(value, default=0.0):
-                try:
-                    value = float(value)
-                    return value if np.isfinite(value) else float(default)
-                except (TypeError, ValueError):
-                    return float(default)
-
-            final_max_kph = float(self.max_speed_clu) * self.speed_conv_to_ms * CV.MS_TO_KPH
-            rec = {
-              "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-              "mono": round(float(now_mono), 3),
-              "v_kph": round(float(v_ego) * 3.6, 3),
-              "cruise_kph": round(float(self.v_cruise_kph), 3),
-              "source": str(diag.get("source", "unknown")),
-              "model_valid": bool(diag.get("model_valid", False)),
-              "model_profile_points": int(diag.get("model_profile_points", 0) or 0),
-              "model_curve_adapter": str(diag.get("model_curve_adapter", "unknown")),
-              "model_geometry_points": int(diag.get("model_geometry_points", 0) or 0),
-              "model_yaw_points": int(diag.get("model_yaw_points", 0) or 0),
-              "model_agree_points": int(diag.get("model_agree_points", 0) or 0),
-              "model_disagree_points": int(diag.get("model_disagree_points", 0) or 0),
-              "model_sign_mismatch_points": int(diag.get("model_sign_mismatch_points", 0) or 0),
-              "model_geometry_only_points": int(diag.get("model_geometry_only_points", 0) or 0),
-              "model_short_horizon_points": int(diag.get("model_short_horizon_points", 0) or 0),
-              "model_short_chord_points": int(diag.get("model_short_chord_points", 0) or 0),
-              "model_curvature_cap_points": int(diag.get("model_curvature_cap_points", 0) or 0),
-              "model_adaptive_span_max": int(diag.get("model_adaptive_span_max", 0) or 0),
-              "model_profile_horizon_m": _number(diag.get("model_profile_horizon_m", 0.0)),
-              "model_profile_confidence": _number(diag.get("model_profile_confidence", 0.0)),
-              "model_profile_min_points": int(diag.get("model_profile_min_points", 0) or 0),
-              "model_profile_min_horizon_m": _number(diag.get("model_profile_min_horizon_m", 0.0)),
-              "model_profile_min_confidence": _number(diag.get("model_profile_min_confidence", 0.0)),
-              "model_profile_leg_distance_m": _number(diag.get("model_profile_leg_distance_m", 0.0)),
-              "model_profile_control_allowed": bool(diag.get("model_profile_control_allowed", False)),
-              "model_high_speed_corroborated": bool(diag.get("model_high_speed_corroborated", False)),
-              "model_confirm_frames": int(diag.get("model_confirm_frames", 0) or 0),
-              "model_invalid_hold_frames": int(diag.get("model_invalid_hold_frames", 0) or 0),
-              "model_geometry_max_curvature": diag.get("model_geometry_max_curvature", None),
-              "model_yaw_max_curvature": diag.get("model_yaw_max_curvature", None),
-              "mpc_valid": bool(diag.get("mpc_valid", False)),
-              "measured_curvature": diag.get("measured_curvature", None),
-              "max_curvature": diag.get("max_curvature", None),
-              "selected_curvature": diag.get("selected_curvature", None),
-              "selected_time_s": diag.get("selected_time_s", None),
-              "selected_distance_m": diag.get("selected_distance_m", None),
-              "raw_curve_kph": _kph_from_ms(diag.get("raw_speed_ms", CURVE_SPEED_DISABLED)),
-              "filtered_curve_kph": _kph_from_ms(diag.get("filtered_speed_ms", CURVE_SPEED_DISABLED)),
-              "confirmed": bool(diag.get("confirmed", False)),
-              "invalid_hold": bool(diag.get("invalid_hold", False)),
-              "curve_phase": self.curve_pedal_coordinator.phase,
-              "curve_entry_kph": round(float(self.curve_pedal_coordinator.entry_speed_kph), 3),
-              "curve_plan_kph": _kph_from_ms(self.curve_plan_speed_ms),
-              "curve_brake_latched": bool(self.curve_pedal_coordinator.brake_latched),
-              "curve_pedal_intervening": bool(self.curve_pedal_coordinator.pedal_intervening),
-              "curve_pedal_lift_ratio": round(float(self.curve_pedal_coordinator.last_lift_ratio), 4),
-              "curve_raw_accel": round(float(self.curve_pedal_raw_accel), 4),
-              "curve_final_accel": round(float(self.curve_pedal_final_accel), 4),
-              "predictive_coast_phase": self.predictive_coasting.phase,
-              "predictive_coast_intervening": bool(self.predictive_coasting.intervening),
-              "predictive_coast_quick_release": bool(
-                self.predictive_coasting.quick_release_active),
-              "predictive_coast_opening_release": bool(
-                self.predictive_coasting.opening_release_active),
-              "predictive_coast_positive_demand_release": bool(
-                self.predictive_coasting.positive_demand_release_active),
-              "predictive_coast_launch_floor_release": bool(
-                self.predictive_coasting.launch_floor_release_active),
-              "predictive_coast_recovery_floor_release": bool(
-                self.predictive_coasting.recovery_floor_release_active),
-              "predictive_coast_brake_release": bool(
-                self.predictive_coasting.brake_release_active),
-              "predictive_coast_pedal_scale": round(float(self.predictive_coast_pedal_scale), 4),
-              "predictive_coast_desired_gap_m": round(float(self.predictive_coasting.desired_gap_m), 3),
-              "predictive_coast_margin_m": round(float(self.predictive_coasting.distance_margin_m), 3),
-              "predictive_coast_time_to_gap_s": (round(float(self.predictive_coasting.time_to_gap_s), 3)
-                                                   if math.isfinite(self.predictive_coasting.time_to_gap_s) else None),
-              "predictive_coast_ttc_s": (round(float(self.predictive_coasting.ttc_s), 3)
-                                           if math.isfinite(self.predictive_coasting.ttc_s) else None),
-              "predictive_coast_lead_drel_m": round(float(self.predictive_coasting.lead_distance_m), 3),
-              "predictive_coast_lead_vrel_ms": round(float(self.predictive_coasting.lead_rel_speed_ms), 3),
-              "predictive_coast_lead_accel_ms2": round(float(self.predictive_coasting.lead_accel_ms2), 3),
-              "predictive_coast_lead_prob": round(float(self.predictive_coasting.lead_model_prob), 4),
-              "predictive_coast_low_speed_learned_offset_s": round(
-                float(self.predictive_coasting.learned_low_speed_offset_s), 4),
-              "predictive_coast_low_speed_learned_active": bool(
-                self.predictive_coasting.learned_low_speed_offset_active),
-              "predictive_coast_ai_gain": round(float(self.driving_style_gain), 4),
-              "comma_pedal_profile": str(self.comma_pedal_profile),
-              "comma_pedal_profile_gain": round(float(self.comma_pedal_profile_gain), 4),
-              "comma_pedal_learned_gain": round(float(self.comma_pedal_learned_gain), 4),
-              "comma_pedal_effective_gain": round(float(self.comma_pedal_effective_gain), 4),
-              "comma_pedal_profile_changing": bool(self.comma_pedal_profile_changing),
-              "comma_pedal_raw_command": round(float(self.comma_pedal_raw_command), 5),
-              "comma_pedal_styled_command": round(float(self.comma_pedal_styled_command), 5),
-              "comma_pedal_final_command": round(float(self.comma_pedal_final_command), 5),
-              "predictive_coast_last_pedal": round(float(self.last_actuators.gas), 5),
-              "predictive_coast_source": self.predictive_coasting.dominant_source,
-              "stop_accel_boost_floor_allowed": bool(
-                self.stop_accel_boost_latch.floor_allowed),
-              "stop_accel_boost_floor_accel": round(
-                float(self.stop_accel_boost_latch.floor_accel), 4),
-              "lead_loss_cruise_armed": bool(self.lead_loss_cruise_assist.armed),
-              "lead_loss_cruise_active": bool(self.lead_loss_cruise_assist.active),
-              "lead_loss_cruise_duration_s": round(
-                float(self.lead_loss_cruise_assist.duration), 3),
-              "lead_loss_cruise_pedal_target": round(
-                float(self.lead_loss_cruise_assist.pedal_target), 5),
-              "lead_loss_cruise_count": int(
-                self.lead_loss_cruise_assist.activation_count),
-              "driving_style_low_speed_coast_offset_s": round(
-                float(self.driving_style_status.low_speed_coast_offset_s), 4),
-              "driving_style_low_speed_brake_events": int(
-                self.driving_style_status.low_speed_brake_events),
-              "driving_style_low_speed_coast_updates": int(
-                self.driving_style_status.low_speed_coast_updates),
-              "predictive_coast_source_pressures": {
-                key: round(float(value), 4)
-                for key, value in self.predictive_coasting.source_pressures.items()
-              },
-              "predictive_coast_required_decel_ms2": round(
-                float(self.predictive_coasting.required_decel_ms2), 4),
-              "predictive_brake_shadow": bool(self.predictive_coasting.brake_needed_shadow),
-              "predictive_brake_alert_enabled": bool(self.predictive_brake_alert_enabled),
-              "predictive_brake_advisory": bool(self.predictive_coasting.brake_advisory),
-              "predictive_brake_bootstrap": bool(self.predictive_coasting.brake_bootstrap),
-              "predictive_brake_min_pressure": round(
-                float(self.predictive_coasting.brake_min_pressure), 4),
-              "predictive_brake_decel_margin_ms2": round(
-                float(self.predictive_coasting.brake_decel_margin_ms2), 4),
-              "predictive_brake_shadow_events": int(self.predictive_coasting.brake_shadow_events),
-              "predictive_brake_shadow_brake_responses": int(
-                self.predictive_coasting.brake_shadow_brake_responses),
-              "predictive_brake_shadow_no_brake_resolutions": int(
-                self.predictive_coasting.brake_shadow_no_brake_resolutions),
-              "driver_brake_pressed": bool(self.predictive_coasting.driver_brake_pressed),
-              "natural_decel_shadow_only": True,
-              "natural_decel_bin": int(self.natural_decel_status.bin_index),
-              "natural_decel_ms2": round(float(self.natural_decel_status.decel_ms2), 4),
-              "natural_decel_confidence": round(float(self.natural_decel_status.confidence), 4),
-              "natural_decel_ready": bool(self.natural_decel_status.ready),
-              "natural_decel_eligible": bool(self.natural_decel_status.eligible),
-              "natural_decel_duration_s": round(float(self.natural_decel_status.duration_s), 2),
-              "natural_decel_events": int(self.natural_decel_status.events),
-              "natural_decel_pitch_deg": round(float(self.natural_decel_pitch_deg), 4),
-              "natural_decel_pitch_valid": bool(self.natural_decel_pitch_valid),
-              "natural_decel_pitch_fallback": bool(self.natural_decel_pitch_fallback),
-              "natural_decel_pitch_source": str(self.natural_decel_pitch_source),
-              "natural_decel_bins": self.natural_decel_learner.bins_snapshot(),
-              "curve_target_kph": round(float(target_speed_clu) * self.speed_conv_to_ms * CV.MS_TO_KPH, 3),
-              "curv_limit_clu": int(curv_limit),
-              "road_limit_speed": _number(road_limit_speed),
-              "apply_limit_speed": _number(apply_limit_speed),
-              "final_apply_max_kph": round(float(clip(
-                self.v_cruise_kph, MIN_SET_SPEED_KPH, final_max_kph)), 3),
-            }
-            with open(self._curve_log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n")
-        except Exception:
-            cloudlog.exception("curve speed diagnostic logging failed")
-
-
     # [크루즈 MAX 속도 설정] #
     def cal_max_speed(self, frame: int, vEgo, sm, CS, measured_curvature):
 
@@ -1167,7 +859,6 @@ class Controls:
 
         self.update_max_speed(int(max_speed_clu + 0.5), CS,
                               curv_limit != 0 and curv_limit == int(max_speed_clu))
-        self._log_curve_speed(vEgo, max_speed_clu, road_limit_speed, apply_limit_speed, curv_limit)
         # print("update_max_speed() value : ", self.max_speed_clu)
 
         return road_limit_speed, left_dist, max_speed_log
@@ -2149,8 +1840,6 @@ class Controls:
 
         steer_angle_without_offset = math.radians(CS.steeringAngleDeg - params.angleOffsetDeg)
         curvature = -self.VM.calc_curvature(steer_angle_without_offset, CS.vEgo, params.roll)
-        self._log_lateral_diagnostics(CS, actuators, lac_log, curvature)
-
         # NDA Add.. (PSK)
         road_limit_speed, left_dist, max_speed_log = self.cal_max_speed(
             self.sm.frame, CS.vEgo, self.sm, CS, curvature)
