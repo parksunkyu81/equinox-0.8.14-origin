@@ -5,7 +5,7 @@ import numpy as np
 from cereal import log
 from common.filter_simple import FirstOrderFilter
 from common.numpy_fast import interp
-from common.realtime import DT_MDL, sec_since_boot
+from common.realtime import DT_MDL
 from selfdrive.ntune import ntune_common_get
 from selfdrive.swaglog import cloudlog
 from selfdrive.controls.lib.lane_probability import (
@@ -54,7 +54,6 @@ LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M = 0.08
 LOW_CONFIDENCE_MAX_CORRECTION_M = 0.35
 CURVE_LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M = 0.12
 CURVE_LOW_CONFIDENCE_MAX_CORRECTION_M = 0.45
-CURVE_EXTENSION_LANE_CENTER_CONTINUITY_MAX_M = 0.45
 
 
 class LanePlanner:
@@ -69,7 +68,6 @@ class LanePlanner:
     self.lll_prob = 0.0
     self.rll_prob = 0.0
     self.d_prob = 0.0
-    self.raw_lane_d_prob = 0.0
     self.lll_std = 1.0
     self.rll_std = 1.0
     self.l_lane_change_prob = 0.0
@@ -83,15 +81,6 @@ class LanePlanner:
     self.lane_center_correction_m = 0.0
     self.lane_center_correction_active = False
     self._last_lane_center_refs = None
-
-    # Export only the raw, frame-to-frame geometry continuity needed by the
-    # lateral planner's short virtual-curve extension. This deliberately does not
-    # use a retained lane line after the model has stopped publishing one.
-    self.lane_data_valid = False
-    self.lane_geometry_plausible = False
-    self.curve_extension_lane_center_continuous = False
-    self.curve_extension_lane_center_last_continuous_t = -np.inf
-    self._last_curve_extension_lane_center_refs = None
 
   def _update_d_prob(self, target_d_prob, v_ego, lane_center_refs,
                      lane_change_active, curve_assist):
@@ -131,7 +120,6 @@ class LanePlanner:
     return next_d_prob
 
   def parse_model(self, md):
-    self.lane_data_valid = False
     lane_lines = md.laneLines
     lane_line_probs = as_finite_vector(md.laneLineProbs, minimum_size=4)
     lane_line_stds = as_finite_vector(md.laneLineStds, minimum_size=4)
@@ -154,7 +142,6 @@ class LanePlanner:
       self.rll_prob = float(lane_line_probs[2])
       self.lll_std = float(lane_line_stds[1])
       self.rll_std = float(lane_line_stds[2])
-      self.lane_data_valid = True
     else:
       self.lll_prob = 0.0
       self.rll_prob = 0.0
@@ -176,8 +163,6 @@ class LanePlanner:
   def get_d_path(self, v_ego, path_t, path_xyz, measured_curvature=0.0,
                  lane_change_active=False):
     del path_t
-    self.lane_geometry_plausible = False
-    self.curve_extension_lane_center_continuous = False
     path_xyz[:, 1] += self.path_offset
 
     width_pts = self.rll_y - self.lll_y
@@ -187,7 +172,6 @@ class LanePlanner:
     )
     if np.count_nonzero(geometry_valid) < 2:
       self.d_prob = 0.0
-      self.raw_lane_d_prob = 0.0
       cloudlog.warning("Lateral mpc - incomplete laneline x/y geometry, ignoring")
       return path_xyz
 
@@ -210,7 +194,6 @@ class LanePlanner:
     lane_width_pts = lane_width_pts[unique_indices]
     if lane_x.size < 2:
       self.d_prob = 0.0
-      self.raw_lane_d_prob = 0.0
       return path_xyz
 
     width_samples = np.array([
@@ -249,7 +232,6 @@ class LanePlanner:
 
     raw_target_d_prob = enhance_lane_probability(
       combined_lane_probability(l_prob, r_prob), True)
-    self.raw_lane_d_prob = float(raw_target_d_prob)
     geometry_plausible = bool(
       np.all(width_samples >= LANE_WIDTH_MIN_END_M) and
       np.all(width_samples <= LANE_WIDTH_MOD_END_M)
@@ -268,24 +250,6 @@ class LanePlanner:
       np.interp(LANE_WIDTH_CHECK_DISTANCES_M, lane_x, lane_left_y) +
       np.interp(LANE_WIDTH_CHECK_DISTANCES_M, lane_x, lane_right_y)
     )
-
-    # The virtual curve extension may only use a short history when the current
-    # raw lane geometry is physically plausible and agrees with the preceding
-    # raw lane frame. Probability can fall during a camera-edge dropout, but
-    # stale geometry from an absent model frame must never qualify.
-    self.lane_geometry_plausible = bool(
-      self.lane_data_valid and geometry_plausible)
-    self.curve_extension_lane_center_continuous = bool(
-      self.lane_geometry_plausible and
-      self._last_curve_extension_lane_center_refs is not None and
-      np.max(np.abs(
-        lane_center_refs - self._last_curve_extension_lane_center_refs)) <=
-      CURVE_EXTENSION_LANE_CENTER_CONTINUITY_MAX_M
-    )
-    if self.lane_geometry_plausible:
-      self._last_curve_extension_lane_center_refs = lane_center_refs.copy()
-    if self.curve_extension_lane_center_continuous:
-      self.curve_extension_lane_center_last_continuous_t = sec_since_boot()
 
     # Tight-curve assist is deliberately limited to low/mid speed. It uses
     # both measured vehicle curvature and visible lane bending so the assist
