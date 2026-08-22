@@ -202,8 +202,11 @@ void tick_handler(void) {
 
       }
 
-      // exit controls allowed if unused by openpilot for a few seconds
-      if (controls_allowed && !heartbeat_engaged) {
+      // Exit controls allowed if an engaged openpilot session explicitly
+      // transitions to disengaged while Panda still allows controls. Do not
+      // treat the normal initial cruise-entry state (controls_allowed before
+      // the first engaged heartbeat) as a mismatch.
+      if (heartbeat_disengaged_with_controls_allowed && controls_allowed && !heartbeat_engaged) {
         heartbeat_engaged_mismatches += 1U;
         if (heartbeat_engaged_mismatches >= 3U) {
           set_controls_allowed(false, CONTROLS_ALLOWED_REASON_HEARTBEAT_MISMATCH, 0U, 0xFFU,
@@ -211,6 +214,9 @@ void tick_handler(void) {
         }
       } else {
         heartbeat_engaged_mismatches = 0U;
+        if (!controls_allowed || heartbeat_engaged) {
+          heartbeat_disengaged_with_controls_allowed = false;
+        }
       }
 
       if (!heartbeat_disabled) {

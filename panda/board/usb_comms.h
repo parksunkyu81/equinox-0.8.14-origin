@@ -412,7 +412,22 @@ int usb_cb_control_msg(USB_Setup_TypeDef *setup, uint8_t *resp) {
         heartbeat_counter = 0U;
         heartbeat_lost = false;
         heartbeat_disabled = false;
-        heartbeat_engaged = (setup->b.wValue.w == 1U);
+        const bool next_heartbeat_engaged = (setup->b.wValue.w == 1U);
+
+        // controls_allowed is set from vehicle messages and can become true
+        // before controlsd publishes its first enabled controlsState. Do not
+        // arm the mismatch watchdog for that normal entry sequence. It is
+        // only meaningful after boardd has first declared engagement and
+        // subsequently declares disengagement while Panda still allows
+        // controls.
+        if (heartbeat_engaged && !next_heartbeat_engaged && controls_allowed) {
+          heartbeat_disengaged_with_controls_allowed = true;
+          heartbeat_engaged_mismatches = 0U;
+        } else if (next_heartbeat_engaged) {
+          heartbeat_disengaged_with_controls_allowed = false;
+          heartbeat_engaged_mismatches = 0U;
+        }
+        heartbeat_engaged = next_heartbeat_engaged;
         break;
       }
     // **** 0xf4: k-line/l-line 5 baud initialization
