@@ -366,7 +366,7 @@ void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
   painter.restore();
 }*/
 
-// 차선 흰색→녹색, PATH는 E2E 여부와 무관하게 항상 녹/노/빨 그라데이션, painter save/restore 짝 정상화
+// 차선은 녹색으로 유지하고, 경로 내부는 가까운 쪽부터 무지개색으로 표시한다.
 void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
   painter.save();
 
@@ -385,33 +385,27 @@ void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
     painter.drawPolygon(scene.road_edge_vertices[i].v, scene.road_edge_vertices[i].cnt);
   }
 
-  // 2) PATH: ALWAYS green~yellow~red gradient (accel/curve based)
-  const auto model = (*s->sm)["modelV2"].getModelV2();
-
-  float accel_future = 0.f;
-  const auto &acc = model.getAcceleration();
-  if (acc.getX().size() > 16) {
-    accel_future = acc.getX()[16];  // ~2.5s
+  // 2) PATH: show a red warning path when the model predicts a deep turn.
+  float future_yaw = 0.0f;
+  const auto &orientation = (*s->sm)["modelV2"].getModelV2().getOrientation();
+  if (orientation.getZ().size() > 16) {
+    future_yaw = std::abs(orientation.getZ()[16]);  // roughly 2.5 seconds ahead
   }
-
-  float orient_future = 0.f;
-  const auto &ori = model.getOrientation();
-  if (ori.getZ().size() > 16) {
-    orient_future = std::abs(ori.getZ()[16]);  // ~2.5s
-  }
-
-  // accel: + => greener, - => redder (0~120)
-  float hue_acc = std::clamp(60.f + accel_future * 30.f, 0.f, 120.f);
-  // curve: bigger => redder (0~120)
-  float hue_curve = std::clamp(120.f - orient_future * 600.f, 0.f, 120.f);
-
-  float end_hue = std::min(hue_acc, hue_curve);
-  end_hue = int(end_hue * 100.f + 0.5f) / 100.f;
 
   QLinearGradient bg(0, height(), 0, height() / 4);
-  bg.setColorAt(0.0, QColor::fromHslF(120.f / 360.f, 0.97, 0.56, 0.45));    // green
-  bg.setColorAt(0.5, QColor::fromHslF(end_hue / 360.f, 1.00, 0.68, 0.35));  // mid
-  bg.setColorAt(1.0, QColor::fromHslF(end_hue / 360.f, 1.00, 0.68, 0.00));  // fade
+  if (future_yaw >= 0.12f) {
+    bg.setColorAt(0.00, QColor(255, 22, 22, 210));   // sharp-turn warning
+    bg.setColorAt(0.55, QColor(255, 48, 25, 185));
+    bg.setColorAt(1.00, QColor(255, 92, 30, 0));
+  } else {
+    bg.setColorAt(0.00, QColor(36, 84, 255, 190));    // blue
+    bg.setColorAt(0.18, QColor(116, 42, 255, 190));   // purple
+    bg.setColorAt(0.36, QColor(255, 32, 181, 190));   // pink
+    bg.setColorAt(0.54, QColor(255, 43, 43, 185));    // red
+    bg.setColorAt(0.72, QColor(255, 213, 30, 170));   // yellow
+    bg.setColorAt(0.90, QColor(55, 235, 72, 130));    // green
+    bg.setColorAt(1.00, QColor(55, 235, 72, 0));      // fade out
+  }
 
   painter.setBrush(bg);
   painter.drawPolygon(scene.track_vertices.v, scene.track_vertices.cnt);
