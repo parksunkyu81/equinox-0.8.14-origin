@@ -54,6 +54,11 @@ LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M = 0.08
 LOW_CONFIDENCE_MAX_CORRECTION_M = 0.35
 CURVE_LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M = 0.12
 CURVE_LOW_CONFIDENCE_MAX_CORRECTION_M = 0.45
+STRONG_CURVE_MAX_SPEED_MS = 18.0
+STRONG_CURVE_MIN_DPROB = 0.50
+STRONG_CURVE_MIN_LANE_BEND_M = 0.35
+STRONG_CURVE_MIN_MODEL_BEND_M = 0.20
+STRONG_CURVE_RISE_BONUS_PER_S = 0.75
 
 
 class LanePlanner:
@@ -80,10 +85,11 @@ class LanePlanner:
     # Compatibility fields retained for the existing lateralPlan schema.
     self.lane_center_correction_m = 0.0
     self.lane_center_correction_active = False
+    self.strong_curve_confirmed = False
     self._last_lane_center_refs = None
 
   def _update_d_prob(self, target_d_prob, v_ego, lane_center_refs,
-                     lane_change_active, curve_assist):
+                     lane_change_active, curve_assist, strong_curve_confirmed):
     """Rate-limit short confidence dropouts, with extra continuity on tight low-speed curves."""
     target_d_prob = float(np.clip(target_d_prob, 0.0, 1.0))
     curve_assist = float(np.clip(curve_assist, 0.0, 1.0))
@@ -104,7 +110,8 @@ class LanePlanner:
         self.d_prob, target_d_prob, v_ego, DT_MDL)
       if curve_assist > 0.0:
         curve_max_rise = (
-          1.50 + CURVE_CONFIDENCE_RISE_BONUS_PER_S * curve_assist
+          1.50 + CURVE_CONFIDENCE_RISE_BONUS_PER_S * curve_assist +
+          (STRONG_CURVE_RISE_BONUS_PER_S if strong_curve_confirmed else 0.0)
         ) * DT_MDL
         next_d_prob = max(
           next_d_prob, min(target_d_prob, self.d_prob + curve_max_rise))
@@ -161,7 +168,7 @@ class LanePlanner:
       self.r_lane_change_prob = 0.0
 
   def get_d_path(self, v_ego, path_t, path_xyz, measured_curvature=0.0,
-                 lane_change_active=False):
+                 lane_change_active=False, model_data_valid=True):
     del path_t
     path_xyz[:, 1] += self.path_offset
 
@@ -172,6 +179,7 @@ class LanePlanner:
     )
     if np.count_nonzero(geometry_valid) < 2:
       self.d_prob = 0.0
+      self.strong_curve_confirmed = False
       cloudlog.warning("Lateral mpc - incomplete laneline x/y geometry, ignoring")
       return path_xyz
 
@@ -194,6 +202,7 @@ class LanePlanner:
     lane_width_pts = lane_width_pts[unique_indices]
     if lane_x.size < 2:
       self.d_prob = 0.0
+      self.strong_curve_confirmed = False
       return path_xyz
 
     width_samples = np.array([
@@ -269,6 +278,35 @@ class LanePlanner:
       max(measured_curve_strength, geometry_curve_strength) *
       speed_curve_weight, 0.0, 1.0))
 
+    # Only promote lane following when the visible lane center and the current
+    # model path bend the same way. This is a present-frame agreement check,
+    # not a retained/virtual curve state.
+    model_geometry_valid = np.isfinite(path_xyz[:, 0]) & np.isfinite(path_xyz[:, 1])
+    model_bend_m = 0.0
+    if np.count_nonzero(model_geometry_valid) >= 2:
+      model_x = path_xyz[:, 0][model_geometry_valid]
+      model_y = path_xyz[:, 1][model_geometry_valid]
+      model_order = np.argsort(model_x)
+      model_x, model_indices = np.unique(model_x[model_order], return_index=True)
+      model_y = model_y[model_order][model_indices]
+      if model_x.size >= 2:
+        model_refs = np.interp(LANE_WIDTH_CHECK_DISTANCES_M, model_x, model_y)
+        model_bend_m = float(model_refs[-1] - model_refs[0])
+    lane_bend_signed_m = float(lane_center_refs[-1] - lane_center_refs[0])
+    curve_direction_agrees = (
+      abs(lane_bend_signed_m) >= STRONG_CURVE_MIN_LANE_BEND_M and
+      abs(model_bend_m) >= STRONG_CURVE_MIN_MODEL_BEND_M and
+      np.sign(lane_bend_signed_m) == np.sign(model_bend_m)
+    )
+    self.strong_curve_confirmed = bool(
+      not lane_change_active and
+      model_data_valid and
+      v_ego <= STRONG_CURVE_MAX_SPEED_MS and
+      curve_assist >= 0.50 and
+      geometry_plausible and
+      raw_target_d_prob >= STRONG_CURVE_MIN_DPROB and
+      curve_direction_agrees)
+
     fallback_max_speed = interp(
       curve_assist, [0.0, 1.0],
       [LOW_SPEED_FALLBACK_MAX_MS, CURVE_FALLBACK_MAX_MS])
@@ -284,7 +322,8 @@ class LanePlanner:
       if fallback_active else raw_target_d_prob
 
     self.d_prob = self._update_d_prob(
-      target_d_prob, v_ego, lane_center_refs, lane_change_active, curve_assist)
+      target_d_prob, v_ego, lane_center_refs, lane_change_active, curve_assist,
+      self.strong_curve_confirmed)
 
     lane_path_y_interp = np.interp(path_xyz[:, 0], lane_x, lane_path_y)
     if target_d_prob < 0.50:
