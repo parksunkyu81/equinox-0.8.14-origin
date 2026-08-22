@@ -19,19 +19,6 @@ LAT_ACCEL_FACTOR_MAX = 5.00
 FRICTION_MIN = 0.0
 FRICTION_MAX = 0.50
 LAT_ACCEL_OFFSET_MAX = 0.03
-CONFIDENT_CORNER_BOOST_MAX = 0.18
-CONFIDENT_CORNER_CURVATURE_BP = [0.003, 0.030]
-CONFIDENT_CORNER_LAT_ACCEL_BP = [0.08, 1.20]
-# The GM command path is enabled at MIN_STEER_SPEED (10 km/h).  Previously
-# this independent boost gate stayed at zero until 3.5 m/s (12.6 km/h), which
-# made a confirmed tight corner receive no additional authority for the first
-# 2.6 km/h of valid LKAS operation.  Start modestly at the same threshold and
-# ramp smoothly; this does not alter the normal actuator limit.
-CONFIDENT_CORNER_SPEED_BP = [0.0, MIN_STEER_SPEED, 4.0, 5.0, 7.0, 22.0, 28.0]
-CONFIDENT_CORNER_SPEED_V = [0.0, 0.35, 0.55, 0.70, 0.80, 1.00, 0.0]
-CONFIDENT_CORNER_BOOST_RISE = 0.006
-CONFIDENT_CORNER_BOOST_FALL = 0.020
-CONFIDENT_CORNER_HOLD_FRAMES = 100  # one second at the control rate
 
 
 class LatControlTorque(LatControl):
@@ -61,23 +48,12 @@ class LatControlTorque(LatControl):
     self.live_torque_params = dict(self.fixed_torque_params)
     self._last_requested_steer = 0.0
     self._last_applied_steer = 0.0
-    self.model_path_quality = 0.0
-    self.model_path_quality_trusted = False
-    self.model_near_curvature = 0.0
-    self.confident_corner_boost = 0.0
-    self.confident_corner_strength = 0.0
-    self.confident_corner_hold_frames = 0
-    self.confident_corner_direction = 0
 
   def reset(self):
     super().reset()
     self.pid.reset()
     self._last_requested_steer = 0.0
     self._last_applied_steer = 0.0
-    self.confident_corner_boost = 0.0
-    self.confident_corner_strength = 0.0
-    self.confident_corner_hold_frames = 0
-    self.confident_corner_direction = 0
 
   def update_live_torque_params(self, latAccelFactor, latAccelOffset,
                                 friction, totalBucketPoints=0):
@@ -101,92 +77,21 @@ class LatControlTorque(LatControl):
     # custom path-state machine.
     del active, range_m, flips
 
-  def set_model_path_quality(self, quality, trusted, model_near_curvature):
-    """Receive the planner's camera/IMU/vehicle-motion quality decision."""
-    try:
-      quality = float(quality)
-      model_near_curvature = float(model_near_curvature)
-    except (TypeError, ValueError):
-      quality = 0.0
-      model_near_curvature = 0.0
-    self.model_path_quality = float(clip(quality, 0.0, 1.0))
-    self.model_path_quality_trusted = bool(trusted and self.model_path_quality >= 0.75)
-    self.model_near_curvature = model_near_curvature if math.isfinite(
-      model_near_curvature) else 0.0
-
-  def _update_confident_corner_boost(self, active, CS, desired_curvature,
-                                     actual_curvature, steer_limited):
-    """Add torque authority only for a camera/IMU-confirmed same-direction turn."""
-    desired_curvature = float(desired_curvature)
-    actual_curvature = float(actual_curvature)
-    direction = 1 if desired_curvature > 0.0 else (-1 if desired_curvature < 0.0 else 0)
-    model_direction_ok = (
-      abs(self.model_near_curvature) < 0.003 or
-      self.model_near_curvature * desired_curvature > 0.0)
-    vehicle_direction_ok = (
-      abs(actual_curvature) < 0.003 or
-      actual_curvature * desired_curvature > 0.0)
-    context_safe = bool(
-      active and self.model_path_quality_trusted and model_direction_ok and
-      vehicle_direction_ok and not CS.steeringPressed and not steer_limited and
-      CS.vEgo >= MIN_STEER_SPEED)
-
-    if not context_safe:
-      # Any perception, driver, or actuator-limit issue returns immediately to
-      # the learned base torque. Do not carry extra authority across a fault.
-      self.confident_corner_boost = 0.0
-      self.confident_corner_strength = 0.0
-      self.confident_corner_hold_frames = 0
-      self.confident_corner_direction = 0
-      return 0.0
-
-    desired_lat_accel = abs(desired_curvature) * CS.vEgo ** 2
-    curvature_strength = interp(
-      abs(desired_curvature), CONFIDENT_CORNER_CURVATURE_BP, [0.0, 1.0])
-    lateral_accel_strength = interp(
-      desired_lat_accel, CONFIDENT_CORNER_LAT_ACCEL_BP, [0.0, 1.0])
-    self.confident_corner_strength = float(clip(
-      max(curvature_strength, lateral_accel_strength), 0.0, 1.0))
-    speed_gate = interp(
-      CS.vEgo, CONFIDENT_CORNER_SPEED_BP, CONFIDENT_CORNER_SPEED_V)
-    target = CONFIDENT_CORNER_BOOST_MAX * self.confident_corner_strength * speed_gate
-
-    if direction and self.confident_corner_direction and direction != self.confident_corner_direction:
-      self.confident_corner_hold_frames = 0
-      self.confident_corner_boost = 0.0
-    self.confident_corner_direction = direction
-    if target >= 0.02:
-      self.confident_corner_hold_frames = CONFIDENT_CORNER_HOLD_FRAMES
-    elif self.confident_corner_hold_frames > 0:
-      self.confident_corner_hold_frames -= 1
-      target = max(target, self.confident_corner_boost)
-
-    if target > self.confident_corner_boost:
-      self.confident_corner_boost = min(
-        target, self.confident_corner_boost + CONFIDENT_CORNER_BOOST_RISE)
-    else:
-      self.confident_corner_boost = max(
-        target, self.confident_corner_boost - CONFIDENT_CORNER_BOOST_FALL)
-    return float(clip(self.confident_corner_boost, 0.0, CONFIDENT_CORNER_BOOST_MAX))
-
   def get_dynamic_debug_torque_params(self):
     params = self.fixed_torque_params
-    effective_lat_accel_factor = float(clip(
-      params['latAccelFactor'] / (1.0 + self.confident_corner_boost),
-      LAT_ACCEL_FACTOR_MIN, LAT_ACCEL_FACTOR_MAX))
     return {
-      'active': bool(self.confident_corner_boost > 1e-4),
-      'latAccelFactor': effective_lat_accel_factor,
+      'active': False,
+      'latAccelFactor': float(params['latAccelFactor']),
       'friction': float(params['friction']),
-      'blend': float(self.confident_corner_boost / CONFIDENT_CORNER_BOOST_MAX),
-      'authorityCeiling': CONFIDENT_CORNER_BOOST_MAX,
-      'corner_strength': float(self.confident_corner_strength),
+      'blend': 0.0,
+      'authorityCeiling': 0.0,
+      'corner_strength': 0.0,
       'directionDamping': False,
       'responseScale': 1.0,
       'responseRatio': 1.0,
       'responseBin': 0,
       'responseStable': False,
-      'responseFrozen': not self.model_path_quality_trusted,
+      'responseFrozen': True,
       'responseUpdateCount': 0,
       'pathStabilityActive': False,
       'pathWobbleRangeM': 0.0,
@@ -218,10 +123,6 @@ class LatControlTorque(LatControl):
       pid_log.active = False
       self._last_requested_steer = 0.0
       self._last_applied_steer = 0.0
-      self.confident_corner_boost = 0.0
-      self.confident_corner_strength = 0.0
-      self.confident_corner_hold_frames = 0
-      self.confident_corner_direction = 0
     else:
       if self.use_steering_angle:
         actual_curvature = -VM.calc_curvature(
@@ -249,15 +150,7 @@ class LatControlTorque(LatControl):
       measurement = actual_lateral_accel + low_speed_factor * actual_curvature
       error = setpoint - measurement
 
-      corner_boost = self._update_confident_corner_boost(
-        active, CS, desired_curvature, actual_curvature, steer_limited)
-      torque_params = dict(self.fixed_torque_params)
-      # Lower latAccelFactor increases the requested steering torque for the
-      # same lateral-acceleration error. The actuator's normal steer_max is
-      # unchanged, so this cannot exceed the vehicle safety command limit.
-      torque_params['latAccelFactor'] = float(clip(
-        torque_params['latAccelFactor'] / (1.0 + corner_boost),
-        LAT_ACCEL_FACTOR_MIN, LAT_ACCEL_FACTOR_MAX))
+      torque_params = self.fixed_torque_params
       pid_log.error = self.torque_from_lateral_accel(
         lateral_accel_value=error,
         torque_params=torque_params)
