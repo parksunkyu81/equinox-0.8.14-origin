@@ -34,14 +34,13 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QScroller>
-#include <QSaveFile>
 #include <QListView>
 #include <QListWidget>
 
 namespace {
 constexpr double kTorqueLatAccelFactorMin = 0.5;
 constexpr double kTorqueLatAccelFactorMax = 4.5;
-constexpr double kTorqueLatAccelFactorStep = 0.1;
+constexpr double kTorqueLatAccelFactorStep = 0.01;
 constexpr double kTorqueLatAccelFactorDefault = 2.0;
 const QString kTorqueTunePath = "/data/ntune/torque.json";
 
@@ -72,7 +71,10 @@ double readTorqueLatAccelFactor(Params &params) {
 
 void writeTorqueLatAccelFactor(Params &params, double value) {
   value = clampTorqueLatAccelFactor(value);
-  params.put("TorqueMaxLatAccel", std::to_string(std::lround(value * 10.0)));
+  value = std::round(value * 100.0) / 100.0;
+  // The legacy value uses a 0.1 scale, but supports decimals (for example
+  // 1.61 is stored as 16.1), preserving the nTune value exactly.
+  params.put("TorqueMaxLatAccel", QString::number(value * 10.0, 'f', 1).toStdString());
 
   QJsonObject tune;
   QFile existing_tune(kTorqueTunePath);
@@ -82,10 +84,11 @@ void writeTorqueLatAccelFactor(Params &params, double value) {
   tune.insert("latAccelFactor", value);
 
   QDir().mkpath("/data/ntune");
-  QSaveFile tune_file(kTorqueTunePath);
-  if (tune_file.open(QIODevice::WriteOnly)) {
+  // Keep the same file inode: nTune watches this directory with F_NOTIFY and
+  // reliably receives a direct modification, unlike an atomic rename.
+  QFile tune_file(kTorqueTunePath);
+  if (tune_file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
     tune_file.write(QJsonDocument(tune).toJson(QJsonDocument::Indented));
-    tune_file.commit();
   }
 }
 }  // namespace
@@ -986,7 +989,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   auto updateTorqueLatAccelLabel = [=](double value) {
     value = clampTorqueLatAccelFactor(value);
     torqueLatAccelLabel->setText(
-      QString("Torque latAccelFactor (0.500 ~ 4.500) : %1\nStep Scale : x0.1")
+      QString("Torque latAccelFactor (0.500 ~ 4.500) : %1\nStep Scale : x0.01")
         .arg(value, 0, 'f', 3));
   };
   auto setTorqueLatAccelFactor = [=](double value) {
