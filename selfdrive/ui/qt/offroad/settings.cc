@@ -1,5 +1,6 @@
 #include "selfdrive/ui/qt/offroad/settings.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <string>
@@ -28,9 +29,66 @@
 
 #include <QComboBox>
 #include <QAbstractItemView>
+#include <QDir>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QScroller>
+#include <QSaveFile>
 #include <QListView>
 #include <QListWidget>
+
+namespace {
+constexpr double kTorqueLatAccelFactorMin = 0.5;
+constexpr double kTorqueLatAccelFactorMax = 4.5;
+constexpr double kTorqueLatAccelFactorStep = 0.1;
+constexpr double kTorqueLatAccelFactorDefault = 2.0;
+const QString kTorqueTunePath = "/data/ntune/torque.json";
+
+double clampTorqueLatAccelFactor(double value) {
+  return std::max(kTorqueLatAccelFactorMin, std::min(value, kTorqueLatAccelFactorMax));
+}
+
+double readTorqueLatAccelFactor(const Params &params) {
+  // Torque live tuning reads this file first. The Params value is retained as
+  // a fallback for initial car setup and for compatibility with older builds.
+  double value = kTorqueLatAccelFactorDefault;
+  bool param_ok = false;
+  const double param_value = QString::fromStdString(params.get("TorqueMaxLatAccel")).toDouble(&param_ok);
+  if (param_ok) {
+    value = param_value * 0.1;
+  }
+
+  QFile tune_file(kTorqueTunePath);
+  if (tune_file.open(QIODevice::ReadOnly)) {
+    const QJsonDocument document = QJsonDocument::fromJson(tune_file.readAll());
+    const QJsonValue tune_value = document.object().value("latAccelFactor");
+    if (tune_value.isDouble()) {
+      value = tune_value.toDouble();
+    }
+  }
+  return clampTorqueLatAccelFactor(value);
+}
+
+void writeTorqueLatAccelFactor(Params &params, double value) {
+  value = clampTorqueLatAccelFactor(value);
+  params.put("TorqueMaxLatAccel", std::to_string(std::lround(value * 10.0)));
+
+  QJsonObject tune;
+  QFile existing_tune(kTorqueTunePath);
+  if (existing_tune.open(QIODevice::ReadOnly)) {
+    tune = QJsonDocument::fromJson(existing_tune.readAll()).object();
+  }
+  tune.insert("latAccelFactor", value);
+
+  QDir().mkpath("/data/ntune");
+  QSaveFile tune_file(kTorqueTunePath);
+  if (tune_file.open(QIODevice::WriteOnly)) {
+    tune_file.write(QJsonDocument(tune).toJson(QJsonDocument::Indented));
+    tune_file.commit();
+  }
+}
+}  // namespace
 
 TogglesPanel::TogglesPanel(SettingsWindow *parent) : ListWidget(parent) {
   // param, title, desc, icon
@@ -734,6 +792,19 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
       color: #dddddd;
       padding: 20px;
     }
+    #torqueLatAccelLabel {
+      font-size: 38px;
+      color: #dddddd;
+      padding: 20px;
+    }
+    #torqueLatAccelAdjustBtn, #torqueLatAccelPresetBtn {
+      font-size: 38px;
+      padding: 10px 20px;
+      color: #dddddd;
+      background-color: #444444;
+      border: 0px;
+      border-radius: 20px;
+    }
     #followingDistanceProfileCombo, #commaPedalResistanceCombo {
       min-width: 300px;
       min-height: 100px;
@@ -887,6 +958,70 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   toggleLayout->addLayout(layoutBtn_0);
   toggleLayout->addWidget(horizontal_line());
   toggleLayout->addLayout(layoutBtn_5);
+
+  // Keep the torque factor control at the bottom of Community. nTune watches
+  // its JSON file, so these changes apply without changing the control logic.
+  auto torqueLatAccelLabel = new QLabel(homeWidget);
+  torqueLatAccelLabel->setObjectName("torqueLatAccelLabel");
+  torqueLatAccelLabel->setWordWrap(true);
+  torqueLatAccelLabel->setMinimumWidth(0);
+  torqueLatAccelLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+
+  auto decreaseTorqueLatAccelBtn = new QPushButton("-", homeWidget);
+  decreaseTorqueLatAccelBtn->setObjectName("torqueLatAccelAdjustBtn");
+  auto increaseTorqueLatAccelBtn = new QPushButton("+", homeWidget);
+  increaseTorqueLatAccelBtn->setObjectName("torqueLatAccelAdjustBtn");
+  auto cityTorqueLatAccelBtn = new QPushButton("City", homeWidget);
+  cityTorqueLatAccelBtn->setObjectName("torqueLatAccelPresetBtn");
+  auto expressTorqueLatAccelBtn = new QPushButton("Express", homeWidget);
+  expressTorqueLatAccelBtn->setObjectName("torqueLatAccelPresetBtn");
+
+  for (auto button : {decreaseTorqueLatAccelBtn, increaseTorqueLatAccelBtn,
+                      cityTorqueLatAccelBtn, expressTorqueLatAccelBtn}) {
+    button->setMinimumHeight(100);
+  }
+  decreaseTorqueLatAccelBtn->setFixedWidth(100);
+  increaseTorqueLatAccelBtn->setFixedWidth(100);
+
+  auto updateTorqueLatAccelLabel = [=](double value) {
+    value = clampTorqueLatAccelFactor(value);
+    torqueLatAccelLabel->setText(
+      QString("Torque latAccelFactor (0.500 ~ 4.500) : %1\nStep Scale : x0.1")
+        .arg(value, 0, 'f', 3));
+  };
+  auto setTorqueLatAccelFactor = [=](double value) {
+    Params params;
+    value = clampTorqueLatAccelFactor(value);
+    writeTorqueLatAccelFactor(params, value);
+    updateTorqueLatAccelLabel(value);
+  };
+  Params initial_torque_params;
+  updateTorqueLatAccelLabel(readTorqueLatAccelFactor(initial_torque_params));
+  connect(decreaseTorqueLatAccelBtn, &QPushButton::clicked, [=]() {
+    Params params;
+    setTorqueLatAccelFactor(readTorqueLatAccelFactor(params) - kTorqueLatAccelFactorStep);
+  });
+  connect(increaseTorqueLatAccelBtn, &QPushButton::clicked, [=]() {
+    Params params;
+    setTorqueLatAccelFactor(readTorqueLatAccelFactor(params) + kTorqueLatAccelFactorStep);
+  });
+  connect(cityTorqueLatAccelBtn, &QPushButton::clicked, [=]() {
+    setTorqueLatAccelFactor(1.6);
+  });
+  connect(expressTorqueLatAccelBtn, &QPushButton::clicked, [=]() {
+    setTorqueLatAccelFactor(1.7);
+  });
+
+  QHBoxLayout* torqueLatAccelLayout = new QHBoxLayout();
+  torqueLatAccelLayout->setContentsMargins(0, 0, 0, 0);
+  torqueLatAccelLayout->setSpacing(10);
+  torqueLatAccelLayout->addWidget(torqueLatAccelLabel, 1);
+  torqueLatAccelLayout->addWidget(decreaseTorqueLatAccelBtn);
+  torqueLatAccelLayout->addWidget(increaseTorqueLatAccelBtn);
+  torqueLatAccelLayout->addWidget(cityTorqueLatAccelBtn);
+  torqueLatAccelLayout->addWidget(expressTorqueLatAccelBtn);
+  toggleLayout->addWidget(horizontal_line());
+  toggleLayout->addLayout(torqueLatAccelLayout);
 
 }
 
