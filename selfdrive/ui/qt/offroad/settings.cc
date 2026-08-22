@@ -29,12 +29,10 @@
 
 #include <QComboBox>
 #include <QAbstractItemView>
-#include <QDir>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QScroller>
-#include <QTimer>
 #include <QListView>
 #include <QListWidget>
 
@@ -43,54 +41,27 @@ constexpr double kTorqueLatAccelFactorMin = 0.5;
 constexpr double kTorqueLatAccelFactorMax = 4.5;
 constexpr double kTorqueLatAccelFactorStep = 0.01;
 constexpr double kTorqueLatAccelFactorDefault = 2.0;
-const QString kTorqueTunePath = "/data/ntune/torque.json";
+const QString kTorqueTunePath = "/data/ntune/lat_torque_v4.json";
 
 double clampTorqueLatAccelFactor(double value) {
   return std::max(kTorqueLatAccelFactorMin, std::min(value, kTorqueLatAccelFactorMax));
 }
 
-bool readTorqueLatAccelFactorFromParam(Params &params, double &value) {
-  bool param_ok = false;
-  const double param_value = QString::fromStdString(params.get("TorqueMaxLatAccel")).toDouble(&param_ok);
-  if (param_ok) {
-    value = clampTorqueLatAccelFactor(param_value * 0.1);
-  }
-  return param_ok;
-}
-
-bool readTorqueLatAccelFactorFromTune(double &value) {
+double readTorqueLatAccelFactor() {
+  double value = kTorqueLatAccelFactorDefault;
   QFile tune_file(kTorqueTunePath);
   if (tune_file.open(QIODevice::ReadOnly)) {
-    const QJsonDocument document = QJsonDocument::fromJson(tune_file.readAll());
-    const QJsonValue tune_value = document.object().value("latAccelFactor");
+    const QJsonValue tune_value = QJsonDocument::fromJson(tune_file.readAll())
+                                  .object().value("latAccelFactor");
     if (tune_value.isDouble()) {
-      value = clampTorqueLatAccelFactor(tune_value.toDouble());
-      return true;
+      value = tune_value.toDouble();
     }
   }
-  return false;
+  return clampTorqueLatAccelFactor(value);
 }
 
-double readTorqueLatAccelFactor(Params &params) {
-  // nTune is the value used by the active torque controller. Params is only a
-  // fallback for first-run and older configurations.
-  double value = kTorqueLatAccelFactorDefault;
-  readTorqueLatAccelFactorFromParam(params, value);
-  readTorqueLatAccelFactorFromTune(value);
-  return value;
-}
-
-void writeTorqueLatAccelFactorParam(Params &params, double value) {
+void writeTorqueLatAccelFactor(double value) {
   value = std::round(clampTorqueLatAccelFactor(value) * 100.0) / 100.0;
-  // The legacy value uses a 0.1 scale, but supports decimals (for example
-  // 1.61 is stored as 16.1), preserving the nTune value exactly.
-  params.put("TorqueMaxLatAccel", QString::number(value * 10.0, 'f', 1).toStdString());
-}
-
-void writeTorqueLatAccelFactor(Params &params, double value) {
-  value = clampTorqueLatAccelFactor(value);
-  value = std::round(value * 100.0) / 100.0;
-  writeTorqueLatAccelFactorParam(params, value);
 
   QJsonObject tune;
   QFile existing_tune(kTorqueTunePath);
@@ -99,13 +70,9 @@ void writeTorqueLatAccelFactor(Params &params, double value) {
   }
   tune.insert("latAccelFactor", value);
 
-  QDir().mkpath("/data/ntune");
-  // Keep the same file inode: nTune watches this directory with F_NOTIFY and
-  // reliably receives a direct modification, unlike an atomic rename.
   QFile tune_file(kTorqueTunePath);
   if (tune_file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
     tune_file.write(QJsonDocument(tune).toJson(QJsonDocument::Indented));
-    tune_file.flush();
     tune_file.close();
   }
 }
@@ -1007,45 +974,21 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   auto updateTorqueLatAccelLabel = [=](double value) {
     value = clampTorqueLatAccelFactor(value);
     torqueLatAccelLabel->setText(
-      QString("Torque latAccelFactor (0.500 ~ 4.500) : %1\nStep Scale : x0.01")
-        .arg(value, 0, 'f', 3));
+      QString("Torque latAccelFactor (0.50 ~ 4.50) : %1\nStep Scale : x0.01")
+        .arg(value, 0, 'f', 2));
   };
   auto setTorqueLatAccelFactor = [=](double value) {
-    Params params;
     value = clampTorqueLatAccelFactor(value);
-    writeTorqueLatAccelFactor(params, value);
+    writeTorqueLatAccelFactor(value);
     updateTorqueLatAccelLabel(value);
   };
-  Params initial_torque_params;
-  updateTorqueLatAccelLabel(readTorqueLatAccelFactor(initial_torque_params));
-
-  // nTune can also be edited outside this menu. Keep the displayed value and
-  // legacy Params value synchronized with the active nTune value.
-  auto syncTorqueLatAccelFactor = [=]() {
-    double tune_value = 0.0;
-    if (!readTorqueLatAccelFactorFromTune(tune_value)) {
-      return;
-    }
-    Params params;
-    double param_value = 0.0;
-    if (!readTorqueLatAccelFactorFromParam(params, param_value) ||
-        std::abs(param_value - tune_value) > 0.0001) {
-      writeTorqueLatAccelFactorParam(params, tune_value);
-    }
-    updateTorqueLatAccelLabel(tune_value);
-  };
-  auto torqueLatAccelSyncTimer = new QTimer(this);
-  torqueLatAccelSyncTimer->setInterval(250);
-  connect(torqueLatAccelSyncTimer, &QTimer::timeout, syncTorqueLatAccelFactor);
-  torqueLatAccelSyncTimer->start();
+  updateTorqueLatAccelLabel(readTorqueLatAccelFactor());
 
   connect(decreaseTorqueLatAccelBtn, &QPushButton::clicked, [=]() {
-    Params params;
-    setTorqueLatAccelFactor(readTorqueLatAccelFactor(params) - kTorqueLatAccelFactorStep);
+    setTorqueLatAccelFactor(readTorqueLatAccelFactor() - kTorqueLatAccelFactorStep);
   });
   connect(increaseTorqueLatAccelBtn, &QPushButton::clicked, [=]() {
-    Params params;
-    setTorqueLatAccelFactor(readTorqueLatAccelFactor(params) + kTorqueLatAccelFactorStep);
+    setTorqueLatAccelFactor(readTorqueLatAccelFactor() + kTorqueLatAccelFactorStep);
   });
   connect(cityTorqueLatAccelBtn, &QPushButton::clicked, [=]() {
     setTorqueLatAccelFactor(1.6);
