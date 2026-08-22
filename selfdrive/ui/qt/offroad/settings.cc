@@ -49,7 +49,7 @@ double clampTorqueLatAccelFactor(double value) {
   return std::max(kTorqueLatAccelFactorMin, std::min(value, kTorqueLatAccelFactorMax));
 }
 
-double readTorqueLatAccelFactor(const Params &params) {
+double readTorqueLatAccelFactor(Params &params) {
   // Torque live tuning reads this file first. The Params value is retained as
   // a fallback for initial car setup and for compatibility with older builds.
   double value = kTorqueLatAccelFactorDefault;
