@@ -191,15 +191,6 @@ class LatControlTorque(LatControl):
       pid_log.output = -output_torque
       pid_log.actualLateralAccel = actual_lateral_accel
       pid_log.desiredLateralAccel = desired_lateral_accel
-      # Keep the target/response pair together in the normal controls log.
-      # controlsd replaces appliedSteer with the command actually accepted by
-      # the car controller after its torque and rate limits are applied.
-      pid_log.desiredCurvature = desired_curvature
-      pid_log.actualCurvature = actual_curvature
-      pid_log.curvatureError = desired_curvature - actual_curvature
-      pid_log.requestedSteer = -output_torque
-      pid_log.appliedSteer = self._last_applied_steer
-      pid_log.steerLimited = bool(steer_limited)
       pid_log.saturated = self._check_saturation(
         self.steer_max - abs(output_torque) < 1e-3,
         CS, steer_limited)
