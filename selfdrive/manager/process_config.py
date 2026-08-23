@@ -30,6 +30,7 @@ procs = [
   PythonProcess("torqued", "selfdrive.locationd.torqued", enabled=not EQUINOX_SIMULATOR),
   PythonProcess("controlsd", "selfdrive.controls.controlsd"),
   PythonProcess("recoverylogger", "tools.equinox_sim.recovery_recorder"),
+  PythonProcess("cornerTorqueLogger", "tools.equinox_sim.corner_torque_recorder", persistent=True),
   PythonProcess("deleter", "selfdrive.loggerd.deleter", persistent=True),
   PythonProcess("dmonitoringd", "selfdrive.monitoring.dmonitoringd",
                 enabled=(not EQUINOX_SIMULATOR and (not PC or WEBCAM)), driverview=True),
