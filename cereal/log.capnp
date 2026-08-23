@@ -865,6 +865,14 @@ struct ControlsState @0x97ff69c53601abf1 {
     latAccelFactor @11 :Float32;
     latAccelOffset @12 :Float32;
     friction @13 :Float32;
+    # Corner-response diagnostics. These are carried in the regular controls
+    # log only; they do not create a separate file or write path.
+    desiredCurvature @14 :Float32;
+    actualCurvature @15 :Float32;
+    curvatureError @16 :Float32;
+    requestedSteer @17 :Float32;
+    appliedSteer @18 :Float32;
+    steerLimited @19 :Bool;
   }
 
   # deprecated

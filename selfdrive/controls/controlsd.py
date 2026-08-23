@@ -1831,6 +1831,12 @@ class Controls:
             self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
             CC.actuatorsOutput = self.last_actuators
             self.steer_limited = abs(CC.actuators.steer - CC.actuatorsOutput.steer) > 1e-2
+            # Record the command that passed the GM torque/rate limiter. This
+            # makes a corner log distinguish inadequate requested torque from
+            # an actuator that could not apply the request.
+            if self.CP.lateralTuning.which() == 'torque':
+                lac_log.appliedSteer = float(CC.actuatorsOutput.steer)
+                lac_log.steerLimited = bool(self.steer_limited)
 
         force_decel = (self.sm['driverMonitoringState'].awarenessStatus < 0.) or \
                       (self.state == State.softDisabling)
