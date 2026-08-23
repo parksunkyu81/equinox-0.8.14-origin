@@ -12,9 +12,6 @@ from common.params import Params
 from selfdrive.controls.lib.model_data_validation import as_finite_vector, validated_model_trajectory
 
 TRAJECTORY_SIZE = 33
-STRONG_CURVE_PATH_COST_SCALE = 1.15
-STRONG_CURVE_HEADING_COST_SCALE = 1.20
-STRONG_CURVE_STEER_RATE_COST_SCALE = 0.85
 
 class LateralPlanner:
   def __init__(self, CP):
@@ -90,15 +87,8 @@ class LateralPlanner:
       d_path_xyz = self.LP.get_d_path(
         v_ego, self.t_idxs, self.path_xyz.copy(),
         measured_curvature=measured_curvature,
-        lane_change_active=lane_change_active,
-        model_data_valid=self.model_data_valid)
-      if self.LP.strong_curve_confirmed:
-        self.lat_mpc.set_weights(
-          MPC_COST_LAT.PATH * STRONG_CURVE_PATH_COST_SCALE,
-          MPC_COST_LAT.HEADING * STRONG_CURVE_HEADING_COST_SCALE,
-          MPC_COST_LAT.STEER_RATE * STRONG_CURVE_STEER_RATE_COST_SCALE)
-      else:
-        self.lat_mpc.set_weights(MPC_COST_LAT.PATH, MPC_COST_LAT.HEADING, MPC_COST_LAT.STEER_RATE)
+        lane_change_active=lane_change_active)
+      self.lat_mpc.set_weights(MPC_COST_LAT.PATH, MPC_COST_LAT.HEADING, MPC_COST_LAT.STEER_RATE)
     else:
       d_path_xyz = self.path_xyz
       # Heading cost is useful at low speed, otherwise end of plan can be off-heading
@@ -109,19 +99,9 @@ class LateralPlanner:
     # to MPC. Do not retain or blend a previous path across real curve changes.
     d_path_distance = np.linalg.norm(d_path_xyz, axis=1)
     y_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], d_path_distance, d_path_xyz[:, 1])
-    heading_path = self.plan_yaw
-    heading_distance = np.linalg.norm(self.path_xyz, axis=1)
-    if self.use_lanelines:
-      # The lane planner can bend the final path away from the raw model path.
-      # Derive heading from that exact final path so MPC receives one coherent
-      # target instead of conflicting lateral-position and heading objectives.
-      path_dx = np.gradient(d_path_xyz[:, 0])
-      path_dy = np.gradient(d_path_xyz[:, 1])
-      heading_path = np.unwrap(np.arctan2(path_dy, np.maximum(path_dx, 1e-3)))
-      heading_distance = d_path_distance
     heading_pts = np.interp(
       v_ego * self.t_idxs[:LAT_MPC_N + 1],
-      heading_distance, heading_path)
+      np.linalg.norm(self.path_xyz, axis=1), self.plan_yaw)
     curv_rate_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], np.linalg.norm(self.path_xyz, axis=1), self.plan_curv_rate)
     self.y_pts = y_pts
 
