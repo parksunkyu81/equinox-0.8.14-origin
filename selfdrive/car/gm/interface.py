@@ -278,12 +278,17 @@ class CarInterface(CarInterfaceBase):
             raw_main_on = bool(self.CS.main_on)
             main_filter_initialized = hasattr(self, "_pedal_main_on_filtered")
             if not main_filter_initialized:
-                # Always start disabled regardless of the current main_on level.
-                # If main_on is already asserted at boot (e.g. left on from the
-                # previous drive), panda has not seen a button press this
-                # session either, so engaging here would desync from panda's
-                # controlsAllowed and trigger a controlsMismatch disable loop.
-                self._pedal_main_on_filtered = True
+                # Adopt the current MAIN level at boot so ACC matches the
+                # physical button from the very first frame: MAIN on -> ACC off,
+                # MAIN off -> ACC on (polarity block below).
+                #
+                # This only arms adaptive_Cruise, it cannot engage openpilot by
+                # itself: State.disabled -> enabled needs an ET.ENABLE event,
+                # which on this car only comes from a SET/RES button release --
+                # the same press panda must witness before it grants
+                # controlsAllowed. So boot-time init cannot desync the two, and
+                # the controlsAllowed mismatch counter only runs while enabled.
+                self._pedal_main_on_filtered = raw_main_on
                 self._pedal_main_on_sync_frames = 0
 
             # An explicit MAIN button event is authoritative and remains an
@@ -302,11 +307,11 @@ class CarInterface(CarInterfaceBase):
             elif raw_main_on == self._pedal_main_on_filtered:
                 self._pedal_main_on_sync_frames = 0
             elif self._pedal_main_on_filtered:
-                # Disabled, and raw_main_on disagrees (raw is True) without a
-                # witnessed button press: do not auto-engage.
+                # ACC disabled, and raw_main_on disagrees (raw is False) without
+                # a witnessed button press: do not auto-engage.
                 self._pedal_main_on_sync_frames = 0
             else:
-                # Enabled, and raw_main_on disagrees (raw is False): allow the
+                # ACC enabled, and raw_main_on disagrees (raw is True): allow the
                 # existing debounce to fail safely back to disabled.
                 self._pedal_main_on_sync_frames = min(
                     self._pedal_main_on_sync_frames + 1,
