@@ -1371,6 +1371,16 @@ class Controls:
 
         lat_plan = self.sm['lateralPlan']
         long_plan = self.sm['longitudinalPlan']
+        if hasattr(self.LaC, 'set_path_stability'):
+            self.LaC.set_path_stability(
+              bool(getattr(lat_plan, 'pathStabilityActive', False)),
+              float(getattr(lat_plan, 'pathWobbleRangeM', 0.0)),
+              int(getattr(lat_plan, 'pathWobbleFlips', 0)))
+        if hasattr(self.LaC, 'set_model_path_quality'):
+            self.LaC.set_model_path_quality(
+              float(getattr(lat_plan, 'modelPathQuality', 0.0)),
+              bool(getattr(lat_plan, 'modelPathQualityTrusted', False)),
+              float(getattr(lat_plan, 'modelNearCurvature', 0.0)))
 
         CC = car.CarControl.new_message()
         CC.enabled = self.enabled
@@ -1919,6 +1929,10 @@ class Controls:
             controlsState.dynamicTorquePathStabilityActive = bool(dyn_torque['pathStabilityActive'])
             controlsState.dynamicTorquePathWobbleRange = float(dyn_torque['pathWobbleRangeM'])
             controlsState.dynamicTorquePathWobbleFlips = int(dyn_torque['pathWobbleFlips'])
+            controlsState.laneCenterCorrectionM = float(
+              getattr(self.sm['lateralPlan'], 'laneCenterCorrectionM', 0.0))
+            controlsState.laneCenterCorrectionActive = bool(
+              getattr(self.sm['lateralPlan'], 'laneCenterCorrectionActive', False))
             controlsState.modelCurvatureGuardActive = bool(dyn_torque['modelCurvatureGuardActive'])
             controlsState.modelCurvatureRaw = float(dyn_torque['modelCurvatureRaw'])
             controlsState.modelCurvatureFiltered = float(dyn_torque['modelCurvatureFiltered'])

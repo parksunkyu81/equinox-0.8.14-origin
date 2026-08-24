@@ -986,6 +986,8 @@ class TorqueEstimator:
         self._dyn_path_stability_active = False
         self._dyn_path_wobble_range = 0.0
         self._dyn_path_wobble_flips = 0
+        self._lane_center_correction_m = 0.0
+        self._lane_center_correction_active = False
         self._model_curvature_guard_active = False
         self._model_curvature_raw = 0.0
         self._model_curvature_filtered = 0.0
@@ -2508,6 +2510,10 @@ class TorqueEstimator:
                         getattr(msg, "dynamicTorquePathWobbleRange", 0.0) or 0.0)
                     self._dyn_path_wobble_flips = int(
                         getattr(msg, "dynamicTorquePathWobbleFlips", 0) or 0)
+                    self._lane_center_correction_m = float(
+                        getattr(msg, "laneCenterCorrectionM", 0.0) or 0.0)
+                    self._lane_center_correction_active = bool(
+                        getattr(msg, "laneCenterCorrectionActive", False))
                     self._model_curvature_guard_active = bool(
                         getattr(msg, "modelCurvatureGuardActive", False))
                     self._model_curvature_raw = float(

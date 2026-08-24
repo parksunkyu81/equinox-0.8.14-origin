@@ -1124,6 +1124,31 @@ struct LateralPlan @0xe1e9318e2ae8b51e {
   autoLaneChangeEnabled @31 :Bool;
   autoLaneChangeTimer @32 :Int8;
   totalCameraOffset @34 :Float32;
+  pathStabilityActive @35 :Bool;
+  pathWobbleRangeM @36 :Float32;
+  pathWobbleFlips @37 :UInt8;
+  laneCenterCorrectionM @38 :Float32;
+  laneCenterCorrectionActive @39 :Bool;
+  # Quality of the current vision trajectory after lane/edge/vehicle-motion checks.
+  modelPathQuality @40 :Float32;
+  modelPathQualityTrusted @41 :Bool;
+  modelNearCurvature @42 :Float32;
+
+  # Diagnostics for the tight-curve temporal-hold store gate. Drive logs showed
+  # sharp curves never store a fallback path (0/96 frames), but the published
+  # fields could not tell which of the gate's conditions blocks it. These expose
+  # each input so the blocking condition can be identified from a drive log.
+  curveAssist @43 :Float32;
+  curveRawTargetDProb @44 :Float32;
+  curveGeometryPlausible @45 :Bool;
+  curveTemporalStored @46 :Bool;
+  curveTemporalHoldAgeS @47 :Float32;
+  # What actually produced laneCenterCorrectionM this frame. Without this, a
+  # correction from ordinary lane blending is indistinguishable from one the
+  # curve fallback injected, which made an earlier "is the fallback steering
+  # the car wide in sharp curves?" measurement inconclusive.
+  # 0 = none, 1 = ordinary lane blending, 2 = temporal hold, 3 = road edge
+  curveFallbackSource @48 :UInt8;
 
   enum Desire {
     none @0;
@@ -1153,22 +1178,6 @@ struct LateralPlan @0xe1e9318e2ae8b51e {
   curvatureRateDEPRECATED @23 :Float32;
   rawCurvatureDEPRECATED @24 :Float32;
   rawCurvatureRateDEPRECATED @25 :Float32;
-  # Diagnostics for the removed custom curve fallback. Kept as deprecated so
-  # their ordinals are never reused and older logs still parse.
-  pathStabilityActiveDEPRECATED @35 :Bool;
-  pathWobbleRangeMDEPRECATED @36 :Float32;
-  pathWobbleFlipsDEPRECATED @37 :UInt8;
-  laneCenterCorrectionMDEPRECATED @38 :Float32;
-  laneCenterCorrectionActiveDEPRECATED @39 :Bool;
-  modelPathQualityDEPRECATED @40 :Float32;
-  modelPathQualityTrustedDEPRECATED @41 :Bool;
-  modelNearCurvatureDEPRECATED @42 :Float32;
-  curveAssistDEPRECATED @43 :Float32;
-  curveRawTargetDProbDEPRECATED @44 :Float32;
-  curveGeometryPlausibleDEPRECATED @45 :Bool;
-  curveTemporalStoredDEPRECATED @46 :Bool;
-  curveTemporalHoldAgeSDEPRECATED @47 :Float32;
-  curveFallbackSourceDEPRECATED @48 :UInt8;
   cProbDEPRECATED @3 :Float32;
   dPolyDEPRECATED @1 :List(Float32);
   cPolyDEPRECATED @2 :List(Float32);
