@@ -152,9 +152,10 @@ class LatControlTorque(LatControl):
         lateral_accel_error=error,
         lateral_accel_deadzone=lateral_accel_deadzone,
         friction_compensation=True)
-      # Official 0.8.14 condition.
-      freeze_integrator = bool(
-        steer_limited or CS.steeringPressed or CS.vEgo < 5)
+      # Official 0.8.14 also freezes below vEgo 5, but this branch is only
+      # reached above MIN_STEER_SPEED, so a speed term here can never fire.
+      # Freeze only for reasons that still apply while steering is live.
+      freeze_integrator = bool(steer_limited or CS.steeringPressed)
       output_torque = self.pid.update(
         pid_log.error,
         feedforward=feedforward,

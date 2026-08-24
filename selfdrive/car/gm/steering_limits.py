@@ -1,5 +1,8 @@
-GM_MIN_STEER_SPEED_KPH = 10.0
-GM_MIN_STEER_SPEED_MS = GM_MIN_STEER_SPEED_KPH / 3.6
+# Official 0.8.13/0.8.14 GM value. Single source of truth: CarControllerParams,
+# CarInterface.minSteerSpeed and latcontrol's MIN_STEER_SPEED all read this, so
+# the controller and the CarController agree on when steering is live.
+GM_MIN_STEER_SPEED_MS = 3.0
+GM_MIN_STEER_SPEED_KPH = GM_MIN_STEER_SPEED_MS * 3.6
 
 # Torque rate limits are the official 0.8.13/0.8.14 GM values and are fixed.
 # They live in CarControllerParams (selfdrive/car/gm/values.py) and must stay in

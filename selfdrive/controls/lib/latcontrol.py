@@ -10,7 +10,7 @@ from selfdrive.car.gm.steering_limits import GM_MIN_STEER_SPEED_MS
 # ------------------------------------------------------------
 # 10km/h부터 lateral controller와 GM LKAS command path를 함께 활성화.
 # 이쿼녹스 2020 디젤 토크 튜닝 기준:
-# - CarControllerParams.MIN_STEER_SPEED = 10km/h
+# - CarControllerParams.MIN_STEER_SPEED = 3.0 m/s (official GM value)
 # - torqued.py 코너 학습 시작 = 10km/h
 # - latcontrol_torque.py 유효 조향 시작 = 10km/h
 #

@@ -23,7 +23,7 @@ class CarControllerParams():
         self.STEER_STEP = 2  # 50 Hz at the 100 Hz control loop
         self.STEER_DELTA_UP = 7  # Official 0.8.13/0.8.14 GM value.
         self.STEER_DELTA_DOWN = 17
-        self.MIN_STEER_SPEED = GM_MIN_STEER_SPEED_MS
+        self.MIN_STEER_SPEED = GM_MIN_STEER_SPEED_MS  # 3.0 m/s, official value
         self.STEER_DRIVER_ALLOWANCE = 50
         self.STEER_DRIVER_MULTIPLIER = 4
         self.STEER_DRIVER_FACTOR = 100
