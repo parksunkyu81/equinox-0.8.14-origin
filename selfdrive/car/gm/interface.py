@@ -278,12 +278,20 @@ class CarInterface(CarInterfaceBase):
             raw_main_on = bool(self.CS.main_on)
             main_filter_initialized = hasattr(self, "_pedal_main_on_filtered")
             if not main_filter_initialized:
-                self._pedal_main_on_filtered = raw_main_on
+                # Always start disabled regardless of the current main_on level.
+                # If main_on is already asserted at boot (e.g. left on from the
+                # previous drive), panda has not seen a button press this
+                # session either, so engaging here would desync from panda's
+                # controlsAllowed and trigger a controlsMismatch disable loop.
+                self._pedal_main_on_filtered = True
                 self._pedal_main_on_sync_frames = 0
 
             # An explicit MAIN button event is authoritative and remains an
             # immediate pedal kill switch. Without that event, require a
-            # sustained raw-signal mismatch before changing pedal state.
+            # sustained raw-signal mismatch before changing pedal state, and
+            # never auto-sync into the engaged state without a witnessed
+            # button press -- panda requires the same before it grants
+            # controlsAllowed, so doing so here would desync from panda again.
             if main_button_pressed:
                 if main_filter_initialized:
                     if raw_main_on != self._pedal_main_on_filtered:
@@ -293,7 +301,13 @@ class CarInterface(CarInterfaceBase):
                 self._pedal_main_on_sync_frames = 0
             elif raw_main_on == self._pedal_main_on_filtered:
                 self._pedal_main_on_sync_frames = 0
+            elif self._pedal_main_on_filtered:
+                # Disabled, and raw_main_on disagrees (raw is True) without a
+                # witnessed button press: do not auto-engage.
+                self._pedal_main_on_sync_frames = 0
             else:
+                # Enabled, and raw_main_on disagrees (raw is False): allow the
+                # existing debounce to fail safely back to disabled.
                 self._pedal_main_on_sync_frames = min(
                     self._pedal_main_on_sync_frames + 1,
                     PEDAL_MAIN_ON_SIGNAL_SYNC_FRAMES,
