@@ -222,6 +222,72 @@ class LanePlanner:
     self._fallback_mode_active = False
     self._fresh_lane_recovery_frames = 0
 
+  @staticmethod
+  def _finite_sorted_unique(x_values, y_values):
+    """Filter to finite points, sort by x, and drop duplicate x.
+
+    Shared prep used everywhere a spatial x/y series (lane path, road edge,
+    temporal-hold cache) needs to become valid np.interp input. Returns
+    (None, None) if fewer than 2 usable points remain.
+    """
+    x_values = np.asarray(x_values, dtype=float)
+    y_values = np.asarray(y_values, dtype=float)
+    if x_values.size < 2 or x_values.size != y_values.size:
+      return None, None
+
+    valid = np.isfinite(x_values) & np.isfinite(y_values)
+    x_values = x_values[valid]
+    y_values = y_values[valid]
+    if x_values.size < 2:
+      return None, None
+
+    order = np.argsort(x_values)
+    x_values = x_values[order]
+    y_values = y_values[order]
+    x_values, unique_indices = np.unique(x_values, return_index=True)
+    y_values = y_values[unique_indices]
+    if x_values.size < 2:
+      return None, None
+    return x_values, y_values
+
+  def _edge_bend(self, edge_x, edge_y, edge_std):
+    """Prepared (x, y), confidence, check-distance refs, and bend strength for
+    one road edge.
+
+    Shared by _road_edge_curve_strength (early curve detector) and
+    _road_edge_fallback_path (path builder) so both agree on what counts as a
+    trustworthy, curving edge instead of computing it twice via separately
+    tuned code. refs/strength are None/0.0 when the edge is unavailable or
+    below ROAD_EDGE_MIN_CONFIDENCE -- every caller already re-checks
+    confidence before using refs, so this only avoids wasted work.
+    """
+    x, y = self._finite_sorted_unique(edge_x, edge_y)
+    confidence = interp(
+      edge_std, [ROAD_EDGE_STD_FULL_CONFIDENCE, ROAD_EDGE_STD_ZERO_CONFIDENCE],
+      [1.0, 0.0])
+    if x is None or confidence < ROAD_EDGE_MIN_CONFIDENCE:
+      return x, y, confidence, None, 0.0
+
+    refs = np.interp(np.asarray(LANE_WIDTH_CHECK_DISTANCES_M, dtype=float), x, y)
+    bend_m = float(np.max(np.abs(refs - refs[0])))
+    strength = float(np.clip(
+      interp(bend_m, [CURVE_ASSIST_START_BEND_M, CURVE_ASSIST_FULL_BEND_M], [0.0, 1.0]),
+      0.0, 1.0))
+    return x, y, confidence, refs, strength
+
+  def _trusted_max_correction(self, x_abs, base_near_m, base_far_m,
+                              trusted_near_m, trusted_far_m):
+    """Correction-magnitude cap, relaxed while readiness is confirmed.
+
+    Shared by the temporal-hold and road-edge fallbacks -- see the
+    CURVE_TEMPORAL_TRUSTED_* comment above for what "confirmed" means.
+    """
+    near_m, far_m = base_near_m, base_far_m
+    if self._readiness_eligible:
+      near_m = interp(self._readiness_quality, [0.0, 1.0], [near_m, trusted_near_m])
+      far_m = interp(self._readiness_quality, [0.0, 1.0], [far_m, trusted_far_m])
+    return np.interp(x_abs, [0.0, 20.0], [near_m, far_m])
+
   def _update_d_prob(self, target_d_prob, v_ego, lane_center_refs,
                      lane_change_active, curve_assist):
     """Rate-limit short confidence dropouts, with extra continuity on tight low-speed curves."""
@@ -282,23 +348,8 @@ class LanePlanner:
   def _store_curve_temporal_hold(self, path_x, lane_path_y,
                                  curve_assist, measured_curvature):
     """Cache a finite, monotonic lane path for a possible short dropout."""
-    path_x = np.asarray(path_x, dtype=float)
-    lane_path_y = np.asarray(lane_path_y, dtype=float)
-    if path_x.size < 2 or path_x.size != lane_path_y.size:
-      return
-
-    finite = np.isfinite(path_x) & np.isfinite(lane_path_y)
-    path_x = path_x[finite]
-    lane_path_y = lane_path_y[finite]
-    if path_x.size < 2:
-      return
-
-    order = np.argsort(path_x)
-    path_x = path_x[order]
-    lane_path_y = lane_path_y[order]
-    path_x, unique_indices = np.unique(path_x, return_index=True)
-    lane_path_y = lane_path_y[unique_indices]
-    if path_x.size < 2:
+    path_x, lane_path_y = self._finite_sorted_unique(path_x, lane_path_y)
+    if path_x is None:
       return
 
     self.curve_temporal_stored_diag = True
@@ -399,18 +450,8 @@ class LanePlanner:
     predicted_x = cos_yaw * rel_x + sin_yaw * rel_y
     predicted_y = -sin_yaw * rel_x + cos_yaw * rel_y
 
-    finite = np.isfinite(predicted_x) & np.isfinite(predicted_y)
-    predicted_x = predicted_x[finite]
-    predicted_y = predicted_y[finite]
-    if predicted_x.size < 2:
-      return None, 0.0
-
-    order = np.argsort(predicted_x)
-    predicted_x = predicted_x[order]
-    predicted_y = predicted_y[order]
-    predicted_x, unique_indices = np.unique(predicted_x, return_index=True)
-    predicted_y = predicted_y[unique_indices]
-    if predicted_x.size < 2:
+    predicted_x, predicted_y = self._finite_sorted_unique(predicted_x, predicted_y)
+    if predicted_x is None:
       return None, 0.0
 
     path_x = np.asarray(path_x, dtype=float)
@@ -435,35 +476,17 @@ class LanePlanner:
 
   def _bound_curve_temporal_path(self, path_xyz, predicted_lane_y):
     """Bound stale-path influence relative to the fresh model path."""
-    near_m, far_m = CURVE_TEMPORAL_MAX_CORRECTION_NEAR_M, CURVE_TEMPORAL_MAX_CORRECTION_M
-    if self._readiness_eligible:
-      near_m = interp(self._readiness_quality,
-                      [0.0, 1.0], [near_m, CURVE_TEMPORAL_TRUSTED_MAX_CORRECTION_NEAR_M])
-      far_m = interp(self._readiness_quality,
-                     [0.0, 1.0], [far_m, CURVE_TEMPORAL_TRUSTED_MAX_CORRECTION_M])
-    max_correction = np.interp(np.abs(path_xyz[:, 0]), [0.0, 20.0], [near_m, far_m])
+    max_correction = self._trusted_max_correction(
+      np.abs(path_xyz[:, 0]),
+      CURVE_TEMPORAL_MAX_CORRECTION_NEAR_M, CURVE_TEMPORAL_MAX_CORRECTION_M,
+      CURVE_TEMPORAL_TRUSTED_MAX_CORRECTION_NEAR_M, CURVE_TEMPORAL_TRUSTED_MAX_CORRECTION_M)
     return path_xyz[:, 1] + np.clip(
       predicted_lane_y - path_xyz[:, 1], -max_correction, max_correction)
 
   def _spatial_curve_strength(self, x_values, y_values):
     """Estimate visible bend strength from spatial x/y points."""
-    x_values = np.asarray(x_values, dtype=float)
-    y_values = np.asarray(y_values, dtype=float)
-    if x_values.size < 2 or x_values.size != y_values.size:
-      return 0.0
-
-    valid = np.isfinite(x_values) & np.isfinite(y_values)
-    x_values = x_values[valid]
-    y_values = y_values[valid]
-    if x_values.size < 2:
-      return 0.0
-
-    order = np.argsort(x_values)
-    x_values = x_values[order]
-    y_values = y_values[order]
-    x_values, unique_indices = np.unique(x_values, return_index=True)
-    y_values = y_values[unique_indices]
-    if x_values.size < 2:
+    x_values, y_values = self._finite_sorted_unique(x_values, y_values)
+    if x_values is None:
       return 0.0
 
     refs = np.interp(
@@ -489,16 +512,10 @@ class LanePlanner:
     for edge_x, edge_y, edge_std in (
         (self.le_x, self.le_y, self.le_std),
         (self.re_x, self.re_y, self.re_std)):
-      edge_conf = interp(
-        edge_std,
-        [ROAD_EDGE_STD_FULL_CONFIDENCE, ROAD_EDGE_STD_ZERO_CONFIDENCE],
-        [1.0, 0.0])
-      if edge_conf < ROAD_EDGE_MIN_CONFIDENCE:
+      _, _, confidence, refs, strength = self._edge_bend(edge_x, edge_y, edge_std)
+      if refs is None:
         continue
-
-      bend_strength = self._spatial_curve_strength(edge_x, edge_y)
-      best_strength = max(
-        best_strength, float(bend_strength) * float(edge_conf))
+      best_strength = max(best_strength, strength * confidence)
 
     return float(np.clip(best_strength, 0.0, 1.0))
 
@@ -508,72 +525,32 @@ class LanePlanner:
     if lane_change_active or v_ego >= CURVE_ASSIST_ZERO_ABOVE_MS:
       return None, 0.0
 
-    def prepare_edge(edge_x, edge_y):
-      valid = np.isfinite(edge_x) & np.isfinite(edge_y)
-      edge_x = np.asarray(edge_x[valid], dtype=float)
-      edge_y = np.asarray(edge_y[valid], dtype=float)
-      if edge_x.size < 2:
-        return None, None
-      order = np.argsort(edge_x)
-      edge_x = edge_x[order]
-      edge_y = edge_y[order]
-      edge_x, unique_indices = np.unique(edge_x, return_index=True)
-      edge_y = edge_y[unique_indices]
-      if edge_x.size < 2:
-        return None, None
-      return edge_x, edge_y
-
-    left_x, left_y = prepare_edge(self.le_x, self.le_y)
-    right_x, right_y = prepare_edge(self.re_x, self.re_y)
+    left_x, left_y, left_conf, left_refs, left_strength = self._edge_bend(
+      self.le_x, self.le_y, self.le_std)
+    right_x, right_y, right_conf, right_refs, right_strength = self._edge_bend(
+      self.re_x, self.re_y, self.re_std)
     if left_x is None and right_x is None:
       return None, 0.0
-
-    left_conf = interp(
-      self.le_std,
-      [ROAD_EDGE_STD_FULL_CONFIDENCE, ROAD_EDGE_STD_ZERO_CONFIDENCE],
-      [1.0, 0.0])
-    right_conf = interp(
-      self.re_std,
-      [ROAD_EDGE_STD_FULL_CONFIDENCE, ROAD_EDGE_STD_ZERO_CONFIDENCE],
-      [1.0, 0.0])
 
     path_x = np.asarray(path_xyz[:, 0], dtype=float)
     model_y = np.asarray(path_xyz[:, 1], dtype=float)
     check_x = np.asarray(LANE_WIDTH_CHECK_DISTANCES_M, dtype=float)
     model_refs = np.interp(check_x, path_x, model_y)
 
-    left_interp = None
-    right_interp = None
-    left_refs = None
-    right_refs = None
-    if left_x is not None:
-      left_interp = np.interp(path_x, left_x, left_y)
-      left_refs = np.interp(check_x, left_x, left_y)
-    if right_x is not None:
-      right_interp = np.interp(path_x, right_x, right_y)
-      right_refs = np.interp(check_x, right_x, right_y)
+    left_interp = np.interp(path_x, left_x, left_y) if left_x is not None else None
+    right_interp = np.interp(path_x, right_x, right_y) if right_x is not None else None
 
     speed_weight = interp(
       v_ego, [CURVE_ASSIST_FULL_BELOW_MS, CURVE_ASSIST_ZERO_ABOVE_MS],
       [1.0, 0.0])
 
     # Road edges can reveal the curve before measured vehicle curvature catches
-    # up. Only trustworthy edges may contribute to this curve detector.
-    edge_curve_strength = 0.0
-    if left_refs is not None and left_conf >= ROAD_EDGE_MIN_CONFIDENCE:
-      left_bend = float(np.max(np.abs(left_refs - left_refs[0])))
-      edge_curve_strength = max(
-        edge_curve_strength,
-        interp(left_bend,
-               [CURVE_ASSIST_START_BEND_M, CURVE_ASSIST_FULL_BEND_M],
-               [0.0, 1.0]))
-    if right_refs is not None and right_conf >= ROAD_EDGE_MIN_CONFIDENCE:
-      right_bend = float(np.max(np.abs(right_refs - right_refs[0])))
-      edge_curve_strength = max(
-        edge_curve_strength,
-        interp(right_bend,
-               [CURVE_ASSIST_START_BEND_M, CURVE_ASSIST_FULL_BEND_M],
-               [0.0, 1.0]))
+    # up. Confidence-weighted to match _road_edge_curve_strength's early
+    # detector -- a noisy/uncertain edge should not trigger this fallback any
+    # more easily than it triggers curve detection upstream.
+    edge_curve_strength = max(
+      left_strength * left_conf if left_refs is not None else 0.0,
+      right_strength * right_conf if right_refs is not None else 0.0)
 
     active_curve_assist = float(np.clip(
       max(float(curve_assist), edge_curve_strength * speed_weight),
@@ -620,13 +597,10 @@ class LanePlanner:
     weights = np.asarray(confidences, dtype=float)
     edge_path = np.average(np.vstack(candidates), axis=0, weights=weights)
 
-    near_m, far_m = ROAD_EDGE_MAX_CORRECTION_NEAR_M, ROAD_EDGE_MAX_CORRECTION_M
-    if self._readiness_eligible:
-      near_m = interp(self._readiness_quality,
-                      [0.0, 1.0], [near_m, ROAD_EDGE_TRUSTED_MAX_CORRECTION_NEAR_M])
-      far_m = interp(self._readiness_quality,
-                     [0.0, 1.0], [far_m, ROAD_EDGE_TRUSTED_MAX_CORRECTION_M])
-    max_correction = np.interp(np.abs(path_x), [0.0, 20.0], [near_m, far_m])
+    max_correction = self._trusted_max_correction(
+      np.abs(path_x),
+      ROAD_EDGE_MAX_CORRECTION_NEAR_M, ROAD_EDGE_MAX_CORRECTION_M,
+      ROAD_EDGE_TRUSTED_MAX_CORRECTION_NEAR_M, ROAD_EDGE_TRUSTED_MAX_CORRECTION_M)
     edge_path = model_y + np.clip(
       edge_path - model_y, -max_correction, max_correction)
 
@@ -791,14 +765,14 @@ class LanePlanner:
 
     # Detect the curve before the car has fully rotated into it. The model path
     # and road edges can remain informative even when lane confidence is weak.
-    model_curve_strength = self._model_path_curve_strength(path_xyz)
-    road_edge_curve_strength = self._road_edge_curve_strength()
+    # Skipped during a lane change, where the result would be discarded below
+    # anyway.
     pre_curve_strength = float(measured_curve_strength)
     if not lane_change_active:
       pre_curve_strength = max(
         pre_curve_strength,
-        MODEL_PATH_CURVE_WEIGHT * model_curve_strength,
-        ROAD_EDGE_CURVE_WEIGHT * road_edge_curve_strength)
+        MODEL_PATH_CURVE_WEIGHT * self._model_path_curve_strength(path_xyz),
+        ROAD_EDGE_CURVE_WEIGHT * self._road_edge_curve_strength())
     pre_curve_assist = float(np.clip(
       pre_curve_strength * speed_curve_weight, 0.0, 1.0))
     # Publish the pre-curve value now so the fallback early-returns below still
@@ -853,10 +827,8 @@ class LanePlanner:
       self._fallback_mode_active = False
       return path_xyz
 
-    width_samples = np.array([
-      abs(float(np.interp(distance, lane_x, lane_width_pts)))
-      for distance in LANE_WIDTH_CHECK_DISTANCES_M
-    ])
+    width_samples = np.abs(np.interp(
+      np.asarray(LANE_WIDTH_CHECK_DISTANCES_M, dtype=float), lane_x, lane_width_pts))
     width_mod = min(
       interp(width, [LANE_WIDTH_MIN_START_M, LANE_WIDTH_MIN_END_M], [0.0, 1.0]) *
       interp(width, [LANE_WIDTH_MOD_START_M, LANE_WIDTH_MOD_END_M], [1.0, 0.0])
