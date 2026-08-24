@@ -6,6 +6,7 @@ from selfdrive.swaglog import cloudlog
 from selfdrive.controls.lib.lateral_mpc_lib.lat_mpc import LateralMpc
 from selfdrive.controls.lib.drive_helpers import CONTROL_N, MPC_COST_LAT, LAT_MPC_N
 from selfdrive.controls.lib.desire_helper import DesireHelper, AUTO_LCA_START_TIME
+from selfdrive.controls.lib.curve_virtual_readiness import CurveVirtualReadinessMonitor
 import cereal.messaging as messaging
 from cereal import log
 from common.params import Params
@@ -35,6 +36,7 @@ class LateralPlanner:
     self.t_idxs = np.arange(TRAJECTORY_SIZE)
     self.y_pts = np.zeros(TRAJECTORY_SIZE)
     self.model_data_valid = False
+    self.curve_virtual_readiness = CurveVirtualReadinessMonitor()
 
     self.lat_mpc = LateralMpc()
     self.reset_mpc(np.zeros(4))
@@ -44,7 +46,8 @@ class LateralPlanner:
     self.lat_mpc.reset(x0=self.x0)
 
   def update(self, sm):
-    v_ego = sm['carState'].vEgo
+    car_state = sm['carState']
+    v_ego = car_state.vEgo
     measured_curvature = sm['controlsState'].curvature
 
     # Parse model predictions
@@ -81,6 +84,14 @@ class LateralPlanner:
 
     # Calculate final driving path and set MPC costs
     lane_change_active = self.DH.lane_change_state != log.LateralPlan.LaneChangeState.off
+    lane_confidence = max(self.LP.lll_prob, self.LP.rll_prob)
+    _, completed_curve_readiness = self.curve_virtual_readiness.update(
+      v_ego, measured_curvature, car_state.yawRate, car_state.steeringPressed,
+      lane_change_active, lane_confidence)
+    if (completed_curve_readiness is not None and
+        completed_curve_readiness['laneLossRatio'] > 0.0):
+      cloudlog.event('virtualCurveReadiness', **completed_curve_readiness)
+
     if self.use_lanelines:
       # LanePlanner applies its offset in-place; a copy prevents an invalid
       # model frame from accumulating the offset on the last valid trajectory.
@@ -180,5 +191,10 @@ class LateralPlanner:
     lateralPlan.pathWobbleFlips = 0
     lateralPlan.laneCenterCorrectionM = float(self.LP.lane_center_correction_m)
     lateralPlan.laneCenterCorrectionActive = bool(self.LP.lane_center_correction_active)
+    # Diagnostic-only readiness for evaluating whether a longer virtual curve
+    # could be trusted on this route. It does not affect lateral control.
+    lateralPlan.modelPathQuality = float(self.curve_virtual_readiness.current['quality'])
+    lateralPlan.modelPathQualityTrusted = bool(self.curve_virtual_readiness.current['eligible'])
+    lateralPlan.modelNearCurvature = float(self.curve_virtual_readiness.current['curvatureMean'])
 
     pm.send('lateralPlan', plan_send)
