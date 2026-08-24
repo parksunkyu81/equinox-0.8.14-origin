@@ -28,6 +28,8 @@ LANE_STD_ZERO_CONFIDENCE = 1.20
 LANE_WIDTH_CHECK_DISTANCES_M = (5.0, 10.0, 20.0)
 LANE_WIDTH_MIN_START_M = 1.8
 LANE_WIDTH_MIN_END_M = 2.5
+# Cache-only width floor; see store_geometry_plausible in get_d_path.
+STORE_LANE_WIDTH_MIN_M = 2.2
 LANE_WIDTH_MOD_START_M = 4.2
 LANE_WIDTH_MOD_END_M = 5.0
 
@@ -808,6 +810,24 @@ class LanePlanner:
       np.all(width_samples >= LANE_WIDTH_MIN_END_M) and
       np.all(width_samples <= LANE_WIDTH_MOD_END_M)
     )
+    # Separate, more permissive sanity floor for *caching* a lane shape.
+    # Drive-log measurement: on straights raw_target_d_prob is healthy (76% of
+    # frames pass 0.35) but geometry_plausible only passes 53%, and every
+    # rejection is "too narrow" -- the failing frames cluster at a 2.37 m median
+    # width, just under the 2.5 m floor, at 5/10/20 m alike (only 4.8% of
+    # rejections are the far sample alone). A threshold that bisects the
+    # device's own width distribution is mis-placed for this camera rather than
+    # a sign of bad geometry, and it was starving the cache on exactly the
+    # straight approach where the lane is still clearly visible.
+    #
+    # This floor gates only what we are willing to remember for <=1.2 s, not how
+    # much lane data is trusted for present steering: LANE_WIDTH_MIN_END_M still
+    # drives width_mod and geometry_plausible everywhere else, and the cached
+    # path is later applied with strength fading plus the max_correction clamps.
+    store_geometry_plausible = bool(
+      np.all(width_samples >= STORE_LANE_WIDTH_MIN_M) and
+      np.all(width_samples <= LANE_WIDTH_MOD_END_M)
+    )
     single_lane_usable = bool(
       (self.lll_prob >= SINGLE_LANE_MIN_RAW_PROB and
        self.lll_std <= SINGLE_LANE_MAX_STD) or
@@ -837,7 +857,9 @@ class LanePlanner:
       combined_curve_strength * speed_curve_weight, 0.0, 1.0))
     self.curve_assist_diag = curve_assist
     self.curve_raw_target_d_prob_diag = float(raw_target_d_prob)
-    self.curve_geometry_plausible_diag = geometry_plausible
+    # Report the floor the store gate actually uses, so drive logs keep
+    # measuring the condition that governs caching.
+    self.curve_geometry_plausible_diag = store_geometry_plausible
 
     fallback_max_speed = interp(
       curve_assist, [0.0, 1.0],
@@ -915,7 +937,7 @@ class LanePlanner:
     # and the dropout below starts consuming it.
     trusted_curve_frame = bool(
       not lane_change_active and
-      geometry_plausible and
+      store_geometry_plausible and
       raw_target_d_prob >= CURVE_TEMPORAL_STORE_DPROB
     )
     # Start fallback gradually as confidence falls below the temporal-store
