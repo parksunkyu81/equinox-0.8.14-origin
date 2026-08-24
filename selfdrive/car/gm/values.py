@@ -21,9 +21,9 @@ class CarControllerParams():
     def __init__(self, CP):
         self.STEER_MAX = 300  # DEF : 300, Safety limit, not LKA max. Trucks use 600.
         self.STEER_STEP = 2  # 50 Hz at the 100 Hz control loop
-        self.STEER_DELTA_UP = 7  # Official 0.8.13/0.8.14 GM value.
-        self.STEER_DELTA_DOWN = 17
-        self.MIN_STEER_SPEED = GM_MIN_STEER_SPEED_MS  # 3.0 m/s, official value
+        self.STEER_DELTA_UP = 14  # Low-speed ceiling; CarController applies the speed map.
+        self.STEER_DELTA_DOWN = 20
+        self.MIN_STEER_SPEED = GM_MIN_STEER_SPEED_MS
         self.STEER_DRIVER_ALLOWANCE = 50
         self.STEER_DRIVER_MULTIPLIER = 4
         self.STEER_DRIVER_FACTOR = 100

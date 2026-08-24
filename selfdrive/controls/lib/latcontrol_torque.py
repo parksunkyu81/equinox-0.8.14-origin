@@ -9,8 +9,11 @@ from selfdrive.controls.lib.pid import PIDController
 from selfdrive.controls.lib.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
 
 
-# Official 0.8.14 value: a fixed low-speed curvature-error gain.
-LOW_SPEED_FACTOR = 200
+# Keep the official low-speed curvature-error idea, with a gradual reduction
+# that avoids the full constant 200 gain through the Equinox's low-speed band.
+LOW_SPEED_FACTOR_BP_MS = [0.0, 10.0 / 3.6, 20.0 / 3.6,
+                          30.0 / 3.6, 40.0 / 3.6, 50.0 / 3.6]
+LOW_SPEED_FACTOR_V = [200.0, 170.0, 120.0, 60.0, 20.0, 0.0]
 LAT_ACCEL_FACTOR_MIN = 0.50
 LAT_ACCEL_FACTOR_MAX = 5.00
 FRICTION_MIN = 0.0
@@ -136,8 +139,10 @@ class LatControlTorque(LatControl):
       desired_lateral_accel = desired_curvature * CS.vEgo ** 2
       actual_lateral_accel = actual_curvature * CS.vEgo ** 2
       lateral_accel_deadzone = curvature_deadzone * CS.vEgo ** 2
-      setpoint = desired_lateral_accel + LOW_SPEED_FACTOR * desired_curvature
-      measurement = actual_lateral_accel + LOW_SPEED_FACTOR * actual_curvature
+      low_speed_factor = interp(
+        CS.vEgo, LOW_SPEED_FACTOR_BP_MS, LOW_SPEED_FACTOR_V)
+      setpoint = desired_lateral_accel + low_speed_factor * desired_curvature
+      measurement = actual_lateral_accel + low_speed_factor * actual_curvature
       error = setpoint - measurement
 
       torque_params = self.fixed_torque_params
@@ -152,10 +157,11 @@ class LatControlTorque(LatControl):
         lateral_accel_error=error,
         lateral_accel_deadzone=lateral_accel_deadzone,
         friction_compensation=True)
-      # Official 0.8.14 also freezes below vEgo 5, but this branch is only
-      # reached above MIN_STEER_SPEED, so a speed term here can never fire.
-      # Freeze only for reasons that still apply while steering is live.
-      freeze_integrator = bool(steer_limited or CS.steeringPressed)
+      # Keep the integrator frozen only at very low speed. Steering is already
+      # active from about 10 km/h on this GM setup, so freezing I all the way to
+      # 18 km/h can leave persistent curvature error in tight low-speed turns.
+      freeze_integrator = bool(
+        steer_limited or CS.steeringPressed or CS.vEgo < 3.5)
       output_torque = self.pid.update(
         pid_log.error,
         feedforward=feedforward,

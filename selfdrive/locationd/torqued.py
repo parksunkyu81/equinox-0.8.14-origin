@@ -68,7 +68,7 @@ from common.params import Params
 from common.realtime import Priority, config_realtime_process, DT_MDL
 from common.filter_simple import FirstOrderFilter
 from selfdrive.swaglog import cloudlog
-from selfdrive.car.gm.steering_limits import STEER_DELTA_UP, STEER_DELTA_DOWN
+from selfdrive.car.gm.steering_limits import steer_delta_limits_kph
 from selfdrive.controls.lib.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
 from selfdrive.controls.lib.v0813_lateral_compat import compensated_steer_delay
 from selfdrive.controls.lib.torque_authority import (
@@ -2338,7 +2338,7 @@ class TorqueEstimator:
                         v_kph = float(self.last_vego) * 3.6 if (
                                     self.last_vego is not None and np.isfinite(self.last_vego)) else 0.0
                         w_mid = self._midspd_weight(v_kph)
-                        delta_up_diag, delta_down_diag = STEER_DELTA_UP, STEER_DELTA_DOWN
+                        delta_up_diag, delta_down_diag = steer_delta_limits_kph(v_kph)
                         lim_up = (delta_up_diag / float(STEER_MAX_DIAG)) * (1.0 + MIDSPD_DELTA_UP_GAIN * w_mid)
                         lim_dn = (delta_down_diag / float(STEER_MAX_DIAG)) * (1.0 + MIDSPD_DELTA_DOWN_GAIN * w_mid)
                         lim = lim_up if abs(desired) > abs(applied) else lim_dn

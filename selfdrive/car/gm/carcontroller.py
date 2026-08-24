@@ -6,6 +6,7 @@ from common.realtime import DT_CTRL
 from selfdrive.car import apply_std_steer_torque_limits, create_gas_interceptor_command
 from selfdrive.car.gm import gmcan
 from selfdrive.car.gm.steer_scheduler import GMSteeringCommandScheduler
+from selfdrive.car.gm.steering_limits import steer_delta_limits_ms
 from selfdrive.car.gm.values import DBC, NO_ASCM, CanBus, CarControllerParams
 from opendbc.can.packer import CANPacker
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
@@ -22,6 +23,12 @@ class CarController():
     self.predictive_coast_styled_pedal = 0.0
     self.predictive_coast_pedal_scale = 1.0
 
+    # Dynamic steering delta diagnostics/state
+    self._dyn_steer_limited_prev = False
+    self._dyn_delta_up_last = 0
+    self._dyn_delta_down_last = 0
+
+
     self.steer_command_scheduler = GMSteeringCommandScheduler()
     self.lka_icon_status_last = (False, False)
     self.steer_rate_limited = False
@@ -36,6 +43,15 @@ class CarController():
              hud_v_cruise, hud_show_lanes, hud_show_car, hud_alert):
 
     P = self.params
+
+    # Panda keeps the absolute low-speed ceiling at 14/20. Apply the actual
+    # speed-dependent envelope here so highway lane changes and curves return
+    # early to the stable 7/17 response.
+    delta_up, delta_down = steer_delta_limits_ms(CS.out.vEgo)
+    P.STEER_DELTA_UP = float(delta_up)
+    P.STEER_DELTA_DOWN = float(delta_down)
+    self._dyn_delta_up_last = float(delta_up)
+    self._dyn_delta_down_last = float(delta_down)
 
     # Send CAN commands.
     can_sends = []
