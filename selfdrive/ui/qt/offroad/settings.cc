@@ -862,12 +862,6 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                             "../assets/offroad/icon_road.png",
                                             this));
 
-  toggles.append(new ParamControl("TurnDesireEngaged",
-                                            "Use Turn Signal for Intersection Turns (Alpha)",
-                                            "While engaged below 40 km/h, a turn signal tells the driving model a turn is coming, so it commits to the corner earlier and harder. Measured on this car: the model still predicts at most about 58 degrees of turn, so it will NOT complete a 90 degree turn by itself. Keep your hands on the wheel and be ready to steer. Stops after 15 s, if you take the wheel, or above 40 km/h. Takes effect on the next drive.",
-                                            "../assets/offroad/icon_road.png",
-                                            this));
-
   /*toggles.append(new ParamControl("SccSmootherSyncGasPressed",
                                             "Sync set speed on gas pressed",
                                             "",
@@ -939,6 +933,15 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                           "Enable auto shutdown",
                                           "Automatically power off the EON 180 seconds after external power is disconnected and driving has stopped.",
                                           "../assets/offroad/icon_shell.png",
+                                          this));
+
+  // Keep this last. The title is deliberately short: AbstractControl renders it
+  // in a QPushButton with no word wrap, so a long title widens the whole panel
+  // and adds a horizontal scrollbar.
+  toggles.append(new ParamControl("TurnDesireEngaged",
+                                          "Intersection Turn Assist",
+                                          "40km/h 미만에서 방향지시등을 켜면 모델에 회전 의도를 전달해 코너에 더 일찍, 더 확실하게 진입합니다.\n\n주의: 이 차량 측정 결과 모델이 예측하는 회전각은 최대 약 58도입니다. 90도 회전을 스스로 완료하지 못하므로 반드시 핸들을 잡고 조향할 준비를 하세요.\n\n다음 조건에서 자동 해제됩니다: 15초 경과, 핸들 조작, 40km/h 초과, 비상등.\n\n다음 주행부터 적용됩니다.",
+                                          "../assets/offroad/icon_road.png",
                                           this));
 
   for(ParamControl *toggle : toggles) {
