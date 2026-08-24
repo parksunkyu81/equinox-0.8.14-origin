@@ -6,7 +6,6 @@ from selfdrive.swaglog import cloudlog
 from selfdrive.controls.lib.lateral_mpc_lib.lat_mpc import LateralMpc
 from selfdrive.controls.lib.drive_helpers import CONTROL_N, MPC_COST_LAT, LAT_MPC_N
 from selfdrive.controls.lib.desire_helper import DesireHelper, AUTO_LCA_START_TIME
-from selfdrive.controls.lib.curve_virtual_readiness import CurveVirtualReadinessMonitor
 import cereal.messaging as messaging
 from cereal import log
 from common.params import Params
@@ -36,7 +35,6 @@ class LateralPlanner:
     self.t_idxs = np.arange(TRAJECTORY_SIZE)
     self.y_pts = np.zeros(TRAJECTORY_SIZE)
     self.model_data_valid = False
-    self.curve_virtual_readiness = CurveVirtualReadinessMonitor()
 
     self.lat_mpc = LateralMpc()
     self.reset_mpc(np.zeros(4))
@@ -83,22 +81,10 @@ class LateralPlanner:
       self.LP.rll_prob *= self.DH.lane_change_ll_prob
 
     # Calculate final driving path and set MPC costs
-    lane_change_active = self.DH.lane_change_state != log.LateralPlan.LaneChangeState.off
-    lane_confidence = max(self.LP.lll_prob, self.LP.rll_prob)
-    _, completed_curve_readiness = self.curve_virtual_readiness.update(
-      v_ego, measured_curvature, car_state.yawRate, car_state.steeringPressed,
-      lane_change_active, lane_confidence)
-    if (completed_curve_readiness is not None and
-        completed_curve_readiness['laneLossRatio'] > 0.0):
-      cloudlog.event('virtualCurveReadiness', **completed_curve_readiness)
-
     if self.use_lanelines:
       # LanePlanner applies its offset in-place; a copy prevents an invalid
       # model frame from accumulating the offset on the last valid trajectory.
-      d_path_xyz = self.LP.get_d_path(
-        v_ego, self.t_idxs, self.path_xyz.copy(),
-        measured_curvature=measured_curvature,
-        lane_change_active=lane_change_active)
+      d_path_xyz = self.LP.get_d_path(v_ego, self.t_idxs, self.path_xyz.copy())
       self.lat_mpc.set_weights(MPC_COST_LAT.PATH, MPC_COST_LAT.HEADING, MPC_COST_LAT.STEER_RATE)
     else:
       d_path_xyz = self.path_xyz
@@ -184,26 +170,5 @@ class LateralPlanner:
     lateralPlan.autoLaneChangeTimer = int(AUTO_LCA_START_TIME) - int(self.DH.auto_lane_change_timer)
 
     lateralPlan.totalCameraOffset = float(self.LP.total_camera_offset)
-    # Compatibility diagnostics. The official-style planner no longer blocks
-    # or filters the current path with a custom instability state machine.
-    lateralPlan.pathStabilityActive = False
-    lateralPlan.pathWobbleRangeM = 0.0
-    lateralPlan.pathWobbleFlips = 0
-    lateralPlan.laneCenterCorrectionM = float(self.LP.lane_center_correction_m)
-    lateralPlan.laneCenterCorrectionActive = bool(self.LP.lane_center_correction_active)
-    # Diagnostic-only readiness for evaluating whether a longer virtual curve
-    # could be trusted on this route. It does not affect lateral control.
-    lateralPlan.modelPathQuality = float(self.curve_virtual_readiness.current['quality'])
-    lateralPlan.modelPathQualityTrusted = bool(self.curve_virtual_readiness.current['eligible'])
-    lateralPlan.modelNearCurvature = float(self.curve_virtual_readiness.current['curvatureMean'])
-    # Diagnostic-only view of the tight-curve temporal-hold store gate, so a
-    # drive log can show which condition prevents a fallback path from being
-    # cached before the lane lines leave this narrow camera's view.
-    lateralPlan.curveAssist = float(self.LP.curve_assist_diag)
-    lateralPlan.curveRawTargetDProb = float(self.LP.curve_raw_target_d_prob_diag)
-    lateralPlan.curveGeometryPlausible = bool(self.LP.curve_geometry_plausible_diag)
-    lateralPlan.curveTemporalStored = bool(self.LP.curve_temporal_stored_diag)
-    lateralPlan.curveTemporalHoldAgeS = float(self.LP.curve_temporal_hold_age_diag)
-    lateralPlan.curveFallbackSource = int(self.LP.curve_fallback_source_diag)
 
     pm.send('lateralPlan', plan_send)

@@ -72,11 +72,6 @@ class LatControlTorque(LatControl):
   def get_fixed_torque_params(self):
     return dict(self.fixed_torque_params)
 
-  def set_path_stability(self, active, range_m=0.0, flips=0):
-    # Compatibility hook. Official-style torque control is not modified by a
-    # custom path-state machine.
-    del active, range_m, flips
-
   def get_dynamic_debug_torque_params(self):
     params = self.fixed_torque_params
     return {
