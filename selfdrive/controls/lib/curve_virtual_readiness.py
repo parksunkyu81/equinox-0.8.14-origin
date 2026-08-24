@@ -93,8 +93,18 @@ class CurveVirtualReadinessMonitor:
     }
 
   def update(self, v_ego, steering_curvature, yaw_rate, steering_pressed,
-             lane_change_active, lane_confidence):
-    """Return (current report, completed report or None)."""
+             lane_change_active, lane_confidence, yaw_valid=True):
+    """Return (current report, completed report or None).
+
+    yaw_rate comes from the device IMU (liveLocationKalman.angularVelocityCalibrated),
+    not the car's CAN bus: this GM's EBCM does not transmit a usable yaw signal
+    (its DBC-mapped field reads a constant 0 in every real drive log checked).
+    yaw_valid should reflect that measurement's own per-sample validity
+    (angularVelocityCalibrated.valid and inputsOK/sensorsOK/deviceStable), not
+    the coarser liveLocationKalman.status, which stays 'uninitialized' on this
+    device (no GPS lock, ever) even while the angular-velocity measurement
+    itself is fine.
+    """
     values = (v_ego, steering_curvature, yaw_rate, lane_confidence)
     if not all(math.isfinite(float(value)) for value in values):
       curve_active = False
@@ -110,7 +120,12 @@ class CurveVirtualReadinessMonitor:
       steering_curvature = float(steering_curvature)
       yaw_curvature = float(yaw_rate) / max(float(v_ego), 1.0)
       agreement_limit = max(0.003, 0.50 * abs(steering_curvature))
+      # An invalid yaw sample cannot confirm agreement. Treat it the same as a
+      # real disagreement rather than skipping it -- this readiness monitor
+      # exists to gate how much a fallback path is trusted, so an unmeasurable
+      # frame should count against trust, not be silently dropped.
       yaw_agrees = bool(
+        yaw_valid and
         steering_curvature * yaw_curvature > 0.0 and
         abs(steering_curvature - yaw_curvature) <= agreement_limit)
       self.active = True

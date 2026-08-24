@@ -91,6 +91,22 @@ CURVE_TEMPORAL_MAX_CORRECTION_NEAR_M = 0.22
 CURVE_TEMPORAL_MAX_CORRECTION_M = 0.75
 CURVE_TEMPORAL_MAX_YAW_RAD = 0.24
 
+# Relaxed ceilings used only while CurveVirtualReadinessMonitor currently
+# confirms the dead-reckoning assumption: the car's own measured curvature
+# (steering-derived, independent of lane visibility) agreeing with the device
+# IMU's live yaw rate (liveLocationKalman.angularVelocityCalibrated -- this
+# GM's CAN yaw signal reads a constant 0, see curve_virtual_readiness.py).
+# That check re-evaluates every frame from live sensors, including through a
+# lane dropout, so it can confirm the fallback is still tracking the real
+# curve -- or withdraw trust within a few frames if the road straightens out
+# faster than the extrapolation assumes. Applied only when
+# readiness['eligible'] is True and scaled by readiness['quality']; outside
+# that window every fallback behaves exactly as it did before this change.
+CURVE_TEMPORAL_TRUSTED_MAX_CORRECTION_NEAR_M = 0.40
+CURVE_TEMPORAL_TRUSTED_MAX_CORRECTION_M = 1.50
+CURVE_TEMPORAL_TRUSTED_MAX_YAW_RAD = 0.42
+CURVE_TEMPORAL_TRUSTED_HOLD_MULT = 2.0
+
 # Road-edge fallback is used only on low/mid-speed tight curves when lane
 # confidence is weak. It never blindly centers the whole road: both edges are
 # accepted only when the visible road width looks like a single-lane corridor;
@@ -105,6 +121,9 @@ ROAD_EDGE_NEAR_MODEL_MIN_M = 1.0
 ROAD_EDGE_NEAR_MODEL_MAX_M = 2.9
 ROAD_EDGE_MAX_CORRECTION_NEAR_M = 0.20
 ROAD_EDGE_MAX_CORRECTION_M = 0.70
+# Same readiness-gated relaxation as the temporal-hold ceilings above.
+ROAD_EDGE_TRUSTED_MAX_CORRECTION_NEAR_M = 0.35
+ROAD_EDGE_TRUSTED_MAX_CORRECTION_M = 1.20
 FRESH_LANE_RECOVERY_DPROB = 0.45
 FRESH_LANE_RECOVERY_FRAMES = 4  # ~0.20 s at 20 Hz before dropping fallback
 
@@ -158,6 +177,12 @@ class LanePlanner:
       cloudlog.warning("CurveFallbackDisabled param unavailable, using default")
     self.curve_fallback_enabled = bool(
       CURVE_FALLBACK_DEFAULT and not fallback_disabled)
+
+    # Set fresh every get_d_path() call from CurveVirtualReadinessMonitor's
+    # current (this-frame) report. False/0.0 reproduces the exact pre-change
+    # fixed caps.
+    self._readiness_eligible = False
+    self._readiness_quality = 0.0
 
     # Compatibility fields retained for the existing lateralPlan schema.
     self.lane_center_correction_m = 0.0
@@ -295,6 +320,20 @@ class LanePlanner:
              CURVE_TEMPORAL_HOLD_V_S),
       0.0, CURVE_TEMPORAL_HOLD_MAX_S))
 
+  def _trusted_hold_max_s(self, v_ego):
+    """Speed-aware bridge time, extended while readiness is confirmed.
+
+    Multiplies rather than replaces: a speed that already collapses the base
+    hold to ~0 (e.g. above the 60 kph top breakpoint) still gets no hold,
+    trusted or not.
+    """
+    hold_max_s = self._temporal_hold_max_s(v_ego)
+    if self._readiness_eligible and hold_max_s > 0.0:
+      hold_max_s = interp(
+        self._readiness_quality, [0.0, 1.0],
+        [hold_max_s, hold_max_s * CURVE_TEMPORAL_TRUSTED_HOLD_MULT])
+    return hold_max_s
+
   def _curve_temporal_prediction(self, path_x, v_ego, curve_assist,
                                  measured_curvature, lane_change_active):
     """Predict the cached lane path with a speed-aware <=0.60 s horizon."""
@@ -319,7 +358,7 @@ class LanePlanner:
       self._clear_curve_temporal_hold()
       return None, 0.0
 
-    hold_max_s = self._temporal_hold_max_s(v_ego)
+    hold_max_s = self._trusted_hold_max_s(v_ego)
     if hold_max_s <= CURVE_TEMPORAL_HOLD_FULL_S:
       self._clear_curve_temporal_hold()
       return None, 0.0
@@ -340,9 +379,11 @@ class LanePlanner:
     if abs(curvature) < CURVE_ASSIST_START_CURVATURE:
       curvature = self._curve_hold_curvature
     travel_m = max(float(v_ego), 0.0) * self._curve_hold_age_s
-    yaw = float(np.clip(
-      curvature * travel_m, -CURVE_TEMPORAL_MAX_YAW_RAD,
-      CURVE_TEMPORAL_MAX_YAW_RAD))
+    yaw_cap = CURVE_TEMPORAL_MAX_YAW_RAD
+    if self._readiness_eligible:
+      yaw_cap = interp(self._readiness_quality, [0.0, 1.0],
+                       [CURVE_TEMPORAL_MAX_YAW_RAD, CURVE_TEMPORAL_TRUSTED_MAX_YAW_RAD])
+    yaw = float(np.clip(curvature * travel_m, -yaw_cap, yaw_cap))
 
     if abs(curvature) > 1e-4:
       dx = np.sin(yaw) / curvature
@@ -394,10 +435,13 @@ class LanePlanner:
 
   def _bound_curve_temporal_path(self, path_xyz, predicted_lane_y):
     """Bound stale-path influence relative to the fresh model path."""
-    max_correction = np.interp(
-      np.abs(path_xyz[:, 0]), [0.0, 20.0],
-      [CURVE_TEMPORAL_MAX_CORRECTION_NEAR_M,
-       CURVE_TEMPORAL_MAX_CORRECTION_M])
+    near_m, far_m = CURVE_TEMPORAL_MAX_CORRECTION_NEAR_M, CURVE_TEMPORAL_MAX_CORRECTION_M
+    if self._readiness_eligible:
+      near_m = interp(self._readiness_quality,
+                      [0.0, 1.0], [near_m, CURVE_TEMPORAL_TRUSTED_MAX_CORRECTION_NEAR_M])
+      far_m = interp(self._readiness_quality,
+                     [0.0, 1.0], [far_m, CURVE_TEMPORAL_TRUSTED_MAX_CORRECTION_M])
+    max_correction = np.interp(np.abs(path_xyz[:, 0]), [0.0, 20.0], [near_m, far_m])
     return path_xyz[:, 1] + np.clip(
       predicted_lane_y - path_xyz[:, 1], -max_correction, max_correction)
 
@@ -576,9 +620,13 @@ class LanePlanner:
     weights = np.asarray(confidences, dtype=float)
     edge_path = np.average(np.vstack(candidates), axis=0, weights=weights)
 
-    max_correction = np.interp(
-      np.abs(path_x), [0.0, 20.0],
-      [ROAD_EDGE_MAX_CORRECTION_NEAR_M, ROAD_EDGE_MAX_CORRECTION_M])
+    near_m, far_m = ROAD_EDGE_MAX_CORRECTION_NEAR_M, ROAD_EDGE_MAX_CORRECTION_M
+    if self._readiness_eligible:
+      near_m = interp(self._readiness_quality,
+                      [0.0, 1.0], [near_m, ROAD_EDGE_TRUSTED_MAX_CORRECTION_NEAR_M])
+      far_m = interp(self._readiness_quality,
+                     [0.0, 1.0], [far_m, ROAD_EDGE_TRUSTED_MAX_CORRECTION_M])
+    max_correction = np.interp(np.abs(path_x), [0.0, 20.0], [near_m, far_m])
     edge_path = model_y + np.clip(
       edge_path - model_y, -max_correction, max_correction)
 
@@ -589,7 +637,7 @@ class LanePlanner:
   def _age_curve_temporal_hold(self, v_ego):
     if self._curve_hold_x is None:
       return
-    hold_max_s = self._temporal_hold_max_s(v_ego)
+    hold_max_s = self._trusted_hold_max_s(v_ego)
     if hold_max_s <= CURVE_TEMPORAL_HOLD_FULL_S:
       self._clear_curve_temporal_hold()
       return
@@ -726,9 +774,12 @@ class LanePlanner:
       self.r_lane_change_prob = 0.0
 
   def get_d_path(self, v_ego, path_t, path_xyz, measured_curvature=0.0,
-                 lane_change_active=False):
+                 lane_change_active=False, readiness_eligible=False,
+                 readiness_quality=0.0):
     del path_t
     path_xyz[:, 1] += self.path_offset
+    self._readiness_eligible = bool(readiness_eligible)
+    self._readiness_quality = float(np.clip(readiness_quality, 0.0, 1.0))
 
     measured_curve_strength = interp(
       abs(float(measured_curvature)),

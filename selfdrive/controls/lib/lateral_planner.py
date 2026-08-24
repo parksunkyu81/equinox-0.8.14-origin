@@ -85,9 +85,23 @@ class LateralPlanner:
     # Calculate final driving path and set MPC costs
     lane_change_active = self.DH.lane_change_state != log.LateralPlan.LaneChangeState.off
     lane_confidence = max(self.LP.lll_prob, self.LP.rll_prob)
+    # This GM's EBCM does not transmit a usable yaw-rate signal on the CAN bus
+    # (car_state.yawRate's DBC-mapped bits read a constant 0 in every real
+    # drive log checked). Use the device's own IMU-derived yaw instead. Gate
+    # on the measurement's own validity, not liveLocationKalman.status: status
+    # stays 'uninitialized' on this device (it never gets a GPS lock) even
+    # while angularVelocityCalibrated itself is fine.
+    llk = sm['liveLocationKalman']
+    angular_velocity = llk.angularVelocityCalibrated
+    yaw_rate_valid = bool(
+      sm.valid['liveLocationKalman'] and angular_velocity.valid and
+      llk.inputsOK and llk.sensorsOK and llk.deviceStable)
+    yaw_rate_imu = (
+      float(angular_velocity.value[2])
+      if yaw_rate_valid and len(angular_velocity.value) > 2 else 0.0)
     _, completed_curve_readiness = self.curve_virtual_readiness.update(
-      v_ego, measured_curvature, car_state.yawRate, car_state.steeringPressed,
-      lane_change_active, lane_confidence)
+      v_ego, measured_curvature, yaw_rate_imu, car_state.steeringPressed,
+      lane_change_active, lane_confidence, yaw_valid=yaw_rate_valid)
     if (completed_curve_readiness is not None and
         completed_curve_readiness['laneLossRatio'] > 0.0):
       cloudlog.event('virtualCurveReadiness', **completed_curve_readiness)
@@ -98,7 +112,9 @@ class LateralPlanner:
       d_path_xyz = self.LP.get_d_path(
         v_ego, self.t_idxs, self.path_xyz.copy(),
         measured_curvature=measured_curvature,
-        lane_change_active=lane_change_active)
+        lane_change_active=lane_change_active,
+        readiness_eligible=self.curve_virtual_readiness.current['eligible'],
+        readiness_quality=self.curve_virtual_readiness.current['quality'])
       self.lat_mpc.set_weights(MPC_COST_LAT.PATH, MPC_COST_LAT.HEADING, MPC_COST_LAT.STEER_RATE)
     else:
       d_path_xyz = self.path_xyz

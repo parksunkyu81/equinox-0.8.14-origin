@@ -26,7 +26,7 @@ def plannerd_thread(sm=None, pm=None):
   last_exception_log = {"lateral": 0.0, "longitudinal": 0.0}
 
   if sm is None:
-    sm = messaging.SubMaster(['carState', 'controlsState', 'radarState', 'modelV2'],
+    sm = messaging.SubMaster(['carState', 'controlsState', 'radarState', 'modelV2', 'liveLocationKalman'],
                              poll=['radarState', 'modelV2'], ignore_avg_freq=['radarState'])
 
   if pm is None:
