@@ -1134,6 +1134,16 @@ struct LateralPlan @0xe1e9318e2ae8b51e {
   modelPathQualityTrusted @41 :Bool;
   modelNearCurvature @42 :Float32;
 
+  # Diagnostics for the tight-curve temporal-hold store gate. Drive logs showed
+  # sharp curves never store a fallback path (0/96 frames), but the published
+  # fields could not tell which of the gate's conditions blocks it. These expose
+  # each input so the blocking condition can be identified from a drive log.
+  curveAssist @43 :Float32;
+  curveRawTargetDProb @44 :Float32;
+  curveGeometryPlausible @45 :Bool;
+  curveTemporalStored @46 :Bool;
+  curveTemporalHoldAgeS @47 :Float32;
+
   enum Desire {
     none @0;
     turnLeft @1;

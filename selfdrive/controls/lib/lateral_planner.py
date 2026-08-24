@@ -196,5 +196,13 @@ class LateralPlanner:
     lateralPlan.modelPathQuality = float(self.curve_virtual_readiness.current['quality'])
     lateralPlan.modelPathQualityTrusted = bool(self.curve_virtual_readiness.current['eligible'])
     lateralPlan.modelNearCurvature = float(self.curve_virtual_readiness.current['curvatureMean'])
+    # Diagnostic-only view of the tight-curve temporal-hold store gate, so a
+    # drive log can show which condition prevents a fallback path from being
+    # cached before the lane lines leave this narrow camera's view.
+    lateralPlan.curveAssist = float(self.LP.curve_assist_diag)
+    lateralPlan.curveRawTargetDProb = float(self.LP.curve_raw_target_d_prob_diag)
+    lateralPlan.curveGeometryPlausible = bool(self.LP.curve_geometry_plausible_diag)
+    lateralPlan.curveTemporalStored = bool(self.LP.curve_temporal_stored_diag)
+    lateralPlan.curveTemporalHoldAgeS = float(self.LP.curve_temporal_hold_age_diag)
 
     pm.send('lateralPlan', plan_send)

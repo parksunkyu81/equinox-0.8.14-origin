@@ -138,6 +138,14 @@ class LanePlanner:
     self.lane_center_correction_active = False
     self._last_lane_center_refs = None
 
+    # Diagnostic-only mirrors of the temporal-hold store gate inputs. They never
+    # feed control; they exist so a drive log can show which condition blocks
+    # storage on a tight curve.
+    self.curve_assist_diag = 0.0
+    self.curve_raw_target_d_prob_diag = 0.0
+    self.curve_geometry_plausible_diag = False
+    self.curve_temporal_stored_diag = False
+
     # Last trustworthy tight-curve lane path in the previous ego frame.
     self._curve_hold_x = None
     self._curve_hold_y = None
@@ -203,6 +211,13 @@ class LanePlanner:
       self._last_lane_center_refs = lane_center_refs.copy()
     return next_d_prob
 
+  @property
+  def curve_temporal_hold_age_diag(self):
+    """Age of the cached tight-curve path, at the max when none is held."""
+    if self._curve_hold_x is None:
+      return CURVE_TEMPORAL_HOLD_MAX_S
+    return float(self._curve_hold_age_s)
+
   def _clear_curve_temporal_hold(self):
     self._curve_hold_x = None
     self._curve_hold_y = None
@@ -233,6 +248,7 @@ class LanePlanner:
     if path_x.size < 2:
       return
 
+    self.curve_temporal_stored_diag = True
     self._curve_hold_x = path_x.copy()
     self._curve_hold_y = lane_path_y.copy()
     self._curve_hold_age_s = 0.0
@@ -595,6 +611,14 @@ class LanePlanner:
     return False
 
   def parse_model(self, md):
+    # Reset the per-frame store-gate diagnostics here rather than in get_d_path,
+    # which is skipped entirely when lane lines are disabled. Without this the
+    # published values would go stale instead of reading as "not evaluated".
+    self.curve_assist_diag = 0.0
+    self.curve_raw_target_d_prob_diag = 0.0
+    self.curve_geometry_plausible_diag = False
+    self.curve_temporal_stored_diag = False
+
     lane_lines = md.laneLines
     lane_line_probs = as_finite_vector(md.laneLineProbs, minimum_size=4)
     lane_line_stds = as_finite_vector(md.laneLineStds, minimum_size=4)
@@ -692,6 +716,10 @@ class LanePlanner:
         ROAD_EDGE_CURVE_WEIGHT * road_edge_curve_strength)
     pre_curve_assist = float(np.clip(
       pre_curve_strength * speed_curve_weight, 0.0, 1.0))
+    # Publish the pre-curve value now so the fallback early-returns below still
+    # report an assist level; the lane-geometry path overwrites it once the
+    # richer estimate is available.
+    self.curve_assist_diag = pre_curve_assist
 
     width_pts = self.rll_y - self.lll_y
     geometry_valid = (
@@ -807,6 +835,9 @@ class LanePlanner:
       pre_curve_strength, geometry_curve_strength)
     curve_assist = float(np.clip(
       combined_curve_strength * speed_curve_weight, 0.0, 1.0))
+    self.curve_assist_diag = curve_assist
+    self.curve_raw_target_d_prob_diag = float(raw_target_d_prob)
+    self.curve_geometry_plausible_diag = geometry_plausible
 
     fallback_max_speed = interp(
       curve_assist, [0.0, 1.0],
