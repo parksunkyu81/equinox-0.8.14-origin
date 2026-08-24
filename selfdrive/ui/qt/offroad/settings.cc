@@ -862,6 +862,12 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                             "../assets/offroad/icon_road.png",
                                             this));
 
+  toggles.append(new ParamControl("TurnDesireEngaged",
+                                            "Use Turn Signal for Intersection Turns (Alpha)",
+                                            "While engaged below 40 km/h, a turn signal tells the driving model a turn is coming, so it commits to the corner earlier and harder. Measured on this car: the model still predicts at most about 58 degrees of turn, so it will NOT complete a 90 degree turn by itself. Keep your hands on the wheel and be ready to steer. Stops after 15 s, if you take the wheel, or above 40 km/h. Takes effect on the next drive.",
+                                            "../assets/offroad/icon_road.png",
+                                            this));
+
   /*toggles.append(new ParamControl("SccSmootherSyncGasPressed",
                                             "Sync set speed on gas pressed",
                                             "",

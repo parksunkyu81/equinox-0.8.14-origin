@@ -11,25 +11,47 @@ LaneChangeDirection = log.LateralPlan.LaneChangeDirection
 LANE_CHANGE_SPEED_MIN = 50 * CV.KPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
 
-# --- Step 1 of the hands-free 90-degree-turn goal: OBSERVATION ONLY ---
-# The driving model already accepts a turn desire (modeld reads
-# lateralPlan.desire and one-hots it into the model), and Desire.turnLeft /
-# turnRight are defined, but nothing in this repo ever sets them. Before
-# building anything on top of that, we need to know one thing: does this model
-# actually predict a 90-degree turn path when told a turn is coming?
+# --- Turn desire from the blinker ---
+# The driving model accepts a turn desire (modeld reads lateralPlan.desire and
+# one-hots it into the model) and Desire.turnLeft / turnRight are defined, but
+# stock never sets them. Feeding it measurably changes what the model predicts.
+# Drive-log measurement of the predicted heading change over the model's own
+# trajectory, turn desire vs none at matched curvature:
 #
-# This wiring answers that from a drive log without touching control. It is
-# gated to the DISENGAGED state on purpose -- feeding a desire changes what the
-# model predicts, and that prediction feeds the MPC, so doing this while
-# engaged would change steering. Disengaged, the prediction is logged and
-# steers nothing.
+#   approach, still near-straight   +9.4 deg   model starts the turn earlier
+#   ordinary curves (20-130 deg wheel) ~0 deg  lane lines already show the bend
+#   intersection-grade (130 deg+)   +15.9 deg  model commits much harder
 #
-# Set to False to disable the experiment entirely.
+# So the desire earns its keep on the approach and deep inside an intersection
+# turn, and does nothing on ordinary curves. The ceiling is real though: even
+# with the desire the model predicted at most ~58 deg of heading change, so
+# this makes intersection turns more decisive, it does not complete a 90 deg
+# turn on its own.
 TURN_DESIRE_OBSERVE = True
-# Only below lane-change speed, so this can never shadow a real lane change
-# (which requires >= LANE_CHANGE_SPEED_MIN and owns the blinker up there).
+
+# Acting on the desire while ENGAGED changes steering at intersections, so it
+# is opt-in: default off, flipped from the Community menu (TurnDesireEngaged).
+# With it off the desire is still pulsed while DISENGAGED, which steers nothing
+# and keeps the drive logs comparable.
+TURN_DESIRE_ENGAGED_DEFAULT = False
+
+# Observation band: anything below lane-change speed, so it can never shadow a
+# real lane change (which needs >= LANE_CHANGE_SPEED_MIN and owns the blinker).
 TURN_DESIRE_MAX_SPEED = LANE_CHANGE_SPEED_MIN
 TURN_DESIRE_MIN_SPEED = 1.0  # m/s, must actually be rolling
+
+# Engaged band is deliberately tighter than the observation band. A real
+# intersection turn is taken well under 40 km/h; between 40 and lane-change
+# speed a blinker is more likely a lane change the driver started early, and
+# asserting a turn there would pull the car across its own lane.
+TURN_DESIRE_ENGAGED_MIN_SPEED = 5.0 * CV.KPH_TO_MS
+TURN_DESIRE_ENGAGED_MAX_SPEED = 40.0 * CV.KPH_TO_MS
+
+# A blinker left on long after the turn (or forgotten entirely) would otherwise
+# keep telling the model to turn into a road that is not there. Stop asserting
+# after this long; the driver can re-arm by cycling the blinker.
+TURN_DESIRE_ENGAGED_MAX_DURATION_S = 15.0
+
 # modeld turns desire into a rising-edge pulse, so a held value reaches the
 # model exactly once. Re-assert it periodically, the way the keepLeft/keepRight
 # pulse already does, so a multi-second turn keeps signalling.
@@ -74,6 +96,17 @@ class DesireHelper:
 
     self.turn_desire_pulse_timer = 0.0
     self.turn_desire_active = False
+    self.turn_desire_duration = 0.0
+    # Read once: a steering-affecting mode must not flip mid-drive. Params
+    # enforces a key whitelist and raises for keys an older compiled library
+    # does not know, which would take plannerd down on a partial deploy.
+    engaged_enabled = TURN_DESIRE_ENGAGED_DEFAULT
+    try:
+      if Params().get_bool('TurnDesireEngaged'):
+        engaged_enabled = True
+    except Exception:
+      pass
+    self.turn_desire_engaged_enabled = bool(engaged_enabled)
 
   def update(self, carstate, active, lane_change_prob):
     v_ego = carstate.vEgo
@@ -163,22 +196,46 @@ class DesireHelper:
     self._update_turn_desire(carstate, active, v_ego, one_blinker)
 
   def _update_turn_desire(self, carstate, active, v_ego, one_blinker):
-    """Signal turn intent to the model from the blinker, while disengaged only.
+    """Signal turn intent to the model from the blinker.
 
     Runs last so it can only fill a desire slot the lane-change state machine
     left empty -- it never overrides a real lane change.
+
+    While disengaged this is pure observation. While engaged it steers, so it
+    additionally requires the opt-in toggle, a tighter speed band, a duration
+    cap and no driver override.
     """
-    eligible = bool(
-      TURN_DESIRE_OBSERVE and
-      not active and
-      self.desire == log.LateralPlan.Desire.none and
-      one_blinker and
-      TURN_DESIRE_MIN_SPEED <= v_ego < TURN_DESIRE_MAX_SPEED
-    )
-    if not eligible:
-      self.turn_desire_pulse_timer = 0.0
-      self.turn_desire_active = False
+    if not TURN_DESIRE_OBSERVE or not one_blinker or \
+       self.desire != log.LateralPlan.Desire.none:
+      self._reset_turn_desire()
       return
+
+    if active:
+      if not self.turn_desire_engaged_enabled:
+        self._reset_turn_desire()
+        return
+      # The driver taking the wheel outranks a blinker: stop pulling the model
+      # toward a turn the driver may be steering away from.
+      if carstate.steeringPressed:
+        self._reset_turn_desire()
+        return
+      in_band = (TURN_DESIRE_ENGAGED_MIN_SPEED <= v_ego <
+                 TURN_DESIRE_ENGAGED_MAX_SPEED)
+      if not in_band:
+        self._reset_turn_desire()
+        return
+      self.turn_desire_duration += DT_MDL
+      if self.turn_desire_duration > TURN_DESIRE_ENGAGED_MAX_DURATION_S:
+        # Held too long to still be this turn. Stay off until the blinker is
+        # cycled, which _reset_turn_desire cannot do on its own.
+        self.desire = log.LateralPlan.Desire.none
+        self.turn_desire_active = False
+        return
+    else:
+      if not (TURN_DESIRE_MIN_SPEED <= v_ego < TURN_DESIRE_MAX_SPEED):
+        self._reset_turn_desire()
+        return
+      self.turn_desire_duration += DT_MDL
 
     self.turn_desire_active = True
     self.turn_desire_pulse_timer += DT_MDL
@@ -190,3 +247,8 @@ class DesireHelper:
     else:
       self.desire = (log.LateralPlan.Desire.turnLeft if carstate.leftBlinker
                      else log.LateralPlan.Desire.turnRight)
+
+  def _reset_turn_desire(self):
+    self.turn_desire_pulse_timer = 0.0
+    self.turn_desire_duration = 0.0
+    self.turn_desire_active = False
