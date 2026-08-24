@@ -99,6 +99,10 @@ class LateralPlanner:
     yaw_rate_imu = (
       float(angular_velocity.value[2])
       if yaw_rate_valid and len(angular_velocity.value) > 2 else 0.0)
+    # Independent physical curvature estimate for the curve-fallback virtual
+    # path (see lane_planner.py's _blended_curvature): yaw_rate / v_ego, floored
+    # so the division stays finite near a stop.
+    imu_curvature = yaw_rate_imu / max(v_ego, 1.0)
     _, completed_curve_readiness = self.curve_virtual_readiness.update(
       v_ego, measured_curvature, yaw_rate_imu, car_state.steeringPressed,
       lane_change_active, lane_confidence, yaw_valid=yaw_rate_valid)
@@ -114,7 +118,8 @@ class LateralPlanner:
         measured_curvature=measured_curvature,
         lane_change_active=lane_change_active,
         readiness_eligible=self.curve_virtual_readiness.current['eligible'],
-        readiness_quality=self.curve_virtual_readiness.current['quality'])
+        readiness_quality=self.curve_virtual_readiness.current['quality'],
+        imu_curvature=imu_curvature, imu_curvature_valid=yaw_rate_valid)
       self.lat_mpc.set_weights(MPC_COST_LAT.PATH, MPC_COST_LAT.HEADING, MPC_COST_LAT.STEER_RATE)
     else:
       d_path_xyz = self.path_xyz
