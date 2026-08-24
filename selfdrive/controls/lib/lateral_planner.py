@@ -204,5 +204,6 @@ class LateralPlanner:
     lateralPlan.curveGeometryPlausible = bool(self.LP.curve_geometry_plausible_diag)
     lateralPlan.curveTemporalStored = bool(self.LP.curve_temporal_stored_diag)
     lateralPlan.curveTemporalHoldAgeS = float(self.LP.curve_temporal_hold_age_diag)
+    lateralPlan.curveFallbackSource = int(self.LP.curve_fallback_source_diag)
 
     pm.send('lateralPlan', plan_send)

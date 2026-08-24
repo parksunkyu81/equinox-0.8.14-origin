@@ -1143,6 +1143,12 @@ struct LateralPlan @0xe1e9318e2ae8b51e {
   curveGeometryPlausible @45 :Bool;
   curveTemporalStored @46 :Bool;
   curveTemporalHoldAgeS @47 :Float32;
+  # What actually produced laneCenterCorrectionM this frame. Without this, a
+  # correction from ordinary lane blending is indistinguishable from one the
+  # curve fallback injected, which made an earlier "is the fallback steering
+  # the car wide in sharp curves?" measurement inconclusive.
+  # 0 = none, 1 = ordinary lane blending, 2 = temporal hold, 3 = road edge
+  curveFallbackSource @48 :UInt8;
 
   enum Desire {
     none @0;

@@ -147,6 +147,8 @@ class LanePlanner:
     self.curve_raw_target_d_prob_diag = 0.0
     self.curve_geometry_plausible_diag = False
     self.curve_temporal_stored_diag = False
+    # 0 none, 1 ordinary lane blending, 2 temporal hold, 3 road edge
+    self.curve_fallback_source_diag = 0
 
     # Last trustworthy tight-curve lane path in the previous ego frame.
     self._curve_hold_x = None
@@ -590,6 +592,7 @@ class LanePlanner:
         np.interp(20.0, path_xyz[:, 0], applied_delta))
       self.lane_center_correction_active = bool(
         abs(self.lane_center_correction_m) > 0.01)
+      self.curve_fallback_source_diag = 2
       self._fallback_mode_active = True
       self._fresh_lane_recovery_frames = 0
       return True
@@ -605,6 +608,7 @@ class LanePlanner:
         np.interp(20.0, path_xyz[:, 0], applied_delta))
       self.lane_center_correction_active = bool(
         abs(self.lane_center_correction_m) > 0.01)
+      self.curve_fallback_source_diag = 3
       self._fallback_mode_active = True
       self._fresh_lane_recovery_frames = 0
       self._age_curve_temporal_hold(v_ego)
@@ -620,6 +624,7 @@ class LanePlanner:
     self.curve_raw_target_d_prob_diag = 0.0
     self.curve_geometry_plausible_diag = False
     self.curve_temporal_stored_diag = False
+    self.curve_fallback_source_diag = 0
 
     lane_lines = md.laneLines
     lane_line_probs = as_finite_vector(md.laneLineProbs, minimum_size=4)
@@ -978,6 +983,7 @@ class LanePlanner:
         self.d_prob = max(
           self.d_prob, CURVE_TEMPORAL_DPROB_FLOOR * temporal_weight)
         center_delta = lane_path_y_interp - path_xyz[:, 1]
+        self.curve_fallback_source_diag = 2
         self._fallback_mode_active = True
         self._fresh_lane_recovery_frames = 0
       else:
@@ -993,6 +999,7 @@ class LanePlanner:
           self.d_prob = max(
             self.d_prob, ROAD_EDGE_DPROB_FLOOR * edge_weight)
           center_delta = lane_path_y_interp - path_xyz[:, 1]
+          self.curve_fallback_source_diag = 3
           self._fallback_mode_active = True
           self._fresh_lane_recovery_frames = 0
           self._age_curve_temporal_hold(v_ego)
@@ -1010,6 +1017,10 @@ class LanePlanner:
     self.lane_center_correction_active = bool(
       self.d_prob > 0.05 and
       abs(self.lane_center_correction_m) > 0.01)
+    # Only ordinary lane blending reached here; a fallback above already
+    # claimed the frame and must keep its attribution.
+    if self.curve_fallback_source_diag == 0 and self.lane_center_correction_active:
+      self.curve_fallback_source_diag = 1
     path_xyz[:, 1] = (
       self.d_prob * lane_path_y_interp +
       (1.0 - self.d_prob) * path_xyz[:, 1]
