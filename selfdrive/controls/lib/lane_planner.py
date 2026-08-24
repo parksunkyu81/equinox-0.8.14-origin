@@ -899,12 +899,22 @@ class LanePlanner:
 
     center_delta = lane_path_y_interp - path_xyz[:, 1]
 
-    # Cache only trustworthy tight-curve frames. During a short camera/model
-    # confidence dropout, prefer current road edges; if those are unavailable,
-    # reuse the ego-motion-compensated lane path with a speed-aware fade.
+    # Cache any trustworthy frame, not only ones already recognized as curving.
+    # A drive-log gate analysis (curveAssist/curveRawTargetDProb diagnostics)
+    # showed curve_assist is essentially never the blocker on a sharp curve
+    # (>=0.30 on 93% of sharp-curvature frames), but raw_target_d_prob is: it
+    # never once reached the 0.35 store threshold while |curvature|>=0.025
+    # (median 0.018, 0/317 frames passed). That is expected, not a bug -- by
+    # the time this narrow EON FOV shows a sharp bend, the lane lines it needs
+    # to measure confidently are already leaving the frame. Requiring
+    # curve_assist here waits for that same moment before trying to store,
+    # which is structurally too late. Storing continuously instead means the
+    # most recent confident lane shape (from a moment ago, while still
+    # straight/gentle, where raw_target_d_prob passes 80%/43% of the time) is
+    # already cached and only a frame or two old once curve_assist ramps up
+    # and the dropout below starts consuming it.
     trusted_curve_frame = bool(
       not lane_change_active and
-      curve_assist >= CURVE_TEMPORAL_MIN_ASSIST and
       geometry_plausible and
       raw_target_d_prob >= CURVE_TEMPORAL_STORE_DPROB
     )
