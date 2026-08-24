@@ -44,6 +44,15 @@ LANE_CONFIDENCE_FALL_RATE_PER_S = 1.25
 LANE_CENTER_CONTINUITY_MAX_M = 0.35
 CURVE_LANE_CENTER_CONTINUITY_MAX_M = 0.55
 CURVE_CONFIDENCE_RISE_BONUS_PER_S = 1.00
+# Measured on this car: real curves keep bending for several seconds while
+# the narrow EON FOV loses lane confidence well before the curve ends. A full
+# 1.25/s fall rate collapses d_path back toward the raw (under-curving) model
+# path only 0.5-0.8 s after confidence first dips, well before the curve is
+# over. Slow the fall while curve_assist is active so partial/weak lane
+# signal keeps contributing longer; still fall at at least the floor rate so
+# a genuinely straight, lane-lost road recovers to the model path.
+CURVE_CONFIDENCE_FALL_SLOWDOWN_PER_S = 0.90
+CURVE_CONFIDENCE_MIN_FALL_RATE_PER_S = 0.35
 CURVE_ASSIST_FULL_BELOW_MS = 12.5  # Full assist through 45 km/h
 CURVE_ASSIST_ZERO_ABOVE_MS = 16.67  # Back to normal by 60 km/h
 CURVE_ASSIST_START_CURVATURE = 0.0075
@@ -57,15 +66,20 @@ CURVE_LOW_CONFIDENCE_MAX_CORRECTION_M = 0.70
 
 # Short temporal continuation for tight curves. Cache the last trustworthy
 # lane-path shape, compensate it for the car's short ego-motion, hold it
-# strongly for 0.10 s, then fade it out completely by 0.60 s.
+# strongly for 0.10 s, then fade it out completely by 1.20 s. This narrow EON
+# FOV loses lane lines well before a real curve (measured up to ~7 s on this
+# car) finishes, so the old 0.60 s cap reverted to the raw (under-curving)
+# model path mid-corner; doubling it covers more of the gap without letting
+# the constant-curvature dead-reckoning run so long that road curvature
+# changes within the hold window dominate the error.
 CURVE_TEMPORAL_HOLD_FULL_S = 0.10
-CURVE_TEMPORAL_HOLD_MAX_S = 0.60
+CURVE_TEMPORAL_HOLD_MAX_S = 1.20
 # Speed-aware temporal horizon: keep longer history only at low speed.
 CURVE_TEMPORAL_HOLD_BP_MS = (
   0.0, 30.0 / 3.6, 40.0 / 3.6, 45.0 / 3.6,
   50.0 / 3.6, 55.0 / 3.6, 60.0 / 3.6,
 )
-CURVE_TEMPORAL_HOLD_V_S = (0.60, 0.60, 0.50, 0.45, 0.38, 0.25, 0.0)
+CURVE_TEMPORAL_HOLD_V_S = (1.20, 1.20, 1.00, 0.90, 0.76, 0.50, 0.0)
 CURVE_TEMPORAL_MIN_ASSIST = 0.30
 CURVE_TEMPORAL_STORE_DPROB = 0.35
 CURVE_TEMPORAL_TRIGGER_DPROB = 0.22
@@ -176,7 +190,12 @@ class LanePlanner:
     elif lane_change_active or not refs_continuous:
       next_d_prob = target_d_prob
     else:
-      max_fall = LANE_CONFIDENCE_FALL_RATE_PER_S * DT_MDL
+      fall_rate = LANE_CONFIDENCE_FALL_RATE_PER_S
+      if curve_assist > 0.0:
+        fall_rate = max(
+          CURVE_CONFIDENCE_MIN_FALL_RATE_PER_S,
+          fall_rate - CURVE_CONFIDENCE_FALL_SLOWDOWN_PER_S * curve_assist)
+      max_fall = fall_rate * DT_MDL
       next_d_prob = max(target_d_prob, self.d_prob - max_fall)
 
     # Do not replace the continuity reference with a fully untrusted frame.
