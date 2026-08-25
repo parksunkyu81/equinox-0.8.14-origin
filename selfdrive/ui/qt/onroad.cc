@@ -790,8 +790,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   drawTextWithColor(p, x, y2+35, str, textColor);
   p.setOpacity(1.0);
 
-  // 3. LKAS
-  x = icon_start_x + (icon_step * 2);
+  // 3. LKAS (swapped column with WHEEL, per user request)
+  x = icon_start_x + (icon_step * 5);
   bool lkas_bool = car_state.getLkasEnable();
 
   textSize = 48.f;
@@ -1010,8 +1010,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   drawTextWithColor(p, x, y2+35, str, textColor);
   p.setOpacity(1.0);
 
-  // 3. ACC
-  x = icon_start_x + (icon_step * 2);
+  // 3. ACC (swapped column with STEER/DESIRE, per user request)
+  x = icon_start_x + (icon_step * 5);
   bool acc_bool = car_state.getAdaptiveCruise();
   p.setPen(Qt::NoPen);
   p.setBrush(blackColor(200));
@@ -1098,7 +1098,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // 6. STEER / DESIRE -- revived from the commented-out steering-angle block
   // above, shown as a signed dual ring instead of plain text so left/right
   // direction reads at a glance and not just magnitude.
-  x = icon_start_x + (icon_step * 5);
+  // (swapped column with ACC, per user request)
+  x = icon_start_x + (icon_step * 2);
   {
     constexpr float steer_desire_max_deg = 120.0f;
     const float steer_angle_deg = car_state.getSteeringAngleDeg();
@@ -1147,12 +1148,16 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // 7. WHEEL -- same live steeringAngleDeg as "STEER" above, rendered as a
   // physically rotating wheel icon instead of a number. Not present in the
   // original source; uses the previously-unused ../assets/img_chffr_wheel.png.
-  x = icon_start_x + (icon_step * 5);
+  // (swapped column with LKAS, per user request)
+  x = icon_start_x + (icon_step * 2);
   {
     const float steer_angle_deg = car_state.getSteeringAngleDeg();
+    const bool hands_on_wheel = car_state.getSteeringPressed();
 
     p.setPen(Qt::NoPen);
-    p.setBrush(QColor(23, 134, 68, 220));
+    // Green when hands-off (system driving alone), black when the driver is
+    // holding the wheel -- gives an at-a-glance signal matching steeringPressed.
+    p.setBrush(hands_on_wheel ? blackColor(220) : QColor(23, 134, 68, 220));
     p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
 
     p.save();
