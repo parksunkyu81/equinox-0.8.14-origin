@@ -873,7 +873,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   }
 
   QColor aiProfileColor = QColor(120, 255, 120, 230);
-  configFont(p, "Open Sans", 27.f, "Bold");
+  configFont(p, "Open Sans", 29.f, "Bold");
   drawTextWithColor(p, x, y1 - 13,
                     QString("Dist : %1").arg(ai_distance_profile),
                     aiProfileColor);
@@ -1106,13 +1106,13 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
     str2.sprintf("STEER %.0f°", steer_angle_deg);
     textColor = QColor(255, 80, 80, 245);
-    configFont(p, "Open Sans", 20, "Bold");
+    configFont(p, "Open Sans", 25, "Bold");
     drawTextWithColor(p, x, y2 - 5, str2, textColor);
 
     str2.sprintf("DESIRE %.0f°", desire_angle_deg);
     textColor = QColor(155, 255, 155, 245);
-    configFont(p, "Open Sans", 20, "Bold");
-    drawTextWithColor(p, x, y2 + 20, str2, textColor);
+    configFont(p, "Open Sans", 25, "Bold");
+    drawTextWithColor(p, x, y2 + 25, str2, textColor);
     p.setOpacity(1.0);
   }
 
