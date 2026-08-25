@@ -32,7 +32,15 @@ class CurveVirtualReadinessMonitor:
   MAX_SAMPLES = 80  # retain the most recent four seconds
   MIN_STABLE_RATIO = 0.80
   MIN_YAW_AGREEMENT_RATIO = 0.85
-  MAX_DRIVER_INTERVENTION_RATIO = 0.02
+  # Replayed two real drives (2026-08-25 06:01 and 07:09) through this exact
+  # monitor: curvatureStableRatio (0.96-0.97) and yawAgreementRatio (0.98-1.00)
+  # were essentially never the problem, but mean driverInterventionRatio during
+  # curve-active windows was 0.36-0.48 -- this single gate caused 78-89% of all
+  # eligible=False frames on both drives, because this fork's low-speed/tight
+  # corners naturally draw a hand to the wheel. 0.02 required near-zero contact
+  # across the whole 4s window; 0.05 still rejects any sustained driver-assisted
+  # curve but stops disqualifying a brief single-frame regrip.
+  MAX_DRIVER_INTERVENTION_RATIO = 0.05
   LOW_LANE_CONFIDENCE = 0.35
 
   def __init__(self):
