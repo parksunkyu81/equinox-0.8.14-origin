@@ -65,7 +65,12 @@ const LogCameraInfo cameras_logged[] = {
     .bitrate = MAIN_BITRATE,
     .is_h265 = true,
     .downscale = false,
-    .has_qcamera = true,
+    // Disabled: qcamera.ts is only a low-bandwidth stream for comma connect
+    // cloud upload/preview. This device has DongleId=UnregisteredDevice and
+    // no uploader process running, so nothing was ever consuming it -- pure
+    // encode/write cost with zero benefit. fcamera.hevc itself (the actual
+    // road-facing recording) is untouched.
+    .has_qcamera = false,
     .trigger_rotate = true,
     .enable = true,
     .record = true,
