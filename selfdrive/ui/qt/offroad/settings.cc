@@ -554,6 +554,57 @@ void SettingsWindow::hideEvent(QHideEvent *event) {
 
 /////////////////////////////////////////////////////////////////////////
 
+TestCamera::TestCamera(QWidget* parent) : QWidget(parent) {
+  QVBoxLayout* main_layout = new QVBoxLayout(this);
+  main_layout->setMargin(20);
+  main_layout->setSpacing(20);
+
+  QPushButton* back = new QPushButton("Back");
+  back->setObjectName("back_btn");
+  back->setFixedSize(500, 100);
+  connect(back, &QPushButton::clicked, [=]() { emit backPress(); });
+  main_layout->addWidget(back, 0, Qt::AlignLeft);
+
+  statusLabel = new QLabel("camera starting", this);
+  statusLabel->setObjectName("testCameraStatus");
+  statusLabel->setAlignment(Qt::AlignCenter);
+  main_layout->addWidget(statusLabel, 0);
+
+  // VISION_STREAM_RGB_BACK is the road-facing (rear) camera -- the same stream
+  // onroad.cc's NvgWindow renders. zoom=false shows the uncropped frame, which
+  // is what makes edge haze and lens dirt visible.
+  cameraView = new CameraViewWidget("camerad", VISION_STREAM_RGB_BACK, false, this);
+  connect(cameraView, &CameraViewWidget::vipcThreadFrameReceived, this, [=](VisionBuf *) {
+    if (statusLabel->isVisible()) {
+      statusLabel->hide();
+    }
+  });
+  main_layout->addWidget(cameraView, 1);
+
+  setStyleSheet(R"(
+    #testCameraStatus {
+      font-size: 45px;
+      color: #dddddd;
+      padding: 20px;
+    }
+  )");
+}
+
+void TestCamera::showEvent(QShowEvent* event) {
+  QWidget::showEvent(event);
+  statusLabel->show();
+  // camerad is a driverview process: offroad it only runs while this param is
+  // set (see manager.py's ensure_running). Onroad it is already running and
+  // this is a no-op that thermald's not_driver_view condition ignores, because
+  // startup_conditions are only evaluated while offroad.
+  params.putBool("IsDriverViewEnabled", true);
+}
+
+void TestCamera::hideEvent(QHideEvent* event) {
+  QWidget::hideEvent(event);
+  params.putBool("IsDriverViewEnabled", false);
+}
+
 CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
 
   main_layout = new QStackedLayout(this);
@@ -717,6 +768,21 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   layoutBtn_4->addSpacing(10);
   // =============================================================================================================== //
 
+  QPushButton* testCameraBtn = new QPushButton("Test Camera");
+  testCameraBtn->setObjectName("testCameraBtn");
+  testCameraBtn->setMinimumWidth(0);
+  testCameraBtn->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+  connect(testCameraBtn, &QPushButton::clicked, [=]() { main_layout->setCurrentWidget(testCamera); });
+
+  testCamera = new TestCamera(this);
+  connect(testCamera, &TestCamera::backPress, [=]() { main_layout->setCurrentWidget(homeScreen); });
+  main_layout->addWidget(testCamera);
+  QHBoxLayout* layoutBtn_testCamera = new QHBoxLayout();
+  layoutBtn_testCamera->setContentsMargins(0, 0, 0, 0);
+  layoutBtn_testCamera->addWidget(testCameraBtn);
+  layoutBtn_testCamera->addSpacing(10);
+  // =============================================================================================================== //
+
   QString lateral_control = QString::fromStdString(Params().get("LateralControl"));
   if(lateral_control.length() == 0)
     lateral_control = "TORQUE";
@@ -755,6 +821,8 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   vlayout->addSpacing(10);
   vlayout->addLayout(layoutBtn_4, 1);
   vlayout->addSpacing(10);
+  vlayout->addLayout(layoutBtn_testCamera, 1);
+  vlayout->addSpacing(10);
   // SettingsWindow already wraps every panel in a ScrollView. Keeping a
   // second ScrollView here reduced the lower menu width by its viewport and
   // scrollbar, and created nested horizontal/vertical scrolling on EON.
@@ -766,7 +834,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   setPalette(pal);
 
   setStyleSheet(R"(
-    #back_btn, #selectCarBtn, #lateralControlBtn, #cruiseGapBtn, #dynamicTRGapBtn, #minTrBtn, #globalDfModBtn {
+    #back_btn, #selectCarBtn, #lateralControlBtn, #cruiseGapBtn, #dynamicTRGapBtn, #minTrBtn, #globalDfModBtn, #testCameraBtn {
       font-size: 50px;
       margin: 0px;
       padding: 20px;
