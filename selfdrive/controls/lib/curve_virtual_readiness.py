@@ -7,12 +7,27 @@ speed request, steering torque, or safety limit.
 from collections import deque
 import math
 
+from selfdrive.car.gm.steering_limits import GM_MIN_STEER_SPEED_MS
+
 
 class CurveVirtualReadinessMonitor:
   """Measure curve stability, vehicle-motion agreement, and driver takeover."""
 
-  MIN_SPEED_MS = 5.0
+  # GM's own LKAS activation floor (10 km/h, see latcontrol.py's MIN_STEER_SPEED
+  # -- this fork uses that same 10 km/h as the unified reference for lateral
+  # control activation and torqued's learning start too). No point validating
+  # readiness below the speed where a correction can't be steered anyway.
+  # Comparing in yaw-RATE domain (see update()) removed the low-speed division
+  # blowup that used to force a much higher 5.0 m/s (18 km/h) floor here --
+  # measured on a real intersection-style right turn where that floor wiped
+  # accumulated samples for >12s continuously, right through the moment the
+  # wheel angle peaked, well above where GM steering was actually active.
+  MIN_SPEED_MS = GM_MIN_STEER_SPEED_MS
   MIN_CURVATURE = 0.0075
+  # Minimum agreement tolerance in yaw rate (rad/s), the rate-domain analogue
+  # of the old curvature-domain 0.003 floor. Not yet drive-log-validated the
+  # way the other thresholds in this file were -- treat as a starting point.
+  MIN_YAW_RATE_AGREEMENT_RAD_S = 0.05
   MIN_SAMPLES = 8  # 0.40 s at the model rate
   MAX_SAMPLES = 80  # retain the most recent four seconds
   MIN_STABLE_RATIO = 0.80
@@ -104,30 +119,38 @@ class CurveVirtualReadinessMonitor:
     the coarser liveLocationKalman.status, which stays 'uninitialized' on this
     device (no GPS lock, ever) even while the angular-velocity measurement
     itself is fine.
+
+    Agreement is checked in yaw-RATE domain (steering_curvature * v_ego vs raw
+    yaw_rate), not curvature domain (yaw_rate / v_ego): dividing by v_ego blew
+    up at low speed, which is why this used to require v_ego >= 5.0 m/s and
+    lost all validation progress every time speed dipped below that -- exactly
+    what happens at the slow apex of a tight turn. Multiplying degrades
+    gracefully to 0 as v_ego -> 0 (no yaw expected when stopped) instead of
+    diverging, so this stays meaningful much closer to a stop.
     """
     values = (v_ego, steering_curvature, yaw_rate, lane_confidence)
     if not all(math.isfinite(float(value)) for value in values):
       curve_active = False
     else:
-      yaw_curvature = float(yaw_rate) / max(float(v_ego), 1.0)
       curve_active = bool(
         not lane_change_active and
         float(v_ego) >= self.MIN_SPEED_MS and
-        max(abs(float(steering_curvature)), abs(yaw_curvature)) >=
-        self.MIN_CURVATURE)
+        abs(float(steering_curvature)) >= self.MIN_CURVATURE)
 
     if curve_active:
       steering_curvature = float(steering_curvature)
-      yaw_curvature = float(yaw_rate) / max(float(v_ego), 1.0)
-      agreement_limit = max(0.003, 0.50 * abs(steering_curvature))
+      expected_yaw_rate = steering_curvature * float(v_ego)
+      actual_yaw_rate = float(yaw_rate)
+      agreement_limit = max(
+        self.MIN_YAW_RATE_AGREEMENT_RAD_S, 0.50 * abs(expected_yaw_rate))
       # An invalid yaw sample cannot confirm agreement. Treat it the same as a
       # real disagreement rather than skipping it -- this readiness monitor
       # exists to gate how much a fallback path is trusted, so an unmeasurable
       # frame should count against trust, not be silently dropped.
       yaw_agrees = bool(
         yaw_valid and
-        steering_curvature * yaw_curvature > 0.0 and
-        abs(steering_curvature - yaw_curvature) <= agreement_limit)
+        expected_yaw_rate * actual_yaw_rate > 0.0 and
+        abs(expected_yaw_rate - actual_yaw_rate) <= agreement_limit)
       self.active = True
       self.samples.append({
         'steeringCurvature': steering_curvature,
