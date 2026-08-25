@@ -559,10 +559,12 @@ void NvgWindow::drawHud(QPainter &p) {
   p.fillRect(0, 0, width(), header_h, bg);
 
   // Wall-clock timestamp, top-left -- lets a screenshot be matched back to
-  // its exact rlog frame during later log analysis. The text only changes
-  // once a second, so cache the formatted string and the QFont (configFont()
-  // rebuilds a QFont by family-name lookup on every call) instead of paying
-  // that cost on every ~20Hz repaint.
+  // its exact rlog frame during later log analysis. Fixed at KST (UTC+9)
+  // via toOffsetFromUtc() rather than trusting the device's own system
+  // timezone setting, so this stays correct even if that's misconfigured.
+  // The text only changes once a second, so cache the formatted string and
+  // the QFont (configFont() rebuilds a QFont by family-name lookup on every
+  // call) instead of paying that cost on every ~20Hz repaint.
   {
     static QFont ts_font = [] {
       QFont f("Open Sans");
@@ -575,7 +577,8 @@ void NvgWindow::drawHud(QPainter &p) {
     const qint64 sec = QDateTime::currentSecsSinceEpoch();
     if (sec != cached_sec) {
       cached_sec = sec;
-      cached_ts = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
+      const QDateTime kst = QDateTime::currentDateTimeUtc().toOffsetFromUtc(9 * 3600);
+      cached_ts = kst.toString("yyyy-MM-dd HH:mm:ss");
     }
     p.setFont(ts_font);
     p.setPen(QColor(255, 255, 255, 220));
