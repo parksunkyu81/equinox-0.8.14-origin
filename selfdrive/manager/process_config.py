@@ -27,7 +27,14 @@ procs = [
   NativeProcess("locationd", "selfdrive/locationd", ["./locationd"], enabled=not EQUINOX_SIMULATOR),
   NativeProcess("boardd", "selfdrive/boardd", ["./boardd"], enabled=False),
   PythonProcess("calibrationd", "selfdrive.locationd.calibrationd", enabled=not EQUINOX_SIMULATOR),
-  PythonProcess("torqued", "selfdrive.locationd.torqued", enabled=not EQUINOX_SIMULATOR),
+  # Disabled: its live-learned torque params are never consumed. Actual torque
+  # control reads fixed latAccelFactor/friction from ntune
+  # (selfdrive/ntune.py) via controlsd's update_ntune_torque_params, and
+  # LatControlTorque.update_live_torque_params() explicitly discards whatever
+  # this would have fed it. Measured ~16% of a CPU core wasted on a real
+  # drive for zero effect on steering. See controlsd.py's SubMaster/
+  # communication_ok changes removing liveTorqueParameters accordingly.
+  PythonProcess("torqued", "selfdrive.locationd.torqued", enabled=False),
   PythonProcess("controlsd", "selfdrive.controls.controlsd"),
   PythonProcess("recoverylogger", "tools.equinox_sim.recovery_recorder"),
   PythonProcess("deleter", "selfdrive.loggerd.deleter", persistent=True),

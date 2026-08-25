@@ -142,11 +142,11 @@ class Controls:
             ignore_avg_freq = ['radarState', 'longitudinalPlan']
             if EON:
                 ignore_avg_freq += ['driverMonitoringState', 'lateralPlan',
-                                    'dynamicFollowData', 'liveTorqueParameters']
+                                    'dynamicFollowData']
             self.sm = messaging.SubMaster(
                 ['deviceState', 'pandaStates', 'peripheralState', 'modelV2', 'liveCalibration',
                  'driverMonitoringState', 'longitudinalPlan', 'lateralPlan', 'liveLocationKalman', 'dynamicFollowData',
-                 'managerState', 'liveParameters', 'radarState', 'liveTorqueParameters'] + self.camera_packets + joystick_packet,
+                 'managerState', 'liveParameters', 'radarState'] + self.camera_packets + joystick_packet,
                 ignore_alive=ignore, ignore_avg_freq=ignore_avg_freq)
 
         self.df_manager = dfManager()
@@ -1055,13 +1055,10 @@ class Controls:
         # self.sm.all_checks()
         # self.sm.all_alive_and_valid()
         else:
-            # liveTorqueParameters is a derived learner output. If its payload
-            # is temporarily invalid, state_control keeps the last valid torque
-            # values. Treating that fallback state as a device-process failure
-            # creates false commIssue alerts on EON. The service must still be
-            # alive, and managerState independently detects a dead torqued.
-            communication_bad = not controlsd_communication_ok(
-                self.sm, optional_validity_services={'liveTorqueParameters'})
+            # torqued is disabled (see process_config.py) -- its output was
+            # never consumed, so there is no longer a liveTorqueParameters
+            # service to special-case here.
+            communication_bad = not controlsd_communication_ok(self.sm)
             if panda_powering_down:
                 self.comm_issue_counter = 0
             elif communication_bad:
@@ -1964,7 +1961,6 @@ class Controls:
         #controlsState.dynamicTRMode = int(self.sm['longitudinalPlan'].dynamicTRMode)
         controlsState.dynamicTRMode = Params().get("DynamicTRGap", encoding="utf8")
         controlsState.globalDfMod = float(Params().get("globalDfMod", encoding="utf8"))
-        # self.sm['liveTorqueParameters']
         controlsState.dynamicTRValue = float(self.sm['dynamicFollowData'].mpcTR)
         controlsState.followingDistanceProfile = str(
           getattr(self.sm['dynamicFollowData'], 'followingDistanceProfile', 'mid'))
