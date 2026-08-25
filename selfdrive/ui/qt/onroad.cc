@@ -283,6 +283,11 @@ void NvgWindow::initializeGL() {
   ic_turn_signal_l = QPixmap("../assets/images/turn_signal_l.png");
   ic_turn_signal_r = QPixmap("../assets/images/turn_signal_r.png");
   ic_satellite = QPixmap("../assets/images/satellite.png");
+  // Unused-upstream asset, not under assets/images/ like the icons above.
+  {
+    const int wheel_icon_size = static_cast<int>(radius * 0.85f);
+    ic_wheel = QPixmap("../assets/img_chffr_wheel.png").scaled(wheel_icon_size, wheel_icon_size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+  }
 
 }
 
@@ -398,12 +403,8 @@ void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
     bg.setColorAt(0.55, QColor(255, 48, 25, 185));
     bg.setColorAt(1.00, QColor(255, 92, 30, 0));
   } else {
-    bg.setColorAt(0.00, QColor(36, 84, 255, 190));    // blue
-    bg.setColorAt(0.18, QColor(116, 42, 255, 190));   // purple
-    bg.setColorAt(0.36, QColor(255, 32, 181, 190));   // pink
-    bg.setColorAt(0.54, QColor(255, 43, 43, 185));    // red
-    bg.setColorAt(0.72, QColor(255, 213, 30, 170));   // yellow
-    bg.setColorAt(0.90, QColor(55, 235, 72, 130));    // green
+    bg.setColorAt(0.00, QColor(55, 235, 72, 190));    // green
+    bg.setColorAt(0.50, QColor(55, 235, 72, 160));
     bg.setColorAt(1.00, QColor(55, 235, 72, 0));      // fade out
   }
 
@@ -1065,6 +1066,79 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.setOpacity(1.0);
   p.setBrush(Qt::NoBrush);
   p.setPen(Qt::NoPen);
+
+  // 6. STEER / DESIRE -- revived from the commented-out steering-angle block
+  // above, shown as a signed dual ring instead of plain text so left/right
+  // direction reads at a glance and not just magnitude.
+  x = icon_start_x + (icon_step * 5);
+  {
+    constexpr float steer_desire_max_deg = 120.0f;
+    const float steer_angle_deg = car_state.getSteeringAngleDeg();
+    const float desire_angle_deg = car_control.getActuators().getSteeringAngleDeg();
+
+    const QRectF steer_outer_ring(x - radius / 2 + 4, y2 - radius / 2 + 4, radius - 8, radius - 8);
+    const QRectF steer_inner_ring(x - radius / 2 + 18, y2 - radius / 2 + 18, radius - 36, radius - 36);
+
+    p.setPen(Qt::NoPen);
+    p.setBrush(blackColor(200));
+    p.drawEllipse(x - radius / 2, y2 - radius / 2, radius, radius);
+
+    // ISO 8855: positive angle = left turn. A physical wheel turning left
+    // spins counter-clockwise, so fill the ring CCW (positive Qt span) for
+    // positive angles and CW (negative span) for negative/right angles --
+    // same sign convention as the WHEEL rotation below.
+    auto draw_signed_ring = [&](const QRectF &ring_rect, const QColor &track_color,
+                                 const QColor &fill_color, float angle_deg) {
+      p.setBrush(Qt::NoBrush);
+      p.setPen(QPen(track_color, 7, Qt::SolidLine, Qt::FlatCap));
+      p.drawEllipse(ring_rect);
+      const float ratio = std::clamp(std::abs(angle_deg) / steer_desire_max_deg, 0.0f, 1.0f);
+      const float signed_span = (angle_deg >= 0.0f ? 1.0f : -1.0f) * ratio * 360.0f;
+      p.setPen(QPen(fill_color, 7, Qt::SolidLine, Qt::FlatCap));
+      p.drawArc(ring_rect, 90 * 16, static_cast<int>(signed_span * 16.0f));
+    };
+
+    draw_signed_ring(steer_outer_ring, QColor(255, 0, 0, 40), QColor(255, 0, 0, 255), steer_angle_deg);
+    draw_signed_ring(steer_inner_ring, QColor(155, 255, 155, 46), QColor(155, 255, 155, 255), desire_angle_deg);
+
+    p.setBrush(Qt::NoBrush);
+    p.setPen(Qt::NoPen);
+
+    str2.sprintf("STEER %.0f°", steer_angle_deg);
+    textColor = QColor(255, 80, 80, 245);
+    configFont(p, "Open Sans", 12, "Bold");
+    drawTextWithColor(p, x, y2 - 5, str2, textColor);
+
+    str2.sprintf("DESIRE %.0f°", desire_angle_deg);
+    textColor = QColor(155, 255, 155, 245);
+    configFont(p, "Open Sans", 11, "Bold");
+    drawTextWithColor(p, x, y2 + 11, str2, textColor);
+    p.setOpacity(1.0);
+  }
+
+  // 7. WHEEL -- same live steeringAngleDeg as "STEER" above, rendered as a
+  // physically rotating wheel icon instead of a number. Not present in the
+  // original source; uses the previously-unused ../assets/img_chffr_wheel.png.
+  x = icon_start_x + (icon_step * 5);
+  {
+    const float steer_angle_deg = car_state.getSteeringAngleDeg();
+
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(23, 134, 68, 220));
+    p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
+
+    p.save();
+    p.translate(x, y1);
+    // QPainter::rotate() is clockwise for positive angles, opposite of the
+    // drawArc() convention above -- negate so positive (left) still spins CCW.
+    p.rotate(-steer_angle_deg);
+    p.setOpacity(1.0);
+    p.drawPixmap(-ic_wheel.width() / 2, -ic_wheel.height() / 2, ic_wheel);
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(255, 59, 59, 255));
+    p.drawEllipse(QPointF(0, -radius * 0.42), 4.5, 4.5);
+    p.restore();
+  }
 
 }
 

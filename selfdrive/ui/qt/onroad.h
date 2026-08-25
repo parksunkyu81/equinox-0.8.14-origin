@@ -77,7 +77,8 @@ protected:
   QPixmap ic_satellite;
   QPixmap ic_acc;
   QPixmap ic_lkas;
-  
+  QPixmap ic_wheel;
+
   QMap<QString, QPixmap> ic_oil_com;
 
   void drawMaxSpeed(QPainter &p);
