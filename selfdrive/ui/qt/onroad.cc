@@ -872,12 +872,12 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   }
 
   QColor aiProfileColor = QColor(120, 255, 120, 230);
-  configFont(p, "Open Sans", 21.f, "Bold");
+  configFont(p, "Open Sans", 22.f, "Bold");
   drawTextWithColor(p, x, y1 - 13,
-                    QString("AI distance : %1").arg(ai_distance_profile),
+                    QString("Dist : %1").arg(ai_distance_profile),
                     aiProfileColor);
   drawTextWithColor(p, x, y1 + 24,
-                    QString("AI pedal : %1").arg(ai_pedal_profile),
+                    QString("Pedal : %1").arg(ai_pedal_profile),
                     aiProfileColor);
   p.setOpacity(1.0);
 
