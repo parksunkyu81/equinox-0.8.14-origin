@@ -371,16 +371,16 @@ void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
   painter.restore();
 }*/
 
-// 차선은 녹색으로 유지하고, 경로 내부는 가까운 쪽부터 무지개색으로 표시한다.
+// 차선은 흰색, 경로 내부는 단색 초록으로 표시한다.
 void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
   painter.save();
 
   const UIScene &scene = s->scene;
 
-  // 1) lanelines: WHITE -> GREEN (alpha = prob, max 0.7)
+  // 1) lanelines: WHITE (alpha = prob, max 0.7)
   for (int i = 0; i < std::size(scene.lane_line_vertices); ++i) {
     const float a = std::clamp<float>(scene.lane_line_probs[i], 0.0f, 0.7f);
-    painter.setBrush(QColor::fromRgbF(0.0, 1.0, 0.0, a));
+    painter.setBrush(QColor::fromRgbF(1.0, 1.0, 1.0, a));
     painter.drawPolygon(scene.lane_line_vertices[i].v, scene.lane_line_vertices[i].cnt);
   }
 
