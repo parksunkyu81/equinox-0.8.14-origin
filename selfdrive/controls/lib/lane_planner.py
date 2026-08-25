@@ -163,6 +163,16 @@ MODEL_PATH_HOLD_MAX_S = 0.50
 MODEL_PATH_HOLD_STORE_STRENGTH = 0.40
 MODEL_PATH_MAX_CORRECTION_NEAR_M = 0.12
 MODEL_PATH_MAX_CORRECTION_M = 0.45
+# Same readiness-gated relaxation as temporal-hold/road-edge (see
+# CURVE_TEMPORAL_TRUSTED_* above). Previously model-path had no trusted
+# variant at all, so even a fully-confirmed curve stayed capped at the same
+# conservative 0.45m as an unverified one -- the tightest cap of any fallback
+# tier, right when the sharpest curves (the ones that escalate all the way to
+# this last-resort tier) need it least. Kept below temporal-hold/road-edge's
+# trusted ceilings since this source still carries no lane or road-edge
+# confirmation, only the model's own prior belief.
+MODEL_PATH_TRUSTED_MAX_CORRECTION_NEAR_M = 0.22
+MODEL_PATH_TRUSTED_MAX_CORRECTION_M = 0.90
 MODEL_PATH_DPROB_FLOOR = 0.45
 
 # A/B switch for the whole curve fallback (temporal hold + road edge). Drive
@@ -846,9 +856,10 @@ class LanePlanner:
       path_xyz[:, 0], v_ego, measured_curvature, lane_change_active,
       imu_curvature=imu_curvature, imu_curvature_valid=imu_curvature_valid)
     if model_path_y is not None and model_path_strength > 0.0:
-      max_correction = np.interp(
-        np.abs(path_xyz[:, 0]), [0.0, 20.0],
-        [MODEL_PATH_MAX_CORRECTION_NEAR_M, MODEL_PATH_MAX_CORRECTION_M])
+      max_correction = self._trusted_max_correction(
+        np.abs(path_xyz[:, 0]),
+        MODEL_PATH_MAX_CORRECTION_NEAR_M, MODEL_PATH_MAX_CORRECTION_M,
+        MODEL_PATH_TRUSTED_MAX_CORRECTION_NEAR_M, MODEL_PATH_TRUSTED_MAX_CORRECTION_M)
       model_path_y = path_xyz[:, 1] + np.clip(
         model_path_y - path_xyz[:, 1], -max_correction, max_correction)
       applied_delta = (model_path_y - path_xyz[:, 1]) * model_path_strength
@@ -1275,9 +1286,10 @@ class LanePlanner:
             path_xyz[:, 0], v_ego, measured_curvature, lane_change_active,
             imu_curvature=imu_curvature, imu_curvature_valid=imu_curvature_valid)
           if model_path_y is not None and model_path_strength > 0.0:
-            max_correction = np.interp(
-              np.abs(path_xyz[:, 0]), [0.0, 20.0],
-              [MODEL_PATH_MAX_CORRECTION_NEAR_M, MODEL_PATH_MAX_CORRECTION_M])
+            max_correction = self._trusted_max_correction(
+              np.abs(path_xyz[:, 0]),
+              MODEL_PATH_MAX_CORRECTION_NEAR_M, MODEL_PATH_MAX_CORRECTION_M,
+              MODEL_PATH_TRUSTED_MAX_CORRECTION_NEAR_M, MODEL_PATH_TRUSTED_MAX_CORRECTION_M)
             model_path_y = path_xyz[:, 1] + np.clip(
               model_path_y - path_xyz[:, 1], -max_correction, max_correction)
             model_weight = float(np.clip(
