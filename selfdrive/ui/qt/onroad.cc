@@ -559,12 +559,27 @@ void NvgWindow::drawHud(QPainter &p) {
   p.fillRect(0, 0, width(), header_h, bg);
 
   // Wall-clock timestamp, top-left -- lets a screenshot be matched back to
-  // its exact rlog frame during later log analysis.
+  // its exact rlog frame during later log analysis. The text only changes
+  // once a second, so cache the formatted string and the QFont (configFont()
+  // rebuilds a QFont by family-name lookup on every call) instead of paying
+  // that cost on every ~20Hz repaint.
   {
-    QString ts = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
-    configFont(p, "Open Sans", 40, "Bold");
+    static QFont ts_font = [] {
+      QFont f("Open Sans");
+      f.setPixelSize(40);
+      f.setStyleName("Bold");
+      return f;
+    }();
+    static QString cached_ts;
+    static qint64 cached_sec = -1;
+    const qint64 sec = QDateTime::currentSecsSinceEpoch();
+    if (sec != cached_sec) {
+      cached_sec = sec;
+      cached_ts = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
+    }
+    p.setFont(ts_font);
     p.setPen(QColor(255, 255, 255, 220));
-    p.drawText(bdr_s, 55, ts);
+    p.drawText(bdr_s, 55, cached_ts);
   }
 
   UIState *s = uiState();
