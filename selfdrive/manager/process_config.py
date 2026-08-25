@@ -36,7 +36,12 @@ procs = [
   # communication_ok changes removing liveTorqueParameters accordingly.
   PythonProcess("torqued", "selfdrive.locationd.torqued", enabled=False),
   PythonProcess("controlsd", "selfdrive.controls.controlsd"),
-  PythonProcess("recoverylogger", "tools.equinox_sim.recovery_recorder"),
+  # Disabled: pedal-recovery/stop-accel-boost/launch-handoff debugging is done.
+  # Measured ~13.5% of a CPU core on a real drive (per-frame ~60-field JSONL
+  # snapshot plus raw sendcan/can CRC8 pedal-frame decoding outside the normal
+  # SubMaster path). Re-enable if that class of issue needs to be captured
+  # again -- /data/media/0/pedal_recovery_logs/ has ~2 weeks of prior events.
+  PythonProcess("recoverylogger", "tools.equinox_sim.recovery_recorder", enabled=False),
   PythonProcess("deleter", "selfdrive.loggerd.deleter", persistent=True),
   PythonProcess("dmonitoringd", "selfdrive.monitoring.dmonitoringd",
                 enabled=(not EQUINOX_SIMULATOR and (not PC or WEBCAM)), driverview=True),
