@@ -29,7 +29,10 @@
 
 #include <QComboBox>
 #include <QAbstractItemView>
+#include <QDateTime>
+#include <QDir>
 #include <QFile>
+#include <QImage>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QScroller>
@@ -575,11 +578,17 @@ TestCamera::TestCamera(QWidget* parent) : QWidget(parent) {
   // is what makes edge haze and lens dirt visible.
   cameraView = new CameraViewWidget("camerad", VISION_STREAM_RGB_BACK, false, this);
   connect(cameraView, &CameraViewWidget::vipcThreadFrameReceived, this, [=](VisionBuf *) {
-    if (statusLabel->isVisible()) {
+    if (statusLabel->isVisible() && !showing_capture_result) {
       statusLabel->hide();
     }
   });
   main_layout->addWidget(cameraView, 1);
+
+  QPushButton* capture = new QPushButton("Capture");
+  capture->setObjectName("testCameraCaptureBtn");
+  capture->setFixedSize(500, 100);
+  connect(capture, &QPushButton::clicked, [=]() { saveFrame(); });
+  main_layout->addWidget(capture, 0, Qt::AlignHCenter);
 
   setStyleSheet(R"(
     #testCameraStatus {
@@ -587,11 +596,54 @@ TestCamera::TestCamera(QWidget* parent) : QWidget(parent) {
       color: #dddddd;
       padding: 20px;
     }
+    #testCameraCaptureBtn {
+      font-size: 50px;
+      padding: 20px;
+      border-width: 0;
+      border-radius: 30px;
+      color: #dddddd;
+      background-color: #444444;
+    }
   )");
+}
+
+void TestCamera::saveFrame() {
+  // grabFramebuffer() returns exactly what is on screen, so the saved file
+  // matches what was just inspected. It must run on the GUI thread (it forces
+  // a repaint), which is where this button's signal already lands.
+  QImage img = cameraView->grabFramebuffer();
+  if (img.isNull()) {
+    showing_capture_result = true;
+    statusLabel->setText("capture failed: no frame yet");
+    statusLabel->show();
+    return;
+  }
+
+  // Same volume the drive logs live on (/data/media/0/realdata), so this is
+  // reachable over scp and survives a reboot, unlike /tmp.
+  const QString dir = "/data/media/0/camera_test";
+  if (!QDir().mkpath(dir)) {
+    showing_capture_result = true;
+    statusLabel->setText("capture failed: cannot create " + dir);
+    statusLabel->show();
+    return;
+  }
+
+  const QString path = dir + "/camtest_" +
+      QDateTime::currentDateTimeUtc().addSecs(9 * 3600).toString("yyyyMMdd_HHmmss") + ".png";
+  showing_capture_result = true;
+  if (img.save(path, "PNG")) {
+    statusLabel->setText("saved: " + path);
+  } else {
+    statusLabel->setText("capture failed: cannot write " + path);
+  }
+  statusLabel->show();
 }
 
 void TestCamera::showEvent(QShowEvent* event) {
   QWidget::showEvent(event);
+  showing_capture_result = false;
+  statusLabel->setText("camera starting");
   statusLabel->show();
   // camerad is a driverview process: offroad it only runs while this param is
   // set (see manager.py's ensure_running). Onroad it is already running and

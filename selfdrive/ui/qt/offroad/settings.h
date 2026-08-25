@@ -174,9 +174,15 @@ protected:
   void hideEvent(QHideEvent* event) override;
 
 private:
+  // Writes the on-screen frame to /data/media/0/camera_test/ as PNG.
+  void saveFrame();
+
   Params params;
   CameraViewWidget* cameraView = nullptr;
   QLabel* statusLabel = nullptr;
+  // statusLabel doubles as the "camera starting" notice and the capture
+  // result. Only the former should be auto-cleared by the next frame.
+  bool showing_capture_result = false;
 
 signals:
   void backPress();
