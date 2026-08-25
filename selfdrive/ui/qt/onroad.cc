@@ -1134,7 +1134,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     p.setPen(Qt::NoPen);
 
     str2.sprintf("STEER %.0f°", steer_angle_deg);
-    textColor = QColor(255, 80, 80, 245);
+    textColor = QColor(155, 255, 155, 245);
     configFont(p, "Open Sans", 29, "Bold");
     drawTextWithColor(p, x, y2 - 5, str2, textColor);
 
