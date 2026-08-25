@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include <QDateTime>
 #include <QDebug>
 #include <QSound>
 #include <QMouseEvent>
@@ -556,6 +557,15 @@ void NvgWindow::drawHud(QPainter &p) {
   bg.setColorAt(0, QColor::fromRgbF(0, 0, 0, 0.45));
   bg.setColorAt(1, QColor::fromRgbF(0, 0, 0, 0));
   p.fillRect(0, 0, width(), header_h, bg);
+
+  // Wall-clock timestamp, top-left -- lets a screenshot be matched back to
+  // its exact rlog frame during later log analysis.
+  {
+    QString ts = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
+    configFont(p, "Open Sans", 40, "Bold");
+    p.setPen(QColor(255, 255, 255, 220));
+    p.drawText(bdr_s, 55, ts);
+  }
 
   UIState *s = uiState();
 
