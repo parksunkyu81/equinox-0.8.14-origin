@@ -28,8 +28,24 @@ LANE_STD_FULL_CONFIDENCE = 0.15
 LANE_STD_ZERO_CONFIDENCE = 1.20
 LANE_WIDTH_CHECK_DISTANCES_M = (5.0, 10.0, 20.0)
 LANE_WIDTH_MIN_START_M = 1.8
-LANE_WIDTH_MIN_END_M = 2.5
-# Cache-only width floor; see store_geometry_plausible in get_d_path.
+# Was 2.5, which sat in the middle of this camera's own width distribution
+# instead of below it. Measured on 2026-08-25--10-51-17 over 1150 frames where
+# both ego lane lines are >=0.5 prob and v_ego >= 5 m/s (i.e. the lane is
+# clearly visible and the car is really driving): median width reads 2.41 m at
+# 5 m, 2.41 m at 10 m and 2.43 m at 20 m, p10 2.28 m. The consistency across
+# all three distances makes this a systematic lateral-scale offset of this
+# camera/model pair, not noisy geometry -- a genuinely too-narrow lane would
+# read proportionally narrower still. At 2.5 m the ramp discounted 74.5% of
+# those frames (median width_mod 0.855, so a ~15% haircut on lane confidence
+# on top of already-weak raw probabilities) purely for being this camera.
+# 2.2 m sits just under the device's p10, so it still rejects real outliers
+# (4.8% of frames) and matches STORE_LANE_WIDTH_MIN_M, whose identical
+# "this threshold is mis-placed for this camera" finding is written up in
+# get_d_path's store_geometry_plausible comment.
+LANE_WIDTH_MIN_END_M = 2.2
+# Cache-only width floor; see store_geometry_plausible in get_d_path. Now
+# equal to LANE_WIDTH_MIN_END_M above, kept as its own name because it gates
+# a different decision (what to remember, not what to trust right now).
 STORE_LANE_WIDTH_MIN_M = 2.2
 LANE_WIDTH_MOD_START_M = 4.2
 LANE_WIDTH_MOD_END_M = 5.0
@@ -1089,20 +1105,23 @@ class LanePlanner:
       np.all(width_samples >= LANE_WIDTH_MIN_END_M) and
       np.all(width_samples <= LANE_WIDTH_MOD_END_M)
     )
-    # Separate, more permissive sanity floor for *caching* a lane shape.
+    # Sanity floor for *caching* a lane shape.
     # Drive-log measurement: on straights raw_target_d_prob is healthy (76% of
-    # frames pass 0.35) but geometry_plausible only passes 53%, and every
+    # frames pass 0.35) but geometry_plausible only passed 53%, and every
     # rejection is "too narrow" -- the failing frames cluster at a 2.37 m median
-    # width, just under the 2.5 m floor, at 5/10/20 m alike (only 4.8% of
+    # width, just under the old 2.5 m floor, at 5/10/20 m alike (only 4.8% of
     # rejections are the far sample alone). A threshold that bisects the
     # device's own width distribution is mis-placed for this camera rather than
     # a sign of bad geometry, and it was starving the cache on exactly the
     # straight approach where the lane is still clearly visible.
     #
-    # This floor gates only what we are willing to remember for <=1.2 s, not how
-    # much lane data is trusted for present steering: LANE_WIDTH_MIN_END_M still
-    # drives width_mod and geometry_plausible everywhere else, and the cached
-    # path is later applied with strength fading plus the max_correction clamps.
+    # That same finding has since been re-measured and applied to
+    # LANE_WIDTH_MIN_END_M itself (see its comment), so this floor is no longer
+    # the more permissive of the two -- the two now coincide at 2.2 m. It stays
+    # a separate name because it gates a different decision: what we are willing
+    # to remember for <=1.2 s, rather than how much lane data is trusted for
+    # present steering. The cached path is still applied with strength fading
+    # plus the max_correction clamps.
     store_geometry_plausible = bool(
       np.all(width_samples >= STORE_LANE_WIDTH_MIN_M) and
       np.all(width_samples <= LANE_WIDTH_MOD_END_M)
