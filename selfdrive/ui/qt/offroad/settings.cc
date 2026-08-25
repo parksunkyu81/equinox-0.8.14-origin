@@ -571,12 +571,21 @@ TestCamera::TestCamera(QWidget* parent) : QWidget(parent) {
   statusLabel = new QLabel("camera starting", this);
   statusLabel->setObjectName("testCameraStatus");
   statusLabel->setAlignment(Qt::AlignCenter);
+  // The saved-file message is a long absolute path. main_layout of
+  // CommunityPanel is a QStackedLayout, which sizes to its widest child, so
+  // without these this panel's width demand would widen the whole Community
+  // menu -- same reason the labels in CommunityPanel's own layout set these.
+  statusLabel->setWordWrap(true);
+  statusLabel->setMinimumWidth(0);
+  statusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   main_layout->addWidget(statusLabel, 0);
 
   // VISION_STREAM_RGB_BACK is the road-facing (rear) camera -- the same stream
   // onroad.cc's NvgWindow renders. zoom=false shows the uncropped frame, which
   // is what makes edge haze and lens dirt visible.
   cameraView = new CameraViewWidget("camerad", VISION_STREAM_RGB_BACK, false, this);
+  cameraView->setMinimumWidth(0);
+  cameraView->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
   connect(cameraView, &CameraViewWidget::vipcThreadFrameReceived, this, [=](VisionBuf *) {
     if (statusLabel->isVisible() && !showing_capture_result) {
       statusLabel->hide();
