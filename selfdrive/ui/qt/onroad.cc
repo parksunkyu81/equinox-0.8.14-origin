@@ -909,7 +909,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   drawText(p, x, y2-14, str, 200);
 
   configFont(p, "Open Sans", textSize, "Bold");
-  drawTextWithColor(p, x, y2+45, str2, textColor);
+  drawTextWithColor(p, x, y2+35, str2, textColor);
   p.setOpacity(1.0);
 
   /*
