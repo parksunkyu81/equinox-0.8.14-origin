@@ -211,7 +211,13 @@ void loggerd_thread() {
 
   LoggerdState s;
   // init logger
-  logger_init(&s.logger, "rlog", true);
+  // qlog disabled: it's a decimated log meant for comma's cloud uploader,
+  // which is commented out in process_config.py on this device (unregistered,
+  // no connect account). It was a second full BZ2_bzWriteOpen(blockSize=9)
+  // stream running the whole segment and finalizing at every 60s rotation
+  // for zero consumers -- same "encode but nobody reads it" waste as qcamera
+  // (see loggerd.h's has_qcamera=false).
+  logger_init(&s.logger, "rlog", false);
   logger_rotate(&s);
   Params().put("CurrentRoute", s.logger.route_name);
 

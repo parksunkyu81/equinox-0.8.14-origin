@@ -26,7 +26,11 @@ class BZFile {
     file = util::safe_fopen(path, "wb");
     assert(file != nullptr);
     int bzerror;
-    bz_file = BZ2_bzWriteOpen(&bzerror, file, 9, 0, 30);
+    // blockSize100k: was 9 (900KB blocks, max compression, max CPU). bzip2's
+    // compression ratio gain flattens out well before 9 -- 5 keeps most of
+    // the ratio while cutting real CPU/memory cost, both during steady-state
+    // writes over the 60s segment and at rotation's final-block flush.
+    bz_file = BZ2_bzWriteOpen(&bzerror, file, 5, 0, 30);
     assert(bzerror == BZ_OK);
   }
   ~BZFile() {
