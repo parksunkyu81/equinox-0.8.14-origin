@@ -617,13 +617,49 @@ TestCamera::TestCamera(QWidget* parent) : QWidget(parent) {
 }
 
 void TestCamera::saveFrame() {
-  // grabFramebuffer() returns exactly what is on screen, so the saved file
-  // matches what was just inspected. It must run on the GUI thread (it forces
-  // a repaint), which is where this button's signal already lands.
-  QImage img = cameraView->grabFramebuffer();
-  if (img.isNull()) {
+  // Read the vision stream directly instead of grabFramebuffer(). The on-screen
+  // image is not the sensor data: cameraview.cc's fragment shader applies an EON
+  // display compensation (dz = 0.0627, so black is lifted to 16/255 and the whole
+  // range is compressed), and the widget letterboxes and rescales it. Measured on
+  // a real capture: on-screen content occupied levels 16..187 while the letterbox
+  // beside it was a true 0, and the same camera's raw fcamera.hevc frames span the
+  // full 0..255. Saving the source buffer keeps the file usable for judging lens
+  // haze/focus, which is the whole point of this screen.
+  //
+  // Its own short-lived client keeps this off CameraViewWidget's vipc thread --
+  // that thread's frame pointer is only valid until it recycles the buffer, while
+  // this runs entirely on the GUI thread where the button signal lands.
+  VisionIpcClient vipc("camerad", VISION_STREAM_RGB_BACK, true);
+  if (!vipc.connect(false)) {
+    showing_capture_result = true;
+    statusLabel->setText("capture failed: camerad not streaming yet");
+    statusLabel->show();
+    return;
+  }
+
+  VisionBuf *buf = vipc.recv(nullptr, 250);
+  if (buf == nullptr || buf->addr == nullptr || buf->width == 0 || buf->height == 0) {
     showing_capture_result = true;
     statusLabel->setText("capture failed: no frame yet");
+    statusLabel->show();
+    return;
+  }
+
+  // camerad's RGB buffers are BGR24 with a row stride (rgb_to_yuv.cl reads
+  // b,g,r from bytes 0,1,2). Qt 5.12 has no Format_BGR888, so wrap the same
+  // bytes as RGB888 and swap. rgbSwapped() deep-copies, which also detaches
+  // the image from the mapped buffer before it is recycled.
+  if (buf->stride < buf->width * 3) {
+    showing_capture_result = true;
+    statusLabel->setText("capture failed: unexpected buffer stride");
+    statusLabel->show();
+    return;
+  }
+  QImage img = QImage((const uchar *)buf->addr, buf->width, buf->height,
+                      buf->stride, QImage::Format_RGB888).rgbSwapped();
+  if (img.isNull()) {
+    showing_capture_result = true;
+    statusLabel->setText("capture failed: could not build image");
     statusLabel->show();
     return;
   }
