@@ -20,9 +20,26 @@ from selfdrive.car.gm.steering_limits import GM_MIN_STEER_SPEED_MS
 
 MIN_STEER_SPEED = GM_MIN_STEER_SPEED_MS
 
-# Saturation 판단은 너무 저속에서 하면 오검출이 많음.
-# 기존 10.0m/s = 36km/h 기준 유지.
-SATURATION_CHECK_SPEED = 10.0
+# Saturation reporting floor. Was 10.0 m/s (36 km/h), which disabled the check
+# across most of this car's real driving: lateral control runs from 10 km/h, so
+# everything between 10 and 36 km/h could sit at full steering command without
+# ever being reported.
+#
+# Measured on 2026-08-26--01-04-22 at +1848 s (a tight left turn at 12-19 km/h
+# while braking): actuators.steer held +/-1.000 -- the full GM steering command
+# -- continuously for about 6 s while the wheel stalled near 45 deg and the
+# planner's target climbed past 100 deg, so lateral accel error grew to about
+# 2 m/s^2. saturated stayed False the whole time purely because of this 36 km/h
+# gate, so the driver got no "핸들을 잡아주세요" prompt while the controller was
+# out of authority.
+#
+# Reporting only: this value gates the sat_count filter feeding pid_log.saturated
+# and, through it, the steerSaturated WARNING alert. It is evaluated after the
+# torque output is computed and never feeds back into it, and steerSaturated is
+# ET.WARNING alone (no soft/immediate disable). controlsd additionally requires
+# hands-off plus >0.20 m path deviation before raising it, and steerLimitTimer
+# (0.4 s on GM) still filters brief saturation.
+SATURATION_CHECK_SPEED = GM_MIN_STEER_SPEED_MS
 
 # sat_count 안전 범위
 SAT_COUNT_MIN = 0.0

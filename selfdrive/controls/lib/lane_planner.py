@@ -192,6 +192,22 @@ MODEL_PATH_HOLD_MAX_S = 0.50
 MODEL_PATH_HOLD_FULL_S = 0.10
 MODEL_PATH_HOLD_SHOULDER_S = 0.30
 MODEL_PATH_HOLD_SHOULDER_STRENGTH = 0.55
+# Readiness-gated bridge extension, same idea as CURVE_TEMPORAL_TRUSTED_HOLD_MULT
+# and applied through the same interp-on-quality shape. 1.6 takes the 0.50 s
+# hold to 0.80 s, but ONLY while readiness is eligible and in proportion to its
+# quality -- an unconfirmed model-path hold still expires at exactly 0.50 s, so
+# this adds no extra dead-reckoning time to the unverified case.
+#
+# This is the one change in this file that genuinely spends safety margin
+# rather than correcting a mis-placed threshold: it lets the car carry a
+# remembered path further without new lane evidence. It is gated on readiness
+# precisely because readiness is the check that the remembered curvature still
+# agrees with measured IMU yaw. Measured on 2026-08-26--01-04-22 at +1830 s (a
+# hands-off right turn where the camera saw essentially nothing, laneLineProbs
+# 0.01-0.05): readiness held eligible with quality 1.00 for ~2.8 s straight
+# through the buildup, so the extension applies in exactly the situation it was
+# added for, and lapses the moment the driver touches the wheel.
+MODEL_PATH_TRUSTED_HOLD_MULT = 1.6
 MODEL_PATH_HOLD_STORE_STRENGTH = 0.40
 MODEL_PATH_MAX_CORRECTION_NEAR_M = 0.12
 MODEL_PATH_MAX_CORRECTION_M = 0.45
@@ -680,8 +696,17 @@ class LanePlanner:
       self._clear_model_path_hold()
       return None, 0.0
 
+    # Bridge time, extended only while readiness confirms the remembered
+    # curvature still matches measured yaw (see MODEL_PATH_TRUSTED_HOLD_MULT).
+    hold_max_s = MODEL_PATH_HOLD_MAX_S
+    if self._readiness_eligible:
+      hold_max_s = interp(
+        self._readiness_quality, [0.0, 1.0],
+        [MODEL_PATH_HOLD_MAX_S,
+         MODEL_PATH_HOLD_MAX_S * MODEL_PATH_TRUSTED_HOLD_MULT])
+
     self._model_hold_age_s += DT_MDL
-    if self._model_hold_age_s > MODEL_PATH_HOLD_MAX_S:
+    if self._model_hold_age_s > hold_max_s:
       self._clear_model_path_hold()
       return None, 0.0
 
@@ -712,10 +737,13 @@ class LanePlanner:
     predicted_lane_y = np.interp(path_x, predicted_x, predicted_y)
     # Plateau then shoulder, mirroring the temporal-hold profile; see the
     # MODEL_PATH_HOLD_FULL_S comment for the drive-log measurement behind it.
+    # Stretch the same plateau/shoulder shape over whatever bridge time is in
+    # force, so an extended hold fades to zero at its own end rather than
+    # hitting zero early at the un-extended 0.50 s.
     strength = float(np.clip(
       interp(self._model_hold_age_s,
              [0.0, MODEL_PATH_HOLD_FULL_S, MODEL_PATH_HOLD_SHOULDER_S,
-              MODEL_PATH_HOLD_MAX_S],
+              hold_max_s],
              [1.0, 1.0, MODEL_PATH_HOLD_SHOULDER_STRENGTH, 0.0]),
       0.0, 1.0))
     return predicted_lane_y, strength
