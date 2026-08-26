@@ -370,9 +370,41 @@ void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
   // left, left, right, and outer right)"). Indices 0 and 3 are the far sides
   // of the neighbouring lanes, which is why every lane on the road used to be
   // drawn. Draw only 1..2 so just the lane we are in is outlined.
+  //
+  // Confidence is carried by alpha, which is hard to read at a glance while
+  // driving, so a doubtful line turns orange as well. Colour rather than an
+  // outline: the band's width is scaled by the same probability, so exactly
+  // where an outline would be wanted the band is at its thinnest and a stroke
+  // would swallow it -- and past a few metres it narrows below a pixel, where
+  // any stroke is the whole line anyway.
+  //
+  // On the 2026-08-26 city route a quarter of engaged frames sat under 0.5, so
+  // orange is meant to be seen regularly: it marks "do not trust this line",
+  // not a fault. Below MIN_DRAW nothing is drawn at all -- the line's position
+  // is meaningless there, and drawing it would show a lane line that the model
+  // is not actually reporting.
+  constexpr float LANE_LINE_WEAK_PROB = 0.5f;
+  constexpr float LANE_LINE_MIN_DRAW_PROB = 0.05f;
+  constexpr float LANE_LINE_WEAK_MIN_ALPHA = 0.45f;
   for (int i = 1; i <= 2; ++i) {
-    const float a = std::clamp<float>(scene.lane_line_probs[i], 0.0f, 0.7f);
-    painter.setBrush(QColor::fromRgbF(0.0, 0.45, 1.0, a));
+    const float prob = scene.lane_line_probs[i];
+    if (prob < LANE_LINE_MIN_DRAW_PROB) {
+      continue;
+    }
+    // Alpha carries confidence, capped at 0.85 rather than the old 0.7 -- at
+    // 0.7 even a fully confident line let bright road surface through it.
+    float a = std::clamp<float>(prob, 0.0f, 0.85f);
+    if (prob < LANE_LINE_WEAK_PROB) {
+      // ...but an orange line is a warning, and a warning that fades out is no
+      // warning. Straight alpha put prob 0.10 at 10% opacity, which on screen
+      // was indistinguishable from the sub-MIN_DRAW case of drawing nothing --
+      // so the frames where the car can see least showed the least. Floor it.
+      // Width still separates them (15 cm at 0.5 down to 11 cm at 0.1).
+      a = std::max(a, LANE_LINE_WEAK_MIN_ALPHA);
+      painter.setBrush(QColor::fromRgbF(1.0, 0.55, 0.0, a));   // orange
+    } else {
+      painter.setBrush(QColor::fromRgbF(0.0, 0.45, 1.0, a));   // blue
+    }
     painter.drawPolygon(scene.lane_line_vertices[i].v, scene.lane_line_vertices[i].cnt);
   }
 

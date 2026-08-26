@@ -83,9 +83,18 @@ static void update_model(UIState *s, const cereal::ModelDataV2::Reader &model) {
   int max_idx = get_path_length_idx(lane_lines[0], max_distance);
   for (int i = 0; i < std::size(scene.lane_line_vertices); i++) {
     scene.lane_line_probs[i] = lane_line_probs[i];
-    // Half-width in metres, still scaled by probability so a weak line stays
-    // faint. Base was 0.0325; +30% as requested for on-screen visibility.
-    update_line_data(s, lane_lines[i], 0.04225 * scene.lane_line_probs[i], 0, &scene.lane_line_vertices[i], max_idx);
+    // Half-width in metres. Upstream draws 0.025 * prob, which at full
+    // confidence is about the width of real lane paint -- on this screen it
+    // disappears into the road it is drawn over. 0.10 is deliberately wider
+    // than real paint so the overlay reads as an overlay.
+    //
+    // The probability term is floored at half rather than used directly.
+    // Straight scaling thinned the line exactly when it most needed to be
+    // seen: at prob 0.3 the band was 3 cm across, right where it also turns
+    // orange for being untrustworthy. Now confidence still shows as width
+    // (19 cm down to 11 cm) without the line vanishing at the low end.
+    const float lane_line_width = 0.10f * (0.5f + 0.5f * scene.lane_line_probs[i]);
+    update_line_data(s, lane_lines[i], lane_line_width, 0, &scene.lane_line_vertices[i], max_idx);
   }
 
   // update road edges
