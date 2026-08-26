@@ -107,7 +107,6 @@ std::unordered_map<std::string, uint32_t> keys = {
     {"DoShutdown", CLEAR_ON_MANAGER_START},
     {"DoUninstall", CLEAR_ON_MANAGER_START},
     {"EnableWideCamera", CLEAR_ON_MANAGER_START},
-    {"EndToEndToggle", PERSISTENT},
     {"EquinoxSimAccelZero", CLEAR_ON_MANAGER_START | CLEAR_ON_IGNITION_OFF},
     {"EquinoxSimBrakePressed", CLEAR_ON_MANAGER_START | CLEAR_ON_IGNITION_OFF},
     {"EquinoxSimEngage", CLEAR_ON_MANAGER_START | CLEAR_ON_IGNITION_OFF},

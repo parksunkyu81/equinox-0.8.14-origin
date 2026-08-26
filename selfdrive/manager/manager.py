@@ -46,7 +46,6 @@ def manager_init() -> None:
     ("IsMetric", "1"),
 
     # HKG
-    ("EndToEndToggle", "0"),
     ("UseClusterSpeed", "0"),
     ("LongControlEnabled", "0"),
     ("MadModeEnabled", "1"),

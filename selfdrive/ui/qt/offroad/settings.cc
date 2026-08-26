@@ -115,12 +115,6 @@ TogglesPanel::TogglesPanel(SettingsWindow *parent) : ListWidget(parent) {
       "../assets/offroad/icon_monitoring.png",
     },
     {
-      "EndToEndToggle",
-      "Disable use of lanelines (Alpha)",
-      "In this mode openpilot will ignore lanelines and just drive how it thinks a human would.",
-      "../assets/offroad/icon_road.png",
-    },
-    {
       "DisengageOnAccelerator",
       "Disengage On Accelerator Pedal",
       "When enabled, pressing the accelerator pedal will disengage openpilot.",
@@ -1002,12 +996,6 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                             "If your car only supports LDWS, turn it on.",
                                             "../assets/offroad/icon_openpilot.png",
                                             this));*/
-
-  toggles.append(new ParamControl("EndToEndToggle",
-                                            "Disable use of lanelines (Alpha)",
-                                            "In this mode openpilot will ignore lanelines and just drive how it thinks a human would.",
-                                            "../assets/offroad/icon_road.png",
-                                            this));
 
   toggles.append(new ParamControl("LaneChangeEnabled",
                                             "Enable Lane Change Assist",

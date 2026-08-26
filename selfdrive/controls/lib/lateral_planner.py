@@ -13,16 +13,9 @@ from common.params import Params
 from selfdrive.controls.lib.model_data_validation import as_finite_vector, validated_model_trajectory
 
 TRAJECTORY_SIZE = 33
-# EndToEndToggle used to be read once at startup, which meant the toggle did
-# nothing until the next ignition cycle -- flip it, drive, see no difference,
-# conclude it is broken. Re-read it once a second instead (20 Hz planner).
-LANELINE_PARAM_REFRESH_FRAMES = 20
 
 class LateralPlanner:
   def __init__(self, CP):
-    self.params = Params()
-    self.use_lanelines = not self.params.get_bool('EndToEndToggle')
-    self.laneline_param_frame = 0
     self.LP = LanePlanner()
     self.DH = DesireHelper()
 
@@ -52,16 +45,6 @@ class LateralPlanner:
     self.lat_mpc.reset(x0=self.x0)
 
   def update(self, sm):
-    self.laneline_param_frame += 1
-    if self.laneline_param_frame >= LANELINE_PARAM_REFRESH_FRAMES:
-      self.laneline_param_frame = 0
-      use_lanelines = not self.params.get_bool('EndToEndToggle')
-      if use_lanelines != self.use_lanelines:
-        # Whatever LanePlanner cached belongs to a stretch of road the car has
-        # already driven past; a fallback must not resume from it.
-        self.LP.reset_state()
-        self.use_lanelines = use_lanelines
-
     car_state = sm['carState']
     v_ego = car_state.vEgo
     measured_curvature = sm['controlsState'].curvature
@@ -126,22 +109,16 @@ class LateralPlanner:
         completed_curve_readiness['laneLossRatio'] > 0.0):
       cloudlog.event('virtualCurveReadiness', **completed_curve_readiness)
 
-    if self.use_lanelines:
-      # LanePlanner applies its offset in-place; a copy prevents an invalid
-      # model frame from accumulating the offset on the last valid trajectory.
-      d_path_xyz = self.LP.get_d_path(
-        v_ego, self.t_idxs, self.path_xyz.copy(),
-        measured_curvature=measured_curvature,
-        lane_change_active=lane_change_active,
-        readiness_eligible=self.curve_virtual_readiness.current['eligible'],
-        readiness_quality=self.curve_virtual_readiness.current['quality'],
-        imu_curvature=imu_curvature, imu_curvature_valid=yaw_rate_valid)
-      self.lat_mpc.set_weights(MPC_COST_LAT.PATH, MPC_COST_LAT.HEADING, MPC_COST_LAT.STEER_RATE)
-    else:
-      d_path_xyz = self.path_xyz
-      # Heading cost is useful at low speed, otherwise end of plan can be off-heading
-      heading_cost = interp(v_ego, [5.0, 10.0], [MPC_COST_LAT.HEADING, 0.15])
-      self.lat_mpc.set_weights(MPC_COST_LAT.PATH, heading_cost, MPC_COST_LAT.STEER_RATE)
+    # LanePlanner applies its offset in-place; a copy prevents an invalid
+    # model frame from accumulating the offset on the last valid trajectory.
+    d_path_xyz = self.LP.get_d_path(
+      v_ego, self.t_idxs, self.path_xyz.copy(),
+      measured_curvature=measured_curvature,
+      lane_change_active=lane_change_active,
+      readiness_eligible=self.curve_virtual_readiness.current['eligible'],
+      readiness_quality=self.curve_virtual_readiness.current['quality'],
+      imu_curvature=imu_curvature, imu_curvature_valid=yaw_rate_valid)
+    self.lat_mpc.set_weights(MPC_COST_LAT.PATH, MPC_COST_LAT.HEADING, MPC_COST_LAT.STEER_RATE)
 
     # Match the official planner: the current model/lane blend goes directly
     # to MPC. Do not retain or blend a previous path across real curve changes.
@@ -213,7 +190,9 @@ class LateralPlanner:
     lateralPlan.solverExecutionTime = self.lat_mpc.solve_time
 
     lateralPlan.desire = self.DH.desire
-    lateralPlan.useLaneLines = self.use_lanelines
+    # Lane lines are always used; the laneless mode was removed 2026-08-27.
+    # Kept in the message so existing log tooling keeps reading a valid field.
+    lateralPlan.useLaneLines = True
     lateralPlan.laneChangeState = self.DH.lane_change_state
     lateralPlan.laneChangeDirection = self.DH.lane_change_direction
 
