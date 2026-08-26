@@ -83,7 +83,18 @@ class LateralPlanner:
       self.LP.rll_prob *= self.DH.lane_change_ll_prob
 
     # Calculate final driving path and set MPC costs
-    lane_change_active = self.DH.lane_change_state != log.LateralPlan.LaneChangeState.off
+    # A turn desire is a deliberate lateral maneuver exactly like a lane
+    # change, so the curve fallbacks in LanePlanner have to stand down for it
+    # too -- they dead-reckon a *lane-keeping* path. Left running through a
+    # 90-degree turn that fallback is worst-case wrong: curve_assist saturates
+    # at 1.0 (turn curvature 0.067-0.10 is far past CURVE_ASSIST_FULL_CURVATURE
+    # = 0.025, and turn speed sits under CURVE_ASSIST_FULL_BELOW_MS), while its
+    # heading stays clipped to CURVE_TEMPORAL_MAX_YAW_RAD = 0.24 rad (13.7 deg).
+    # That applies a near-straight path at full strength against a 90-degree
+    # turn, pulling the plan outward and widening the radius.
+    lane_change_active = (
+      self.DH.lane_change_state != log.LateralPlan.LaneChangeState.off or
+      self.DH.turn_desire_direction != log.LateralPlan.LaneChangeDirection.none)
     lane_confidence = max(self.LP.lll_prob, self.LP.rll_prob)
     # This GM's EBCM does not transmit a usable yaw-rate signal on the CAN bus
     # (car_state.yawRate's DBC-mapped bits read a constant 0 in every real

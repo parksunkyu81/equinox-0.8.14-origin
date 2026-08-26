@@ -11,6 +11,17 @@ LaneChangeDirection = log.LateralPlan.LaneChangeDirection
 LANE_CHANGE_SPEED_MIN = 50 * CV.KPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
 
+# A straight-road lane change and an intersection turn are indistinguishable at
+# the blinker -- both are "blinker on, under LANE_CHANGE_SPEED_MIN". They part
+# ways at the wheel. Through steerRatio 16.8 and a 2.72 m wheelbase, the
+# 90-degree turn this fork targets (curvature 0.067-0.10) needs roughly 175-260
+# deg of steering wheel, while a lane change peaks near 60. Only call it a turn
+# once the wheel is past anything a lane change would ask for, so a lane change
+# can never pull a turn desire. Hysteresis keeps the desire alive while the
+# wheel unwinds through the corner exit.
+TURN_DESIRE_ENTER_STEER_DEG = 120.0
+TURN_DESIRE_EXIT_STEER_DEG = 60.0
+
 DESIRES = {
   LaneChangeDirection.none: {
     LaneChangeState.off: log.LateralPlan.Desire.none,
@@ -47,6 +58,12 @@ class DesireHelper:
     self.auto_lane_change_enabled = Params().get_bool('AutoLaneChangeEnabled')
     self.auto_lane_change_timer = 0.0
     self.prev_torque_applied = False
+
+    # Turn desire defaults on; write "0" to the param to disable without a rebuild.
+    turn_desire_param = Params().get('TurnDesireEnabled')
+    self.turn_desire_enabled = turn_desire_param not in (b'0', '0')
+    self.turn_desire_direction = LaneChangeDirection.none
+    self.turn_pulse_timer = 0.0
 
   def update(self, carstate, active, lane_change_prob):
     v_ego = carstate.vEgo
@@ -131,4 +148,42 @@ class DesireHelper:
       if self.keep_pulse_timer > 1.0:
         self.keep_pulse_timer = 0.0
       elif self.desire in (log.LateralPlan.Desire.keepLeft, log.LateralPlan.Desire.keepRight):
+        self.desire = log.LateralPlan.Desire.none
+
+    # Turn desire. Below LANE_CHANGE_SPEED_MIN a blinker means an intersection
+    # turn, not a lane change, and the state machine above deliberately parks
+    # at LaneChangeState.off there -- so nothing was ever signalled to the
+    # model. turnLeft/turnRight ride the same one-hot desire slot as the lane
+    # change desires (modeld builds vec_desire[desire] = 1.0 with no special
+    # casing), so populating self.desire here is the whole wiring.
+    turn_ok = (active and self.turn_desire_enabled and one_blinker and
+               below_lane_change_speed and not carstate.standstill and
+               self.lane_change_state == LaneChangeState.off)
+
+    # ISO 8855: positive steeringAngleDeg is a left turn. Requiring the wheel to
+    # agree with the blinker also throws out a blinker left through a right-hand
+    # bend, and hands us the direction without trusting the blinker alone.
+    steer_deg = carstate.steeringAngleDeg
+    already_turning = self.turn_desire_direction != LaneChangeDirection.none
+    threshold = TURN_DESIRE_EXIT_STEER_DEG if already_turning else TURN_DESIRE_ENTER_STEER_DEG
+
+    if turn_ok and carstate.leftBlinker and steer_deg > threshold:
+      self.turn_desire_direction = LaneChangeDirection.left
+    elif turn_ok and carstate.rightBlinker and steer_deg < -threshold:
+      self.turn_desire_direction = LaneChangeDirection.right
+    else:
+      self.turn_desire_direction = LaneChangeDirection.none
+      self.turn_pulse_timer = 0.0
+
+    if self.turn_desire_direction != LaneChangeDirection.none:
+      # modeld only forwards a desire to the model on a rising edge, so a held
+      # value reaches it exactly once. Re-assert for a single frame once per
+      # second, the same trick the keep pulse above uses.
+      if self.turn_pulse_timer <= 0.0:
+        self.turn_pulse_timer = 1.0
+        self.desire = (log.LateralPlan.Desire.turnLeft
+                       if self.turn_desire_direction == LaneChangeDirection.left
+                       else log.LateralPlan.Desire.turnRight)
+      else:
+        self.turn_pulse_timer -= DT_MDL
         self.desire = log.LateralPlan.Desire.none
