@@ -41,9 +41,16 @@ TURN_DESIRE_EXIT_STEER_DEG = 60.0
 #   even 7 s still mis-fired on 6 while losing a real turn. No usable split.
 TURN_DESIRE_DOUBLE_TAP_GAP_S = 1.5
 # A declaration outlives the blinker: a tapped stalk self-cancels a few seconds
-# later, and the turn still has to be driven. Cleared early by the opposite
-# blinker or by the corner finishing.
+# later, and the turn still has to be driven. The timeout only runs while the
+# car is moving, so declaring before a red light and turning after it still
+# works. It is the backstop, not the normal exit -- the normal exit is the
+# corner finishing (TURN_DECLARE_DONE_S below).
 TURN_DECLARE_TIMEOUT_S = 20.0
+# Once the wheel has actually gone round, the corner is over as soon as it
+# unwinds and stays unwound this long. Without this the declaration ran its
+# full timeout and kept pulsing turn desire at the model long after the turn,
+# which stops the car settling back onto lane centre.
+TURN_DECLARE_DONE_S = 0.5
 
 TURN_DESIRE_MODEL_PROB = 0.35
 # Index into the DESIRE_LEN = 8 one-hot, matching LateralPlan.Desire.
@@ -97,6 +104,8 @@ class DesireHelper:
     self.prev_blinker_dir = LaneChangeDirection.none
     self.turn_declared_dir = LaneChangeDirection.none
     self.turn_declare_s = 0.0
+    self.turn_started = False
+    self.turn_unwound_s = 0.0
 
   def update(self, carstate, active, lane_change_prob, model_desire_state=None):
     v_ego = carstate.vEgo
@@ -222,8 +231,25 @@ class DesireHelper:
       self.turn_declared_dir = LaneChangeDirection.none
       self.turn_declare_s = 0.0
 
+    # Corner finished: the wheel went round and has come back. This is the
+    # normal way a declaration ends.
+    if self.turn_declared_dir != LaneChangeDirection.none:
+      if abs(carstate.steeringAngleDeg) > TURN_DESIRE_EXIT_STEER_DEG:
+        self.turn_started = True
+        self.turn_unwound_s = 0.0
+      elif self.turn_started:
+        self.turn_unwound_s += DT_MDL
+        if self.turn_unwound_s >= TURN_DECLARE_DONE_S:
+          self.turn_declared_dir = LaneChangeDirection.none
+          self.turn_declare_s = 0.0
+    else:
+      self.turn_started = False
+      self.turn_unwound_s = 0.0
+
+    # Timeout backstop, held while stopped so a red light doesn't eat it.
     if self.turn_declare_s > 0.0:
-      self.turn_declare_s -= DT_MDL
+      if not carstate.standstill:
+        self.turn_declare_s -= DT_MDL
     else:
       self.turn_declared_dir = LaneChangeDirection.none
 
