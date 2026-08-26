@@ -390,11 +390,21 @@ void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
     painter.drawPolygon(scene.lane_line_vertices[i].v, scene.lane_line_vertices[i].cnt);
   }
 
-  // road edges (원본 유지)
-  for (int i = 0; i < std::size(scene.road_edge_vertices); ++i) {
-    painter.setBrush(QColor::fromRgbF(1.0, 0.0, 0.0, std::clamp<float>(1.0f - scene.road_edge_stds[i], 0.0f, 1.0f)));
-    painter.drawPolygon(scene.road_edge_vertices[i].v, scene.road_edge_vertices[i].cnt);
-  }
+  // Road edges are hidden so only the lane we are in is outlined. These are
+  // the two road *boundaries* (where the road meets kerb/sidewalk), not lane
+  // lines, and they run out to the sides at a much wider angle than the ego
+  // lane -- they were the pale lines still crossing the view after the lane
+  // loop above was narrowed to indices 1..2. They looked white rather than red
+  // because alpha is 1.0 - road_edge_stds, so an uncertain edge washes out
+  // against a bright road surface.
+  //
+  // Display only: road edges are still computed in ui.cc and still feed the
+  // curve fallback (lane_planner.py's road-edge tier). Restore by
+  // un-commenting.
+  // for (int i = 0; i < std::size(scene.road_edge_vertices); ++i) {
+  //   painter.setBrush(QColor::fromRgbF(1.0, 0.0, 0.0, std::clamp<float>(1.0f - scene.road_edge_stds[i], 0.0f, 1.0f)));
+  //   painter.drawPolygon(scene.road_edge_vertices[i].v, scene.road_edge_vertices[i].cnt);
+  // }
 
   // 2) PATH: show a red warning path when the model predicts a deep turn.
   float future_yaw = 0.0f;
@@ -1139,14 +1149,14 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     p.setPen(Qt::NoPen);
 
     str2.sprintf("STEER %.0f°", steer_angle_deg);
-    textColor = QColor(120, 255, 120, 200);  // green
-    configFont(p, "Open Sans", 29, "Bold");
+    textColor = QColor(255, 185, 15, 200);  // amber(호박색)
+    configFont(p, "Open Sans", 32, "Bold");
     drawTextWithColor(p, x, y2 - 5, str2, textColor);
 
     str2.sprintf("DESIRE %.0f°", desire_angle_deg);
-    textColor = QColor(120, 255, 120, 200);  // green
-    configFont(p, "Open Sans", 29, "Bold");
-    drawTextWithColor(p, x, y2 + 29, str2, textColor);
+    textColor = QColor(255, 185, 15, 200);  // amber(호박색)
+    configFont(p, "Open Sans", 32, "Bold");
+    drawTextWithColor(p, x, y2 + 32, str2, textColor);
     p.setOpacity(1.0);
   }
 
