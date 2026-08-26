@@ -176,6 +176,22 @@ ROAD_EDGE_CURVE_WEIGHT = 0.90
 # road-edge confirmation at all, only "the model itself believed this a moment
 # ago".
 MODEL_PATH_HOLD_MAX_S = 0.50
+# Strength profile across the hold. This used to be a bare linear 1.0 -> 0.0
+# ramp over MODEL_PATH_HOLD_MAX_S, i.e. it started fading on the very first
+# frame, so the mean applied strength across a hold was only ~0.50 and the
+# correction was throttled long before any correction ceiling mattered.
+# Measured on 2026-08-25--10-51-17 (1522 model-path frames): applied
+# |correction| was p50 0.088 m / p90 0.186 m, and on the readiness-trusted
+# frames it peaked at 0.201 m -- less than half of the 0.45 m ceiling that was
+# in force, so the ceiling was never the binding constraint, this decay was.
+# Reshaped to match the temporal-hold profile that already exists above
+# (CURVE_TEMPORAL_HOLD_FULL_S plateau, then a 0.55 shoulder, then to zero),
+# which lifts mean strength to ~0.62 while still reaching zero at exactly the
+# same MODEL_PATH_HOLD_MAX_S -- the hold is not extended, only the shape
+# within it changes, so dead-reckoning time is unchanged.
+MODEL_PATH_HOLD_FULL_S = 0.10
+MODEL_PATH_HOLD_SHOULDER_S = 0.30
+MODEL_PATH_HOLD_SHOULDER_STRENGTH = 0.55
 MODEL_PATH_HOLD_STORE_STRENGTH = 0.40
 MODEL_PATH_MAX_CORRECTION_NEAR_M = 0.12
 MODEL_PATH_MAX_CORRECTION_M = 0.45
@@ -694,8 +710,13 @@ class LanePlanner:
 
     path_x = np.asarray(path_x, dtype=float)
     predicted_lane_y = np.interp(path_x, predicted_x, predicted_y)
+    # Plateau then shoulder, mirroring the temporal-hold profile; see the
+    # MODEL_PATH_HOLD_FULL_S comment for the drive-log measurement behind it.
     strength = float(np.clip(
-      interp(self._model_hold_age_s, [0.0, MODEL_PATH_HOLD_MAX_S], [1.0, 0.0]),
+      interp(self._model_hold_age_s,
+             [0.0, MODEL_PATH_HOLD_FULL_S, MODEL_PATH_HOLD_SHOULDER_S,
+              MODEL_PATH_HOLD_MAX_S],
+             [1.0, 1.0, MODEL_PATH_HOLD_SHOULDER_STRENGTH, 0.0]),
       0.0, 1.0))
     return predicted_lane_y, strength
 

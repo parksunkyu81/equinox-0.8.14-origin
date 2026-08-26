@@ -378,10 +378,15 @@ void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
 
   const UIScene &scene = s->scene;
 
-  // 1) lanelines: WHITE (alpha = prob, max 0.7)
-  for (int i = 0; i < std::size(scene.lane_line_vertices); ++i) {
+  // 1) lanelines: BLUE (alpha = prob, max 0.7)
+  // The model always returns four lane lines: 0 = outer-left, 1 = ego-left,
+  // 2 = ego-right, 3 = outer-right (see models/README.md "4 lanelines (outer
+  // left, left, right, and outer right)"). Indices 0 and 3 are the far sides
+  // of the neighbouring lanes, which is why every lane on the road used to be
+  // drawn. Draw only 1..2 so just the lane we are in is outlined.
+  for (int i = 1; i <= 2; ++i) {
     const float a = std::clamp<float>(scene.lane_line_probs[i], 0.0f, 0.7f);
-    painter.setBrush(QColor::fromRgbF(1.0, 1.0, 1.0, a));
+    painter.setBrush(QColor::fromRgbF(0.0, 0.45, 1.0, a));
     painter.drawPolygon(scene.lane_line_vertices[i].v, scene.lane_line_vertices[i].cnt);
   }
 
