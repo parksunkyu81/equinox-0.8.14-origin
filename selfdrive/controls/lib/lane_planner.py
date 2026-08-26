@@ -19,7 +19,26 @@ from selfdrive.controls.lib.model_data_validation import as_finite_vector
 
 TRAJECTORY_SIZE = 33
 PATH_OFFSET = ntune_common_get('pathOffset')
-CAMERA_OFFSET = -0.055
+# Lateral trim. Both lane lines get this added, so it moves the lane centre the
+# planner steers to: more negative puts the car further left.
+#
+# Sized from 2026-08-26--09-33-54, engaged and hands-off, both lane lines above
+# 0.5 probability, |curvature| < 0.003, n = 4359: the lane centre sat at
+# -0.0148 m, i.e. the car rode 1.5 cm right of centre (3.6 cm at 30-50 km/h,
+# 1.3 cm at 50-80). Mean d_prob on those frames was 0.983 and the final path is
+#   d_prob * lane_path + (1 - d_prob) * model_path
+# so this offset reaches the output at 98.3% while ntune's pathOffset, which
+# only enters the model_path term, reaches it at 1.7% -- correcting 1.5 cm that
+# way would need pathOffset = -0.86, near its +-1.0 clamp. Hence the trim lives
+# here and pathOffset stays 0.
+#
+# -0.055 -> -0.070 shifts the car 1.5 cm left (-0.0148 / 0.983). Each further
+# -0.010 is roughly another 1 cm left.
+#
+# Caveat: this is measured against the model's OWN lane lines, so it corrects
+# where the car sits relative to what the model sees. A bias in the lane-line
+# estimate itself (narrow EON FOV) would not show up in that measurement.
+CAMERA_OFFSET = -0.070
 
 # Official 0.8.14 uses a soft standard-deviation weight from 0.15 to 0.30.
 # The EON model observed on this car reports geometrically continuous lane
