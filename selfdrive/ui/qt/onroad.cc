@@ -1144,7 +1144,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     drawTextWithColor(p, x, y2 - 5, str2, textColor);
 
     str2.sprintf("DESIRE %.0f°", desire_angle_deg);
-    textColor = QColor(155, 255, 155, 245);
+    textColor = QColor(120, 255, 120, 200);  // green
     configFont(p, "Open Sans", 29, "Bold");
     drawTextWithColor(p, x, y2 + 29, str2, textColor);
     p.setOpacity(1.0);
