@@ -38,10 +38,25 @@ const char frame_fragment_shader[] =
   "out vec4 colorOut;\n"
   "void main() {\n"
   "  colorOut = texture(uTexture, vTexCoord.xy);\n"
-#ifdef QCOM
-  "  vec3 dz = vec3(0.0627f, 0.0627f, 0.0627f);\n"
-  "  colorOut.rgb = ((vec3(1.0f, 1.0f, 1.0f) - dz) * colorOut.rgb / vec3(1.0f, 1.0f, 1.0f)) + dz;\n"
-#endif
+// The upstream EON path lifted the black floor here:
+//   dz = 0.0627;  colorOut.rgb = (1 - dz) * colorOut.rgb + dz;
+// That maps [0,1] -> [0.0627, 1], i.e. true black is shown as 16/255, with the
+// lift largest in the dark tones -- which is what made the road, dark cars and
+// shadowed signs look washed out on this screen.
+//
+// Measured from a Test Camera capture: the on-screen image occupied levels
+// 16..187 and never went below 16, while the letterbox drawn beside it in the
+// same framebuffer was a true 0, and this camera's raw fcamera.hevc frames span
+// the full 0..255. So the haze came from this transform, not the lens (lens
+// sharpness was checked separately: hard edges resolve in 1 px).
+//
+// Display only: modeld reads the YUV stream (VISION_STREAM_ROAD) directly and
+// never sees this shader, so lane detection and control are unaffected.
+// Restore by un-commenting the four lines below if the panel needs it.
+//#ifdef QCOM
+//  "  vec3 dz = vec3(0.0627f, 0.0627f, 0.0627f);\n"
+//  "  colorOut.rgb = ((vec3(1.0f, 1.0f, 1.0f) - dz) * colorOut.rgb / vec3(1.0f, 1.0f, 1.0f)) + dz;\n"
+//#endif
   "}\n";
 
 const mat4 device_transform = {{
