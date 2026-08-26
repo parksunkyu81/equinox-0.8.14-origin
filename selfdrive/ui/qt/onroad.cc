@@ -827,17 +827,24 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     str = "ON";
     textColor = QColor(120, 255, 120, 200);
   }
-  else if (car_state.getSteerFaultTemporary() || car_state.getSteerFaultPermanent()) {
-    str = "고장";
-    textSize = 40.f;
-    textColor = QColor(254, 32, 32, 200);
-  }
   else if (lkas_bool && engaged && cur_speed < min_steer_kph) {
     // City stop-and-go: steering is cut by the speed gate and comes back on
-    // its own above it. Amber, not red -- nothing is broken.
+    // its own above it. Amber, not red -- nothing is broken. This is checked
+    // BEFORE the fault branch on purpose: the PSCM reports
+    // LKATorqueDeliveredStatus == 2 (steerFaultTemporary) while stopped or
+    // creeping simply because it is not delivering LKA torque there. In the
+    // 2026-08-26 city drive every one of those 24.9s sat under 10 km/h, so
+    // ranking the fault first would paint normal stop-and-go red.
     str = "저속";
     textSize = 40.f;
     textColor = QColor(255, 175, 0, 220);
+  }
+  else if (car_state.getSteerFaultTemporary() || car_state.getSteerFaultPermanent()) {
+    // A steer fault at a speed where steering should have been available is
+    // the case actually worth a red light.
+    str = "고장";
+    textSize = 40.f;
+    textColor = QColor(254, 32, 32, 200);
   }
   else {
     str = "OFF";
