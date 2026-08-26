@@ -13,10 +13,16 @@ from common.params import Params
 from selfdrive.controls.lib.model_data_validation import as_finite_vector, validated_model_trajectory
 
 TRAJECTORY_SIZE = 33
+# EndToEndToggle used to be read once at startup, which meant the toggle did
+# nothing until the next ignition cycle -- flip it, drive, see no difference,
+# conclude it is broken. Re-read it once a second instead (20 Hz planner).
+LANELINE_PARAM_REFRESH_FRAMES = 20
 
 class LateralPlanner:
   def __init__(self, CP):
-    self.use_lanelines = not Params().get_bool('EndToEndToggle')
+    self.params = Params()
+    self.use_lanelines = not self.params.get_bool('EndToEndToggle')
+    self.laneline_param_frame = 0
     self.LP = LanePlanner()
     self.DH = DesireHelper()
 
@@ -46,6 +52,16 @@ class LateralPlanner:
     self.lat_mpc.reset(x0=self.x0)
 
   def update(self, sm):
+    self.laneline_param_frame += 1
+    if self.laneline_param_frame >= LANELINE_PARAM_REFRESH_FRAMES:
+      self.laneline_param_frame = 0
+      use_lanelines = not self.params.get_bool('EndToEndToggle')
+      if use_lanelines != self.use_lanelines:
+        # Whatever LanePlanner cached belongs to a stretch of road the car has
+        # already driven past; a fallback must not resume from it.
+        self.LP.reset_state()
+        self.use_lanelines = use_lanelines
+
     car_state = sm['carState']
     v_ego = car_state.vEgo
     measured_curvature = sm['controlsState'].curvature

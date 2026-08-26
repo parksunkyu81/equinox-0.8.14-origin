@@ -1115,7 +1115,11 @@ class Controls:
         # take over. Shorter sustains do not get rarer as the threshold drops --
         # brief dropouts are normal and frequent, so duration is what separates
         # trouble from noise. Re-check these against a daytime/highway route.
+        # useLaneLines gates this: with lane lines disabled the planner skips
+        # get_d_path entirely, so dProb is never written and sits at its 0.0
+        # initial value forever -- the watchdog would fire on every drive.
         if (self.active and CS.vEgo > LANE_CONF_MIN_SPEED and
+                self.sm['lateralPlan'].useLaneLines and
                 self.sm['lateralPlan'].dProb < LANE_CONF_DPROB):
             self.lane_conf_low_s += DT_CTRL
         else:

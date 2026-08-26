@@ -476,6 +476,23 @@ class LanePlanner:
       return CURVE_TEMPORAL_HOLD_MAX_S
     return float(self._curve_hold_age_s)
 
+  def reset_state(self):
+    """Drop everything carried between frames.
+
+    Called when the lanelines toggle flips: get_d_path stops being called in
+    laneless mode, so on the way back every cached path belongs to road the car
+    has already driven past, and d_prob is whatever it was frozen at. Resuming a
+    fallback from that would steer toward a shape that is no longer there.
+    """
+    self._clear_curve_temporal_hold()
+    self._clear_model_path_hold()
+    self.d_prob = 0.0
+    self._fallback_mode_active = False
+    self._fresh_lane_recovery_frames = 0
+    self.lane_center_correction_m = 0.0
+    self.lane_center_correction_active = False
+    self.curve_fallback_source_diag = 0
+
   def _clear_curve_temporal_hold(self):
     self._curve_hold_x = None
     self._curve_hold_y = None

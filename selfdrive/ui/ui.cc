@@ -258,6 +258,9 @@ void UIState::update() {
 
   if (sm->frame % UI_FREQ == 0) {
     watchdog_kick();
+    // Read once a second rather than only on the onroad transition, so the
+    // lanelines toggle changes the drawn path as soon as it is flipped.
+    scene.end_to_end = Params().getBool("EndToEndToggle");
   }
   emit uiUpdate(*this);
 }
