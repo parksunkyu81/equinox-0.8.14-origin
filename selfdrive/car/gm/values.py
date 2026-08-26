@@ -8,7 +8,7 @@ from selfdrive.car.gm.steering_limits import GM_MIN_STEER_SPEED_MS
 LEFT_EDGE_OFFSET = 15       # 양수
 RIGHT_EDGE_OFFSET = -15     # 음수
 
-MIN_CURVE_SPEED = 40. * CV.KPH_TO_MS  # 커브 속도 설정
+MIN_CURVE_SPEED = 30. * CV.KPH_TO_MS  # 커브 속도 설정
 
 # m/s 속도로 1초당 1미터 -> 3초면 3미터를 이동
 # 2 m/s^2는 가속도 1초당 2m/s 속도 증가 -> 1초면 2미터 이동 -> <1초면 4미터 이동>
