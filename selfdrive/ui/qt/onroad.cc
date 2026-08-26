@@ -1396,16 +1396,21 @@ void NvgWindow::drawSpeed(QPainter &p) {
 
   const int panel_cx = (int)panelContent.center().x();
 
-  // 3줄 배치 + 중간 여백
-  const int midGapY = 25;
-
-  int y_cruise = (int)(panelContent.top() + panelContent.height() * 0.30) - midGapY;
-  int y_curspd = (int)(panelContent.top() + panelContent.height() * 0.55);
-  int y_apply  = (int)(panelContent.top() + panelContent.height() * 0.80) + midGapY;
+  // 3줄을 패널 세로 중앙 기준으로 균등 배치.
+  const int panel_cy = (int)panelContent.center().y();
+  const int lineGap = (int)(panelContent.height() * 0.33);
 
   // 폰트
   const int unifiedFont = 70;     // Cruise/Apply
   const int unifiedSpdFont = 100;  // Current Speed
+
+  // drawTextWithColor 는 y 를 베이스라인으로 쓴다. 숫자를 원하는 높이에
+  // "가운데" 놓으려면 자기 글자 높이의 절반만큼 내려야 한다. 높이 기준은
+  // 실제 문자열이 아니라 "8" 로 고정해서, 값이 바뀌어도 줄이 흔들리지 않게 한다.
+  auto baselineAt = [&](int center_y) {
+    QFontMetrics fm(p.font());
+    return center_y + fm.boundingRect("8").height() / 2;
+  };
 
   // Colors
   QColor cruiseGreen(120, 255, 120, 200);
@@ -1415,6 +1420,7 @@ void NvgWindow::drawSpeed(QPainter &p) {
   // Cruise
   QString strCruise;
   configFont(p, "Inter", unifiedFont, "Bold");
+  const int y_cruise = baselineAt(panel_cy - lineGap);
   if (is_cruise_set) {
     strCruise.sprintf("%d", to_display_speed(cruiseMaxSpeed_kph));
     drawTextWithColor(p, panel_cx, y_cruise, strCruise, cruiseGreen);
@@ -1428,7 +1434,7 @@ void NvgWindow::drawSpeed(QPainter &p) {
   QString strCur;
   strCur.sprintf("%d", (int)(cur_speed + 0.5f));
   configFont(p, "Inter", unifiedSpdFont, "Bold");
-  drawTextWithColor(p, panel_cx, y_curspd, strCur, curSpeedColor);
+  drawTextWithColor(p, panel_cx, baselineAt(panel_cy), strCur, curSpeedColor);
 
   // Apply
   QString strApply;
@@ -1438,7 +1444,7 @@ void NvgWindow::drawSpeed(QPainter &p) {
     strApply = "MAX";
   }
   configFont(p, "Inter", unifiedFont, "Bold");
-  drawTextWithColor(p, panel_cx, y_apply, strApply, applyOrange);
+  drawTextWithColor(p, panel_cx, baselineAt(panel_cy + lineGap), strApply, applyOrange);
 
   p.restore();
 }
