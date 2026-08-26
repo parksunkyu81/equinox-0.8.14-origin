@@ -552,7 +552,7 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
       "핸들을 잡아주세요",
       "조향제어 제한을 초과함",
       AlertStatus.userPrompt, AlertSize.mid,
-      Priority.LOW, VisualAlert.steerRequired, AudibleAlert.promptRepeat, 1.),
+      Priority.LOW, VisualAlert.steerRequired, AudibleAlert.steerRequired, 1.),
   },
 
   # Thrown when the fan is driven at >50% but is not rotating
@@ -650,6 +650,20 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
     ET.NO_ENTRY: NoEntryAlert("어뎁티브크루즈를 활성화하세요"),
   },
 
+  # Lane confidence has been on the floor long enough that the car is running
+  # on the model path alone. Sized from 2026-08-26--12-34-51: dProb spends 26%
+  # of engaged driving below the fallback threshold and the driver grabs the
+  # wheel 5.3x more often there, but almost all of it is brief -- 33 of 72
+  # dropouts last under 0.5 s, median 0.99 s. Alerting on those would fire ~37
+  # times an hour and be tuned out. Only the long ones are worth a sound.
+  EventName.laneConfidenceLow: {
+    ET.WARNING: Alert(
+      "핸들을 잡아주세요",
+      "차선 인식 불량",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.LOW, VisualAlert.steerRequired, AudibleAlert.laneLost, 3.),
+  },
+
   EventName.steerTempUnavailable: {
     #ET.SOFT_DISABLE: soft_disable_alert("Steering Temporarily Unavailable"),
     #ET.NO_ENTRY: NoEntryAlert("Steering Temporarily Unavailable"),
@@ -658,7 +672,7 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
       "핸들을 잡아주세요",
       "조향제어 일시적으로 사용불가",
       AlertStatus.userPrompt, AlertSize.small,
-      Priority.LOW, VisualAlert.steerRequired, AudibleAlert.none, 0.),
+      Priority.LOW, VisualAlert.steerRequired, AudibleAlert.steerRequired, 0.),
     ET.NO_ENTRY: NoEntryAlert("조향제어 일시적으로 사용불가"),
   },
 

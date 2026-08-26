@@ -21,6 +21,10 @@ const std::tuple<AudibleAlert, QString, int> sound_list[] = {
   {AudibleAlert::SLOWING_DOWN_SPEED, "slowing_down_speed.wav", 0},
   {AudibleAlert::BRAKE_READY, "brake_ready_ko.wav", 0},
   {AudibleAlert::CORNER_ENTRY, "corner_entry_ko.wav", 0},
+  // Spoken, so it plays once per event rather than looping the way the
+  // prompt chimes do -- a 1.45 s voice line on repeat is unusable.
+  {AudibleAlert::STEER_REQUIRED, "steer_required_ko.wav", 0},
+  {AudibleAlert::LANE_LOST, "lane_lost_ko.wav", 0},
 };
 
 class Sound : public QObject {

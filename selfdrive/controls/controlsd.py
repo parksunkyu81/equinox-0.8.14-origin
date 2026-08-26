@@ -84,6 +84,18 @@ COMMA_PEDAL_PARAM_REFRESH_FRAMES = max(1, int(0.2 / DT_CTRL))
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
+# Lane-confidence watchdog (EventName.laneConfidenceLow). Tuned on
+# 2026-08-26--12-34-51, 11.5 min engaged, 48 driver interventions:
+#   dProb < 0.25, 8 s sustained, 30 s cooldown -> 2 alerts, both immediately
+#   before the driver took over. Loosening the sustain is what makes it noisy,
+#   not the threshold: at 3 s the same 0.25 fires 24 times (~37/hour) because
+#   brief dropouts are normal -- 33 of 72 last under 0.5 s, median 0.99 s.
+# Sample is one night city route, so expect to retune on daytime/highway data.
+LANE_CONF_DPROB = 0.25
+LANE_CONF_SUSTAIN_S = 8.0
+LANE_CONF_COOLDOWN_S = 30.0
+LANE_CONF_MIN_SPEED = 5 * CV.KPH_TO_MS
+
 REPLAY = "REPLAY" in os.environ
 SIMULATION = "SIMULATION" in os.environ
 NOSENSOR = "NOSENSOR" in os.environ
@@ -264,6 +276,9 @@ class Controls:
         self.slowing_down = False
         self.slowing_down_alert = False
         self.slowing_down_sound_alert = False
+        # Lane-confidence watchdog, see EventName.laneConfidenceLow.
+        self.lane_conf_low_s = 0.0
+        self.lane_conf_alert_t = -LANE_CONF_COOLDOWN_S
         self.active_cam = False
         self.over_speed_limit = False
 
@@ -1093,6 +1108,23 @@ class Controls:
             self.events.add(EventName.vehicleModelInvalid)
         if not self.sm['lateralPlan'].mpcSolutionValid and not (EventName.turningIndicatorOn in self.events.names):
             self.events.add(EventName.plannerError)
+
+        # Lane-confidence watchdog. Thresholds measured on 2026-08-26--12-34-51
+        # (11.5 min, 48 driver interventions): dProb < 0.25 sustained 8 s with a
+        # 30 s cooldown fired twice, both immediately before the driver had to
+        # take over. Shorter sustains do not get rarer as the threshold drops --
+        # brief dropouts are normal and frequent, so duration is what separates
+        # trouble from noise. Re-check these against a daytime/highway route.
+        if (self.active and CS.vEgo > LANE_CONF_MIN_SPEED and
+                self.sm['lateralPlan'].dProb < LANE_CONF_DPROB):
+            self.lane_conf_low_s += DT_CTRL
+        else:
+            self.lane_conf_low_s = 0.0
+        if self.lane_conf_low_s >= LANE_CONF_SUSTAIN_S:
+            now = sec_since_boot()
+            if now - self.lane_conf_alert_t >= LANE_CONF_COOLDOWN_S:
+                self.events.add(EventName.laneConfidenceLow)
+                self.lane_conf_alert_t = now
         if not self.sm['liveLocationKalman'].sensorsOK and not NOSENSOR:
             if self.sm.frame > 5 / DT_CTRL:  # Give locationd some time to receive all the inputs
                 self.events.add(EventName.sensorDataInvalid)
