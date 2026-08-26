@@ -2061,20 +2061,26 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
     label = (uiState()->status == STATUS_ENGAGED && car_state.getVEgo() < 50 / 3.6f) ? "50km/h+" : "";
   }
 
-  // Kept clear of the thermal tiles on the right and the speed box on the left.
+  // Placed where the old pixmap indicator sat: vertically centred, and inboard
+  // rather than pinned to the screen edge. Still clear of the speed box on the
+  // left and the thermal tiles on the right, which both hug the edges.
   const int band_w = 240;
-  const int band_x = left ? 0 : width() - band_w;
-  const int edge_x = left ? 0 : width();
-  const int cy = height() * 0.28f;
+  const int band_gap = 400;   // inner edge of the band, out from screen centre
+  const int band_x = left ? width() / 2 - band_gap - band_w : width() / 2 + band_gap;
+  const int cy = height() / 2;
   const int dir = left ? -1 : 1;
+  // Outboard side of the band -- the glow is brightest there and fades inward,
+  // so it still reads as coming from the side the car is heading toward.
+  const int glow_x = left ? band_x : band_x + band_w;
 
   p.save();
   p.setRenderHint(QPainter::Antialiasing);
   p.setOpacity(1.0);
 
-  // Glow bleeding in from the edge the car is heading toward. Peripheral
-  // vision picks this up without having to look away from the road.
-  QRadialGradient glow(QPointF(edge_x, cy), band_w * 1.35f);
+  // Halo behind the chevrons. Bounded to the band instead of the full screen
+  // height -- at the edge a full-height column was harmless, but here it would
+  // wash over the path view in the middle of the screen.
+  QRadialGradient glow(QPointF(glow_x, cy), band_w * 1.35f);
   QColor halo = color;
   halo.setAlpha(150);
   glow.setColorAt(0.0, halo);
@@ -2082,7 +2088,7 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
   glow.setColorAt(0.55, halo);
   halo.setAlpha(0);
   glow.setColorAt(1.0, halo);
-  p.fillRect(band_x, 0, band_w, height(), glow);
+  p.fillRect(band_x, cy - band_w, band_w, 2 * band_w, glow);
 
   // Three chevrons firing inside-out, the way a sequential turn signal does.
   const int n = 3;
@@ -2092,7 +2098,7 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
   const double period = changing ? 460.0 : 800.0;
   const double phase = fmod(millis_since_boot(), period) / period;
   const int lit = phase < 0.82 ? (int)(phase / 0.82 * n) + 1 : 0;
-  const int inner = left ? band_w - 30 : width() - band_w + 30;
+  const int inner = left ? band_x + band_w - 30 : band_x + 30;
 
   for (int i = 0; i < n; i++) {
     const int x = inner + dir * i * step;
