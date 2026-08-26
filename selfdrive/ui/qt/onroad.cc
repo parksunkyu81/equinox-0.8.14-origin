@@ -807,24 +807,37 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.setOpacity(1.0);
 
   // 3. LKAS (swapped column with WHEEL, per user request)
+  // carControl.latActive is the exact flag the GM CarController gates LKAS on
+  // (apply_control_activation: steer faults, minSteerSpeed, standstill, angle
+  // limit). Read it instead of re-deriving from speed -- the old
+  // "cur_speed > 10" copy showed ON while steering was actually cut, and
+  // duplicated GM_MIN_STEER_SPEED_KPH as a literal.
   x = icon_start_x + (icon_step * 5);
-  bool lkas_bool = car_state.getLkasEnable();
-
-  textSize = 48.f;
+  const bool lkas_bool = car_state.getLkasEnable();
+  const bool lat_active = car_control.getLatActive();
+  const bool engaged = controls_state.getEnabled();
+  const float min_steer_kph = sm["carParams"].getCarParams().getMinSteerSpeed() * MS_TO_KPH;
 
   p.setPen(Qt::NoPen);
   p.setBrush(blackColor(200));
   p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
 
-  textColor = QColor(255, 255, 255, 200);
-
-  if(lkas_bool == true and cur_speed > 10) {
+  textSize = 48.f;
+  if (lat_active) {
     str = "ON";
     textColor = QColor(120, 255, 120, 200);
   }
-  else if(lkas_bool == true and cur_speed <= 10) {
-    str = "OFF";
+  else if (car_state.getSteerFaultTemporary() || car_state.getSteerFaultPermanent()) {
+    str = "고장";
+    textSize = 40.f;
     textColor = QColor(254, 32, 32, 200);
+  }
+  else if (lkas_bool && engaged && cur_speed < min_steer_kph) {
+    // City stop-and-go: steering is cut by the speed gate and comes back on
+    // its own above it. Amber, not red -- nothing is broken.
+    str = "저속";
+    textSize = 40.f;
+    textColor = QColor(255, 175, 0, 220);
   }
   else {
     str = "OFF";
