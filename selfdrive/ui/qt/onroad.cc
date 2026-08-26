@@ -6,6 +6,7 @@
 #include <QDebug>
 #include <QSound>
 #include <QMouseEvent>
+#include <QPainterPath>
 #include <algorithm>
 
 #include "selfdrive/common/timing.h"
@@ -1999,81 +2000,92 @@ void NvgWindow::drawRestAreaItem(QPainter &p, int yPos, capnp::Text::Reader imag
 }
 
 void NvgWindow::drawTurnSignals(QPainter &p) {
-  static int blink_index = 0;
-  static int blink_wait = 0;
-  static double prev_ts = 0.0;
+  const SubMaster &sm = *(uiState()->sm);
+  const auto car_state = sm["carState"].getCarState();
+  const bool left_on = car_state.getLeftBlinker();
+  const bool right_on = car_state.getRightBlinker();
 
-  if(blink_wait > 0) {
-    blink_wait--;
-    blink_index = 0;
+  // nothing to show with both off, and hazards shouldn't paint both edges
+  if (left_on == right_on) {
+    p.setOpacity(1.0);
+    return;
   }
-  else {
-    const SubMaster &sm = *(uiState()->sm);
-    auto car_state = sm["carState"].getCarState();
-    bool left_on = car_state.getLeftBlinker();
-    bool right_on = car_state.getRightBlinker();
+  const bool left = left_on;
 
-    const float img_alpha = 0.8f;
-    const int fb_w = width() / 2 - 200;
-    const int center_x = width() / 2;
-    const int w = fb_w / 25;
-    const int h = 160;
-    const int gap = fb_w / 25;
-    const int margin = (int)(fb_w / 3.8f);
-    const int base_y = (height() - h) / 2;
-    const int draw_count = 8;
+  // The blinker alone doesn't say whether openpilot will actually move the car
+  // over. Pull the planner's lane change state so the indicator can tell the
+  // driver which of the three situations they're in.
+  const auto lp = sm["lateralPlan"].getLateralPlan();
+  const auto lc_state = lp.getLaneChangeState();
+  const bool changing = lc_state == cereal::LateralPlan::LaneChangeState::LANE_CHANGE_STARTING ||
+                        lc_state == cereal::LateralPlan::LaneChangeState::LANE_CHANGE_FINISHING;
+  const bool armed = lc_state == cereal::LateralPlan::LaneChangeState::PRE_LANE_CHANGE;
 
-    int x = center_x;
-    int y = base_y;
-
-    if(left_on) {
-      for(int i = 0; i < draw_count; i++) {
-        float alpha = img_alpha;
-        int d = std::abs(blink_index - i);
-        if(d > 0)
-          alpha /= d*2;
-
-        p.setOpacity(alpha);
-        float factor = (float)draw_count / (i + draw_count);
-        p.drawPixmap(x - w - margin, y + (h-h*factor)/2, w*factor, h*factor, ic_turn_signal_l);
-        x -= gap + w;
-      }
-    }
-
-    x = center_x;
-    if(right_on) {
-      for(int i = 0; i < draw_count; i++) {
-        float alpha = img_alpha;
-        int d = std::abs(blink_index - i);
-        if(d > 0)
-          alpha /= d*2;
-
-        float factor = (float)draw_count / (i + draw_count);
-        p.setOpacity(alpha);
-        p.drawPixmap(x + margin, y + (h-h*factor)/2, w*factor, h*factor, ic_turn_signal_r);
-        x += gap + w;
-      }
-    }
-
-    if(left_on || right_on) {
-
-      double now = millis_since_boot();
-      if(now - prev_ts > 900/UI_FREQ) {
-        prev_ts = now;
-        blink_index++;
-      }
-
-      if(blink_index >= draw_count) {
-        blink_index = draw_count - 1;
-        blink_wait = UI_FREQ/4;
-      }
-    }
-    else {
-      blink_index = 0;
-    }
+  QColor color;
+  QString label;
+  if (changing) {
+    color = QColor(0, 225, 120);
+    label = "차선변경 중";
+  } else if (armed) {
+    color = QColor(255, 175, 0);
+    label = lp.getAutoLaneChangeEnabled() ? "자동 대기" : "핸들 밀기";
+  } else {
+    // planner isn't arming: not engaged, or under LANE_CHANGE_SPEED_MIN
+    color = QColor(210, 210, 210);
+    label = (uiState()->status == STATUS_ENGAGED && car_state.getVEgo() < 50 / 3.6f) ? "50km/h+" : "";
   }
 
-  p.setOpacity(1.);
+  // Kept clear of the thermal tiles on the right and the speed box on the left.
+  const int band_w = 240;
+  const int band_x = left ? 0 : width() - band_w;
+  const int edge_x = left ? 0 : width();
+  const int cy = height() * 0.28f;
+  const int dir = left ? -1 : 1;
+
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing);
+  p.setOpacity(1.0);
+
+  // Glow bleeding in from the edge the car is heading toward. Peripheral
+  // vision picks this up without having to look away from the road.
+  QRadialGradient glow(QPointF(edge_x, cy), band_w * 1.35f);
+  QColor halo = color;
+  halo.setAlpha(150);
+  glow.setColorAt(0.0, halo);
+  halo.setAlpha(55);
+  glow.setColorAt(0.55, halo);
+  halo.setAlpha(0);
+  glow.setColorAt(1.0, halo);
+  p.fillRect(band_x, 0, band_w, height(), glow);
+
+  // Three chevrons firing inside-out, the way a sequential turn signal does.
+  const int n = 3;
+  const int step = 56;
+  const int cw = 38;
+  const int ch = 58;
+  const double period = changing ? 460.0 : 800.0;
+  const double phase = fmod(millis_since_boot(), period) / period;
+  const int lit = phase < 0.82 ? (int)(phase / 0.82 * n) + 1 : 0;
+  const int inner = left ? band_w - 30 : width() - band_w + 30;
+
+  for (int i = 0; i < n; i++) {
+    const int x = inner + dir * i * step;
+    QColor c = color;
+    c.setAlpha(i < lit ? 255 : 50);
+    QPainterPath chevron;
+    chevron.moveTo(x, cy - ch);
+    chevron.lineTo(x + dir * cw, cy);
+    chevron.lineTo(x, cy + ch);
+    p.strokePath(chevron, QPen(c, 18, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  }
+
+  if (!label.isEmpty()) {
+    configFont(p, "Open Sans", 40, "Bold");
+    p.setPen(color);
+    p.drawText(QRect(band_x, cy + ch + 30, band_w, 60), Qt::AlignCenter, label);
+  }
+
+  p.restore();
 }
 
 /*
