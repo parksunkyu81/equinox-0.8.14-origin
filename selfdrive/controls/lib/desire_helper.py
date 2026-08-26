@@ -40,6 +40,14 @@ TURN_DESIRE_EXIT_STEER_DEG = 60.0
 #   to 44.8 s, so declaring at 3 s mis-fired on 12 of 24 non-turn episodes and
 #   even 7 s still mis-fired on 6 while losing a real turn. No usable split.
 TURN_DESIRE_DOUBLE_TAP_GAP_S = 1.5
+# ...and a floor under it, because the lamp state bounces. Across the two
+# 2026-08-26 city routes the detector saw exactly two same-direction gaps and
+# BOTH were artifacts, not gestures: 0.23 s at t=225 (declared left, the driver
+# then turned right) and 0.55 s at t=931 (48 km/h, no turn at all). The driver
+# has not once actually used this gesture in 108 min of logs, so treat the whole
+# declaration path as unproven -- this floor only rules out what is too fast for
+# a hand on a stalk.
+TURN_DESIRE_DOUBLE_TAP_MIN_GAP_S = 0.3
 # A declaration outlives the blinker: a tapped stalk self-cancels a few seconds
 # later, and the turn still has to be driven. The timeout only runs while the
 # car is moving, so declaring before a red light and turning after it still
@@ -51,8 +59,32 @@ TURN_DECLARE_TIMEOUT_S = 20.0
 # full timeout and kept pulsing turn desire at the model long after the turn,
 # which stops the car settling back onto lane centre.
 TURN_DECLARE_DONE_S = 0.5
+# Turn desire only arms at intersection speed. LANE_CHANGE_SPEED_MIN (50 km/h)
+# is far too loose a bar for "this must be an intersection": on
+# 2026-08-26--09-33-54 a right blinker tapped twice 0.54 s apart at 48 km/h --
+# a lane-change signal, not a turn -- declared a turn and pushed turnRight at
+# the model for 7.4 s through a left-hand bend, pinning the model's own
+# desireState[turnRight] at 0.97 the whole way. Turn-in speed across the two
+# 2026-08-26 city routes never exceeded 23.6 km/h, so 30 leaves margin for the
+# approach while shutting out the 31-48 km/h band where the false fire lived.
+TURN_DESIRE_MAX_SPEED = 30 * CV.KPH_TO_MS
+
+# GM's BCMTurnSignals state drops long before the wheel moves: on the same
+# route 9 of 11 turns past 120 deg had the lamp already off at turn-in. The
+# worst case signalled for 1.1 s, went dark 1.5 s BEFORE the wheel started
+# moving, and then took 445 deg of steering with no desire, because both the
+# model and wheel triggers below require a blinker to agree with. Latch the
+# last direction for a few seconds so they still have something to agree with.
+TURN_BLINKER_LATCH_S = 4.0
 
 TURN_DESIRE_MODEL_PROB = 0.35
+# The model's desireState is downstream of what we feed it: one pulse of
+# turnRight pinned modelV2.meta.desireState[turnRight] at 0.97 for 9 s on
+# 2026-08-26--09-33-54 t=931, so the model trigger can keep re-arming itself off
+# its own echo -- a latch with no way out. Give a model-only desire a short
+# leash: if the wheel has not gone the same way by then, drop it and lock the
+# model trigger out until the driver signals again.
+TURN_DESIRE_MODEL_MAX_S = 3.0
 # Index into the DESIRE_LEN = 8 one-hot, matching LateralPlan.Desire.
 MODEL_DESIRE_TURN_LEFT = 1
 MODEL_DESIRE_TURN_RIGHT = 2
@@ -106,6 +138,10 @@ class DesireHelper:
     self.turn_declare_s = 0.0
     self.turn_started = False
     self.turn_unwound_s = 0.0
+    self.blinker_latch_dir = LaneChangeDirection.none
+    self.blinker_latch_s = 0.0
+    self.turn_model_only_s = 0.0
+    self.model_trigger_blocked = False
 
   def update(self, carstate, active, lane_change_prob, model_desire_state=None):
     v_ego = carstate.vEgo
@@ -199,9 +235,8 @@ class DesireHelper:
     # change desires (modeld builds vec_desire[desire] = 1.0 with no special
     # casing), so populating self.desire here is the whole wiring.
     base_ok = (active and self.turn_desire_enabled and
-               below_lane_change_speed and not carstate.standstill and
+               v_ego <= TURN_DESIRE_MAX_SPEED and not carstate.standstill and
                self.lane_change_state == LaneChangeState.off)
-    turn_ok = base_ok and one_blinker
 
     # --- driver declaration, tracked independently of the blinker so it can
     # outlive a stalk that self-cancels.
@@ -215,14 +250,35 @@ class DesireHelper:
     if blinker_dir != self.prev_blinker_dir:
       if (blinker_dir != LaneChangeDirection.none and
           self.last_blinker_dir == blinker_dir and
-          self.blinker_phase_s <= TURN_DESIRE_DOUBLE_TAP_GAP_S):
+          TURN_DESIRE_DOUBLE_TAP_MIN_GAP_S <= self.blinker_phase_s <= TURN_DESIRE_DOUBLE_TAP_GAP_S and
+          v_ego <= TURN_DESIRE_MAX_SPEED):
         self.turn_declared_dir = blinker_dir
         self.turn_declare_s = TURN_DECLARE_TIMEOUT_S
+      if blinker_dir != LaneChangeDirection.none:
+        # A fresh stalk gesture is the one thing that lifts the model lockout.
+        self.model_trigger_blocked = False
       self.blinker_phase_s = 0.0
     self.blinker_phase_s += DT_MDL
     if blinker_dir != LaneChangeDirection.none:
       self.last_blinker_dir = blinker_dir
     self.prev_blinker_dir = blinker_dir
+
+    # Blinker latch: hold the last signalled direction for a few seconds after
+    # the lamp goes dark, so a stalk that self-cancels before turn-in still
+    # counts. Frozen at standstill for the same reason the declaration timeout
+    # is -- signalling, stopping at the light, then turning is the normal case.
+    if blinker_dir != LaneChangeDirection.none:
+      self.blinker_latch_dir = blinker_dir
+      self.blinker_latch_s = TURN_BLINKER_LATCH_S
+    elif self.blinker_latch_s > 0.0:
+      if not carstate.standstill:
+        self.blinker_latch_s -= DT_MDL
+      if self.blinker_latch_s <= 0.0:
+        self.blinker_latch_dir = LaneChangeDirection.none
+    else:
+      self.blinker_latch_dir = LaneChangeDirection.none
+
+    turn_ok = base_ok and self.blinker_latch_dir != LaneChangeDirection.none
 
     # Signalling the other way is an explicit change of mind.
     if (blinker_dir != LaneChangeDirection.none and
@@ -263,22 +319,32 @@ class DesireHelper:
     #      evidence to delete on;
     #   3. the wheel is past anything a lane change asks for -> backstop for
     #      unsignalled turns, which were 13 of 18 on that same route.
-    # ISO 8855: positive steeringAngleDeg is a left turn. Model and wheel both
-    # additionally need the blinker to agree, so neither fires on its own; a
-    # declaration stands alone by design.
+    # Sign: positive steeringAngleDeg is a LEFT turn. Verified 2026-08-26 rather
+    # than assumed, because the model frame is the trap here -- modelV2 y is
+    # positive to the RIGHT (laneLines[1], the left line, sits at y = -1.38 and
+    # laneLines[2], the right line, at +1.49), and liveLocationKalman's
+    # calibrated frame is z-down, so both of those read backwards if taken for
+    # the usual left-positive convention. Cross-checks that agree: at t=105 on
+    # 2026-08-26--07-38-23 a left blinker accompanied +348 deg of wheel, and the
+    # laneChangeRight episodes on --09-33-54 all ran -5 deg of mean wheel angle.
+    # Model and wheel both additionally need a blinker (latched, above) to
+    # agree, so neither fires on its own; a declaration stands alone by design.
     steer_deg = carstate.steeringAngleDeg
     already_turning = self.turn_desire_direction != LaneChangeDirection.none
     threshold = TURN_DESIRE_EXIT_STEER_DEG if already_turning else TURN_DESIRE_ENTER_STEER_DEG
 
     model_left = model_right = False
-    if model_desire_state is not None and len(model_desire_state) > MODEL_DESIRE_TURN_RIGHT:
+    if (model_desire_state is not None and not self.model_trigger_blocked and
+        len(model_desire_state) > MODEL_DESIRE_TURN_RIGHT):
       model_left = model_desire_state[MODEL_DESIRE_TURN_LEFT] > TURN_DESIRE_MODEL_PROB
       model_right = model_desire_state[MODEL_DESIRE_TURN_RIGHT] > TURN_DESIRE_MODEL_PROB
 
     declared_left = base_ok and self.turn_declared_dir == LaneChangeDirection.left
     declared_right = base_ok and self.turn_declared_dir == LaneChangeDirection.right
-    signalled_left = turn_ok and carstate.leftBlinker and (model_left or steer_deg > threshold)
-    signalled_right = turn_ok and carstate.rightBlinker and (model_right or steer_deg < -threshold)
+    signalled_left = (turn_ok and self.blinker_latch_dir == LaneChangeDirection.left and
+                      (model_left or steer_deg > threshold))
+    signalled_right = (turn_ok and self.blinker_latch_dir == LaneChangeDirection.right and
+                       (model_right or steer_deg < -threshold))
 
     if declared_left or signalled_left:
       self.turn_desire_direction = LaneChangeDirection.left
@@ -287,6 +353,27 @@ class DesireHelper:
     else:
       self.turn_desire_direction = LaneChangeDirection.none
       self.turn_pulse_timer = 0.0
+
+    # A declaration is the driver speaking and keeps its own timeout above; only
+    # a model-only desire is on the leash, and only the wheel turning the same
+    # way counts as backing it up -- the 931 false fire had 106 deg of wheel,
+    # all of it the other way.
+    if self.turn_desire_direction == LaneChangeDirection.left:
+      wheel_backs_desire = steer_deg > TURN_DESIRE_EXIT_STEER_DEG
+    elif self.turn_desire_direction == LaneChangeDirection.right:
+      wheel_backs_desire = steer_deg < -TURN_DESIRE_EXIT_STEER_DEG
+    else:
+      wheel_backs_desire = False
+
+    if (self.turn_desire_direction != LaneChangeDirection.none and
+        not (declared_left or declared_right) and not wheel_backs_desire):
+      self.turn_model_only_s += DT_MDL
+      if self.turn_model_only_s >= TURN_DESIRE_MODEL_MAX_S:
+        self.model_trigger_blocked = True
+        self.turn_desire_direction = LaneChangeDirection.none
+        self.turn_pulse_timer = 0.0
+    else:
+      self.turn_model_only_s = 0.0
 
     if self.turn_desire_direction != LaneChangeDirection.none:
       # modeld only forwards a desire to the model on a rising edge, so a held
