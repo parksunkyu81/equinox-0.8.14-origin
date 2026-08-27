@@ -81,6 +81,18 @@ CONTROLS_MISMATCH_SAMPLE_FRAMES = max(1, int(0.05 / DT_CTRL))  # 20 Hz
 PROCESS_NOT_RUNNING_CONSECUTIVE_UPDATES = 3
 COMM_ISSUE_CONSECUTIVE_FRAMES = max(1, int(0.30 / DT_CTRL))
 COMMA_PEDAL_PARAM_REFRESH_FRAMES = max(1, int(0.2 / DT_CTRL))
+
+# Warn while the lateral controller is still out of authority, instead of after
+# the car has already left the path. latcontrol's sat_count filter already
+# requires steerLimitTimer (0.4 s on GM) of continuous full-command steering;
+# this is the additional hold applied on top of it before prompting, so the
+# total is about 0.7 s. Lower it toward 0.0 for the earliest possible prompt.
+STEER_SAT_WARN_HOLD_S = 0.3
+# Saturation must stay clear this long before the hold is re-armed, so a corner
+# that briefly unloads does not restart the countdown from zero.
+STEER_SAT_CLEAR_S = 0.5
+# Path deviation that still warrants an immediate prompt with no extra hold.
+STEER_SAT_DEVIATION_M = 0.20
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
@@ -313,6 +325,8 @@ class Controls:
         self.last_actuators = car.CarControl.Actuators.new_message()
 
         self.steer_limited = False
+        self.steer_sat_elapsed = 0.0
+        self.steer_sat_clear_elapsed = 0.0
         self.desired_curvature = 0.0
         self.desired_curvature_rate = 0.0
 
@@ -1757,17 +1771,30 @@ class Controls:
           self.comma_pedal_profile_gain, self.comma_pedal_learned_gain,
           self.stop_accel_boost_active)
 
-        # Send a "steering required alert" if saturation count has reached the limit (조향 제어 초과)
-        if lac_log.active and lac_log.saturated and not CS.steeringPressed:
-            dpath_points = lat_plan.dPathPoints
-            if len(dpath_points):
-                # Check if we deviated from the path
-                # TODO use desired vs actual curvature
-                left_deviation = actuators.steer > 0 and dpath_points[0] < -0.20
-                right_deviation = actuators.steer < 0 and dpath_points[0] > 0.20
+        # Steering-authority prompt (조향 제어 초과).
+        # A tight city corner saturates the steering command for seconds before
+        # the car measurably leaves the path, so waiting for 0.20 m of deviation
+        # prompts the driver far too late. Sustained saturation alone raises it;
+        # an actual deviation still raises it immediately.
+        steer_saturated_now = bool(lac_log.active and lac_log.saturated and
+                                   not CS.steeringPressed)
+        if steer_saturated_now:
+            self.steer_sat_elapsed += DT_CTRL
+            self.steer_sat_clear_elapsed = 0.0
+        else:
+            self.steer_sat_clear_elapsed += DT_CTRL
+            if self.steer_sat_clear_elapsed >= STEER_SAT_CLEAR_S:
+                self.steer_sat_elapsed = 0.0
 
-                if left_deviation or right_deviation:
-                    self.events.add(EventName.steerSaturated)
+        if steer_saturated_now:
+            dpath_points = lat_plan.dPathPoints
+            deviating = False
+            if len(dpath_points):
+                # TODO use desired vs actual curvature
+                deviating = ((actuators.steer > 0 and dpath_points[0] < -STEER_SAT_DEVIATION_M) or
+                             (actuators.steer < 0 and dpath_points[0] > STEER_SAT_DEVIATION_M))
+            if deviating or self.steer_sat_elapsed >= STEER_SAT_WARN_HOLD_S:
+                self.events.add(EventName.steerSaturated)
 
         # Ensure no NaNs/Infs
         for p in ACTUATOR_FIELDS:
