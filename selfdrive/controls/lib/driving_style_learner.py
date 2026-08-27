@@ -20,10 +20,15 @@ import time
 from dataclasses import dataclass
 
 
-STATE_VERSION = 2
+STATE_VERSION = 3
 
-GAIN_MIN = 0.90
+GAIN_MIN = 0.85
 GAIN_MAX = 1.12
+# How far evidence is allowed to move the gain from neutral, scaled by
+# confidence. Down is wider than up: braking is a direct complaint, while a
+# request for more acceleration is inferred.
+GAIN_DOWN_AUTHORITY = 0.15
+GAIN_UP_AUTHORITY = 0.12
 TR_OFFSET_MIN = -0.20
 TR_OFFSET_MAX = 0.40
 
@@ -33,7 +38,7 @@ TR_OFFSET_MAX = 0.40
 STYLE_RESPONSE_BP_KPH = (0.0, 30.0, 60.0, 100.0, 130.0)
 GAIN_RESPONSE_V = (2.0, 2.0, 1.7, 1.4, 1.2)
 GAIN_APPLIED_MAX_V = (1.08, 1.08, 1.065, 1.045, 1.04)
-GAIN_APPLIED_MIN = 0.94
+GAIN_APPLIED_MIN = 0.85
 TR_RESPONSE_V = (4.0, 3.8, 3.2, 2.5, 2.0)
 TR_APPLIED_MIN_V = (-0.12, -0.12, -0.10, -0.08, -0.06)
 TR_APPLIED_MAX_V = (0.25, 0.25, 0.28, 0.30, 0.30)
@@ -64,7 +69,8 @@ ACCEL_SAMPLE_COUNT_MAX = 100000
 ACCEL_MIN_PAIRED_SAMPLES = 120
 # Global evidence required before the gain is allowed to move at all.
 ACCEL_MIN_TOTAL_SAMPLES = 300
-ACCEL_RATIO_MIN = 0.80
+# Only the upper bound remains. The paired measurement may raise the gain but
+# never lower it -- see _maybe_apply_gain.
 ACCEL_RATIO_MAX = 1.35
 # Maximum gain movement per update. With the 30 s cooldown this bounds the
 # learner to roughly +0.02/minute, so a bad measurement can never step the
@@ -77,17 +83,22 @@ BIN_OFFSET_MAX = 0.03
 # unambiguous "that was too much" from the driver, and unlike the time-gap
 # evidence it needs no lead at all. The rate is a plain fraction: 0.0 means the
 # driver never overrules openpilot's acceleration, 1.0 means always.
-BRAKE_VETO_RECENT_PEDAL_S = 0.7
+#
+# How long openpilot acceleration must stay stopped before the episode counts
+# as accepted by the driver.
+BRAKE_VETO_EPISODE_END_S = 0.7
 BRAKE_VETO_MIN_ALPHA = 1.0 / 60.0
 BRAKE_VETO_COUNT_MAX = 100000
 # Counted in openpilot acceleration episodes, not control frames: the numerator
 # is one brake press, so the denominator has to be an episode too.
 BRAKE_VETO_MIN_SAMPLES = 12
-# A driver who brakes over a quarter of openpilot's accelerations loses 0.05
-# of gain. The penalty is capped so the veto can shade the learned gain but
-# never drive it to the floor on its own.
-BRAKE_VETO_WEIGHT = 0.20
-BRAKE_VETO_MAX_PENALTY = 0.08
+# Braking out of openpilot's acceleration is the primary downward signal, so it
+# maps straight to a target gain instead of shading someone else's number.
+BRAKE_VETO_BP = (0.00, 0.15, 0.30, 0.50)
+BRAKE_VETO_TARGET_GAIN = (1.00, 0.95, 0.90, 0.85)
+# A brake landing in the first moments of an episode is usually a reaction to
+# something outside the car, not a verdict on how hard it just accelerated.
+BRAKE_VETO_MIN_EPISODE_S = 0.5
 
 # Low-speed manual-brake learning does not change the always-on following TR.
 # It learns a small, closing-only predictive-coasting headway so the comma
@@ -241,6 +252,8 @@ class DrivingStyleLearner:
     self._last_op_pedal_time = -1e9
     self._prev_brake_pressed = False
     self._op_episode_active = False
+    self._op_episode_idle_s = 0.0
+    self._op_episode_elapsed_s = 0.0
     self._dirty = False
 
     # Per-frame snapshots are held as flat attributes. Building a dict on every
@@ -321,47 +334,43 @@ class DrivingStyleLearner:
     try:
       state = json.loads(raw)
       version = int(state.get("version", 0))
-      if version not in (1, STATE_VERSION):
-        return
-      if version == 1:
-        # v1 scored acceleration gain from discrete events on a scale that has
-        # no v2 equivalent, so every gain field is dropped. Time-gap and
-        # low-speed coast learning are unchanged between versions and are
-        # genuinely expensive to re-earn, so they carry over.
-        self._load_v1_shared(state)
-        self._dirty = True
+      if version not in (1, 2, STATE_VERSION):
         return
 
-      self.global_gain = _clip(_finite(state.get("global_gain"), 1.0), GAIN_MIN, GAIN_MAX)
-      offsets = state.get("bin_offsets", [])
-      if isinstance(offsets, list) and len(offsets) == _NUM_BINS:
-        self.bin_offsets = [_clip(_finite(v), -BIN_OFFSET_MAX, BIN_OFFSET_MAX) for v in offsets]
-      self.tr_offset = _clip(_finite(state.get("tr_offset")), TR_OFFSET_MIN, TR_OFFSET_MAX)
-      self.low_speed_coast_offset_s = _clip(
-        _finite(state.get("low_speed_coast_offset_s")), 0.0,
-        LOW_SPEED_COAST_MAX_OFFSET_S)
+      # Time-gap and low-speed coast learning have never changed meaning and
+      # are expensive to re-earn, so they carry over from every version.
+      self._load_v1_shared(state)
 
-      for name in ("driver_accel", "op_accel"):
-        values = state.get(name, [])
-        if isinstance(values, list) and len(values) == _NUM_BINS:
-          setattr(self, name, [_clip(_finite(v), 0.0, ACCEL_SAMPLE_MAX_MS2) for v in values])
-      for name in ("driver_count", "op_count"):
-        values = state.get(name, [])
-        if isinstance(values, list) and len(values) == _NUM_BINS:
-          setattr(self, name, [int(_clip(int(v), 0, ACCEL_SAMPLE_COUNT_MAX)) for v in values])
+      if version >= 2:
+        # The paired acceleration measurement is unchanged; only what the gain
+        # rule does with it changed.
+        for name in ("driver_accel", "op_accel"):
+          values = state.get(name, [])
+          if isinstance(values, list) and len(values) == _NUM_BINS:
+            setattr(self, name, [_clip(_finite(v), 0.0, ACCEL_SAMPLE_MAX_MS2) for v in values])
+        for name in ("driver_count", "op_count"):
+          values = state.get(name, [])
+          if isinstance(values, list) and len(values) == _NUM_BINS:
+            setattr(self, name, [int(_clip(int(v), 0, ACCEL_SAMPLE_COUNT_MAX)) for v in values])
+        self.gain_evidence_events = max(0, int(state.get("gain_evidence_events", 0)))
 
-      self.brake_veto_rate = _clip(_finite(state.get("brake_veto_rate")), 0.0, 1.0)
-      self.brake_veto_count = max(0, min(BRAKE_VETO_COUNT_MAX,
-                                         int(state.get("brake_veto_count", 0))))
+      if version >= STATE_VERSION:
+        # v2 counted a brake-veto episode as ending only once the pedal had been
+        # released, which openpilot rarely does while holding speed. Every
+        # episode therefore closed on a brake press and the stored rate ran to
+        # ~1.0, so v2 values are discarded rather than migrated.
+        self.brake_veto_rate = _clip(_finite(state.get("brake_veto_rate")), 0.0, 1.0)
+        self.brake_veto_count = max(0, min(BRAKE_VETO_COUNT_MAX,
+                                           int(state.get("brake_veto_count", 0))))
+        # The gain rule itself changed in v3, so an older gain is not carried:
+        # it is re-derived from the retained evidence within a few updates.
+        self.global_gain = _clip(_finite(state.get("global_gain"), 1.0), GAIN_MIN, GAIN_MAX)
+        offsets = state.get("bin_offsets", [])
+        if isinstance(offsets, list) and len(offsets) == _NUM_BINS:
+          self.bin_offsets = [_clip(_finite(v), -BIN_OFFSET_MAX, BIN_OFFSET_MAX) for v in offsets]
+        self.gain_updates = max(0, int(state.get("gain_updates", 0)))
 
-      for name in ("gas_events", "brake_events", "gain_evidence_events", "tr_evidence_events",
-                   "gain_updates", "tr_updates", "low_speed_brake_events",
-                   "low_speed_coast_updates", "low_speed_brake_batch_events"):
-        setattr(self, name, max(0, int(state.get(name, 0))))
-      self.stable_follow_s = max(0.0, _finite(state.get("stable_follow_s")))
-
-      self.tr_batch_score = _finite(state.get("tr_batch_score"))
-      self.tr_batch_events = max(0, int(state.get("tr_batch_events", 0)))
+      self._dirty = True
     except (TypeError, ValueError, json.JSONDecodeError):
       # Invalid or partially-written state is ignored; bounded defaults remain.
       return
@@ -433,6 +442,8 @@ class DrivingStyleLearner:
       self._sample_accum = 0.0
       self._last_op_pedal_time = -1e9
       self._op_episode_active = False
+      self._op_episode_idle_s = 0.0
+      self._op_episode_elapsed_s = 0.0
       self._clear_snapshot()
       self._clear_low_speed_snapshot()
       if was_enabled and not self.enabled:
@@ -502,46 +513,69 @@ class DrivingStyleLearner:
     self.brake_veto_rate = _clip(self.brake_veto_rate, 0.0, 1.0)
     self._dirty = True
 
-  def brake_veto_penalty(self):
-    """Gain reduction earned by the driver braking out of openpilot accelerations."""
+  def brake_veto_target(self):
+    """Target gain implied by how often the driver brakes out of acceleration.
+
+    Returns (target, confidence), or (1.0, 0.0) when there is not yet enough
+    evidence. This is the primary downward signal: a driver who lets the comma
+    pedal do the accelerating produces almost no gas samples, so braking is the
+    only preference this setup reliably observes.
+    """
     if self.brake_veto_count < BRAKE_VETO_MIN_SAMPLES:
-      return 0.0
-    return _clip(BRAKE_VETO_WEIGHT * self.brake_veto_rate, 0.0, BRAKE_VETO_MAX_PENALTY)
+      return 1.0, 0.0
+    target = _interp(self.brake_veto_rate, BRAKE_VETO_BP, BRAKE_VETO_TARGET_GAIN)
+    confidence = min(1.0, self.brake_veto_count / (4.0 * BRAKE_VETO_MIN_SAMPLES))
+    return target, confidence
 
   def _maybe_apply_gain(self, now):
     if now - self._last_gain_update < LEARNING_UPDATE_COOLDOWN_S:
       return False
-    if self._paired_ratio is None or self._paired_weight < ACCEL_MIN_TOTAL_SAMPLES:
+
+    brake_target, brake_confidence = self.brake_veto_target()
+    accel_ready = (self._paired_ratio is not None and
+                   self._paired_weight >= ACCEL_MIN_TOTAL_SAMPLES)
+    if brake_confidence <= 0.0 and not accel_ready:
       return False
 
     self._last_gain_update = now
-    ratio = self._paired_ratio
-    confidence = min(1.0, self._paired_weight / (4.0 * ACCEL_MIN_TOTAL_SAMPLES))
 
-    # Positive evidence is how much harder the driver accelerates; negative
-    # evidence is how often they brake out of openpilot's acceleration.
-    target = _clip(ratio, ACCEL_RATIO_MIN, ACCEL_RATIO_MAX) - self.brake_veto_penalty()
-    # Authority grows with evidence: an early, thin measurement can only nudge
-    # the gain, never take it to the bound.
+    # The paired acceleration measurement may only RAISE the gain. Reading a
+    # handful of gentle manual-driving samples as "this driver wants half the
+    # acceleration" is what pinned the gain to its floor for a driver who lets
+    # the comma pedal do the accelerating.
+    accel_target, accel_confidence = 1.0, 0.0
+    if accel_ready and self._paired_ratio > 1.0:
+      accel_target = min(ACCEL_RATIO_MAX, self._paired_ratio)
+      accel_confidence = min(1.0, self._paired_weight / (4.0 * ACCEL_MIN_TOTAL_SAMPLES))
+
+    # Braking wins outright when it asks for less: it is a direct complaint
+    # about acceleration that already happened.
+    if brake_target < 1.0:
+      target, confidence = brake_target, brake_confidence
+    else:
+      target, confidence = accel_target, accel_confidence
+
+    # Authority grows with evidence, so a thin measurement can only nudge.
     target = _clip(target,
-                   max(GAIN_MIN, 1.0 - 0.10 * confidence),
-                   min(GAIN_MAX, 1.0 + 0.12 * confidence))
+                   max(GAIN_MIN, 1.0 - GAIN_DOWN_AUTHORITY * confidence),
+                   min(GAIN_MAX, 1.0 + GAIN_UP_AUTHORITY * confidence))
     step = _clip(target - self.global_gain, -GAIN_STEP_MAX, GAIN_STEP_MAX)
     new_gain = _clip(self.global_gain + step, GAIN_MIN, GAIN_MAX)
     changed = abs(new_gain - self.global_gain) > 1e-6
     self.global_gain = new_gain
 
-    # Speed bins carry only their residual from the shared global ratio, so
-    # sparse evidence is shared across speeds without creating steps at the
-    # bin edges (gain_for_speed interpolates between bin centers).
-    for index in range(_NUM_BINS):
-      paired = min(self.driver_count[index], self.op_count[index])
-      if paired < ACCEL_MIN_PAIRED_SAMPLES or self.op_accel[index] <= 1e-3:
-        continue
-      bin_ratio = self.driver_accel[index] / self.op_accel[index]
-      bin_confidence = min(1.0, paired / (4.0 * ACCEL_MIN_PAIRED_SAMPLES))
-      bound = BIN_OFFSET_MAX * bin_confidence
-      self.bin_offsets[index] = _clip(0.5 * (bin_ratio - ratio), -bound, bound)
+    # Per-speed residuals come from the paired measurement, so they are only
+    # meaningful while that measurement is the one steering the gain.
+    if accel_confidence > 0.0 and target == accel_target:
+      for index in range(_NUM_BINS):
+        paired = min(self.driver_count[index], self.op_count[index])
+        if paired < ACCEL_MIN_PAIRED_SAMPLES or self.op_accel[index] <= 1e-3:
+          continue
+        bin_ratio = self.driver_accel[index] / self.op_accel[index]
+        bin_confidence = min(1.0, paired / (4.0 * ACCEL_MIN_PAIRED_SAMPLES))
+        bound = BIN_OFFSET_MAX * bin_confidence
+        self.bin_offsets[index] = _clip(0.5 * (bin_ratio - self._paired_ratio),
+                                        -bound, bound)
 
     if changed:
       self.gain_updates += 1
@@ -550,7 +584,9 @@ class DrivingStyleLearner:
     return changed
 
   def confidence(self):
-    gain_confidence = min(1.0, self._paired_weight / (4.0 * ACCEL_MIN_TOTAL_SAMPLES))
+    gain_confidence = max(
+      min(1.0, self._paired_weight / (4.0 * ACCEL_MIN_TOTAL_SAMPLES)),
+      min(1.0, self.brake_veto_count / (4.0 * BRAKE_VETO_MIN_SAMPLES)))
     tr_confidence = 0.5 * min(1.0, self.tr_evidence_events / 10.0) + \
                     0.5 * min(1.0, self.stable_follow_s / 300.0)
     return _clip(max(gain_confidence, tr_confidence), 0.0, 1.0)
@@ -789,6 +825,8 @@ class DrivingStyleLearner:
       self._sample_accum = 0.0
       self._last_op_pedal_time = -1e9
       self._op_episode_active = False
+      self._op_episode_idle_s = 0.0
+      self._op_episode_elapsed_s = 0.0
       self._prev_brake_pressed = brake_pressed
       self._clear_snapshot()
       self._clear_low_speed_snapshot()
@@ -803,22 +841,37 @@ class DrivingStyleLearner:
       self._last_op_pedal_time = now
 
     # --- brake veto ---------------------------------------------------------
-    # One openpilot acceleration episode is one sample. It resolves as vetoed if
-    # the driver brakes out of it, otherwise as accepted once the pedal has been
-    # released long enough for the episode to be over. Both sides of the ratio
-    # are therefore episodes, not control frames.
+    # One openpilot acceleration episode is one sample: it starts when openpilot
+    # is producing acceleration and ends once that acceleration has stopped for
+    # BRAKE_VETO_EPISODE_END_S. It resolves as vetoed only if the driver brakes
+    # out of it. The end condition must track the acceleration itself, not the
+    # pedal: openpilot holds pedal continuously to maintain speed, so waiting
+    # for a released pedal left every episode open until a brake press and drove
+    # the measured rate toward 1.0.
+    op_accelerating = bool(op_pedal_live and not gas_pressed and
+                           a_ego_f >= ACCEL_SAMPLE_MIN_MS2)
+    brake_edge = brake_pressed and not self._prev_brake_pressed
     if not self._op_episode_active:
-      if op_pedal_live and style_context_ok and not gas_pressed and \
-         a_ego_f >= ACCEL_SAMPLE_MIN_MS2:
+      if op_accelerating and style_context_ok:
         self._op_episode_active = True
+        self._op_episode_idle_s = 0.0
+        self._op_episode_elapsed_s = 0.0
     else:
-      brake_edge = brake_pressed and not self._prev_brake_pressed
-      if brake_edge and now - self._last_op_pedal_time <= BRAKE_VETO_RECENT_PEDAL_S:
-        self._push_brake_veto(True)
+      self._op_episode_elapsed_s += dt
+      if brake_edge:
+        # A brake in the first moments is a reaction to something outside the
+        # car, not a verdict on the acceleration. Drop the episode rather than
+        # scoring it either way.
+        if self._op_episode_elapsed_s >= BRAKE_VETO_MIN_EPISODE_S:
+          self._push_brake_veto(True)
         self._op_episode_active = False
-      elif now - self._last_op_pedal_time > BRAKE_VETO_RECENT_PEDAL_S:
-        self._push_brake_veto(False)
-        self._op_episode_active = False
+      elif op_accelerating:
+        self._op_episode_idle_s = 0.0
+      else:
+        self._op_episode_idle_s += dt
+        if self._op_episode_idle_s >= BRAKE_VETO_EPISODE_END_S:
+          self._push_brake_veto(False)
+          self._op_episode_active = False
     self._prev_brake_pressed = brake_pressed
 
     # --- paired acceleration sampling ---------------------------------------
