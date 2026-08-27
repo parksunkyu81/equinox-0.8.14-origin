@@ -91,20 +91,6 @@ LANE_DEPARTURE_THRESHOLD = 0.1
 #   not the threshold: at 3 s the same 0.25 fires 24 times (~37/hour) because
 #   brief dropouts are normal -- 33 of 72 last under 0.5 s, median 0.99 s.
 # Sample is one night city route, so expect to retune on daytime/highway data.
-# The driving-style learner runs at 25 Hz rather than the 100 Hz control loop.
-# Nothing it measures moves at 100 Hz: its own constants are PARAM_REFRESH_S 1.0,
-# LEARNING_UPDATE_COOLDOWN_S 30, MIN_STABLE_FOLLOW_S 60, and the shortest thing
-# it looks at is MIN_EVENT_DURATION_S 0.12 -- three samples at this rate, and it
-# already discards anything briefer. It is dt-driven throughout (accumulators
-# take += dt, and 46 sites work off wall-clock `now`), and it counts no frames,
-# so the cadence is free to change as long as dt changes with it.
-#
-# Static call-graph count: 2452 statements are reachable per control frame, 360
-# of them in this learner. Whether that translates into measurable CPU is NOT
-# established -- an earlier 1260-calls-per-second font fix measured exactly zero
-# -- so treat this as untested until a drive says otherwise.
-DRIVING_STYLE_UPDATE_FRAMES = 4
-
 LANE_CONF_DPROB = 0.25
 LANE_CONF_SUSTAIN_S = 8.0
 LANE_CONF_COOLDOWN_S = 30.0
@@ -1745,26 +1731,25 @@ class Controls:
           not self.is_curv_driving and not self.curve_pedal_coordinator.engaged and
           not self.speed_limit_coast_active and not long_plan.fcw and CS.canValid)
         style_lead_valid = bool(dynamic_follow_valid and dynamic_follow.leadDistance > 0.0)
-        if self.sm.frame % DRIVING_STYLE_UPDATE_FRAMES == 0:
-          self.driving_style_status = self.driving_style_learner.update(
-            v_ego=CS.vEgo,
-            a_ego=CS.aEgo,
-            gas=CS.gas,
-            gas_pressed=CS.gasPressed,
-            brake=CS.brake,
-            brake_pressed=CS.brakePressed,
-            cruise_enabled=CS.cruiseState.enabled,
-            control_active=self.active and self.CP.enableGasInterceptor,
-            requested_accel=actuators.accel,
-            lead_valid=style_lead_valid,
-            lead_distance=dynamic_follow.leadDistance if style_lead_valid else 0.0,
-            lead_rel_speed=dynamic_follow.leadRelativeSpeed if style_lead_valid else 0.0,
-            base_tr=dynamic_follow.mpcTR if dynamic_follow_valid else 1.3,
-            pedal_output=self.last_actuators.gas,
-            unsafe_context=style_unsafe_context,
-            low_speed_brake_context_ok=low_speed_brake_context_ok,
-            can_valid=CS.canValid,
-            dt=DT_CTRL * DRIVING_STYLE_UPDATE_FRAMES)
+        self.driving_style_status = self.driving_style_learner.update(
+          v_ego=CS.vEgo,
+          a_ego=CS.aEgo,
+          gas=CS.gas,
+          gas_pressed=CS.gasPressed,
+          brake=CS.brake,
+          brake_pressed=CS.brakePressed,
+          cruise_enabled=CS.cruiseState.enabled,
+          control_active=self.active and self.CP.enableGasInterceptor,
+          requested_accel=actuators.accel,
+          lead_valid=style_lead_valid,
+          lead_distance=dynamic_follow.leadDistance if style_lead_valid else 0.0,
+          lead_rel_speed=dynamic_follow.leadRelativeSpeed if style_lead_valid else 0.0,
+          base_tr=dynamic_follow.mpcTR if dynamic_follow_valid else 1.3,
+          pedal_output=self.last_actuators.gas,
+          unsafe_context=style_unsafe_context,
+          low_speed_brake_context_ok=low_speed_brake_context_ok,
+          can_valid=CS.canValid,
+          dt=DT_CTRL)
         # Never stack learned pedal gain on top of the dedicated 40% lead-launch
         # boost. The learner remains bounded, but the two features serve
         # different purposes and must not compound each other.
