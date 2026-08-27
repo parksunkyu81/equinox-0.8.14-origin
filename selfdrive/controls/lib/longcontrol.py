@@ -131,10 +131,11 @@ class LongControl:
       error = self.v_pid - CS.vEgo
       error_deadzone = apply_deadzone(error, deadzone)
 
-      # A gas interceptor cannot execute negative acceleration. Once both
-      # vision leads are gone, do not let stale negative feedforward cancel a
-      # positive PID speed request while the new trajectory is recovering.
-      # While a lead is present, the original MPC deceleration remains intact.
+      # 가스 인터셉터(gas interceptor)는 음의 가속(감속)을 수행할 수 없습니다.
+      # 일단 두 비전 리드(vision lead)가 모두 사라지면, 새로운 궤적을 복구하는 동안
+      # 유효하지 않은 음의 피드포워드(stale negative feedforward) 값이
+      # 양의 PID 속도 요청을 상쇄하지 않도록 해야 합니다.
+      # 리드가 존재하는 동안에는 기존의 MPC 감속 동작이 그대로 유지됩니다.
       pedal_clear_road_recovery = self.CP.enableGasInterceptor and \
                                   not long_plan.hasLead and \
                                   error_deadzone > 0.0 and \
@@ -142,6 +143,24 @@ class LongControl:
                                   a_target < 0.0
       if pedal_clear_road_recovery:
         a_target = 0.0
+        # 단순히 오래된 피드포워드(stale feedforward) 값뿐만 아니라,
+        # 음수 방향의 적분(negative integrator) 값도 여기서 초기화(drop)해야 합니다.
+        #
+        # PIDController는 제어값이 pos_limit이나 neg_limit에 도달했을 때만 적분 동작을 멈추는데,
+        # 여기서 neg_limit은 ISO 감속 하한값(약 -3.5)으로 설정되어 있습니다.
+        # 하지만 이 차량의 실제 액추에이터 한계값은 0입니다. 즉, 인터셉터(interceptor)는 음의 가속도를 낼 수 없으며,
+        # carcontroller는 페달 값을 clip(acc_mult * accel, 0.0, 0.85)로 제한합니다.
+        # 따라서 감속 상황에서 PID는 이미 0에 고정된 액추에이터를 상대로 적분값(i)을 계속 낮추게 되는데,
+        # 이는 PID가 감지하지 못하는 전형적인 '포화 상태의 윈드업(saturation windup)' 현상입니다.
+        #
+        # 이렇게 낮아진 적분값(i)이 재가속을 지연시키는 원인이 됩니다. a_target을 0으로 설정하면 오래된 피드포워드 값은 제거되지만,
+        # 적분값(i)은 페달 입력이 다시 발생하기 전까지 error * k_i * i_rate에 따라 0을 지나 다시 상승해야 하기 때문입니다.
+        # 음수 방향으로 누적된 적분값은 실제 제어에 반영된 적이 없으므로, 굳이 유지할 필요가 없습니다.
+        #
+        # 이 로직은 복구 조건(recovery condition)에 한해 적용됩니다.
+        # 이 조건은 선행 차량이 없고(no lead), 데드존을 벗어난 양수 속도 오차가 있으며,
+        # 목표값이 상승하는 상황을 전제로 하므로, 실제로 감속이 필요한 상황에서는 작동하지 않습니다.
+        self.pid.i = max(self.pid.i, 0.0)
 
       output_accel = self.pid.update(error_deadzone, speed=CS.vEgo, feedforward=a_target, freeze_integrator=freeze_integrator)
 
