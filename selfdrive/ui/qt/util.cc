@@ -1,5 +1,6 @@
 #include "selfdrive/ui/qt/util.h"
 
+#include <QHash>
 #include <QApplication>
 #include <QLayoutItem>
 #include <QStyleOption>
@@ -36,10 +37,24 @@ std::optional<QString> getDongleId() {
 }
 
 void configFont(QPainter &p, const QString &family, int size, const QString &style) {
-  QFont f(family);
-  f.setPixelSize(size);
-  f.setStyleName(style);
-  p.setFont(f);
+  // Cached by (family, size, style). NvgWindow::paintEvent calls this 63 times
+  // a frame at 20 Hz, and building the QFont each time was not free: setting a
+  // style name sends Qt back to the font database to re-match, which sidesteps
+  // its own QFont cache. On the 2026-08-26 drive _ui was the single largest
+  // consumer on the device at 58.8% of a core, ahead of controlsd.
+  //
+  // The combination count is small and fixed by the code, so the cache cannot
+  // grow unbounded. Same QFont, same rendering -- only the rebuild goes away.
+  static QHash<QString, QFont> font_cache;
+  const QString key = family + "|" + QString::number(size) + "|" + style;
+  auto it = font_cache.find(key);
+  if (it == font_cache.end()) {
+    QFont f(family);
+    f.setPixelSize(size);
+    f.setStyleName(style);
+    it = font_cache.insert(key, f);
+  }
+  p.setFont(it.value());
 }
 
 void clearLayout(QLayout* layout) {
