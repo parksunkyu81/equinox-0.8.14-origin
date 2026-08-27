@@ -1,10 +1,26 @@
+"""Bounded online driver-style adaptation for the GM gas-interceptor setup.
+
+Acceleration style is measured directly instead of scored from rare events.
+The driver's own acceleration and openpilot's acceleration are accumulated
+into the same speed bins, and the ratio between them is the learned pedal
+gain. The driver reference is collected whenever the driver owns the pedal --
+an engaged override or fully manual driving -- so evidence no longer depends
+on a clean-context event surviving a long condition chain.
+
+Braking contributes on two independent paths. The always-available one is the
+brake veto rate: the fraction of openpilot acceleration episodes the driver
+overruled with the brake pedal. It needs no radar and no vision lead, and it
+is the only negative acceleration evidence this car can produce reliably.
+The lead-dependent path still feeds time-gap (TR) learning as before.
+"""
+
 import json
 import math
 import time
 from dataclasses import dataclass
 
 
-STATE_VERSION = 1
+STATE_VERSION = 2
 
 GAIN_MIN = 0.90
 GAIN_MAX = 1.12
@@ -28,10 +44,50 @@ SPEED_BIN_EDGES_KPH = (10.0, 30.0, 60.0, 100.0)
 PARAM_REFRESH_S = 1.0
 SAVE_INTERVAL_S = 60.0
 LEARNING_UPDATE_COOLDOWN_S = 30.0
-MIN_GAS_EVENTS_FIRST_UPDATE = 8
-MIN_GAS_EVENTS_NEXT_UPDATE = 4
 MIN_TR_EVENTS_PER_UPDATE = 3
 MIN_STABLE_FOLLOW_S = 60.0
+
+# --- Paired acceleration measurement -----------------------------------------
+# Sampling is decimated from the 100 Hz control loop. Only real acceleration
+# episodes are sampled: a coasting or cruising frame says nothing about how
+# hard the driver likes to accelerate, and including those frames would drag
+# both sides toward zero and make the ratio meaningless.
+ACCEL_SAMPLE_DT_S = 0.10
+ACCEL_SAMPLE_MIN_MS2 = 0.15
+ACCEL_SAMPLE_MAX_MS2 = 3.00
+# EMA time constant expressed in sampled seconds, not wall-clock seconds.
+ACCEL_EMA_TAU_S = 90.0
+ACCEL_EMA_MIN_ALPHA = ACCEL_SAMPLE_DT_S / ACCEL_EMA_TAU_S
+ACCEL_SAMPLE_COUNT_MAX = 100000
+# A bin contributes only once both sides have seen this many samples, i.e.
+# ~12 s of qualifying acceleration from the driver and from openpilot.
+ACCEL_MIN_PAIRED_SAMPLES = 120
+# Global evidence required before the gain is allowed to move at all.
+ACCEL_MIN_TOTAL_SAMPLES = 300
+ACCEL_RATIO_MIN = 0.80
+ACCEL_RATIO_MAX = 1.35
+# Maximum gain movement per update. With the 30 s cooldown this bounds the
+# learner to roughly +0.02/minute, so a bad measurement can never step the
+# pedal response.
+GAIN_STEP_MAX = 0.01
+BIN_OFFSET_MAX = 0.03
+
+# --- Brake veto --------------------------------------------------------------
+# A brake press that lands while openpilot was commanding positive pedal is an
+# unambiguous "that was too much" from the driver, and unlike the time-gap
+# evidence it needs no lead at all. The rate is a plain fraction: 0.0 means the
+# driver never overrules openpilot's acceleration, 1.0 means always.
+BRAKE_VETO_RECENT_PEDAL_S = 0.7
+BRAKE_VETO_MIN_ALPHA = 1.0 / 60.0
+BRAKE_VETO_COUNT_MAX = 100000
+# Counted in openpilot acceleration episodes, not control frames: the numerator
+# is one brake press, so the denominator has to be an episode too.
+BRAKE_VETO_MIN_SAMPLES = 12
+# A driver who brakes over a quarter of openpilot's accelerations loses 0.05
+# of gain. The penalty is capped so the veto can shade the learned gain but
+# never drive it to the floor on its own.
+BRAKE_VETO_WEIGHT = 0.20
+BRAKE_VETO_MAX_PENALTY = 0.08
 
 # Low-speed manual-brake learning does not change the always-on following TR.
 # It learns a small, closing-only predictive-coasting headway so the comma
@@ -62,6 +118,8 @@ MIN_LEAD_DISTANCE_M = 3.0
 MAX_LEAD_DISTANCE_M = 160.0
 LEAD_STABLE_REQUIRED_S = 1.0
 LEAD_DISTANCE_JUMP_M = 6.0
+
+_NUM_BINS = len(SPEED_BIN_CENTERS_KPH)
 
 
 def _clip(value, lower, upper):
@@ -119,12 +177,10 @@ class DrivingStyleStatus:
 
 
 class DrivingStyleLearner:
-  """Bounded, event-based online adaptation for the GM gas-interceptor setup.
+  """Bounded, measurement-based online adaptation for the gas interceptor.
 
-  Driver inputs are counted as complete press/release events, never as 100 Hz
-  frames. The class does not determine gasPressed itself; it consumes the
-  existing CarState.gasPressed value so the GM `ret.gas > 15` behavior remains
-  unchanged.
+  The class does not determine gasPressed itself; it consumes the existing
+  CarState.gasPressed value so the GM `ret.gas > 15` behavior stays unchanged.
   """
 
   def __init__(self, params=None, writer=None, clock=None):
@@ -138,9 +194,20 @@ class DrivingStyleLearner:
 
     self.enabled = False
     self.global_gain = 1.0
-    self.bin_offsets = [0.0] * len(SPEED_BIN_CENTERS_KPH)
+    self.bin_offsets = [0.0] * _NUM_BINS
     self.tr_offset = 0.0
     self.low_speed_coast_offset_s = 0.0
+
+    # Paired acceleration statistics. driver_* is what the driver produces,
+    # op_* is what openpilot produces, both in the same speed bin.
+    self.driver_accel = [0.0] * _NUM_BINS
+    self.driver_count = [0] * _NUM_BINS
+    self.op_accel = [0.0] * _NUM_BINS
+    self.op_count = [0] * _NUM_BINS
+
+    # Fraction of openpilot acceleration episodes the driver braked out of.
+    self.brake_veto_rate = 0.0
+    self.brake_veto_count = 0
 
     self.gas_events = 0
     self.brake_events = 0
@@ -153,30 +220,64 @@ class DrivingStyleLearner:
     self.low_speed_coast_updates = 0
     self.low_speed_brake_batch_events = 0
 
-    self.gain_batch_score = 0.0
-    self.gain_batch_events = 0
-    self.bin_batch_score = [0.0] * len(SPEED_BIN_CENTERS_KPH)
-    self.bin_batch_events = [0] * len(SPEED_BIN_CENTERS_KPH)
-    self.bin_total_events = [0] * len(SPEED_BIN_CENTERS_KPH)
     self.tr_batch_score = 0.0
     self.tr_batch_events = 0
+
+    self._paired_ratio = None
+    self._paired_weight = 0.0
+    self._bin_gains = [1.0] * _NUM_BINS
 
     self._gas_event = None
     self._brake_event = None
     self._low_speed_brake_event = None
-    self._low_speed_snapshot = None
     self._lead_stable_s = 0.0
     self._last_lead_distance = None
-    self._last_snapshot = None
     self._last_control_active = False
     self._last_param_refresh = -1e9
     self._last_save = self._clock()
     self._last_gain_update = -1e9
     self._last_tr_update = -1e9
+    self._sample_accum = 0.0
+    self._last_op_pedal_time = -1e9
+    self._prev_brake_pressed = False
+    self._op_episode_active = False
     self._dirty = False
 
+    # Per-frame snapshots are held as flat attributes. Building a dict on every
+    # control frame allocated ~200 dicts/s for data that is read only when an
+    # event actually starts.
+    self._clear_snapshot()
+    self._clear_low_speed_snapshot()
+
     self._load_state()
+    self._refresh_pair_stats()
+    self._refresh_bin_gains()
     self._refresh_enabled(self._clock(), force=True)
+
+  # --- snapshots -------------------------------------------------------------
+
+  def _clear_snapshot(self):
+    self._snap_valid = False
+    self._snap_time = -1e9
+    self._snap_v_ego = 0.0
+    self._snap_bin = 0
+    self._snap_requested_accel = 0.0
+    self._snap_lead_valid = False
+    self._snap_lead_distance = 0.0
+    self._snap_lead_rel_speed = 0.0
+    self._snap_base_tr = 1.3
+    self._snap_lead_stable_s = 0.0
+
+  def _clear_low_speed_snapshot(self):
+    self._ls_valid = False
+    self._ls_time = -1e9
+    self._ls_v_ego = 0.0
+    self._ls_requested_accel = 0.0
+    self._ls_lead_valid = False
+    self._ls_lead_distance = 0.0
+    self._ls_lead_rel_speed = 0.0
+    self._ls_base_tr = 1.3
+    self._ls_pedal_output = 0.0
 
   @staticmethod
   def _speed_bin(v_ego):
@@ -184,7 +285,9 @@ class DrivingStyleLearner:
     for index, edge in enumerate(SPEED_BIN_EDGES_KPH):
       if speed_kph < edge:
         return index
-    return len(SPEED_BIN_CENTERS_KPH) - 1
+    return _NUM_BINS - 1
+
+  # --- params ----------------------------------------------------------------
 
   def _param_text(self, key, default=""):
     try:
@@ -218,16 +321,31 @@ class DrivingStyleLearner:
     try:
       state = json.loads(raw)
       if int(state.get("version", 0)) != STATE_VERSION:
+        # A previous version scored evidence on a different scale and is not
+        # convertible. Bounded defaults remain and learning restarts clean.
         return
 
       self.global_gain = _clip(_finite(state.get("global_gain"), 1.0), GAIN_MIN, GAIN_MAX)
       offsets = state.get("bin_offsets", [])
-      if isinstance(offsets, list) and len(offsets) == len(self.bin_offsets):
-        self.bin_offsets = [_clip(_finite(value), -0.03, 0.03) for value in offsets]
+      if isinstance(offsets, list) and len(offsets) == _NUM_BINS:
+        self.bin_offsets = [_clip(_finite(v), -BIN_OFFSET_MAX, BIN_OFFSET_MAX) for v in offsets]
       self.tr_offset = _clip(_finite(state.get("tr_offset")), TR_OFFSET_MIN, TR_OFFSET_MAX)
       self.low_speed_coast_offset_s = _clip(
         _finite(state.get("low_speed_coast_offset_s")), 0.0,
         LOW_SPEED_COAST_MAX_OFFSET_S)
+
+      for name in ("driver_accel", "op_accel"):
+        values = state.get(name, [])
+        if isinstance(values, list) and len(values) == _NUM_BINS:
+          setattr(self, name, [_clip(_finite(v), 0.0, ACCEL_SAMPLE_MAX_MS2) for v in values])
+      for name in ("driver_count", "op_count"):
+        values = state.get(name, [])
+        if isinstance(values, list) and len(values) == _NUM_BINS:
+          setattr(self, name, [int(_clip(int(v), 0, ACCEL_SAMPLE_COUNT_MAX)) for v in values])
+
+      self.brake_veto_rate = _clip(_finite(state.get("brake_veto_rate")), 0.0, 1.0)
+      self.brake_veto_count = max(0, min(BRAKE_VETO_COUNT_MAX,
+                                         int(state.get("brake_veto_count", 0))))
 
       for name in ("gas_events", "brake_events", "gain_evidence_events", "tr_evidence_events",
                    "gain_updates", "tr_updates", "low_speed_brake_events",
@@ -235,20 +353,8 @@ class DrivingStyleLearner:
         setattr(self, name, max(0, int(state.get(name, 0))))
       self.stable_follow_s = max(0.0, _finite(state.get("stable_follow_s")))
 
-      self.gain_batch_score = _finite(state.get("gain_batch_score"))
-      self.gain_batch_events = max(0, int(state.get("gain_batch_events", 0)))
       self.tr_batch_score = _finite(state.get("tr_batch_score"))
       self.tr_batch_events = max(0, int(state.get("tr_batch_events", 0)))
-
-      for name, default, cast in (("bin_batch_score", self.bin_batch_score, float),
-                                  ("bin_batch_events", self.bin_batch_events, int),
-                                  ("bin_total_events", self.bin_total_events, int)):
-        values = state.get(name, [])
-        if isinstance(values, list) and len(values) == len(default):
-          if cast is float:
-            setattr(self, name, [_finite(value) for value in values])
-          else:
-            setattr(self, name, [max(0, int(value)) for value in values])
     except (TypeError, ValueError, json.JSONDecodeError):
       # Invalid or partially-written state is ignored; bounded defaults remain.
       return
@@ -260,6 +366,12 @@ class DrivingStyleLearner:
       "bin_offsets": [round(value, 6) for value in self.bin_offsets],
       "tr_offset": round(self.tr_offset, 6),
       "low_speed_coast_offset_s": round(self.low_speed_coast_offset_s, 6),
+      "driver_accel": [round(value, 6) for value in self.driver_accel],
+      "driver_count": list(self.driver_count),
+      "op_accel": [round(value, 6) for value in self.op_accel],
+      "op_count": list(self.op_count),
+      "brake_veto_rate": round(self.brake_veto_rate, 6),
+      "brake_veto_count": self.brake_veto_count,
       "gas_events": self.gas_events,
       "brake_events": self.brake_events,
       "gain_evidence_events": self.gain_evidence_events,
@@ -270,11 +382,6 @@ class DrivingStyleLearner:
       "low_speed_brake_events": self.low_speed_brake_events,
       "low_speed_coast_updates": self.low_speed_coast_updates,
       "low_speed_brake_batch_events": self.low_speed_brake_batch_events,
-      "gain_batch_score": round(self.gain_batch_score, 6),
-      "gain_batch_events": self.gain_batch_events,
-      "bin_batch_score": [round(value, 6) for value in self.bin_batch_score],
-      "bin_batch_events": self.bin_batch_events,
-      "bin_total_events": self.bin_total_events,
       "tr_batch_score": round(self.tr_batch_score, 6),
       "tr_batch_events": self.tr_batch_events,
     }
@@ -300,23 +407,129 @@ class DrivingStyleLearner:
       self._gas_event = None
       self._brake_event = None
       self._low_speed_brake_event = None
-      self._low_speed_snapshot = None
       self._lead_stable_s = 0.0
       self._last_lead_distance = None
-      self._last_snapshot = None
+      self._sample_accum = 0.0
+      self._last_op_pedal_time = -1e9
+      self._op_episode_active = False
+      self._clear_snapshot()
+      self._clear_low_speed_snapshot()
       if was_enabled and not self.enabled:
         self._save(now, force=True)
+
+  # --- gain ------------------------------------------------------------------
+
+  def _refresh_bin_gains(self):
+    """Precompute the per-bin gain so the per-frame path is one interpolation."""
+    self._bin_gains = [_clip(self.global_gain + offset, GAIN_MIN, GAIN_MAX)
+                       for offset in self.bin_offsets]
 
   def gain_for_speed(self, v_ego):
     if not self.enabled:
       return 1.0
     speed_kph = max(0.0, _finite(v_ego)) * 3.6
-    gains = [_clip(self.global_gain + offset, GAIN_MIN, GAIN_MAX) for offset in self.bin_offsets]
-    raw_gain = _clip(_interp(speed_kph, SPEED_BIN_CENTERS_KPH, gains), GAIN_MIN, GAIN_MAX)
+    raw_gain = _clip(_interp(speed_kph, SPEED_BIN_CENTERS_KPH, self._bin_gains),
+                     GAIN_MIN, GAIN_MAX)
     return applied_driving_style_gain(raw_gain, v_ego)
 
+  def _refresh_pair_stats(self):
+    """Weighted ratio of driver acceleration to openpilot acceleration.
+
+    Each bin is weighted by its weaker side, so a bin where only one side has
+    data contributes nothing and cannot bias the result.
+    """
+    numerator = 0.0
+    weight = 0.0
+    for index in range(_NUM_BINS):
+      paired = min(self.driver_count[index], self.op_count[index])
+      if paired < ACCEL_MIN_PAIRED_SAMPLES or self.op_accel[index] <= 1e-3:
+        continue
+      numerator += paired * (self.driver_accel[index] / self.op_accel[index])
+      weight += paired
+    if weight <= 0.0:
+      self._paired_ratio = None
+      self._paired_weight = 0.0
+    else:
+      self._paired_ratio = numerator / weight
+      self._paired_weight = weight
+
+  def _push_accel_sample(self, is_driver, speed_bin, a_ego):
+    if is_driver:
+      means, counts = self.driver_accel, self.driver_count
+    else:
+      means, counts = self.op_accel, self.op_count
+
+    count = counts[speed_bin]
+    if count < ACCEL_SAMPLE_COUNT_MAX:
+      count += 1
+      counts[speed_bin] = count
+    # Converge quickly while the bin is empty, then settle to the slow EMA.
+    alpha = max(ACCEL_EMA_MIN_ALPHA, 1.0 / count)
+    means[speed_bin] += alpha * (a_ego - means[speed_bin])
+
+    self.gain_evidence_events = min(ACCEL_SAMPLE_COUNT_MAX, self.gain_evidence_events + 1)
+    self._refresh_pair_stats()
+    self._dirty = True
+
+  def _push_brake_veto(self, vetoed):
+    count = self.brake_veto_count
+    if count < BRAKE_VETO_COUNT_MAX:
+      count += 1
+      self.brake_veto_count = count
+    alpha = max(BRAKE_VETO_MIN_ALPHA, 1.0 / count)
+    self.brake_veto_rate += alpha * ((1.0 if vetoed else 0.0) - self.brake_veto_rate)
+    self.brake_veto_rate = _clip(self.brake_veto_rate, 0.0, 1.0)
+    self._dirty = True
+
+  def brake_veto_penalty(self):
+    """Gain reduction earned by the driver braking out of openpilot accelerations."""
+    if self.brake_veto_count < BRAKE_VETO_MIN_SAMPLES:
+      return 0.0
+    return _clip(BRAKE_VETO_WEIGHT * self.brake_veto_rate, 0.0, BRAKE_VETO_MAX_PENALTY)
+
+  def _maybe_apply_gain(self, now):
+    if now - self._last_gain_update < LEARNING_UPDATE_COOLDOWN_S:
+      return False
+    if self._paired_ratio is None or self._paired_weight < ACCEL_MIN_TOTAL_SAMPLES:
+      return False
+
+    self._last_gain_update = now
+    ratio = self._paired_ratio
+    confidence = min(1.0, self._paired_weight / (4.0 * ACCEL_MIN_TOTAL_SAMPLES))
+
+    # Positive evidence is how much harder the driver accelerates; negative
+    # evidence is how often they brake out of openpilot's acceleration.
+    target = _clip(ratio, ACCEL_RATIO_MIN, ACCEL_RATIO_MAX) - self.brake_veto_penalty()
+    # Authority grows with evidence: an early, thin measurement can only nudge
+    # the gain, never take it to the bound.
+    target = _clip(target,
+                   max(GAIN_MIN, 1.0 - 0.10 * confidence),
+                   min(GAIN_MAX, 1.0 + 0.12 * confidence))
+    step = _clip(target - self.global_gain, -GAIN_STEP_MAX, GAIN_STEP_MAX)
+    new_gain = _clip(self.global_gain + step, GAIN_MIN, GAIN_MAX)
+    changed = abs(new_gain - self.global_gain) > 1e-6
+    self.global_gain = new_gain
+
+    # Speed bins carry only their residual from the shared global ratio, so
+    # sparse evidence is shared across speeds without creating steps at the
+    # bin edges (gain_for_speed interpolates between bin centers).
+    for index in range(_NUM_BINS):
+      paired = min(self.driver_count[index], self.op_count[index])
+      if paired < ACCEL_MIN_PAIRED_SAMPLES or self.op_accel[index] <= 1e-3:
+        continue
+      bin_ratio = self.driver_accel[index] / self.op_accel[index]
+      bin_confidence = min(1.0, paired / (4.0 * ACCEL_MIN_PAIRED_SAMPLES))
+      bound = BIN_OFFSET_MAX * bin_confidence
+      self.bin_offsets[index] = _clip(0.5 * (bin_ratio - ratio), -bound, bound)
+
+    if changed:
+      self.gain_updates += 1
+    self._refresh_bin_gains()
+    self._dirty = True
+    return changed
+
   def confidence(self):
-    gain_confidence = min(1.0, self.gain_evidence_events / 20.0)
+    gain_confidence = min(1.0, self._paired_weight / (4.0 * ACCEL_MIN_TOTAL_SAMPLES))
     tr_confidence = 0.5 * min(1.0, self.tr_evidence_events / 10.0) + \
                     0.5 * min(1.0, self.stable_follow_s / 300.0)
     return _clip(max(gain_confidence, tr_confidence), 0.0, 1.0)
@@ -336,10 +549,13 @@ class DrivingStyleLearner:
       low_speed_coast_updates=self.low_speed_coast_updates,
     )
 
+  # --- lead / events ---------------------------------------------------------
+
   def _update_lead_stability(self, context_ok, lead_valid, lead_distance, lead_rel_speed, dt):
     lead_distance = _finite(lead_distance)
     lead_rel_speed = _finite(lead_rel_speed)
-    plausible = context_ok and lead_valid and MIN_LEAD_DISTANCE_M <= lead_distance <= MAX_LEAD_DISTANCE_M
+    plausible = context_ok and lead_valid and \
+        MIN_LEAD_DISTANCE_M <= lead_distance <= MAX_LEAD_DISTANCE_M
     if plausible and self._last_lead_distance is not None:
       expected_delta = lead_rel_speed * dt
       if abs((lead_distance - self._last_lead_distance) - expected_delta) > LEAD_DISTANCE_JUMP_M:
@@ -352,63 +568,54 @@ class DrivingStyleLearner:
       self._lead_stable_s = 0.0
       self._last_lead_distance = lead_distance if lead_valid else None
 
-  def _make_snapshot(self, now, v_ego, requested_accel, lead_valid, lead_distance,
-                     lead_rel_speed, base_tr):
+  def _start_event(self, now, signal_value):
+    if not self._snap_valid or now - self._snap_time > 0.5:
+      return None
+    if not self._last_control_active or self._snap_v_ego < MIN_LEARN_SPEED_MS:
+      return None
     return {
-      "time": now,
-      "v_ego": max(0.0, _finite(v_ego)),
-      "speed_bin": self._speed_bin(v_ego),
-      "requested_accel": _finite(requested_accel),
-      "lead_valid": bool(lead_valid),
-      "lead_distance": max(0.0, _finite(lead_distance)),
-      "lead_rel_speed": _finite(lead_rel_speed),
-      "base_tr": _clip(_finite(base_tr, 1.3), 0.8, 2.7),
-      "lead_stable_s": self._lead_stable_s,
+      "v_ego": self._snap_v_ego,
+      "speed_bin": self._snap_bin,
+      "requested_accel": self._snap_requested_accel,
+      "lead_valid": self._snap_lead_valid,
+      "lead_distance": self._snap_lead_distance,
+      "lead_rel_speed": self._snap_lead_rel_speed,
+      "base_tr": self._snap_base_tr,
+      "lead_stable_s": self._snap_lead_stable_s,
+      "start": now,
+      "peak": max(0.0, _finite(signal_value)),
+      "valid": True,
     }
 
-  def _start_event(self, now, signal_value):
-    snapshot = self._last_snapshot
-    if snapshot is None or now - snapshot["time"] > 0.5:
-      return None
-    if not self._last_control_active or snapshot["v_ego"] < MIN_LEARN_SPEED_MS:
-      return None
-    event = dict(snapshot)
-    event.update({"start": now, "peak": max(0.0, _finite(signal_value)), "valid": True})
-    return event
-
   def _low_speed_brake_candidate(self, now):
-    snapshot = self._low_speed_snapshot
-    if snapshot is None or now - snapshot["time"] > LOW_SPEED_COAST_SNAPSHOT_MAX_AGE_S:
+    if not self._ls_valid or now - self._ls_time > LOW_SPEED_COAST_SNAPSHOT_MAX_AGE_S:
       return None
     if not self._last_control_active:
       return None
-    speed_kph = snapshot["v_ego"] * 3.6
-    desired_gap = (LOW_SPEED_COAST_STANDSTILL_GAP_M +
-                   snapshot["v_ego"] * snapshot["base_tr"])
-    distance_margin = snapshot["lead_distance"] - desired_gap
+    speed_kph = self._ls_v_ego * 3.6
+    desired_gap = LOW_SPEED_COAST_STANDSTILL_GAP_M + self._ls_v_ego * self._ls_base_tr
+    distance_margin = self._ls_lead_distance - desired_gap
     distance_margin_limit = min(
       LOW_SPEED_COAST_MAX_DISTANCE_MARGIN_M,
       LOW_SPEED_COAST_BASE_DISTANCE_MARGIN_M +
-      snapshot["v_ego"] * LOW_SPEED_COAST_DISTANCE_MARGIN_SPEED_S)
-    pedal_applied = snapshot["pedal_output"] >= LOW_SPEED_COAST_MIN_PEDAL
+      self._ls_v_ego * LOW_SPEED_COAST_DISTANCE_MARGIN_SPEED_S)
+    pedal_applied = self._ls_pedal_output >= LOW_SPEED_COAST_MIN_PEDAL
     # A manual brake after the comma pedal has already reached zero is still
     # useful evidence when the lead is both close and closing decisively. This
     # is the common real-world case when coasting started, but started too late.
     zero_pedal_closing_evidence = bool(
       not pedal_applied and
-      snapshot["lead_rel_speed"] <= LOW_SPEED_COAST_ZERO_PEDAL_MAX_VREL_MS and
+      self._ls_lead_rel_speed <= LOW_SPEED_COAST_ZERO_PEDAL_MAX_VREL_MS and
       distance_margin <= LOW_SPEED_COAST_ZERO_PEDAL_MAX_DISTANCE_MARGIN_M)
     candidate = bool(
       LOW_SPEED_COAST_MIN_KPH <= speed_kph <= LOW_SPEED_COAST_MAX_KPH and
-      snapshot["lead_valid"] and
-      snapshot["lead_rel_speed"] <= LOW_SPEED_COAST_MAX_VREL_MS and
+      self._ls_lead_valid and
+      self._ls_lead_rel_speed <= LOW_SPEED_COAST_MAX_VREL_MS and
       distance_margin <= distance_margin_limit and
       (pedal_applied or zero_pedal_closing_evidence))
     if not candidate:
       return None
-    event = dict(snapshot)
-    event.update({"start": now, "valid": True})
-    return event
+    return {"start": now, "valid": True}
 
   def _finish_low_speed_brake_event(self, now):
     event = self._low_speed_brake_event
@@ -430,16 +637,6 @@ class DrivingStyleLearner:
       self.low_speed_brake_batch_events = 0
     self._dirty = True
     return changed
-
-  def _add_gain_evidence(self, score, speed_bin):
-    score = _clip(_finite(score), -1.0, 1.0)
-    self.gain_batch_score += score
-    self.gain_batch_events += 1
-    self.gain_evidence_events += 1
-    self.bin_batch_score[speed_bin] += score
-    self.bin_batch_events[speed_bin] += 1
-    self.bin_total_events[speed_bin] += 1
-    self._dirty = True
 
   def _add_tr_evidence(self, score):
     score = _clip(_finite(score), -1.0, 1.0)
@@ -468,11 +665,10 @@ class DrivingStyleLearner:
     raw_intensity = _clip((event["peak"] - 15.0) / 60.0, 0.0, 1.0)
     event_strength = 0.50 + 0.30 * duration_score + 0.20 * raw_intensity
 
+    # Acceleration gain is no longer scored here. It is measured continuously
+    # from the paired driver/openpilot statistics, which do not depend on this
+    # event surviving a clean-context chain.
     headway = self._event_headway(event) if event["lead_valid"] else 0.0
-    lead_allows_catchup = (not event["lead_valid"] or event["lead_rel_speed"] > 0.3 or
-                           headway > event["base_tr"] + 0.25)
-    if event["requested_accel"] > 0.05 and lead_allows_catchup:
-      self._add_gain_evidence(event_strength, event["speed_bin"])
 
     # A driver repeatedly closing an unnecessarily large, stable gap is weak
     # evidence for a shorter preferred time gap. Shortening is more conservative
@@ -497,60 +693,20 @@ class DrivingStyleLearner:
     intensity = _clip(event["peak"], 0.0, 1.0)
     event_strength = 0.60 + 0.20 * _clip(duration / 1.5, 0.0, 1.0) + 0.20 * intensity
 
+    # Braking near a stable lead is evidence about following distance only.
+    # The acceleration-gain consequence of braking is carried by the brake veto
+    # rate, which does not need a lead at all.
     if event["lead_valid"] and event["lead_stable_s"] >= LEAD_STABLE_REQUIRED_S and \
        event["v_ego"] >= MIN_FOLLOW_LEARN_SPEED_MS:
       headway = self._event_headway(event)
       if headway <= event["base_tr"] + 0.35 and event["lead_rel_speed"] < 0.5:
         self._add_tr_evidence(event_strength)
 
-      # If a stable lead gap was already generous but automatic acceleration
-      # was still positive immediately before braking, reduce pedal gain rather
-      # than incorrectly increasing following distance.
-      if event["requested_accel"] > 0.15 and headway > event["base_tr"] + 0.45 and \
-         event["lead_rel_speed"] > -0.5:
-        self._add_gain_evidence(-event_strength, event["speed_bin"])
-
     self._dirty = True
-
-  def _maybe_apply_gain(self, now):
-    required = MIN_GAS_EVENTS_FIRST_UPDATE if self.gain_updates == 0 else MIN_GAS_EVENTS_NEXT_UPDATE
-    if self.gain_batch_events < required or now - self._last_gain_update < LEARNING_UPDATE_COOLDOWN_S:
-      return False
-
-    average = self.gain_batch_score / max(1, self.gain_batch_events)
-    changed = False
-    if abs(average) >= 0.25:
-      confidence = min(1.0, self.gain_evidence_events / 20.0)
-      delta = _clip(average * 0.015, -0.015, 0.020)
-      lower = 1.0 - 0.10 * confidence
-      upper = 1.0 + 0.12 * confidence
-      new_gain = _clip(self.global_gain + delta, max(GAIN_MIN, lower), min(GAIN_MAX, upper))
-      changed = abs(new_gain - self.global_gain) > 1e-6
-      self.global_gain = new_gain
-
-      # Speed bins learn only their residual from the shared global direction.
-      # This shares sparse evidence across all speeds without creating steps at
-      # 10/30/60/100 km/h (gain_for_speed interpolates between bin centers).
-      for index, count in enumerate(self.bin_batch_events):
-        if count >= 3:
-          bin_average = self.bin_batch_score[index] / count
-          bin_confidence = min(1.0, self.bin_total_events[index] / 12.0)
-          residual_delta = _clip((bin_average - average) * 0.008, -0.006, 0.006)
-          bound = 0.03 * bin_confidence
-          self.bin_offsets[index] = _clip(self.bin_offsets[index] + residual_delta, -bound, bound)
-
-      self.gain_updates += 1
-      self._last_gain_update = now
-
-    self.gain_batch_score = 0.0
-    self.gain_batch_events = 0
-    self.bin_batch_score = [0.0] * len(self.bin_batch_score)
-    self.bin_batch_events = [0] * len(self.bin_batch_events)
-    self._dirty = True
-    return changed
 
   def _maybe_apply_tr(self, now):
-    if self.tr_batch_events < MIN_TR_EVENTS_PER_UPDATE or self.stable_follow_s < MIN_STABLE_FOLLOW_S or \
+    if self.tr_batch_events < MIN_TR_EVENTS_PER_UPDATE or \
+       self.stable_follow_s < MIN_STABLE_FOLLOW_S or \
        now - self._last_tr_update < LEARNING_UPDATE_COOLDOWN_S:
       return False
 
@@ -577,6 +733,8 @@ class DrivingStyleLearner:
     self._dirty = True
     return changed
 
+  # --- main entry point ------------------------------------------------------
+
   def update(self, *, v_ego, a_ego, gas, gas_pressed, brake, brake_pressed,
              cruise_enabled, control_active, requested_accel, lead_valid,
              lead_distance, lead_rel_speed, base_tr, pedal_output=0.0,
@@ -588,14 +746,17 @@ class DrivingStyleLearner:
 
     gas_pressed = bool(gas_pressed)
     brake_pressed = bool(brake_pressed)
+    v_ego_f = _finite(v_ego)
+    pedal_output_f = max(0.0, _finite(pedal_output))
     context_ok = bool(can_valid and cruise_enabled and not unsafe_context)
     low_speed_context_ok = bool(
       self.enabled and can_valid and cruise_enabled and control_active and
       low_speed_brake_context_ok)
-    self._update_lead_stability(context_ok, bool(lead_valid), lead_distance, lead_rel_speed, dt)
+    self._update_lead_stability(context_ok, bool(lead_valid), lead_distance,
+                                lead_rel_speed, dt)
 
     if self.enabled and context_ok and lead_valid and self._lead_stable_s >= 2.0 and \
-       _finite(v_ego) >= MIN_FOLLOW_LEARN_SPEED_MS and abs(_finite(lead_rel_speed)) < 1.0 and \
+       v_ego_f >= MIN_FOLLOW_LEARN_SPEED_MS and abs(_finite(lead_rel_speed)) < 1.0 and \
        abs(_finite(a_ego)) < 1.2:
       self.stable_follow_s += dt
       self._dirty = True
@@ -604,11 +765,57 @@ class DrivingStyleLearner:
       self._gas_event = None
       self._brake_event = None
       self._low_speed_brake_event = None
-      self._low_speed_snapshot = None
-      self._last_snapshot = None
+      self._sample_accum = 0.0
+      self._last_op_pedal_time = -1e9
+      self._op_episode_active = False
+      self._prev_brake_pressed = brake_pressed
+      self._clear_snapshot()
+      self._clear_low_speed_snapshot()
       self._last_control_active = bool(control_active and cruise_enabled)
       return self.status(v_ego)
 
+    style_context_ok = bool(can_valid and not unsafe_context and
+                            v_ego_f >= MIN_LEARN_SPEED_MS)
+    a_ego_f = _finite(a_ego)
+    op_pedal_live = bool(control_active and pedal_output_f > 0.01)
+    if op_pedal_live:
+      self._last_op_pedal_time = now
+
+    # --- brake veto ---------------------------------------------------------
+    # One openpilot acceleration episode is one sample. It resolves as vetoed if
+    # the driver brakes out of it, otherwise as accepted once the pedal has been
+    # released long enough for the episode to be over. Both sides of the ratio
+    # are therefore episodes, not control frames.
+    if not self._op_episode_active:
+      if op_pedal_live and style_context_ok and not gas_pressed and \
+         a_ego_f >= ACCEL_SAMPLE_MIN_MS2:
+        self._op_episode_active = True
+    else:
+      brake_edge = brake_pressed and not self._prev_brake_pressed
+      if brake_edge and now - self._last_op_pedal_time <= BRAKE_VETO_RECENT_PEDAL_S:
+        self._push_brake_veto(True)
+        self._op_episode_active = False
+      elif now - self._last_op_pedal_time > BRAKE_VETO_RECENT_PEDAL_S:
+        self._push_brake_veto(False)
+        self._op_episode_active = False
+    self._prev_brake_pressed = brake_pressed
+
+    # --- paired acceleration sampling ---------------------------------------
+    # The driver reference deliberately does not require cruise_enabled or an
+    # engaged controller: manual driving is the purest statement of preferred
+    # acceleration, and excluding it was why evidence never accumulated.
+    self._sample_accum += dt
+    if self._sample_accum >= ACCEL_SAMPLE_DT_S:
+      self._sample_accum = 0.0
+      if style_context_ok and not brake_pressed and \
+         ACCEL_SAMPLE_MIN_MS2 <= a_ego_f <= ACCEL_SAMPLE_MAX_MS2:
+        speed_bin = self._speed_bin(v_ego_f)
+        if gas_pressed:
+          self._push_accel_sample(True, speed_bin, a_ego_f)
+        elif op_pedal_live:
+          self._push_accel_sample(False, speed_bin, a_ego_f)
+
+    # --- time-gap events ----------------------------------------------------
     if gas_pressed and self._gas_event is None and not brake_pressed:
       self._gas_event = None if unsafe_context or not can_valid else self._start_event(now, gas)
     elif gas_pressed and self._gas_event is not None:
@@ -638,18 +845,33 @@ class DrivingStyleLearner:
     elif not brake_pressed and self._low_speed_brake_event is not None:
       low_speed_changed = self._finish_low_speed_brake_event(now)
 
-    if context_ok and control_active and not gas_pressed and not brake_pressed and \
-       _finite(v_ego) >= MIN_LEARN_SPEED_MS:
-      self._last_snapshot = self._make_snapshot(now, v_ego, requested_accel, lead_valid,
-                                                lead_distance, lead_rel_speed, base_tr)
-    if low_speed_context_ok and not gas_pressed and not brake_pressed and \
-       _finite(v_ego) >= MIN_LEARN_SPEED_MS:
-      self._low_speed_snapshot = self._make_snapshot(
-        now, v_ego, requested_accel, lead_valid, lead_distance,
-        lead_rel_speed, base_tr)
-      self._low_speed_snapshot["pedal_output"] = max(0.0, _finite(pedal_output))
+    # --- snapshots (flat, no per-frame allocation) --------------------------
+    pedals_free = not gas_pressed and not brake_pressed
+    moving = v_ego_f >= MIN_LEARN_SPEED_MS
+    if context_ok and control_active and pedals_free and moving:
+      self._snap_valid = True
+      self._snap_time = now
+      self._snap_v_ego = max(0.0, v_ego_f)
+      self._snap_bin = self._speed_bin(v_ego_f)
+      self._snap_requested_accel = _finite(requested_accel)
+      self._snap_lead_valid = bool(lead_valid)
+      self._snap_lead_distance = max(0.0, _finite(lead_distance))
+      self._snap_lead_rel_speed = _finite(lead_rel_speed)
+      self._snap_base_tr = _clip(_finite(base_tr, 1.3), 0.8, 2.7)
+      self._snap_lead_stable_s = self._lead_stable_s
+
+    if low_speed_context_ok and pedals_free and moving:
+      self._ls_valid = True
+      self._ls_time = now
+      self._ls_v_ego = max(0.0, v_ego_f)
+      self._ls_requested_accel = _finite(requested_accel)
+      self._ls_lead_valid = bool(lead_valid)
+      self._ls_lead_distance = max(0.0, _finite(lead_distance))
+      self._ls_lead_rel_speed = _finite(lead_rel_speed)
+      self._ls_base_tr = _clip(_finite(base_tr, 1.3), 0.8, 2.7)
+      self._ls_pedal_output = pedal_output_f
     elif gas_pressed or not low_speed_context_ok:
-      self._low_speed_snapshot = None
+      self._clear_low_speed_snapshot()
 
     gain_changed = self._maybe_apply_gain(now)
     tr_changed = self._maybe_apply_tr(now)
