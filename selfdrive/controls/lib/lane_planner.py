@@ -169,8 +169,26 @@ CURVE_RATE_MAX_DELTA = 0.020
 # faster than the extrapolation assumes. Applied only when
 # readiness['eligible'] is True and scaled by readiness['quality']; outside
 # that window every fallback behaves exactly as it did before this change.
-CURVE_TEMPORAL_TRUSTED_MAX_CORRECTION_NEAR_M = 0.40
-CURVE_TEMPORAL_TRUSTED_MAX_CORRECTION_M = 1.50
+# The trusted relaxation is switched off for the temporal hold: these now match
+# CURVE_TEMPORAL_MAX_CORRECTION_* above, so readiness no longer widens this tier.
+#
+# It does fire -- modelPathQualityTrusted was true on 3.7% of lateralPlan frames
+# of 2026-08-27--02-44-03 -- and the relaxed cap was being spent: of the frames
+# where the temporal hold drove the path, 16% pushed past the 0.75 m ordinary
+# limit, reaching 1.578 m, half a lane width.
+#
+# That is the weakest tier spending the largest correction. Its evidence is a
+# dead-reckoned lane shape good for about 1.2 s, against dropouts that run 6-15 s
+# for 46% of their duration, and it covers only 28.6% of the lost time. Compare
+# the model-path tier, which moves the path a median 0.051 m and 0.200 m at the
+# 95th, is used more often, and is built from the model's own current output.
+#
+# Fallback itself stays on: the 2026-08-27 pair of drives on one road (fallback
+# on --02-44-03, off --04-22-29) had intervention through collapsed-confidence
+# frames rise 36.1% -> 45.6% with it disabled. This narrows the one tier that
+# was reaching furthest on the least evidence, it does not remove it.
+CURVE_TEMPORAL_TRUSTED_MAX_CORRECTION_NEAR_M = 0.22
+CURVE_TEMPORAL_TRUSTED_MAX_CORRECTION_M = 0.75
 CURVE_TEMPORAL_TRUSTED_MAX_YAW_RAD = 0.42
 CURVE_TEMPORAL_TRUSTED_HOLD_MULT = 2.0
 
