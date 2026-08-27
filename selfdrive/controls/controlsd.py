@@ -1134,8 +1134,21 @@ class Controls:
             self.events.add(EventName.deviceFalling)
 
         if not REPLAY:
-            # Check for mismatch between openpilot and car's PCM
-            cruise_mismatch = CS.cruiseState.enabled and (not self.enabled or not self.CP.pcmCruise)
+            # Check for mismatch between openpilot and car's PCM.
+            #
+            # The upstream condition also fires on `not self.CP.pcmCruise`, which
+            # asks "is openpilot doing longitudinal itself?" -- on this GM the
+            # answer is always yes (gm/interface.py sets pcmCruise = False for the
+            # pedal interceptor), so that term is constantly true and the check
+            # collapses to "the car's cruise is on". It then fires continuously
+            # for the whole drive: 817 events in 13 min on 2026-08-27--02-44-03,
+            # 301 in 11.5 min the day before, tracking cruise-on time and nothing
+            # else. The event's own handlers are already commented out in
+            # events.py, so it was pure log noise.
+            #
+            # What the check is actually for -- openpilot failing to cancel the
+            # car's cruise while disengaged -- still works via the first term.
+            cruise_mismatch = CS.cruiseState.enabled and not self.enabled
             self.cruise_mismatch_counter = self.cruise_mismatch_counter + 1 if cruise_mismatch else 0
             if self.cruise_mismatch_counter > int(3. / DT_CTRL):
                 self.events.add(EventName.cruiseMismatch)
