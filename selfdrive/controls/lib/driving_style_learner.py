@@ -320,9 +320,16 @@ class DrivingStyleLearner:
       return
     try:
       state = json.loads(raw)
-      if int(state.get("version", 0)) != STATE_VERSION:
-        # A previous version scored evidence on a different scale and is not
-        # convertible. Bounded defaults remain and learning restarts clean.
+      version = int(state.get("version", 0))
+      if version not in (1, STATE_VERSION):
+        return
+      if version == 1:
+        # v1 scored acceleration gain from discrete events on a scale that has
+        # no v2 equivalent, so every gain field is dropped. Time-gap and
+        # low-speed coast learning are unchanged between versions and are
+        # genuinely expensive to re-earn, so they carry over.
+        self._load_v1_shared(state)
+        self._dirty = True
         return
 
       self.global_gain = _clip(_finite(state.get("global_gain"), 1.0), GAIN_MIN, GAIN_MAX)
@@ -358,6 +365,20 @@ class DrivingStyleLearner:
     except (TypeError, ValueError, json.JSONDecodeError):
       # Invalid or partially-written state is ignored; bounded defaults remain.
       return
+
+  def _load_v1_shared(self, state):
+    """Carry over the v1 fields whose meaning is identical in v2."""
+    self.tr_offset = _clip(_finite(state.get("tr_offset")), TR_OFFSET_MIN, TR_OFFSET_MAX)
+    self.low_speed_coast_offset_s = _clip(
+      _finite(state.get("low_speed_coast_offset_s")), 0.0,
+      LOW_SPEED_COAST_MAX_OFFSET_S)
+    self.stable_follow_s = max(0.0, _finite(state.get("stable_follow_s")))
+    self.tr_batch_score = _finite(state.get("tr_batch_score"))
+    self.tr_batch_events = max(0, int(state.get("tr_batch_events", 0)))
+    for name in ("gas_events", "brake_events", "tr_evidence_events", "tr_updates",
+                 "low_speed_brake_events", "low_speed_coast_updates",
+                 "low_speed_brake_batch_events"):
+      setattr(self, name, max(0, int(state.get(name, 0))))
 
   def _state_dict(self):
     return {
