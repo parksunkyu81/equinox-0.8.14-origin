@@ -74,6 +74,22 @@ LANE_WIDTH_MOD_END_M = 5.0
 # far away from the model path.
 LOW_SPEED_FALLBACK_MAX_MS = 12.0
 CURVE_FALLBACK_MAX_MS = 16.0
+# Lane width is only re-measured while both lines are genuinely visible, and is
+# then held rather than surrendered to the speed-based default the moment
+# confidence dips. Measured on 2026-08-26--12-34-51: through curves at
+# |curv| >= 0.008 the two lines actually showed a 3.36 m lane, but l_prob *
+# r_prob fell to about 0.07 (0.25 x 0.28), so the published width collapsed onto
+# speed_lane_width -- 2.98 m at that speed, a distribution 2.93-3.06 m wide,
+# i.e. the measurement was not being used at all.
+#
+# That 0.38 m shortfall is a centring error, not a cosmetic one: the lane centre
+# is derived as (visible line) +/- lane_width / 2, so with one line dominating it
+# puts the centre 19 cm too far toward that line. Through those curves the
+# dominant line was the OUTER one, and the car sat a median 28.8 cm wide.
+LANE_WIDTH_TRUST_PROB = 0.25
+LANE_WIDTH_HOLD_S = 8.0
+LANE_WIDTH_DECAY_S = 8.0
+
 SINGLE_LANE_MIN_RAW_PROB = 0.20
 SINGLE_LANE_MAX_STD = 0.90
 SINGLE_LANE_DPROB_FLOOR = 0.30
@@ -261,6 +277,10 @@ class LanePlanner:
     self.rll_y = np.zeros((TRAJECTORY_SIZE,))
     self.lane_width_estimate = FirstOrderFilter(3.7, 9.95, DT_MDL)
     self.lane_width_certainty = FirstOrderFilter(1.0, 0.95, DT_MDL)
+    # Seconds since both lane lines were last clear enough to measure a width.
+    # Starts stale so a fresh planner uses the speed default until it has seen
+    # a real lane.
+    self.lane_width_age_s = LANE_WIDTH_HOLD_S + LANE_WIDTH_DECAY_S
     self.lane_width = 3.7
 
     self.lll_prob = 0.0
@@ -1153,11 +1173,24 @@ class LanePlanner:
 
     self.lane_width_certainty.update(l_prob * r_prob)
     current_lane_width = float(np.median(width_samples))
-    self.lane_width_estimate.update(current_lane_width)
+    # Only learn from a frame that can actually see both edges of the lane.
+    # Updating unconditionally let a curve, where one line is half gone, drag
+    # the estimate toward whatever the remaining geometry implied.
+    if l_prob * r_prob >= LANE_WIDTH_TRUST_PROB:
+      self.lane_width_estimate.update(current_lane_width)
+      self.lane_width_age_s = 0.0
+    else:
+      self.lane_width_age_s = min(
+        self.lane_width_age_s + DT_MDL, LANE_WIDTH_HOLD_S + LANE_WIDTH_DECAY_S)
     speed_lane_width = interp(v_ego, [0.0, 31.0], [2.8, 3.5])
+    # A lane does not change width in the seconds it takes to round a bend, so
+    # hold the last real measurement across the dip and only decay toward the
+    # speed default once it is genuinely stale.
+    hold = interp(self.lane_width_age_s,
+                  [LANE_WIDTH_HOLD_S, LANE_WIDTH_HOLD_S + LANE_WIDTH_DECAY_S],
+                  [1.0, 0.0])
     self.lane_width = (
-      self.lane_width_certainty.x * self.lane_width_estimate.x +
-      (1.0 - self.lane_width_certainty.x) * speed_lane_width
+      hold * self.lane_width_estimate.x + (1.0 - hold) * speed_lane_width
     )
 
     clipped_lane_width = min(4.0, self.lane_width)
