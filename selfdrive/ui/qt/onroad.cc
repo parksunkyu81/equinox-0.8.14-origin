@@ -483,10 +483,14 @@ void NvgWindow::drawLead(QPainter &painter, const cereal::ModelDataV2::LeadDataV
 
   if (!info_text.isEmpty()) {
     painter.save();
-    configFont(painter, "Open Sans", 36, "Bold");
+    // +20% overall on 2026-08-27: the font and the padding both, so the box
+    // grows with the text instead of tightening around it. 36 -> 43 px, and the
+    // padding scaled to match (32 -> 38, 20 -> 24). The rounded-rect radius
+    // below follows for the same reason.
+    configFont(painter, "Open Sans", 43, "Bold");
     QFontMetrics metrics(painter.font());
-    const int text_width = metrics.horizontalAdvance(info_text) + 32;
-    const int text_height = metrics.height() + 20;
+    const int text_width = metrics.horizontalAdvance(info_text) + 38;
+    const int text_height = metrics.height() + 24;
     QRect text_rect(static_cast<int>(x - text_width / 2), static_cast<int>(y + sz + 12),
                     text_width, text_height);
     if (text_rect.bottom() > height() - 12) {
@@ -496,7 +500,7 @@ void NvgWindow::drawLead(QPainter &painter, const cereal::ModelDataV2::LeadDataV
 
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(0, 0, 0, 160));
-    painter.drawRoundedRect(text_rect, 8, 8);
+    painter.drawRoundedRect(text_rect, 10, 10);
     painter.setPen(whiteColor());
     painter.drawText(text_rect, Qt::AlignCenter, info_text);
     painter.restore();
