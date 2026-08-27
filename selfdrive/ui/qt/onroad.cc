@@ -928,25 +928,15 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.setOpacity(1.0);
   */
 
-  // Community menu values:
-  //   FollowingDistanceProfile = short | mid | long
-  //   CommaPedalResistance     = high  | mid | low
+  // Community menu value:
+  //   CommaPedalResistance = high | mid | low
   // Refresh once per second instead of reading Params on every UI frame.
   static uint64_t last_ai_profile_update = 0;
-  static QString ai_distance_profile = "MID";
   static QString ai_pedal_profile = "MID";
   const uint64_t ai_profile_now = millis_since_boot();
 
   if (last_ai_profile_update == 0 || ai_profile_now - last_ai_profile_update >= 1000) {
     last_ai_profile_update = ai_profile_now;
-
-    QString distance_profile = QString::fromStdString(
-      Params().get("FollowingDistanceProfile")).toUpper();
-    if (distance_profile != "SHORT" && distance_profile != "MID" &&
-        distance_profile != "LONG") {
-      distance_profile = "MID";
-    }
-    ai_distance_profile = distance_profile;
 
     QString pedal_profile = QString::fromStdString(
       Params().get("CommaPedalResistance")).toUpper();
@@ -960,9 +950,6 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   QColor aiProfileColor = QColor(120, 255, 120, 230);
   configFont(p, "Open Sans", 29.f, "Bold");
   drawTextWithColor(p, x, y1 - 13,
-                    QString("Dist : %1").arg(ai_distance_profile),
-                    aiProfileColor);
-  drawTextWithColor(p, x, y1 + 24,
                     QString("Pedal : %1").arg(ai_pedal_profile),
                     aiProfileColor);
   p.setOpacity(1.0);

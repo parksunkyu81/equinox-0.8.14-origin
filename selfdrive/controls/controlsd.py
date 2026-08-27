@@ -1722,8 +1722,6 @@ class Controls:
                                     self.stop_accel_boost_active or
                                     self.moving_gap_catchup_assist.active or
                                     self.comma_pedal_profile_changing or
-                                    (dynamic_follow_valid and
-                                     dynamic_follow.followingDistanceProfileChanging) or
                                     self.predictive_coasting.learning_blocked)
         low_speed_brake_context_ok = bool(
           not self.joystick_mode and self.CP.enableGasInterceptor and
@@ -2007,16 +2005,10 @@ class Controls:
         controlsState.dynamicTRMode = Params().get("DynamicTRGap", encoding="utf8")
         controlsState.globalDfMod = float(Params().get("globalDfMod", encoding="utf8"))
         controlsState.dynamicTRValue = float(self.sm['dynamicFollowData'].mpcTR)
-        controlsState.followingDistanceProfile = str(
-          getattr(self.sm['dynamicFollowData'], 'followingDistanceProfile', 'mid'))
-        controlsState.followingDistanceOffset = float(
-          getattr(self.sm['dynamicFollowData'], 'followingDistanceOffset', 0.0))
         controlsState.followingDistanceRawTR = float(
           getattr(self.sm['dynamicFollowData'], 'rawTR', 1.3))
         controlsState.followingDistanceLearnedTROffset = float(
           getattr(self.sm['dynamicFollowData'], 'learnedTROffset', 0.0))
-        controlsState.followingDistanceProfileChanging = bool(
-          getattr(self.sm['dynamicFollowData'], 'followingDistanceProfileChanging', False))
 
         # Stop-and-go launch diagnostics. These report the controller-accepted
         # request and whether it actually raised the acceleration command.

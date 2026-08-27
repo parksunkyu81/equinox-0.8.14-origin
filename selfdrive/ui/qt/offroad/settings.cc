@@ -733,32 +733,6 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   });
   main_layout->addWidget(selectCar);*/
 
-  QString following_distance_profile = QString::fromStdString(
-    Params().get("FollowingDistanceProfile"));
-  if (following_distance_profile != "short" && following_distance_profile != "mid" &&
-      following_distance_profile != "long") {
-    following_distance_profile = "mid";
-    Params().put("FollowingDistanceProfile", "mid");
-  }
-  QLabel* followingDistanceProfileLabel = new QLabel(
-    "Adjusting distance to the vehicle ahead", homeWidget);
-  followingDistanceProfileLabel->setObjectName("followingDistanceProfileLabel");
-  followingDistanceProfileLabel->setWordWrap(true);
-  followingDistanceProfileLabel->setMinimumWidth(0);
-  followingDistanceProfileLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-  QComboBox* followingDistanceProfileCombo = new QComboBox(homeWidget);
-  followingDistanceProfileCombo->setObjectName("followingDistanceProfileCombo");
-  followingDistanceProfileCombo->addItems(QStringList() << "SHORT" << "MID" << "LONG");
-  followingDistanceProfileCombo->setCurrentText(following_distance_profile.toUpper());
-  connect(followingDistanceProfileCombo, &QComboBox::currentTextChanged,
-          [=](const QString &selected) {
-    Params().put("FollowingDistanceProfile", selected.toLower().toStdString());
-  });
-  QHBoxLayout* layoutBtn_0 = new QHBoxLayout();
-  layoutBtn_0->setContentsMargins(0, 0, 0, 0);
-  layoutBtn_0->addWidget(followingDistanceProfileLabel, 1);
-  layoutBtn_0->addWidget(followingDistanceProfileCombo, 0);
-
   QString comma_pedal_resistance = QString::fromStdString(
     Params().get("CommaPedalResistance")).toLower();
   if (comma_pedal_resistance != "high" && comma_pedal_resistance != "mid" &&
@@ -934,7 +908,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
       color: #dddddd;
       background-color: #444444;
     }
-    #followingDistanceProfileLabel, #commaPedalResistanceLabel {
+    #commaPedalResistanceLabel {
       font-size: 42px;
       color: #dddddd;
       padding: 20px;
@@ -952,7 +926,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
       border: 0px;
       border-radius: 20px;
     }
-    #followingDistanceProfileCombo, #commaPedalResistanceCombo {
+    #commaPedalResistanceCombo {
       min-width: 300px;
       min-height: 100px;
       font-size: 45px;
@@ -962,7 +936,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
       border: 0px;
       border-radius: 20px;
     }
-    #followingDistanceProfileCombo QAbstractItemView, #commaPedalResistanceCombo QAbstractItemView {
+    #commaPedalResistanceCombo QAbstractItemView {
       font-size: 45px;
       min-height: 300px;
       color: #dddddd;
@@ -1103,8 +1077,6 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
     toggleLayout->addWidget(toggle);
   }
 
-  toggleLayout->addWidget(horizontal_line());
-  toggleLayout->addLayout(layoutBtn_0);
   toggleLayout->addWidget(horizontal_line());
   toggleLayout->addLayout(layoutBtn_5);
 

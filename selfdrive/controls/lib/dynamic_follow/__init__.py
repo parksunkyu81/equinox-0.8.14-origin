@@ -12,9 +12,6 @@ from selfdrive.controls.lib.dynamic_follow.auto_df import predict
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.dynamic_follow.support import LeadData, CarData, dfData, dfProfiles
 from selfdrive.controls.lib.driving_style_learner import applied_driving_style_tr_offset
-from selfdrive.controls.lib.following_distance_profile import (FollowingDistanceProfileController,
-                                                               combine_following_tr,
-                                                               normalize_following_distance_profile)
 from common.data_collector import DataCollector
 
 travis = False
@@ -25,6 +22,13 @@ DEFAULT_TR = 1.3   #1.45
 # cannot shorten the gap below the speed-appropriate bound.
 HIGH_SPEED_TR_BP_KPH = (0.0, 60.0, 80.0, 100.0, 120.0, 140.0)
 HIGH_SPEED_TR_FLOOR = (0.0, 0.95, 1.00, 1.10, 1.20, 1.30)
+
+
+def combine_following_tr(raw_tr, learned_offset_s, safety_floor, upper_bound=2.7):
+  """Apply the learned style offset to the Dynamic Follow result, then bound it."""
+  lower = max(0.0, float(safety_floor))
+  selected = float(raw_tr) + float(learned_offset_s)
+  return max(lower, min(float(upper_bound), selected))
 
 
 def speed_based_min_tr(v_ego):
@@ -161,10 +165,6 @@ class DynamicFollow:
     self.df_data = dfData()  # dynamic follow data
     self.base_TR = DEFAULT_TR
     self.base_TR_unadjusted = DEFAULT_TR
-    self.following_distance_profile = 'mid'
-    self.following_distance_profile_controller = FollowingDistanceProfileController('mid')
-    self.following_distance_offset = 0.0
-    self.following_distance_profile_changing = False
     self.applied_driving_style_tr_offset = 0.0
 
     self.lead_launch_state = LEAD_LAUNCH_IDLE
@@ -202,11 +202,6 @@ class DynamicFollow:
       self.base_TR_unadjusted = self._get_TR()
       #print("if self.lead_data.status: ======================================== : ", self.TR)
 
-    self.following_distance_offset = self.following_distance_profile_controller.update(
-      self.following_distance_profile,
-      self.lead_data.status or self.last_launch_lead_status,
-      DT_MDL)
-    self.following_distance_profile_changing = self.following_distance_profile_controller.changing
     self.base_TR = self._apply_driving_style_tr(self.base_TR_unadjusted)
     self.TR = self._update_lead_launch_TR(self.base_TR)
 
@@ -223,15 +218,14 @@ class DynamicFollow:
       self._get_pred()  # sets self.model_profile, all other checks are inside function
 
   def _apply_driving_style_tr(self, base_tr):
-    # The menu is the coarse driver choice; learned style is the fine offset.
-    # Both are applied to the existing Dynamic Follow result so the legacy
-    # traffic/stock/roadtrip/auto behavior remains intact.
+    # Coarse distance selection belongs to DynamicTRGap; learned style is the
+    # only offset applied on top, so the legacy traffic/stock/roadtrip/auto
+    # behavior remains intact.
     self.applied_driving_style_tr_offset = (applied_driving_style_tr_offset(
       self.driving_style_tr_offset, self.car_data.v_ego)
       if self.driving_style_ai_enabled else 0.0)
     dynamic_floor = max(float(self.min_TR), speed_based_min_tr(self.car_data.v_ego))
-    return combine_following_tr(base_tr, self.following_distance_offset,
-                                self.applied_driving_style_tr_offset,
+    return combine_following_tr(base_tr, self.applied_driving_style_tr_offset,
                                 dynamic_floor)
 
   def _gather_data(self):
@@ -276,12 +270,8 @@ class DynamicFollow:
       dat.dynamicFollowData.leadRelativeSpeed = float(filtered_lead_speed - self.car_data.v_ego)
       dat.dynamicFollowData.leadDistance = float(self.lead_data.x_lead or 0.0)
       dat.dynamicFollowData.egoSpeed = float(self.car_data.v_ego)
-      dat.dynamicFollowData.followingDistanceProfile = self.following_distance_profile
-      dat.dynamicFollowData.followingDistanceOffset = float(self.following_distance_offset)
       dat.dynamicFollowData.rawTR = float(self.base_TR_unadjusted)
       dat.dynamicFollowData.learnedTROffset = float(self.applied_driving_style_tr_offset)
-      dat.dynamicFollowData.followingDistanceProfileChanging = bool(
-        self.following_distance_profile_changing)
       #print("dat.dynamicFollowData.mpcTR ======================================== : ", dat.dynamicFollowData.mpcTR)
       #print("dat.dynamicFollowData.profilePred ======================================== : ", dat.dynamicFollowData.profilePred)
       self.pm.send('dynamicFollowData', dat)
@@ -622,11 +612,6 @@ class DynamicFollow:
     # switch takes effect without restarting controls.
     params = Params()
     self.stop_accel_boost_enabled = params.get_bool("ActiveStopAccelBoost")
-    try:
-      profile_param = params.get("FollowingDistanceProfile", encoding="utf8") or 'mid'
-    except Exception:
-      profile_param = 'mid'
-    self.following_distance_profile = normalize_following_distance_profile(profile_param)
     self.driving_style_ai_enabled = params.get_bool("DrivingStyleAI")
     try:
       self.driving_style_tr_offset = float(params.get("DrivingStyleAITrOffset", encoding="utf8") or 0.0)

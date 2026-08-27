@@ -79,7 +79,6 @@ def manager_init() -> None:
     ("DynamicTRGap", "auto"),
     ("minTR", "0.9"),
     ("globalDfMod", "1.0"),
-    ("FollowingDistanceProfile", "mid"),
     ("CommaPedalResistance", "mid"),
 
     # Temp
