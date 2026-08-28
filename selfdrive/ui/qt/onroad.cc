@@ -856,20 +856,9 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // creeping simply because it is not delivering LKA torque there. In the
     // 2026-08-26 city drive every one of those 24.9s sat under 10 km/h, so
     // ranking the fault first would paint normal stop-and-go red.
-    str = "저속";
+    str = "OFF";
     textSize = 40.f;
     textColor = QColor(255, 175, 0, 220);
-  }
-  else if (car_state.getSteerFaultTemporary() || car_state.getSteerFaultPermanent()) {
-    // A steer fault at a speed where steering should have been available is
-    // the case actually worth a red light.
-    str = "고장";
-    textSize = 40.f;
-    textColor = QColor(254, 32, 32, 200);
-  }
-  else {
-    str = "OFF";
-    textColor = QColor(254, 32, 32, 200);
   }
 
   configFont(p, "Open Sans", 27, "Bold");
