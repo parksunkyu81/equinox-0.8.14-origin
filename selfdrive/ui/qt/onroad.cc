@@ -629,10 +629,13 @@ void NvgWindow::drawHud(QPainter &p) {
   drawLaneLines(p, s);
 
   auto leads = sm["modelV2"].getModelV2().getLeadsV3();
+  const auto controls_state = sm["controlsState"].getControlsState();
+  // Lead distance/speed readout under the lead marker. Left empty so drawLead
+  // skips the text box entirely; uncomment the block to bring it back.
+  QString lead_info;
+  /*
   const auto lead_one = sm["radarState"].getRadarState().getLeadOne();
   const auto car_state = sm["carState"].getCarState();
-  const auto controls_state = sm["controlsState"].getControlsState();
-  QString lead_info;
   if (lead_one.getStatus()) {
     const float v_ego = std::max(car_state.getVEgo(), 0.0f);
     const float d_rel = std::max(lead_one.getDRel(), 0.0f);
@@ -648,6 +651,7 @@ void NvgWindow::drawHud(QPainter &p) {
                         d_rel, desired_distance, v_lead * MS_TO_KPH);
     }
   }
+  */
   if (leads[0].getProb() > .5) {
     drawLead(p, leads[0], s->scene.lead_vertices[0], s->scene.lead_radar[0], lead_info);
   }
@@ -705,6 +709,86 @@ void NvgWindow::drawHud(QPainter &p) {
   drawBottomIcons(p);
 }
 
+// Lane-centring indicator: a bowed bar for the lane, a marker for where the car
+// actually sits in it, and a fixed pointer at the lane centre. Reads the model
+// lane lines directly -- the same y values lane_planner blends -- so it shows
+// the geometry the planner is steering to, not a smoothed control output.
+void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
+  // Mirrors lane_planner.py CAMERA_OFFSET. The camera does not sit on the car's
+  // centreline, so raw lane lines carry a constant lateral bias.
+  constexpr float CAMERA_OFFSET_UI = -0.070f;
+  constexpr int BOW = 12;      // how much the bar bows up in the middle
+  constexpr int BAR_W = 26;    // bar stroke width
+
+  const SubMaster &sm = *(uiState()->sm);
+  const auto model = sm["modelV2"].getModelV2();
+  const auto lls = model.getLaneLines();
+  const auto probs = model.getLaneLineProbs();
+
+  bool valid = false;
+  float offset = 0.0f;   // -1 = hard left of lane, +1 = hard right
+  if (lls.size() >= 4 && probs.size() >= 4) {
+    const auto ly = lls[1].getY();
+    const auto ry = lls[2].getY();
+    if (ly.size() > 0 && ry.size() > 0) {
+      const float left = ly[0], right = ry[0];
+      const float lane_w = right - left;
+      if (probs[1] > 0.3f && probs[2] > 0.3f && lane_w > 2.0f && lane_w < 4.5f) {
+        // modelV2 y is +right, so a positive lane centre means the lane sits to
+        // the right of the car -- the car is left of centre. Flip the sign so
+        // the marker travels the way the car does.
+        const float centre = (left + right) / 2.0f + CAMERA_OFFSET_UI;
+        offset = std::clamp(-centre / (lane_w / 2.0f), -1.0f, 1.0f);
+        valid = true;
+      }
+    }
+  }
+
+  // Smooth so the marker glides instead of chattering with the model frame.
+  static float shown = 0.0f;
+  shown += ((valid ? offset : 0.0f) - shown) * 0.18f;
+
+  const int half = w / 2;
+  const int x0 = cx - half, x1 = cx + half;
+  const int y_end = cy + BOW;
+
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing);
+  p.setOpacity(1.0);
+
+  QPainterPath bar;
+  bar.moveTo(x0, y_end);
+  bar.quadTo(cx, cy - BOW, x1, y_end);
+  p.strokePath(bar, QPen(QColor(150, 156, 162, valid ? 175 : 90), BAR_W,
+                         Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+
+  // Fixed pointer at the lane centre.
+  const int tw = 34, th = 30, tip_y = cy + BOW + 10;
+  QPainterPath tri;
+  tri.moveTo(cx, tip_y);
+  tri.lineTo(cx - tw, tip_y + th);
+  tri.lineTo(cx + tw, tip_y + th);
+  tri.closeSubpath();
+  p.setPen(QPen(QColor(255, 200, 0, valid ? 255 : 120), 5,
+                Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  p.setBrush(QColor(220, 40, 30, valid ? 235 : 110));
+  p.drawPath(tri);
+
+  // Marker riding the bar. The bar is a quadratic, so follow it exactly.
+  const float t = (shown + 1.0f) / 2.0f;
+  const float mt = 1.0f - t;
+  const float mx = mt * mt * x0 + 2.0f * mt * t * cx + t * t * x1;
+  const float my = mt * mt * y_end + 2.0f * mt * t * (cy - BOW) + t * t * y_end;
+
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(255, 255, 255, valid ? 235 : 110));
+  p.drawRoundedRect(QRectF(mx - 17, my - 17, 34, 34), 7, 7);
+  p.setBrush(QColor(198, 198, 198, valid ? 255 : 120));
+  p.drawEllipse(QPointF(mx, my), 11, 11);
+
+  p.restore();
+}
+
 void NvgWindow::drawBottomIcons(QPainter &p) {
   const SubMaster &sm = *(uiState()->sm);
   auto car_state = sm["carState"].getCarState();
@@ -721,6 +805,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   int x = icon_start_x;
   const int y1 = rect().bottom() - footer_h / 2 - 10;
   const int y2 = y1 - radius - row_gap;
+
+  // Centring indicator sits above the upper icon row, spanning its width.
+  drawLaneAlignment(p, icon_start_x + (icon_step * 5) / 2,
+                    y2 - radius / 2 - 52, icon_step * 5 + radius);
 
   float cur_speed = std::max(0.0, car_state.getVEgo() * MS_TO_KPH);
   QString str;
