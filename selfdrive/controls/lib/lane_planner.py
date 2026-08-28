@@ -10,8 +10,11 @@ from common.realtime import DT_MDL
 from selfdrive.ntune import ntune_common_get
 from selfdrive.swaglog import cloudlog
 from selfdrive.controls.lib.lane_probability import (
+  LANE_PATH_DISAGREE_M,
+  LANE_PATH_DISAGREE_X_M,
   combined_lane_probability,
   enhance_lane_probability,
+  lane_head_trust_cap,
   limit_lane_probability_rise,
 )
 from selfdrive.controls.lib.model_data_validation import as_finite_vector
@@ -345,6 +348,8 @@ class LanePlanner:
     self.curve_temporal_stored_diag = False
     # 0 none, 1 ordinary lane blending, 2 temporal hold, 3 road edge
     self.curve_fallback_source_diag = 0
+    self.lane_head_disagree = False
+    self.lane_head_gap_m = 0.0
 
     # Last trustworthy tight-curve lane path in the previous ego frame.
     self._curve_hold_x = None
@@ -1084,6 +1089,31 @@ class LanePlanner:
       self.l_lane_change_prob = 0.0
       self.r_lane_change_prob = 0.0
 
+  @staticmethod
+  def _lane_head_gap(path_xyz, lane_x, lane_path_y):
+    """Distance between the two model heads at LANE_PATH_DISAGREE_X_M.
+
+    Returns 0.0 (heads agree, nothing withheld) on any malformed input so a
+    parsing problem can never silently reduce lane reliance.
+    """
+    try:
+      px = np.asarray(path_xyz[:, 0], dtype=float)
+      py = np.asarray(path_xyz[:, 1], dtype=float)
+      lx = np.asarray(lane_x, dtype=float)
+      ly = np.asarray(lane_path_y, dtype=float)
+    except (TypeError, ValueError, IndexError):
+      return 0.0
+    for xs in (px, lx):
+      if xs.size < 2 or not np.all(np.isfinite(xs)) or not np.all(np.diff(xs) > 0):
+        return 0.0
+      if xs[0] > LANE_PATH_DISAGREE_X_M or xs[-1] < LANE_PATH_DISAGREE_X_M:
+        return 0.0
+    if not (np.all(np.isfinite(py)) and np.all(np.isfinite(ly))):
+      return 0.0
+    model_y = float(np.interp(LANE_PATH_DISAGREE_X_M, px, py))
+    lane_y = float(np.interp(LANE_PATH_DISAGREE_X_M, lx, ly))
+    return abs(lane_y - model_y)
+
   def get_d_path(self, v_ego, path_t, path_xyz, measured_curvature=0.0,
                  lane_change_active=False, readiness_eligible=False,
                  readiness_quality=0.0, imu_curvature=None,
@@ -1218,8 +1248,22 @@ class LanePlanner:
       l_prob * path_from_left_lane + r_prob * path_from_right_lane
     ) / (l_prob + r_prob + 0.0001)
 
+    # d_prob is built only from the model's own lane-line confidence and never
+    # checks whether the lane-line head agrees with the end-to-end path head.
+    # When they contradict each other, withhold the confidence boost so the
+    # blend falls back to the ordinary combined probability. This can only
+    # lower reliance to the un-boosted value, never below it.
+    self.lane_head_gap_m = self._lane_head_gap(path_xyz, lane_x, lane_path_y)
+    self.lane_head_disagree = bool(self.lane_head_gap_m > LANE_PATH_DISAGREE_M)
     raw_target_d_prob = enhance_lane_probability(
-      combined_lane_probability(l_prob, r_prob), True)
+      combined_lane_probability(l_prob, r_prob), not self.lane_head_disagree)
+    if self.lane_head_disagree:
+      # Measured envelope: across 4444 frames with lane confidence >= 0.90 the
+      # heads never sat more than 0.996 m apart, so past 1.0 m the lane head is
+      # outside its own normal range. Shift weight to the path head in
+      # proportion to how far outside, down to the LANE_PATH_MIN_TRUST floor.
+      raw_target_d_prob = min(raw_target_d_prob,
+                              lane_head_trust_cap(self.lane_head_gap_m))
     geometry_plausible = bool(
       np.all(width_samples >= LANE_WIDTH_MIN_END_M) and
       np.all(width_samples <= LANE_WIDTH_MOD_END_M)
