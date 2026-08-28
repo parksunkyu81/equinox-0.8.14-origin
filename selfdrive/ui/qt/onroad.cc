@@ -16,7 +16,7 @@
 #include "selfdrive/ui/qt/maps/map_helpers.h"
 #endif
 
-/*namespace {
+namespace {
 constexpr float COMFORT_BRAKE = 2.5f;
 constexpr float STOP_DISTANCE = 5.5f;
 
@@ -33,7 +33,7 @@ float desired_follow_distance(float v_ego, float v_lead, float t_follow) {
     (v_lead * v_lead) / (2.0f * COMFORT_BRAKE) + v_diff_offset;
   return std::max(safe_obstacle_distance - stopped_equivalence_distance, 0.0f);
 }
-}  // namespace*/
+}  // namespace
 
 OnroadWindow::OnroadWindow(QWidget *parent) : QWidget(parent) {
   QVBoxLayout *main_layout  = new QVBoxLayout(this);
