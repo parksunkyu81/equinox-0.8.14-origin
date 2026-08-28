@@ -714,12 +714,11 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
   // centreline, so raw lane lines carry a constant lateral bias.
   constexpr float CAMERA_OFFSET_UI = -0.070f;
   constexpr int BOW = 12;      // how much the bar bows up in the middle
-  constexpr int BAR_W = 26;    // bar stroke width
-  constexpr int MARK = 34;     // marker box size
-  constexpr int MARK_PEN = 8;  // marker outline thickness
-  // Lift the marker so it rides on top of the bar with its lower edge dipping
-  // into it, instead of sitting centred on the curve.
-  constexpr int MARK_LIFT = BAR_W / 2 + MARK / 2 - 11;
+  // The bar is wide enough to contain both the centre reference and the moving
+  // marker, so the whole readout reads as one object.
+  constexpr int BAR_W = 46;    // bar stroke width
+  constexpr int MARK = 32;     // marker box size
+  constexpr int MARK_PEN = 6;  // marker outline thickness
 
   const SubMaster &sm = *(uiState()->sm);
   const auto model = sm["modelV2"].getModelV2();
@@ -760,20 +759,15 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
   QPainterPath bar;
   bar.moveTo(x0, y_end);
   bar.quadTo(cx, cy - BOW, x1, y_end);
-  p.strokePath(bar, QPen(QColor(150, 156, 162, valid ? 175 : 90), BAR_W,
+  p.strokePath(bar, QPen(QColor(255, 255, 255, valid ? 210 : 110), BAR_W,
                          Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 
-  // Fixed reference block at the lane centre. Its top edge sits on the
-  // underside of the bar at the bar's midpoint, so it reads as a datum the
-  // marker is measured against rather than a separate floating icon.
-  // Same green as the driving path above (see drawLaneLines), so the centre
-  // reference reads as belonging to the path the car is steering to.
-  const int ref_w = MARK, ref_h = 24;
-  const int ref_top = cy + BAR_W / 2;
-  p.setPen(QPen(QColor(28, 150, 45, valid ? 255 : 120), 4,
-                Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-  p.setBrush(QColor(55, 235, 72, valid ? 235 : 110));
-  p.drawRoundedRect(QRectF(cx - ref_w / 2.0, ref_top, ref_w, ref_h), 6, 6);
+  // Fixed reference block at the lane centre, seated inside the bar on its
+  // centreline. Grey so it reads as part of the scale rather than as data.
+  const int ref_w = 40, ref_h = 30;
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(122, 128, 134, valid ? 235 : 110));
+  p.drawRoundedRect(QRectF(cx - ref_w / 2.0, cy - ref_h / 2.0, ref_w, ref_h), 5, 5);
 
   // Marker riding the bar. The bar is a quadratic, so follow it exactly.
   const float t = (shown + 1.0f) / 2.0f;
@@ -781,13 +775,12 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
   const float mx = mt * mt * x0 + 2.0f * mt * t * cx + t * t * x1;
   const float my = mt * mt * y_end + 2.0f * mt * t * (cy - BOW) + t * t * y_end;
 
-  // Outline only -- no fill -- so the bar stays readable underneath it. The
-  // green matches the driving path and the centre pointer.
+  // Outline only -- no fill -- so the grey reference stays visible when the car
+  // is centred and the two shapes overlap. Rides inside the bar on the curve.
   p.setBrush(Qt::NoBrush);
-  p.setPen(QPen(QColor(55, 235, 72, valid ? 255 : 120), MARK_PEN,
+  p.setPen(QPen(QColor(255, 140, 0, valid ? 255 : 120), MARK_PEN,
                 Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-  p.drawRoundedRect(QRectF(mx - MARK / 2.0, my - MARK_LIFT - MARK / 2.0,
-                           MARK, MARK), 8, 8);
+  p.drawRoundedRect(QRectF(mx - MARK / 2.0, my - MARK / 2.0, MARK, MARK), 7, 7);
 
   p.restore();
 }
