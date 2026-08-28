@@ -844,7 +844,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
 
   textSize = 48.f;
-  if (lat_active) {
+  if (lat_active && cur_speed > min_steer_kph) {
     str = "ON";
     textColor = QColor(120, 255, 120, 200);
   }
