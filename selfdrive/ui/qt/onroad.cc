@@ -947,11 +947,27 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     ai_pedal_profile = pedal_profile;
   }
 
-  QColor aiProfileColor = QColor(120, 255, 120, 230);
-  configFont(p, "Open Sans", 29.f, "Bold");
-  drawTextWithColor(p, x, y1 - 13,
-                    QString("Pedal : %1").arg(ai_pedal_profile),
-                    aiProfileColor);
+  // Circular dial matching the PEDAL STATUS / ACC gauges: title on the disc,
+  // value under it. Colour encodes the level rather than being fixed green,
+  // so the setting reads at a glance without looking at the word.
+  p.setPen(Qt::NoPen);
+  p.setBrush(blackColor(200));
+  p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
+
+  QColor aiProfileColor;
+  if (ai_pedal_profile == "HIGH") {
+    aiProfileColor = QColor(254, 32, 32, 220);
+  } else if (ai_pedal_profile == "MID") {
+    aiProfileColor = QColor(255, 185, 15, 220);
+  } else {
+    aiProfileColor = QColor(255, 255, 255, 200);
+  }
+
+  configFont(p, "Open Sans", 20, "Bold");
+  drawText(p, x, y1 - 14, "PEDAL LEVEL", 200);
+
+  configFont(p, "Open Sans", 38, "Bold");
+  drawTextWithColor(p, x, y1 + 35, ai_pedal_profile, aiProfileColor);
   p.setOpacity(1.0);
 
 
@@ -2077,26 +2093,12 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
   const int band_x = left ? width() / 2 - band_gap - band_w : width() / 2 + band_gap;
   const int cy = height() / 2;
   const int dir = left ? -1 : 1;
-  // Outboard side of the band -- the glow is brightest there and fades inward,
-  // so it still reads as coming from the side the car is heading toward.
-  const int glow_x = left ? band_x : band_x + band_w;
-
   p.save();
   p.setRenderHint(QPainter::Antialiasing);
   p.setOpacity(1.0);
 
-  // Halo behind the chevrons. Bounded to the band instead of the full screen
-  // height -- at the edge a full-height column was harmless, but here it would
-  // wash over the path view in the middle of the screen.
-  QRadialGradient glow(QPointF(glow_x, cy), band_w * 1.35f);
-  QColor halo = color;
-  halo.setAlpha(150);
-  glow.setColorAt(0.0, halo);
-  halo.setAlpha(55);
-  glow.setColorAt(0.55, halo);
-  halo.setAlpha(0);
-  glow.setColorAt(1.0, halo);
-  p.fillRect(band_x, cy - band_w, band_w, 2 * band_w, glow);
+  // Chevrons and label only -- no halo behind them, so the path view stays
+  // unobstructed where the indicator overlaps it.
 
   // Three chevrons firing inside-out, the way a sequential turn signal does.
   const int n = 3;
@@ -2116,7 +2118,7 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
     chevron.moveTo(x, cy - ch);
     chevron.lineTo(x + dir * cw, cy);
     chevron.lineTo(x, cy + ch);
-    p.strokePath(chevron, QPen(c, 18, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.strokePath(chevron, QPen(c, 22, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
   }
 
   if (!label.isEmpty()) {
