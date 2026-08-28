@@ -20,7 +20,7 @@ namespace {
 constexpr float COMFORT_BRAKE = 2.5f;
 constexpr float STOP_DISTANCE = 5.5f;
 
-float desired_follow_distance(float v_ego, float v_lead, float t_follow) {
+/*float desired_follow_distance(float v_ego, float v_lead, float t_follow) {
   float v_diff_offset = 0.0f;
   if (v_lead > v_ego) {
     v_diff_offset = std::clamp(v_lead - v_ego, 0.0f, STOP_DISTANCE / 2.0f);
@@ -32,7 +32,8 @@ float desired_follow_distance(float v_ego, float v_lead, float t_follow) {
   const float stopped_equivalence_distance =
     (v_lead * v_lead) / (2.0f * COMFORT_BRAKE) + v_diff_offset;
   return std::max(safe_obstacle_distance - stopped_equivalence_distance, 0.0f);
-}
+}*/
+
 }  // namespace
 
 OnroadWindow::OnroadWindow(QWidget *parent) : QWidget(parent) {
