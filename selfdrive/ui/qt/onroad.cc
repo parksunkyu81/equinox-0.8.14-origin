@@ -766,7 +766,7 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
   // centreline. Grey so it reads as part of the scale rather than as data.
   const int ref_w = 40, ref_h = 30;
   p.setPen(Qt::NoPen);
-  p.setBrush(QColor(122, 128, 134, valid ? 235 : 110));
+  p.setBrush(QColor(40, 44, 48, valid ? 235 : 110));
   p.drawRoundedRect(QRectF(cx - ref_w / 2.0, cy - ref_h / 2.0, ref_w, ref_h), 5, 5);
 
   // Marker riding the bar. The bar is a quadratic, so follow it exactly.
@@ -778,7 +778,7 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
   // Outline only -- no fill -- so the grey reference stays visible when the car
   // is centred and the two shapes overlap. Rides inside the bar on the curve.
   p.setBrush(Qt::NoBrush);
-  p.setPen(QPen(QColor(40, 44, 48, valid ? 255 : 120), MARK_PEN,
+  p.setPen(QPen(QColor(254, 32, 32, valid ? 255 : 120), MARK_PEN,
                 Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
   p.drawRoundedRect(QRectF(mx - MARK / 2.0, my - MARK / 2.0, MARK, MARK), 7, 7);
 
