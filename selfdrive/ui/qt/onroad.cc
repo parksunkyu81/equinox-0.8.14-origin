@@ -718,7 +718,7 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
   // marker, so the whole readout reads as one object.
   constexpr int BAR_W = 46;    // bar stroke width
   constexpr int MARK = 32;     // marker box size
-  constexpr int MARK_PEN = 6;  // marker outline thickness
+  constexpr int MARK_PEN = 8;  // marker outline thickness
 
   const SubMaster &sm = *(uiState()->sm);
   const auto model = sm["modelV2"].getModelV2();
@@ -778,7 +778,7 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
   // Outline only -- no fill -- so the grey reference stays visible when the car
   // is centred and the two shapes overlap. Rides inside the bar on the curve.
   p.setBrush(Qt::NoBrush);
-  p.setPen(QPen(QColor(255, 140, 0, valid ? 255 : 120), MARK_PEN,
+  p.setPen(QPen(QColor(40, 44, 48, valid ? 255 : 120), MARK_PEN,
                 Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
   p.drawRoundedRect(QRectF(mx - MARK / 2.0, my - MARK / 2.0, MARK, MARK), 7, 7);
 
