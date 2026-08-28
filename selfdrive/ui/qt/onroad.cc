@@ -834,9 +834,9 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // "cur_speed > 10" copy showed ON while steering was actually cut, and
   // duplicated GM_MIN_STEER_SPEED_KPH as a literal.
   x = icon_start_x + (icon_step * 5);
-  const bool lkas_bool = car_state.getLkasEnable();
+  //const bool lkas_bool = car_state.getLkasEnable();
   const bool lat_active = car_control.getLatActive();
-  const bool engaged = controls_state.getEnabled();
+  //const bool engaged = controls_state.getEnabled();
   const float min_steer_kph = sm["carParams"].getCarParams().getMinSteerSpeed() * MS_TO_KPH;
 
   p.setPen(Qt::NoPen);
@@ -848,7 +848,19 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     str = "ON";
     textColor = QColor(120, 255, 120, 200);
   }
-  else if (lkas_bool && engaged && cur_speed < min_steer_kph) {
+  else if (lat_active && cur_speed < min_steer_kph) {
+    // City stop-and-go: steering is cut by the speed gate and comes back on
+    // its own above it. Amber, not red -- nothing is broken. This is checked
+    // BEFORE the fault branch on purpose: the PSCM reports
+    // LKATorqueDeliveredStatus == 2 (steerFaultTemporary) while stopped or
+    // creeping simply because it is not delivering LKA torque there. In the
+    // 2026-08-26 city drive every one of those 24.9s sat under 10 km/h, so
+    // ranking the fault first would paint normal stop-and-go red.
+    str = "OFF";
+    textSize = 40.f;
+    textColor = QColor(255, 175, 0, 220);
+  }
+  else  {
     // City stop-and-go: steering is cut by the speed gate and comes back on
     // its own above it. Amber, not red -- nothing is broken. This is checked
     // BEFORE the fault branch on purpose: the PSCM reports
