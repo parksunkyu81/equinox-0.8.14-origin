@@ -769,9 +769,11 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
   tri.lineTo(cx - tw, tip_y + th);
   tri.lineTo(cx + tw, tip_y + th);
   tri.closeSubpath();
-  p.setPen(QPen(QColor(255, 200, 0, valid ? 255 : 120), 5,
+  // Same green as the driving path above (see drawLaneLines), so the centre
+  // reference reads as belonging to the path the car is steering to.
+  p.setPen(QPen(QColor(28, 150, 45, valid ? 255 : 120), 5,
                 Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-  p.setBrush(QColor(220, 40, 30, valid ? 235 : 110));
+  p.setBrush(QColor(55, 235, 72, valid ? 235 : 110));
   p.drawPath(tri);
 
   // Marker riding the bar. The bar is a quadratic, so follow it exactly.
@@ -780,11 +782,12 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
   const float mx = mt * mt * x0 + 2.0f * mt * t * cx + t * t * x1;
   const float my = mt * mt * y_end + 2.0f * mt * t * (cy - BOW) + t * t * y_end;
 
-  p.setPen(Qt::NoPen);
-  p.setBrush(QColor(255, 255, 255, valid ? 235 : 110));
-  p.drawRoundedRect(QRectF(mx - 17, my - 17, 34, 34), 7, 7);
-  p.setBrush(QColor(198, 198, 198, valid ? 255 : 120));
-  p.drawEllipse(QPointF(mx, my), 11, 11);
+  // Outline only -- no fill -- so the bar stays readable underneath it. The
+  // green matches the driving path and the centre pointer.
+  p.setBrush(Qt::NoBrush);
+  p.setPen(QPen(QColor(55, 235, 72, valid ? 255 : 120), 5,
+                Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  p.drawRoundedRect(QRectF(mx - 17, my - 17, 34, 34), 8, 8);
 
   p.restore();
 }
