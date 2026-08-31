@@ -547,24 +547,31 @@ void NvgWindow::showEvent(QShowEvent *event) {
   prev_draw_t = millis_since_boot();
 }
 
-void NvgWindow::drawText(QPainter &p, int x, int y, const QString &text, int alpha) {
+// QRect::moveCenter rounds to an integer centre, and how far it rounds
+// (0 or 0.5 px) depends on the parity of the glyph bounding box's width --
+// consistent for any one string, but a single narrow glyph (e.g. "0") and a
+// wider one (e.g. "40") drawn at the same x can land on opposite sides of
+// that 0.5 px line. Each individually reads as "centred", but stacked next
+// to each other (the cruise/current-speed/apply panel) the mismatch shows
+// as one number looking off-centre relative to the others. Centring with
+// float math instead removes the parity dependency, so every string lands
+// on the exact same subpixel point regardless of its own width.
+static void drawCenteredText(QPainter &p, int x, int y, const QString &text) {
   QFontMetrics fm(p.font());
   QRect init_rect = fm.boundingRect(text);
   QRect real_rect = fm.boundingRect(init_rect, 0, text);
-  real_rect.moveCenter({x, y - real_rect.height() / 2});
+  const qreal draw_x = x - real_rect.width() / 2.0;
+  p.drawText(QPointF(draw_x, y), text);
+}
 
+void NvgWindow::drawText(QPainter &p, int x, int y, const QString &text, int alpha) {
   p.setPen(QColor(0xff, 0xff, 0xff, alpha));
-  p.drawText(real_rect.x(), real_rect.bottom(), text);
+  drawCenteredText(p, x, y, text);
 }
 
 void NvgWindow::drawTextWithColor(QPainter &p, int x, int y, const QString &text, QColor& color) {
-  QFontMetrics fm(p.font());
-  QRect init_rect = fm.boundingRect(text);
-  QRect real_rect = fm.boundingRect(init_rect, 0, text);
-  real_rect.moveCenter({x, y - real_rect.height() / 2});
-
   p.setPen(color);
-  p.drawText(real_rect.x(), real_rect.bottom(), text);
+  drawCenteredText(p, x, y, text);
 }
 
 void NvgWindow::drawIcon(QPainter &p, int x, int y, QPixmap &img, QBrush bg, float opacity) {
