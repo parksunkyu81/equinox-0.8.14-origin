@@ -2394,10 +2394,29 @@ void NvgWindow::drawThermal(QPainter &p) {
   // 레이아웃(세로형 + 오른쪽 아래 디버그 표시 위쪽)
   // =========================
   const int tile_w = 185;
-  const int tile_h = 120;
-  const int gap = 14;
+  // Space between one tile's label and the next tile's reading. The layout
+  // this replaced left 38 px here; halved from the 32 px first tried, since
+  // that band was the most visibly empty part of the panel.
+  const int gap = 16;
   const int pad = 14;
 
+  // Size each tile to the glyphs' actual ink, not to the font's line box.
+  // Open Sans reports ascent 1.07em + descent 0.29em, but every string here
+  // is digits/caps with no descender, so its ink is only cap height
+  // (~0.71em). Laying out by line box therefore left ~45% of each tile
+  // structurally empty, which is what made the panel look padded out.
+  //
+  // Measured from fixed reference strings, never from the live values, so a
+  // changing reading (9% -> 100%, 5C -> 45C) can never change the tile
+  // height and shift the whole panel. "8" covers digits, "°" and "%" the
+  // tallest symbols the value line can show; labels are all caps.
+  const int value_label_gap = 20;
+  configFont(p, "Open Sans", 56, "Bold");
+  const int val_ink_h = QFontMetrics(p.font()).tightBoundingRect("8°%").height();
+  configFont(p, "Open Sans", 31, "Bold");
+  const int lab_ink_h = QFontMetrics(p.font()).tightBoundingRect("A").height();
+
+  const int tile_h = val_ink_h + value_label_gap + lab_ink_h;
   const int total_w = tile_w;
   const int total_h = tile_h * 3 + gap * 2;
 
@@ -2421,20 +2440,23 @@ void NvgWindow::drawThermal(QPainter &p) {
   p.setBrush(QColor(0, 0, 0, 150));
   p.drawRoundedRect(bg_rect, 18, 18);
 
+  // Draw each string from its own ink box rather than centring it in a rect:
+  // the rect form re-introduces exactly the line-box padding the tile heights
+  // above were sized to remove. Baselines sit at the bottom of each reference
+  // ink block (valid because none of these strings has a descender), and the
+  // horizontal centre uses the string's own ink width so the digits look
+  // optically centred rather than advance-centred.
   auto drawTile = [&](int ty, const QString &value, const QString &label, const QColor &valColor) {
-    const int label_h = 42;
-    const int value_label_gap = 4;
-
-    QRect valueRect(x, ty, tile_w, tile_h - label_h - value_label_gap);
-    QRect labelRect(x, ty + tile_h - label_h, tile_w, label_h);
-
     configFont(p, "Open Sans", 56, "Bold");
+    const QRect vi = QFontMetrics(p.font()).tightBoundingRect(value);
     p.setPen(valColor);
-    p.drawText(valueRect, Qt::AlignCenter, value);
+    p.drawText(x + (tile_w - vi.width()) / 2 - vi.left(), ty + val_ink_h, value);
 
     configFont(p, "Open Sans", 31, "Bold");
+    const QRect li = QFontMetrics(p.font()).tightBoundingRect(label);
     p.setPen(QColor(0, 255, 0, 220));
-    p.drawText(labelRect, Qt::AlignCenter, label);
+    p.drawText(x + (tile_w - li.width()) / 2 - li.left(),
+               ty + val_ink_h + value_label_gap + lab_ink_h, label);
   };
 
   // =========================
