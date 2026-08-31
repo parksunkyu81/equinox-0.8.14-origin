@@ -735,17 +735,27 @@ static QColor gaugeColor(float t) {
 // the entire left half, and the driver sees both direction and how close
 // the system is to running out of authority in one glance.
 //
-// Driven by carControl.actuators.steer, the same normalized command the
-// STEER MAX gauge below scales to 0..300, so the two never disagree.
-// Deliberately NOT the lane-line offset it used to show: the point of this
-// readout is openpilot's own steering effort, and a lane-derived position
-// kept moving while the driver was steering, which read as the system
-// still being in charge when it was not.
+// The gauge is driven by carControl.actuators.steer, the same normalized
+// command the STEER MAX gauge below scales to 0..300, so the two never
+// disagree.
+//
+// Riding on top is a separate outline-only marker for lane centring: where
+// the car actually sits between the model's two lane lines, so a drift left
+// or right is visible alongside the steering effort. The two answer
+// different questions -- the gauge is what openpilot is DOING, the marker is
+// where the car IS -- so they are deliberately kept as distinct shapes
+// rather than folded into one indicator, which is what made the previous
+// single marker ambiguous.
 void NvgWindow::drawSteerGauge(QPainter &p, int cx, int cy, int w) {
   constexpr int BOW = 12;      // how much the bar bows up in the middle
   constexpr int BAR_W = 46;    // track stroke width
   constexpr int GAUGE_W = 30;  // gauge stroke width, inset inside the track
   constexpr int REF_W = 40, REF_H = 30;
+  constexpr int MARK = 32;     // lane-centring marker box size
+  constexpr int MARK_PEN = 8;  // marker outline thickness
+  // Mirrors lane_planner.py CAMERA_OFFSET. The camera does not sit on the
+  // car's centreline, so raw lane lines carry a constant lateral bias.
+  constexpr float CAMERA_OFFSET_UI = -0.070f;
 
   const SubMaster &sm = *(uiState()->sm);
   const auto car_state = sm["carState"].getCarState();
@@ -763,12 +773,37 @@ void NvgWindow::drawSteerGauge(QPainter &p, int cx, int cy, int w) {
   // Smooth so the gauge glides instead of chattering frame to frame. Held
   // hard at neutral while inactive, so grabbing the wheel stops all motion
   // immediately instead of animating down.
-  static float shown = 0.0f;
+  static float steer_shown = 0.0f;
   if (active) {
-    shown += (steer_cmd - shown) * 0.18f;
+    steer_shown += (steer_cmd - steer_shown) * 0.18f;
   } else {
-    shown = 0.0f;
+    steer_shown = 0.0f;
   }
+
+  // Lane centring: -1 = hard left of the lane, +1 = hard right. Read from
+  // the model's own lane lines, the same y values lane_planner blends.
+  bool lane_valid = false;
+  float lane_offset = 0.0f;
+  const auto lls = sm["modelV2"].getModelV2().getLaneLines();
+  const auto probs = sm["modelV2"].getModelV2().getLaneLineProbs();
+  if (lls.size() >= 4 && probs.size() >= 4) {
+    const auto ly = lls[1].getY();
+    const auto ry = lls[2].getY();
+    if (ly.size() > 0 && ry.size() > 0) {
+      const float left = ly[0], right = ry[0];
+      const float lane_w = right - left;
+      if (probs[1] > 0.3f && probs[2] > 0.3f && lane_w > 2.0f && lane_w < 4.5f) {
+        // modelV2 y is +right, so a positive lane centre means the lane sits
+        // to the right of the car -- the car is left of centre. Flip the sign
+        // so the marker travels the way the car does.
+        const float centre = (left + right) / 2.0f + CAMERA_OFFSET_UI;
+        lane_offset = std::clamp(-centre / (lane_w / 2.0f), -1.0f, 1.0f);
+        lane_valid = true;
+      }
+    }
+  }
+  static float lane_shown = 0.0f;
+  lane_shown += ((lane_valid ? lane_offset : 0.0f) - lane_shown) * 0.18f;
 
   const int half = w / 2;
   const int x0 = cx - half, x1 = cx + half;
@@ -793,11 +828,11 @@ void NvgWindow::drawSteerGauge(QPainter &p, int cx, int cy, int w) {
   p.strokePath(bar, QPen(QColor(255, 255, 255, active ? 210 : 110), BAR_W,
                          Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 
-  const float ratio = std::abs(shown);
+  const float ratio = std::abs(steer_shown);
   if (active && ratio > 0.01f) {
     // Positive (left) walks t down from the centre toward 0, negative
     // (right) up toward 1, reaching the very end at full saturation.
-    const float t_end = 0.5f - 0.5f * shown;
+    const float t_end = 0.5f - 0.5f * steer_shown;
     constexpr int STEPS = 24;
     QPainterPath gauge;
     gauge.moveTo(bar_point(0.5f));
@@ -808,11 +843,22 @@ void NvgWindow::drawSteerGauge(QPainter &p, int cx, int cy, int w) {
                              Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
   }
 
-  // Neutral reference at the centre, drawn last so the gauge appears to
-  // grow out from behind it and its round cap never bulges past centre.
+  // Neutral reference at the centre, over the gauge so its round cap never
+  // bulges past centre.
   p.setPen(Qt::NoPen);
   p.setBrush(QColor(40, 44, 48, active ? 235 : 110));
   p.drawRoundedRect(QRectF(cx - REF_W / 2.0, cy - REF_H / 2.0, REF_W, REF_H), 5, 5);
+
+  // Lane-centring marker, drawn last so it stays readable over the gauge.
+  // Outline only -- no fill -- so the gauge colour and the black centre
+  // reference both stay visible where it overlaps them, which is exactly
+  // where the car is centred and the two shapes sit on top of each other.
+  const QPointF mark_pt = bar_point((lane_shown + 1.0f) / 2.0f);
+  p.setBrush(Qt::NoBrush);
+  p.setPen(QPen(QColor(254, 32, 32, lane_valid ? 255 : 120), MARK_PEN,
+                Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  p.drawRoundedRect(QRectF(mark_pt.x() - MARK / 2.0, mark_pt.y() - MARK / 2.0,
+                           MARK, MARK), 7, 7);
 
   p.restore();
 }
