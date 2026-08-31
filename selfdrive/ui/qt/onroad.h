@@ -85,6 +85,7 @@ protected:
   void drawSpeed(QPainter &p);
   void drawBottomIcons(QPainter &p);
   void drawLaneAlignment(QPainter &p, int cx, int cy, int w);
+  void drawConfidenceGauge(QPainter &p, int cx, int top_y, int bottom_y);
   void drawSpeedLimit(QPainter &p);
   void drawSteer(QPainter &p);
   void drawRestArea(QPainter &p);

@@ -805,6 +805,63 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
   p.restore();
 }
 
+// Scene-understanding confidence gauge: a vertical white track with a ball
+// that rises and shifts red -> amber -> green as lateralPlan.dProb climbs.
+// dProb is the model's own published confidence in the lane geometry it is
+// currently steering to (see lane_planner.py) -- the same quantity behind
+// the dProb-based analysis used to size the fallback thresholds elsewhere
+// in this file/repo, reused here as a general "how sure is it right now"
+// readout rather than adding a second confidence source.
+void NvgWindow::drawConfidenceGauge(QPainter &p, int cx, int top_y, int bottom_y) {
+  constexpr int TRACK_W = 28;
+  constexpr int BALL_D = 44;
+
+  const SubMaster &sm = *(uiState()->sm);
+  const auto lp = sm["lateralPlan"].getLateralPlan();
+  const float target = std::clamp(lp.getDProb(), 0.0f, 1.0f);
+
+  // Smooth like the lane-alignment marker so the ball glides rather than
+  // jumping every model frame.
+  static float shown = 0.0f;
+  shown += (target - shown) * 0.15f;
+
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing);
+  p.setOpacity(1.0);
+
+  // White track, matching the lane-alignment bar's look.
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(255, 255, 255, 90));
+  p.drawRoundedRect(QRectF(cx - TRACK_W / 2.0, top_y, TRACK_W, bottom_y - top_y),
+                    TRACK_W / 2.0, TRACK_W / 2.0);
+
+  // Red -> amber -> green across the confidence range.
+  QColor low(230, 55, 55), mid(230, 165, 40), high(120, 220, 90);
+  QColor ball_color;
+  if (shown < 0.5f) {
+    const float t = shown / 0.5f;
+    ball_color = QColor(low.red() + (mid.red() - low.red()) * t,
+                        low.green() + (mid.green() - low.green()) * t,
+                        low.blue() + (mid.blue() - low.blue()) * t);
+  } else {
+    const float t = (shown - 0.5f) / 0.5f;
+    ball_color = QColor(mid.red() + (high.red() - mid.red()) * t,
+                        mid.green() + (high.green() - mid.green()) * t,
+                        mid.blue() + (high.blue() - mid.blue()) * t);
+  }
+
+  // Ball travels the track's inner extent so it never pokes past the
+  // rounded caps at either end.
+  const float travel_top = top_y + BALL_D / 2.0f;
+  const float travel_bottom = bottom_y - BALL_D / 2.0f;
+  const float ball_y = travel_bottom - shown * (travel_bottom - travel_top);
+
+  p.setBrush(ball_color);
+  p.drawEllipse(QPointF(cx, ball_y), BALL_D / 2.0, BALL_D / 2.0);
+
+  p.restore();
+}
+
 void NvgWindow::drawBottomIcons(QPainter &p) {
   const SubMaster &sm = *(uiState()->sm);
   auto car_state = sm["carState"].getCarState();
@@ -825,6 +882,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // Centring indicator sits above the upper icon row, spanning its width.
   drawLaneAlignment(p, icon_start_x + (icon_step * 5) / 2,
                     y2 - radius / 2 - 52, icon_step * 5 + radius);
+
+  // Confidence gauge sits beside the ACC/LKAS column (icon_step * 5),
+  // spanning the same vertical extent as that stacked pair.
+  drawConfidenceGauge(p, icon_start_x + (icon_step * 6),
+                      y2 - radius / 2, y1 + radius / 2);
 
   float cur_speed = std::max(0.0, car_state.getVEgo() * MS_TO_KPH);
   QString str;
