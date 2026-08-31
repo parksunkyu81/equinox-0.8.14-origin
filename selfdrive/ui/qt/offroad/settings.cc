@@ -551,151 +551,6 @@ void SettingsWindow::hideEvent(QHideEvent *event) {
 
 /////////////////////////////////////////////////////////////////////////
 
-TestCamera::TestCamera(QWidget* parent) : QWidget(parent) {
-  QVBoxLayout* main_layout = new QVBoxLayout(this);
-  main_layout->setMargin(20);
-  main_layout->setSpacing(20);
-
-  QPushButton* back = new QPushButton("Back");
-  back->setObjectName("back_btn");
-  back->setFixedSize(500, 100);
-  connect(back, &QPushButton::clicked, [=]() { emit backPress(); });
-  main_layout->addWidget(back, 0, Qt::AlignLeft);
-
-  statusLabel = new QLabel("camera starting", this);
-  statusLabel->setObjectName("testCameraStatus");
-  statusLabel->setAlignment(Qt::AlignCenter);
-  // The saved-file message is a long absolute path. main_layout of
-  // CommunityPanel is a QStackedLayout, which sizes to its widest child, so
-  // without these this panel's width demand would widen the whole Community
-  // menu -- same reason the labels in CommunityPanel's own layout set these.
-  statusLabel->setWordWrap(true);
-  statusLabel->setMinimumWidth(0);
-  statusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-  main_layout->addWidget(statusLabel, 0);
-
-  // VISION_STREAM_RGB_BACK is the road-facing (rear) camera -- the same stream
-  // onroad.cc's NvgWindow renders. zoom=false shows the uncropped frame, which
-  // is what makes edge haze and lens dirt visible.
-  cameraView = new CameraViewWidget("camerad", VISION_STREAM_RGB_BACK, false, this);
-  cameraView->setMinimumWidth(0);
-  cameraView->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
-  connect(cameraView, &CameraViewWidget::vipcThreadFrameReceived, this, [=](VisionBuf *) {
-    if (statusLabel->isVisible() && !showing_capture_result) {
-      statusLabel->hide();
-    }
-  });
-  main_layout->addWidget(cameraView, 1);
-
-  QPushButton* capture = new QPushButton("Capture");
-  capture->setObjectName("testCameraCaptureBtn");
-  capture->setFixedSize(500, 100);
-  connect(capture, &QPushButton::clicked, [=]() { saveFrame(); });
-  main_layout->addWidget(capture, 0, Qt::AlignHCenter);
-
-  setStyleSheet(R"(
-    #testCameraStatus {
-      font-size: 45px;
-      color: #dddddd;
-      padding: 20px;
-    }
-    #testCameraCaptureBtn {
-      font-size: 50px;
-      padding: 20px;
-      border-width: 0;
-      border-radius: 30px;
-      color: #dddddd;
-      background-color: #444444;
-    }
-  )");
-}
-
-void TestCamera::saveFrame() {
-  // Read the vision stream directly instead of grabFramebuffer(). The on-screen
-  // image is not the sensor data: cameraview.cc's fragment shader applies an EON
-  // display compensation (dz = 0.0627, so black is lifted to 16/255 and the whole
-  // range is compressed), and the widget letterboxes and rescales it. Measured on
-  // a real capture: on-screen content occupied levels 16..187 while the letterbox
-  // beside it was a true 0, and the same camera's raw fcamera.hevc frames span the
-  // full 0..255. Saving the source buffer keeps the file usable for judging lens
-  // haze/focus, which is the whole point of this screen.
-  //
-  // Its own short-lived client keeps this off CameraViewWidget's vipc thread --
-  // that thread's frame pointer is only valid until it recycles the buffer, while
-  // this runs entirely on the GUI thread where the button signal lands.
-  VisionIpcClient vipc("camerad", VISION_STREAM_RGB_BACK, true);
-  if (!vipc.connect(false)) {
-    showing_capture_result = true;
-    statusLabel->setText("capture failed: camerad not streaming yet");
-    statusLabel->show();
-    return;
-  }
-
-  VisionBuf *buf = vipc.recv(nullptr, 250);
-  if (buf == nullptr || buf->addr == nullptr || buf->width == 0 || buf->height == 0) {
-    showing_capture_result = true;
-    statusLabel->setText("capture failed: no frame yet");
-    statusLabel->show();
-    return;
-  }
-
-  // camerad's RGB buffers are BGR24 with a row stride (rgb_to_yuv.cl reads
-  // b,g,r from bytes 0,1,2). Qt 5.12 has no Format_BGR888, so wrap the same
-  // bytes as RGB888 and swap. rgbSwapped() deep-copies, which also detaches
-  // the image from the mapped buffer before it is recycled.
-  if (buf->stride < buf->width * 3) {
-    showing_capture_result = true;
-    statusLabel->setText("capture failed: unexpected buffer stride");
-    statusLabel->show();
-    return;
-  }
-  QImage img = QImage((const uchar *)buf->addr, buf->width, buf->height,
-                      buf->stride, QImage::Format_RGB888).rgbSwapped();
-  if (img.isNull()) {
-    showing_capture_result = true;
-    statusLabel->setText("capture failed: could not build image");
-    statusLabel->show();
-    return;
-  }
-
-  // Same volume the drive logs live on (/data/media/0/realdata), so this is
-  // reachable over scp and survives a reboot, unlike /tmp.
-  const QString dir = "/data/media/0/camera_test";
-  if (!QDir().mkpath(dir)) {
-    showing_capture_result = true;
-    statusLabel->setText("capture failed: cannot create " + dir);
-    statusLabel->show();
-    return;
-  }
-
-  const QString path = dir + "/camtest_" +
-      QDateTime::currentDateTimeUtc().addSecs(9 * 3600).toString("yyyyMMdd_HHmmss") + ".png";
-  showing_capture_result = true;
-  if (img.save(path, "PNG")) {
-    statusLabel->setText("saved: " + path);
-  } else {
-    statusLabel->setText("capture failed: cannot write " + path);
-  }
-  statusLabel->show();
-}
-
-void TestCamera::showEvent(QShowEvent* event) {
-  QWidget::showEvent(event);
-  showing_capture_result = false;
-  statusLabel->setText("camera starting");
-  statusLabel->show();
-  // camerad is a driverview process: offroad it only runs while this param is
-  // set (see manager.py's ensure_running). Onroad it is already running and
-  // this is a no-op that thermald's not_driver_view condition ignores, because
-  // startup_conditions are only evaluated while offroad.
-  params.putBool("IsDriverViewEnabled", true);
-}
-
-void TestCamera::hideEvent(QHideEvent* event) {
-  QWidget::hideEvent(event);
-  params.putBool("IsDriverViewEnabled", false);
-}
-
 CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
 
   main_layout = new QStackedLayout(this);
@@ -833,21 +688,6 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   layoutBtn_4->addSpacing(10);
   // =============================================================================================================== //
 
-  QPushButton* testCameraBtn = new QPushButton("Test Camera");
-  testCameraBtn->setObjectName("testCameraBtn");
-  testCameraBtn->setMinimumWidth(0);
-  testCameraBtn->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-  connect(testCameraBtn, &QPushButton::clicked, [=]() { main_layout->setCurrentWidget(testCamera); });
-
-  testCamera = new TestCamera(this);
-  connect(testCamera, &TestCamera::backPress, [=]() { main_layout->setCurrentWidget(homeScreen); });
-  main_layout->addWidget(testCamera);
-  QHBoxLayout* layoutBtn_testCamera = new QHBoxLayout();
-  layoutBtn_testCamera->setContentsMargins(0, 0, 0, 0);
-  layoutBtn_testCamera->addWidget(testCameraBtn);
-  layoutBtn_testCamera->addSpacing(10);
-  // =============================================================================================================== //
-
   QString lateral_control = QString::fromStdString(Params().get("LateralControl"));
   if(lateral_control.length() == 0)
     lateral_control = "TORQUE";
@@ -886,8 +726,6 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   vlayout->addSpacing(10);
   vlayout->addLayout(layoutBtn_4, 1);
   vlayout->addSpacing(10);
-  vlayout->addLayout(layoutBtn_testCamera, 1);
-  vlayout->addSpacing(10);
   // SettingsWindow already wraps every panel in a ScrollView. Keeping a
   // second ScrollView here reduced the lower menu width by its viewport and
   // scrollbar, and created nested horizontal/vertical scrolling on EON.
@@ -899,7 +737,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   setPalette(pal);
 
   setStyleSheet(R"(
-    #back_btn, #selectCarBtn, #lateralControlBtn, #cruiseGapBtn, #dynamicTRGapBtn, #minTrBtn, #globalDfModBtn, #testCameraBtn {
+    #back_btn, #selectCarBtn, #lateralControlBtn, #cruiseGapBtn, #dynamicTRGapBtn, #minTrBtn, #globalDfModBtn {
       font-size: 50px;
       margin: 0px;
       padding: 20px;

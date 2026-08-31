@@ -10,7 +10,6 @@
 #include <QStackedLayout>
 
 
-#include "selfdrive/ui/qt/widgets/cameraview.h"
 #include "selfdrive/ui/qt/widgets/controls.h"
 
 // ********** settings window + top-level panels **********
@@ -159,35 +158,6 @@ signals:
 
 };
 
-// Live view of the road-facing (rear) camera, for checking lens condition --
-// haze, dirt, condensation or focus directly degrade laneLineProbs, since the
-// model is fed these raw frames. Runs offroad by holding IsDriverViewEnabled,
-// which is what starts camerad while parked; camerad publishes the rear RGB
-// stream unconditionally once running.
-class TestCamera : public QWidget {
-  Q_OBJECT
-public:
-  explicit TestCamera(QWidget* parent = 0);
-
-protected:
-  void showEvent(QShowEvent* event) override;
-  void hideEvent(QHideEvent* event) override;
-
-private:
-  // Writes the on-screen frame to /data/media/0/camera_test/ as PNG.
-  void saveFrame();
-
-  Params params;
-  CameraViewWidget* cameraView = nullptr;
-  QLabel* statusLabel = nullptr;
-  // statusLabel doubles as the "camera starting" notice and the capture
-  // result. Only the former should be auto-cleared by the next frame.
-  bool showing_capture_result = false;
-
-signals:
-  void backPress();
-};
-
 class CommunityPanel : public QWidget {
   Q_OBJECT
 
@@ -199,7 +169,6 @@ private:
   DynamicTRGap* dynamicTRGap = nullptr;
   MinTR* minTR = nullptr;
   GlobalDfMod* globalDfMod = nullptr;
-  TestCamera* testCamera = nullptr;
 
   QWidget* homeWidget;
 
