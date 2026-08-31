@@ -712,71 +712,76 @@ void NvgWindow::drawHud(QPainter &p) {
   drawBottomIcons(p);
 }
 
-// Lane-centring indicator: a bowed bar for the lane, a marker for where the car
-// actually sits in it, and a fixed pointer at the lane centre. Reads the model
-// lane lines directly -- the same y values lane_planner blends -- so it shows
-// the geometry the planner is steering to, not a smoothed control output.
-void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
-  // Mirrors lane_planner.py CAMERA_OFFSET. The camera does not sit on the car's
-  // centreline, so raw lane lines carry a constant lateral bias.
-  constexpr float CAMERA_OFFSET_UI = -0.070f;
+// Shared green -> amber -> red scale for the on-screen gauges. t = 0 is
+// green (plenty of headroom), t = 1 red (at the limit). The confidence
+// gauge reads the other way round -- more is better there -- so it passes
+// 1 - dProb and lands on the same palette.
+static QColor gaugeColor(float t) {
+  t = std::clamp(t, 0.0f, 1.0f);
+  const QColor safe(90, 200, 110), mid(230, 165, 40), danger(230, 55, 55);
+  const QColor &a = (t < 0.5f) ? safe : mid;
+  const QColor &b = (t < 0.5f) ? mid : danger;
+  const float u = (t < 0.5f) ? (t / 0.5f) : ((t - 0.5f) / 0.5f);
+  return QColor(a.red() + (b.red() - a.red()) * u,
+                a.green() + (b.green() - a.green()) * u,
+                a.blue() + (b.blue() - a.blue()) * u);
+}
+
+// Steering-effort gauge. The bowed bar is a fixed track; a coloured gauge
+// fills out of its centre toward the side openpilot is steering to, its
+// length proportional to how much of the available steering command is in
+// use and its colour running green -> amber -> red as that approaches
+// saturation. So a full-left saturated command reads as a red bar filling
+// the entire left half, and the driver sees both direction and how close
+// the system is to running out of authority in one glance.
+//
+// Driven by carControl.actuators.steer, the same normalized command the
+// STEER MAX gauge below scales to 0..300, so the two never disagree.
+// Deliberately NOT the lane-line offset it used to show: the point of this
+// readout is openpilot's own steering effort, and a lane-derived position
+// kept moving while the driver was steering, which read as the system
+// still being in charge when it was not.
+void NvgWindow::drawSteerGauge(QPainter &p, int cx, int cy, int w) {
   constexpr int BOW = 12;      // how much the bar bows up in the middle
-  // The bar is wide enough to contain both the centre reference and the moving
-  // marker, so the whole readout reads as one object.
-  constexpr int BAR_W = 46;    // bar stroke width
-  constexpr int MARK = 32;     // marker box size, at rest
-  constexpr int MARK_PEN = 8;  // marker outline thickness
-  // Steering-limit warning: past this fraction of steer_max, the marker
-  // stretches toward the bar's end on the saturating side so a driver
-  // glancing at the bar sees the car running out of steering authority,
-  // not just where it sits in the lane.
-  constexpr float STEER_WARN_START = 0.80f;
+  constexpr int BAR_W = 46;    // track stroke width
+  constexpr int GAUGE_W = 30;  // gauge stroke width, inset inside the track
+  constexpr int REF_W = 40, REF_H = 30;
 
   const SubMaster &sm = *(uiState()->sm);
-  const auto model = sm["modelV2"].getModelV2();
-  const auto lls = model.getLaneLines();
-  const auto probs = model.getLaneLineProbs();
+  const auto car_state = sm["carState"].getCarState();
+  const auto car_control = sm["carControl"].getCarControl();
 
-  // Same normalized-to-GM-scale conversion as the STEER MAX gauge below,
-  // reused here so both readouts agree on what "near the limit" means.
-  // Signed, not just magnitude: the warning grows toward the side the car
-  // is actually saturating against (see below), so which end of the bar it
-  // reaches for tells you left vs right, not just "near the limit".
   // Positive = LEFT, matching this fork's steeringAngleDeg convention (see
   // reference-sign-conventions) -- actuators.steer is commanded in the same
-  // frame so the two never disagree on direction.
-  const auto car_control = sm["carControl"].getCarControl();
+  // frame, so positive fills toward the bar's left end.
   const float steer_cmd = std::clamp(car_control.getActuators().getSteer(), -1.0f, 1.0f);
-  const float steer_ratio = std::abs(steer_cmd);
-  const float steer_warn = std::clamp(
-      (steer_ratio - STEER_WARN_START) / (1.0f - STEER_WARN_START), 0.0f, 1.0f);
+  // Hands on the wheel means the driver is steering, not openpilot, and the
+  // command still being published is being overridden. Show nothing rather
+  // than an animated gauge implying the system is driving the corner.
+  const bool active = car_control.getLatActive() && !car_state.getSteeringPressed();
 
-  bool valid = false;
-  float offset = 0.0f;   // -1 = hard left of lane, +1 = hard right
-  if (lls.size() >= 4 && probs.size() >= 4) {
-    const auto ly = lls[1].getY();
-    const auto ry = lls[2].getY();
-    if (ly.size() > 0 && ry.size() > 0) {
-      const float left = ly[0], right = ry[0];
-      const float lane_w = right - left;
-      if (probs[1] > 0.3f && probs[2] > 0.3f && lane_w > 2.0f && lane_w < 4.5f) {
-        // modelV2 y is +right, so a positive lane centre means the lane sits to
-        // the right of the car -- the car is left of centre. Flip the sign so
-        // the marker travels the way the car does.
-        const float centre = (left + right) / 2.0f + CAMERA_OFFSET_UI;
-        offset = std::clamp(-centre / (lane_w / 2.0f), -1.0f, 1.0f);
-        valid = true;
-      }
-    }
-  }
-
-  // Smooth so the marker glides instead of chattering with the model frame.
+  // Smooth so the gauge glides instead of chattering frame to frame. Held
+  // hard at neutral while inactive, so grabbing the wheel stops all motion
+  // immediately instead of animating down.
   static float shown = 0.0f;
-  shown += ((valid ? offset : 0.0f) - shown) * 0.18f;
+  if (active) {
+    shown += (steer_cmd - shown) * 0.18f;
+  } else {
+    shown = 0.0f;
+  }
 
   const int half = w / 2;
   const int x0 = cx - half, x1 = cx + half;
   const int y_end = cy + BOW;
+
+  // The track is a quadratic bezier, so the gauge has to follow it exactly
+  // rather than being a straight rectangle. t = 0 is the left end, 1 the
+  // right, 0.5 the centre.
+  auto bar_point = [&](float t) {
+    const float mt = 1.0f - t;
+    return QPointF(mt * mt * x0 + 2.0f * mt * t * cx + t * t * x1,
+                   mt * mt * y_end + 2.0f * mt * t * (cy - BOW) + t * t * y_end);
+  };
 
   p.save();
   p.setRenderHint(QPainter::Antialiasing);
@@ -785,61 +790,29 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
   QPainterPath bar;
   bar.moveTo(x0, y_end);
   bar.quadTo(cx, cy - BOW, x1, y_end);
-  p.strokePath(bar, QPen(QColor(255, 255, 255, valid ? 210 : 110), BAR_W,
+  p.strokePath(bar, QPen(QColor(255, 255, 255, active ? 210 : 110), BAR_W,
                          Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 
-  // Fixed reference block at the lane centre, seated inside the bar on its
-  // centreline. Black, matching the circular gauges below.
-  const int ref_w = 40, ref_h = 30;
-  p.setPen(Qt::NoPen);
-  p.setBrush(QColor(40, 44, 48, valid ? 235 : 110));
-  p.drawRoundedRect(QRectF(cx - ref_w / 2.0, cy - ref_h / 2.0, ref_w, ref_h), 5, 5);
-
-  // Marker riding the bar. The bar is a quadratic, so follow it exactly.
-  const float t = (shown + 1.0f) / 2.0f;
-  const float mt = 1.0f - t;
-  const float mx = mt * mt * x0 + 2.0f * mt * t * cx + t * t * x1;
-  const float my = mt * mt * y_end + 2.0f * mt * t * (cy - BOW) + t * t * y_end;
-
-  // Filled green at rest -- steering has plenty of headroom -- shading
-  // through amber to red as steer_ratio climbs toward saturation, same
-  // green/amber/red scale as the confidence gauge below (just read in the
-  // opposite direction: there, more is better; here, more is closer to the
-  // wall). Independent of that colour fade, once steer_warn > 0 (past
-  // STEER_WARN_START) the marker's near edge also stretches toward
-  // whichever end of the bar matches the saturation direction (x0 = left,
-  // x1 = right), reaching that endpoint exactly at steer_warn == 1.0 (full
-  // saturation) -- so "pinned against the wall" reads as both fully red
-  // and fully extended, not an arbitrary fixed width that never gets there.
-  const QColor safe(90, 200, 110), mid(230, 165, 40), danger(230, 55, 55);
-  QColor mark_color;
-  if (steer_ratio < 0.5f) {
-    const float u = steer_ratio / 0.5f;
-    mark_color = QColor(safe.red() + (mid.red() - safe.red()) * u,
-                        safe.green() + (mid.green() - safe.green()) * u,
-                        safe.blue() + (mid.blue() - safe.blue()) * u);
-  } else {
-    const float u = (steer_ratio - 0.5f) / 0.5f;
-    mark_color = QColor(mid.red() + (danger.red() - mid.red()) * u,
-                        mid.green() + (danger.green() - mid.green()) * u,
-                        mid.blue() + (danger.blue() - mid.blue()) * u);
-  }
-
-  float mark_left = mx - MARK / 2.0f;
-  float mark_right = mx + MARK / 2.0f;
-  if (steer_warn > 0.0f) {
-    const float edge_x = (steer_cmd >= 0.0f) ? static_cast<float>(x0) : static_cast<float>(x1);
-    const float extended = mx + (edge_x - mx) * steer_warn;
-    if (edge_x < mx) {
-      mark_left = std::min(mark_left, extended);
-    } else {
-      mark_right = std::max(mark_right, extended);
+  const float ratio = std::abs(shown);
+  if (active && ratio > 0.01f) {
+    // Positive (left) walks t down from the centre toward 0, negative
+    // (right) up toward 1, reaching the very end at full saturation.
+    const float t_end = 0.5f - 0.5f * shown;
+    constexpr int STEPS = 24;
+    QPainterPath gauge;
+    gauge.moveTo(bar_point(0.5f));
+    for (int i = 1; i <= STEPS; i++) {
+      gauge.lineTo(bar_point(0.5f + (t_end - 0.5f) * (float)i / STEPS));
     }
+    p.strokePath(gauge, QPen(gaugeColor(ratio), GAUGE_W,
+                             Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
   }
-  p.setBrush(QColor(mark_color.red(), mark_color.green(), mark_color.blue(), valid ? 235 : 100));
-  p.setPen(QPen(QColor(mark_color.red(), mark_color.green(), mark_color.blue(), valid ? 255 : 120),
-                MARK_PEN, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-  p.drawRoundedRect(QRectF(mark_left, my - MARK / 2.0, mark_right - mark_left, MARK), 7, 7);
+
+  // Neutral reference at the centre, drawn last so the gauge appears to
+  // grow out from behind it and its round cap never bulges past centre.
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(40, 44, 48, active ? 235 : 110));
+  p.drawRoundedRect(QRectF(cx - REF_W / 2.0, cy - REF_H / 2.0, REF_W, REF_H), 5, 5);
 
   p.restore();
 }
@@ -874,20 +847,9 @@ void NvgWindow::drawConfidenceGauge(QPainter &p, int cx, int top_y, int bottom_y
   p.drawRoundedRect(QRectF(cx - TRACK_W / 2.0, top_y, TRACK_W, bottom_y - top_y),
                     TRACK_W / 2.0, TRACK_W / 2.0);
 
-  // Red -> amber -> green across the confidence range.
-  QColor low(230, 55, 55), mid(230, 165, 40), high(120, 220, 90);
-  QColor ball_color;
-  if (shown < 0.5f) {
-    const float t = shown / 0.5f;
-    ball_color = QColor(low.red() + (mid.red() - low.red()) * t,
-                        low.green() + (mid.green() - low.green()) * t,
-                        low.blue() + (mid.blue() - low.blue()) * t);
-  } else {
-    const float t = (shown - 0.5f) / 0.5f;
-    ball_color = QColor(mid.red() + (high.red() - mid.red()) * t,
-                        mid.green() + (high.green() - mid.green()) * t,
-                        mid.blue() + (high.blue() - mid.blue()) * t);
-  }
+  // Red -> amber -> green across the confidence range: the shared gauge
+  // scale, inverted because here a high value is the good end.
+  const QColor ball_color = gaugeColor(1.0f - shown);
 
   // Ball travels the track's inner extent so it never pokes past the
   // rounded caps at either end.
@@ -918,9 +880,9 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   const int y1 = rect().bottom() - footer_h / 2 - 10;
   const int y2 = y1 - radius - row_gap;
 
-  // Centring indicator sits above the upper icon row, spanning its width.
-  drawLaneAlignment(p, icon_start_x + (icon_step * 5) / 2,
-                    y2 - radius / 2 - 52, icon_step * 5 + radius);
+  // Steering-effort gauge sits above the upper icon row, spanning its width.
+  drawSteerGauge(p, icon_start_x + (icon_step * 5) / 2,
+                 y2 - radius / 2 - 52, icon_step * 5 + radius);
 
   // Confidence gauge sits beside the ACC/LKAS column (icon_step * 5),
   // spanning the same vertical extent as that stacked pair.
