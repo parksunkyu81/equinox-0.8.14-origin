@@ -763,7 +763,7 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
                          Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 
   // Fixed reference block at the lane centre, seated inside the bar on its
-  // centreline. Grey so it reads as part of the scale rather than as data.
+  // centreline. Black, matching the circular gauges below.
   const int ref_w = 40, ref_h = 30;
   p.setPen(Qt::NoPen);
   p.setBrush(QColor(40, 44, 48, valid ? 235 : 110));
@@ -775,8 +775,8 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
   const float mx = mt * mt * x0 + 2.0f * mt * t * cx + t * t * x1;
   const float my = mt * mt * y_end + 2.0f * mt * t * (cy - BOW) + t * t * y_end;
 
-  // Outline only -- no fill -- so the grey reference stays visible when the car
-  // is centred and the two shapes overlap. Rides inside the bar on the curve.
+  // Outline only -- no fill -- so the black reference stays visible when the
+  // car is centred and the two shapes overlap. Rides inside the bar.
   p.setBrush(Qt::NoBrush);
   p.setPen(QPen(QColor(254, 32, 32, valid ? 255 : 120), MARK_PEN,
                 Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
@@ -1279,12 +1279,12 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     p.setPen(Qt::NoPen);
 
     str2.sprintf("STEER %.0f°", steer_angle_deg);
-    textColor = QColor(255, 185, 15, 200);  // amber(호박색)
+    textColor = QColor(120, 255, 120, 200);  // green
     configFont(p, "Open Sans", 32, "Bold");
     drawTextWithColor(p, x, y2 - 5, str2, textColor);
 
     str2.sprintf("DESIRE %.0f°", desire_angle_deg);
-    textColor = QColor(255, 185, 15, 200);  // amber(호박색)
+    textColor = QColor(120, 255, 120, 200);  // green
     configFont(p, "Open Sans", 32, "Bold");
     drawTextWithColor(p, x, y2 + 32, str2, textColor);
     p.setOpacity(1.0);
