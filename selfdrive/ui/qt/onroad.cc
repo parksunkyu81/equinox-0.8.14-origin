@@ -717,13 +717,25 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
   // The bar is wide enough to contain both the centre reference and the moving
   // marker, so the whole readout reads as one object.
   constexpr int BAR_W = 46;    // bar stroke width
-  constexpr int MARK = 32;     // marker box size
+  constexpr int MARK = 32;     // marker box size, at rest
   constexpr int MARK_PEN = 8;  // marker outline thickness
+  // Steering-limit warning: past this fraction of steer_max, the marker
+  // widens toward MARK_MAX_W so a driver glancing at the bar sees the car
+  // running out of steering authority, not just where it sits in the lane.
+  constexpr float STEER_WARN_START = 0.80f;
+  constexpr int MARK_MAX_W = 170;
 
   const SubMaster &sm = *(uiState()->sm);
   const auto model = sm["modelV2"].getModelV2();
   const auto lls = model.getLaneLines();
   const auto probs = model.getLaneLineProbs();
+
+  // Same normalized-to-GM-scale conversion as the STEER MAX gauge below,
+  // reused here so both readouts agree on what "near the limit" means.
+  const auto car_control = sm["carControl"].getCarControl();
+  const float steer_ratio = std::clamp(std::abs(car_control.getActuators().getSteer()), 0.0f, 1.0f);
+  const float steer_warn = std::clamp(
+      (steer_ratio - STEER_WARN_START) / (1.0f - STEER_WARN_START), 0.0f, 1.0f);
 
   bool valid = false;
   float offset = 0.0f;   // -1 = hard left of lane, +1 = hard right
@@ -775,12 +787,20 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
   const float mx = mt * mt * x0 + 2.0f * mt * t * cx + t * t * x1;
   const float my = mt * mt * y_end + 2.0f * mt * t * (cy - BOW) + t * t * y_end;
 
-  // Outline only -- no fill -- so the black reference stays visible when the
-  // car is centred and the two shapes overlap. Rides inside the bar.
-  p.setBrush(Qt::NoBrush);
+  // Outline only at rest -- no fill -- so the black reference stays visible
+  // when the car is centred and the two shapes overlap. Rides inside the
+  // bar. As steering nears its limit (steer_warn > 0), the marker widens
+  // and fills solid so running out of steering authority reads as a
+  // distinct warning, not just a lane-offset reading.
+  const float mark_w = MARK + (MARK_MAX_W - MARK) * steer_warn;
+  if (steer_warn > 0.0f) {
+    p.setBrush(QColor(255, 60, 60, valid ? static_cast<int>(160 + 95 * steer_warn) : 90));
+  } else {
+    p.setBrush(Qt::NoBrush);
+  }
   p.setPen(QPen(QColor(254, 32, 32, valid ? 255 : 120), MARK_PEN,
                 Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-  p.drawRoundedRect(QRectF(mx - MARK / 2.0, my - MARK / 2.0, MARK, MARK), 7, 7);
+  p.drawRoundedRect(QRectF(mx - mark_w / 2.0, my - MARK / 2.0, mark_w, MARK), 7, 7);
 
   p.restore();
 }
