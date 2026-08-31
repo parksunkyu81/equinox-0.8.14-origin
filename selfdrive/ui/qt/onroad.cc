@@ -2405,10 +2405,14 @@ void NvgWindow::drawThermal(QPainter &p) {
   const int x_calc = width() - tile_w - 35;
   const int x = x_calc > 35 ? x_calc : 35;
 
-  // 하단 디버그/정보 표시 영역 위쪽으로 올림.
-  // 1080p 기준 대략 y=500 부근에 배치되어 오른쪽 하단 원형 아이콘과 겹치지 않음.
-  const int bottom_margin = 100;
-  const int y_calc = rect().bottom() - bottom_margin - total_h;
+  // 화면 맨 아래로 내림. 배경 사각형의 아래변이 하단 디버그 텍스트의
+  // baseline(paintGL에서 rect().height() - 15에 그림)과 같은 높이에 오도록
+  // 맞춰서, 둘이 하나의 하단 줄처럼 읽히게 한다. 배경은 타일보다 pad 만큼
+  // 더 내려가므로 그만큼 빼 준다.
+  // 디버그 텍스트는 왼쪽(left + 20)에서 시작하고 이 패널은 오른쪽 끝에
+  // 붙으므로 같은 높이에 있어도 가로로 겹치지 않는다.
+  constexpr int debug_text_up = 15;
+  const int y_calc = rect().bottom() - debug_text_up - pad - total_h;
   const int y = y_calc > 80 ? y_calc : 80;
 
   // ✅ 배경: 투명 검정 + 라운드
