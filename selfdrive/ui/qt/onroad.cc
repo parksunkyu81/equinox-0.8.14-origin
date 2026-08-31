@@ -720,10 +720,10 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
   constexpr int MARK = 32;     // marker box size, at rest
   constexpr int MARK_PEN = 8;  // marker outline thickness
   // Steering-limit warning: past this fraction of steer_max, the marker
-  // widens toward MARK_MAX_W so a driver glancing at the bar sees the car
-  // running out of steering authority, not just where it sits in the lane.
+  // stretches toward the bar's end on the saturating side so a driver
+  // glancing at the bar sees the car running out of steering authority,
+  // not just where it sits in the lane.
   constexpr float STEER_WARN_START = 0.80f;
-  constexpr int MARK_MAX_W = 170;
 
   const SubMaster &sm = *(uiState()->sm);
   const auto model = sm["modelV2"].getModelV2();
@@ -732,8 +732,15 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
 
   // Same normalized-to-GM-scale conversion as the STEER MAX gauge below,
   // reused here so both readouts agree on what "near the limit" means.
+  // Signed, not just magnitude: the warning grows toward the side the car
+  // is actually saturating against (see below), so which end of the bar it
+  // reaches for tells you left vs right, not just "near the limit".
+  // Positive = LEFT, matching this fork's steeringAngleDeg convention (see
+  // reference-sign-conventions) -- actuators.steer is commanded in the same
+  // frame so the two never disagree on direction.
   const auto car_control = sm["carControl"].getCarControl();
-  const float steer_ratio = std::clamp(std::abs(car_control.getActuators().getSteer()), 0.0f, 1.0f);
+  const float steer_cmd = std::clamp(car_control.getActuators().getSteer(), -1.0f, 1.0f);
+  const float steer_ratio = std::abs(steer_cmd);
   const float steer_warn = std::clamp(
       (steer_ratio - STEER_WARN_START) / (1.0f - STEER_WARN_START), 0.0f, 1.0f);
 
@@ -787,20 +794,45 @@ void NvgWindow::drawLaneAlignment(QPainter &p, int cx, int cy, int w) {
   const float mx = mt * mt * x0 + 2.0f * mt * t * cx + t * t * x1;
   const float my = mt * mt * y_end + 2.0f * mt * t * (cy - BOW) + t * t * y_end;
 
-  // Outline only at rest -- no fill -- so the black reference stays visible
-  // when the car is centred and the two shapes overlap. Rides inside the
-  // bar. As steering nears its limit (steer_warn > 0), the marker widens
-  // and fills solid so running out of steering authority reads as a
-  // distinct warning, not just a lane-offset reading.
-  const float mark_w = MARK + (MARK_MAX_W - MARK) * steer_warn;
-  if (steer_warn > 0.0f) {
-    p.setBrush(QColor(255, 60, 60, valid ? static_cast<int>(160 + 95 * steer_warn) : 90));
+  // Filled green at rest -- steering has plenty of headroom -- shading
+  // through amber to red as steer_ratio climbs toward saturation, same
+  // green/amber/red scale as the confidence gauge below (just read in the
+  // opposite direction: there, more is better; here, more is closer to the
+  // wall). Independent of that colour fade, once steer_warn > 0 (past
+  // STEER_WARN_START) the marker's near edge also stretches toward
+  // whichever end of the bar matches the saturation direction (x0 = left,
+  // x1 = right), reaching that endpoint exactly at steer_warn == 1.0 (full
+  // saturation) -- so "pinned against the wall" reads as both fully red
+  // and fully extended, not an arbitrary fixed width that never gets there.
+  const QColor safe(90, 200, 110), mid(230, 165, 40), danger(230, 55, 55);
+  QColor mark_color;
+  if (steer_ratio < 0.5f) {
+    const float u = steer_ratio / 0.5f;
+    mark_color = QColor(safe.red() + (mid.red() - safe.red()) * u,
+                        safe.green() + (mid.green() - safe.green()) * u,
+                        safe.blue() + (mid.blue() - safe.blue()) * u);
   } else {
-    p.setBrush(Qt::NoBrush);
+    const float u = (steer_ratio - 0.5f) / 0.5f;
+    mark_color = QColor(mid.red() + (danger.red() - mid.red()) * u,
+                        mid.green() + (danger.green() - mid.green()) * u,
+                        mid.blue() + (danger.blue() - mid.blue()) * u);
   }
-  p.setPen(QPen(QColor(254, 32, 32, valid ? 255 : 120), MARK_PEN,
-                Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-  p.drawRoundedRect(QRectF(mx - mark_w / 2.0, my - MARK / 2.0, mark_w, MARK), 7, 7);
+
+  float mark_left = mx - MARK / 2.0f;
+  float mark_right = mx + MARK / 2.0f;
+  if (steer_warn > 0.0f) {
+    const float edge_x = (steer_cmd >= 0.0f) ? static_cast<float>(x0) : static_cast<float>(x1);
+    const float extended = mx + (edge_x - mx) * steer_warn;
+    if (edge_x < mx) {
+      mark_left = std::min(mark_left, extended);
+    } else {
+      mark_right = std::max(mark_right, extended);
+    }
+  }
+  p.setBrush(QColor(mark_color.red(), mark_color.green(), mark_color.blue(), valid ? 235 : 100));
+  p.setPen(QPen(QColor(mark_color.red(), mark_color.green(), mark_color.blue(), valid ? 255 : 120),
+                MARK_PEN, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  p.drawRoundedRect(QRectF(mark_left, my - MARK / 2.0, mark_right - mark_left, MARK), 7, 7);
 
   p.restore();
 }
