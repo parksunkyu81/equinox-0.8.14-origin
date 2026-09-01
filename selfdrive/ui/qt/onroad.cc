@@ -1349,7 +1349,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // Skipped if drawThermal has not run yet (it does, earlier in paintGL) so a
   // zero panel top can never park these at the top of the screen.
   if (thermal_panel_top_ > 0) {
-    constexpr int SD = 88;         // status circle diameter
+    constexpr int SD = 72;         // status circle diameter
     constexpr int SGAP_X = 12;     // horizontal gap between the two columns
     constexpr int SGAP_Y = 10;     // vertical gap between the two rows
     constexpr int PANEL_GAP = 16;  // clearance above the temperature panel
@@ -1363,11 +1363,16 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // the width of "ACC" and a fixed 20 px would run off the edge. The value
     // is measured from "8" rather than the live string so a changing reading
     // can never shift the pair.
+    // size_ref is the widest string this tile can ever show. Both the label
+    // and the value are fitted to the disc, and the value is measured from
+    // size_ref rather than the live text so switching state (ON -> OFF,
+    // 가속 -> 브레이크) never resizes or reflows it.
     auto drawTileText = [&](int cx_, int cy, const QString &label,
                             const QString &value, const QColor &value_color,
-                            int label_budget, int label_alpha) {
+                            int label_budget, int label_alpha,
+                            const QString &size_ref) {
       int label_pt = 20;
-      while (label_pt > 11) {
+      while (label_pt > 9) {
         configFont(p, "Open Sans", label_pt, "Bold");
         if (QFontMetrics(p.font()).width(label) <= label_budget) {
           break;
@@ -1376,7 +1381,20 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       }
       configFont(p, "Open Sans", label_pt, "Bold");
       const int label_h = QFontMetrics(p.font()).tightBoundingRect(label).height();
-      configFont(p, "Open Sans", 28, "Bold");
+
+      // The value sits across the disc's widest part, so it gets a little
+      // more room than the label. "브레이크" at a fixed 28 px is 112 px wide
+      // and would run well outside a 72 px disc.
+      const int value_budget = label_budget + 8;
+      int value_pt = 28;
+      while (value_pt > 14) {
+        configFont(p, "Open Sans", value_pt, "Bold");
+        if (QFontMetrics(p.font()).width(size_ref) <= value_budget) {
+          break;
+        }
+        value_pt--;
+      }
+      configFont(p, "Open Sans", value_pt, "Bold");
       const int value_h = QFontMetrics(p.font()).tightBoundingRect("8").height();
 
       constexpr int TEXT_GAP = 7;
@@ -1386,23 +1404,25 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       configFont(p, "Open Sans", label_pt, "Bold");
       drawText(p, cx_, top + label_h, label, label_alpha);
       QColor c = value_color;
-      configFont(p, "Open Sans", 28, "Bold");
+      configFont(p, "Open Sans", value_pt, "Bold");
       drawTextWithColor(p, cx_, top + total_h, value, c);
       p.setOpacity(1.0);
     };
 
     auto statusCircle = [&](int cx_, int cy, const QString &label,
-                            const QString &value, const QColor &value_color) {
+                            const QString &value, const QColor &value_color,
+                            const QString &size_ref) {
       p.setPen(Qt::NoPen);
       p.setBrush(blackColor(200));
       p.drawEllipse(cx_ - SD / 2, cy - SD / 2, SD, SD);
-      drawTileText(cx_, cy, label, value, value_color, SD - 8, 200);
+      drawTileText(cx_, cy, label, value, value_color, SD - 8, 200, size_ref);
     };
 
     // Same tile as statusCircle plus a progress ring, so the live comma-pedal
     // command still reads as a filling arc rather than only as a number.
     auto statusRing = [&](int cx_, int cy, const QString &label,
-                          const QString &value, float ratio) {
+                          const QString &value, float ratio,
+                          const QString &size_ref) {
       p.setPen(QPen(QColor(55, 61, 74, 255), 3));
       p.setBrush(QColor(55, 61, 74, 235));
       p.drawEllipse(cx_ - SD / 2, cy - SD / 2, SD, SD);
@@ -1416,7 +1436,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
                 -static_cast<int>(std::clamp(ratio, 0.0f, 1.0f) * 360.0f * 16.0f));
 
       // Label budget is the disc minus the ring, not just the disc.
-      drawTileText(cx_, cy, label, value, QColor(255, 255, 255, 245), SD - 22, 230);
+      drawTileText(cx_, cy, label, value, QColor(255, 255, 255, 245), SD - 22, 230, size_ref);
       p.setBrush(Qt::NoBrush);
       p.setPen(Qt::NoPen);
     };
@@ -1441,8 +1461,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
     QString pedal_max_str;
     pedal_max_str.sprintf("%.0f", comma_pedal * 100.0f);
-    statusRing(col_l, row_top, "PEDAL MAX", pedal_max_str, comma_pedal_ratio);
-    statusCircle(col_r, row_top, "PEDAL LEVEL", ai_pedal_profile, aiProfileColor);
+    statusRing(col_l, row_top, "PEDAL MAX", pedal_max_str, comma_pedal_ratio, "88");
+    statusCircle(col_r, row_top, "PEDAL LEVEL", ai_pedal_profile, aiProfileColor, "HIGH");
     statusIcon(col_l, row_t, ic_brake, brake_valid);
     if (autohold >= 0) {
       statusIcon(col_l, row_b,
@@ -1450,8 +1470,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
                  autohold > 0);
     }
     statusCircle(col_r, row_t, "ACC", acc_bool ? "ON" : "OFF",
-                 acc_bool ? QColor(120, 255, 120, 200) : QColor(254, 32, 32, 200));
-    statusCircle(col_r, row_b, "LKAS", lkas_str, lkas_color);
+                 acc_bool ? QColor(120, 255, 120, 200) : QColor(254, 32, 32, 200), "OFF");
+    statusCircle(col_r, row_b, "LKAS", lkas_str, lkas_color, "OFF");
 
     // TR and PEDAL STATUS ride above the speed panel, at the same size and
     // with the same horizontal gap as the block above -- so the two groups
@@ -1460,9 +1480,9 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     if (speed_panel_top_ > 0) {
       const int speed_row = speed_panel_top_ - PANEL_GAP - SD / 2;
       statusCircle(speed_panel_cx_ - (SD + SGAP_X) / 2, speed_row,
-                   tr_label, tr_str, QColor(120, 255, 120, 200));
+                   tr_label, tr_str, QColor(120, 255, 120, 200), "8.88");
       statusCircle(speed_panel_cx_ + (SD + SGAP_X) / 2, speed_row,
-                   "PEDAL STATUS", pedal_status_str, pedalStatusColor);
+                   "PEDAL STATUS", pedal_status_str, pedalStatusColor, "브레이크");
     }
   }
 }
