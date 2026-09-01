@@ -1204,7 +1204,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     pedal_status_str = "가속";
     pedalStatusColor = QColor(120, 255, 120, 200);
   } else if (accel == 0.0) {
-    pedal_status_str = "제동";
+    pedal_status_str = "브레이크";
     pedalStatusColor = QColor(255, 185, 15, 200);
   } else {
     pedal_status_str = "감속";
@@ -1416,7 +1416,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     auto drawTileText = [&](int cx_, int cy, const QString &label,
                             const QString &value, const QColor &value_color,
                             int usable_r, int label_alpha,
-                            const QString &size_ref) {
+                            const QString &size_ref, float value_scale) {
       constexpr int TEXT_GAP = 7;   // between the label block and the value
       constexpr int LINE_GAP = 2;   // between two label lines
       const QStringList label_lines = label.split('\n');
@@ -1482,6 +1482,18 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
         }
       }
 
+      // Applied after the fit, so it deliberately breaks out of the disc. The
+      // pedal-state tile needs it: its widest state, BOOST, is 5 Latin glyphs
+      // and pins the value at 28 px, which is too small to read at a glance
+      // for the three states actually shown while driving.
+      if (value_scale != 1.0f) {
+        value_pt = (int)(value_pt * value_scale + 0.5f);
+        configFont(p, "Open Sans", value_pt, "Bold");
+        value_h = QFontMetrics(p.font()).tightBoundingRect("8").height();
+        const int n = label_lines.size();
+        total_h = label_h * n + LINE_GAP * (n - 1) + TEXT_GAP + value_h;
+      }
+
       const int top = cy - total_h / 2;
 
       configFont(p, "Open Sans", label_pt, "Bold");
@@ -1497,14 +1509,17 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       p.setOpacity(1.0);
     };
 
+    // value_scale > 1 lets the value spill past the disc on purpose; see the
+    // note where it is applied.
     auto statusCircle = [&](int cx_, int cy, const QString &label,
                             const QString &value, const QColor &value_color,
-                            const QString &size_ref) {
+                            const QString &size_ref, float value_scale = 1.0f) {
       p.setPen(Qt::NoPen);
       p.setBrush(blackColor(200));
       p.drawEllipse(cx_ - SD / 2, cy - SD / 2, SD, SD);
       // A hair inside the disc's edge so the glyphs don't graze it.
-      drawTileText(cx_, cy, label, value, value_color, SD / 2 - 3, 200, size_ref);
+      drawTileText(cx_, cy, label, value, value_color, SD / 2 - 3, 200, size_ref,
+                   value_scale);
     };
 
     // Same tile as statusCircle plus a progress ring, so the live comma-pedal
@@ -1526,7 +1541,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
       // Inside the ring, not just inside the disc: the ring's circle is inset
       // 6 and stroked 7, so its inner edge is at SD / 2 - 9.5.
-      drawTileText(cx_, cy, label, value, QColor(255, 255, 255, 245), SD / 2 - 13, 230, size_ref);
+      drawTileText(cx_, cy, label, value, QColor(255, 255, 255, 245), SD / 2 - 13, 230,
+                   size_ref, 1.0f);
       p.setBrush(Qt::NoBrush);
       p.setPen(Qt::NoPen);
     };
@@ -1581,7 +1597,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
                    // size_ref is the widest state this tile can ever show. With
                    // 브레이크 shortened to 제동 that is no longer a Korean
                    // string: BOOST is 5 Latin glyphs (~3.4 em) against 2 em.
-                   "페달 상태", pedal_status_str, pedalStatusColor, "BOOST");
+                   "페달 상태", pedal_status_str, pedalStatusColor, "BOOST", 1.2f);
     }
   }
 }
