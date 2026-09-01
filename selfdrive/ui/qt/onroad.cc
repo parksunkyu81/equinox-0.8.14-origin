@@ -7,6 +7,7 @@
 #include <QSound>
 #include <QMouseEvent>
 #include <QPainterPath>
+#include <QStringList>
 #include <algorithm>
 
 #include "selfdrive/common/timing.h"
@@ -1203,7 +1204,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     pedal_status_str = "가속";
     pedalStatusColor = QColor(120, 255, 120, 200);
   } else if (accel == 0.0) {
-    pedal_status_str = "브레이크";
+    pedal_status_str = "제동";
     pedalStatusColor = QColor(255, 185, 15, 200);
   } else {
     pedal_status_str = "감속";
@@ -1371,14 +1372,16 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // Skipped if drawThermal has not run yet (it does, earlier in paintGL) so a
   // zero panel top can never park these at the top of the screen.
   if (thermal_panel_top_ > 0) {
-    // The largest that fits: two tiles plus SGAP_X have to sit inside the
-    // temperature panel's 213 px background, so 2*SD + 12 <= 213 caps SD at
-    // 100 and it lands flush with 0-1 px either side. Going bigger needs a
-    // different arrangement, not a bigger number.
+    // The tiles no longer have to fit inside the temperature panel's 213 px
+    // background; they only have to keep the panel's own 21 px margin off the
+    // screen edge, so the block is right-aligned to the panel rather than
+    // centred on it and overhangs to the left. 116 matches the wheel's
+    // diameter, and the block then runs 1655..1899 -- 37 px clear of the
+    // confidence gauge, which it does not overlap vertically anyway.
     //
-    // The tiles above the speed panel have far more room (that panel is
-    // ~290 px wide) but stay the same size so the two groups read as one set.
-    constexpr int SD = 100;        // status circle diameter
+    // The tiles above the speed panel are unaffected: 2*116 + 12 = 244 still
+    // sits inside that panel's 290 px with 23 px either side.
+    constexpr int SD = 116;        // status circle diameter
     constexpr int SGAP_X = 12;     // horizontal gap between the two columns
     constexpr int SGAP_Y = 10;     // vertical gap between the two rows
     constexpr int PANEL_GAP = 16;  // clearance above the temperature panel
@@ -1396,43 +1399,98 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // and the value are fitted to the disc, and the value is measured from
     // size_ref rather than the live text so switching state (ON -> OFF,
     // 가속 -> 브레이크) never resizes or reflows it.
+    // The tile is a disc, so a flat width budget is the wrong shape: the two
+    // lines sit at the top and bottom of the text block, where the disc has
+    // narrowed, not across its widest part. Fitting each line to the chord at
+    // its own height is what keeps the long labels inside their circle -- the
+    // old flat SD - 8 budget already pushed "PEDAL LEVEL" 3 px past the disc
+    // at SD 100, and would have pushed it 11 px past at 116.
+    //
+    // Both caps are ceilings, not fixed sizes: short values ("ON", "MID") take
+    // the full 42 px, while a long size_ref settles well below it.
+    //
+    // A label carrying a newline is stacked over two lines, each measured at
+    // its own height. That buys the label width but costs the value: the
+    // taller block pushes the value down into the narrower part of the disc,
+    // which is why 페달 상태 stayed on one line.
     auto drawTileText = [&](int cx_, int cy, const QString &label,
                             const QString &value, const QColor &value_color,
-                            int label_budget, int label_alpha,
+                            int usable_r, int label_alpha,
                             const QString &size_ref) {
-      int label_pt = 24;
-      while (label_pt > 9) {
+      constexpr int TEXT_GAP = 7;   // between the label block and the value
+      constexpr int LINE_GAP = 2;   // between two label lines
+      const QStringList label_lines = label.split('\n');
+      int label_pt = 28;
+      int value_pt = 42;
+      int label_h = 0, value_h = 0, total_h = 0;
+
+      // Shrinking a line changes the block's height, which changes the chord
+      // both lines are measured against, so this converges rather than solving
+      // in one pass. The guard is a belt-and-braces bound: each turn drops a
+      // size by one and both have floors, so it always terminates well before.
+      // Widest the disc is at a line whose outer edge is |y| from the centre.
+      const auto chord_at = [&](int y_outer) {
+        const float k = (float)usable_r * usable_r - (float)y_outer * y_outer;
+        return k > 1.0f ? (int)(2.0f * std::sqrt(k)) : 0;
+      };
+
+      for (int guard = 0; guard < 96; guard++) {
         configFont(p, "Open Sans", label_pt, "Bold");
-        if (QFontMetrics(p.font()).width(label) <= label_budget) {
-          break;
+        const QFontMetrics fm_label(p.font());
+        // One line height for every label line: they are all caps, so their
+        // ink heights match and even spacing is what reads as a block.
+        label_h = 0;
+        for (const QString &line : label_lines) {
+          label_h = std::max(label_h, fm_label.tightBoundingRect(line).height());
         }
-        label_pt--;
-      }
-      configFont(p, "Open Sans", label_pt, "Bold");
-      const int label_h = QFontMetrics(p.font()).tightBoundingRect(label).height();
 
-      // The value sits across the disc's widest part, so it gets a little
-      // more room than the label. Both caps are ceilings, not fixed sizes:
-      // short values ("ON", "MID") take the full 36 px while "브레이크" is
-      // 4 full-width glyphs and settles around 25 px to stay on the disc.
-      const int value_budget = label_budget + 8;
-      int value_pt = 36;
-      while (value_pt > 14) {
         configFont(p, "Open Sans", value_pt, "Bold");
-        if (QFontMetrics(p.font()).width(size_ref) <= value_budget) {
+        const QFontMetrics fm_value(p.font());
+        // Height from "8" rather than the live text, so a changing value can
+        // never reflow the block.
+        value_h = fm_value.tightBoundingRect("8").height();
+        const int value_w = fm_value.width(size_ref);
+
+        const int n = label_lines.size();
+        total_h = label_h * n + LINE_GAP * (n - 1) + TEXT_GAP + value_h;
+        const int half = total_h / 2;
+
+        // Each line is measured where it actually sits: the second label line
+        // is nearer the centre than the first, so it gets a wider chord even
+        // though "STATUS" is the longer word.
+        int label_over = -usable_r;
+        for (int i = 0; i < n; i++) {
+          const int line_top = -half + i * (label_h + LINE_GAP);
+          const int outer = std::max(std::abs(line_top), std::abs(line_top + label_h));
+          label_over = std::max(label_over,
+                                fm_label.width(label_lines[i]) - chord_at(outer));
+        }
+        const int value_over = value_w - chord_at(half);
+        if (label_over <= 0 && value_over <= 0) {
           break;
         }
-        value_pt--;
+        // Give up whichever line overhangs more, so they close in together
+        // instead of one starving the other.
+        if (value_over >= label_over && value_pt > 14) {
+          value_pt--;
+        } else if (label_pt > 9) {
+          label_pt--;
+        } else if (value_pt > 14) {
+          value_pt--;
+        } else {
+          break;
+        }
       }
-      configFont(p, "Open Sans", value_pt, "Bold");
-      const int value_h = QFontMetrics(p.font()).tightBoundingRect("8").height();
 
-      constexpr int TEXT_GAP = 7;
-      const int total_h = label_h + TEXT_GAP + value_h;
       const int top = cy - total_h / 2;
 
       configFont(p, "Open Sans", label_pt, "Bold");
-      drawText(p, cx_, top + label_h, label, label_alpha);
+      for (int i = 0; i < label_lines.size(); i++) {
+        // drawText takes the baseline, which for these all-caps lines is the
+        // bottom of the ink.
+        drawText(p, cx_, top + (i + 1) * label_h + i * LINE_GAP,
+                 label_lines[i], label_alpha);
+      }
       QColor c = value_color;
       configFont(p, "Open Sans", value_pt, "Bold");
       drawTextWithColor(p, cx_, top + total_h, value, c);
@@ -1445,7 +1503,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       p.setPen(Qt::NoPen);
       p.setBrush(blackColor(200));
       p.drawEllipse(cx_ - SD / 2, cy - SD / 2, SD, SD);
-      drawTileText(cx_, cy, label, value, value_color, SD - 8, 200, size_ref);
+      // A hair inside the disc's edge so the glyphs don't graze it.
+      drawTileText(cx_, cy, label, value, value_color, SD / 2 - 3, 200, size_ref);
     };
 
     // Same tile as statusCircle plus a progress ring, so the live comma-pedal
@@ -1465,8 +1524,9 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       p.drawArc(ring, 90 * 16,
                 -static_cast<int>(std::clamp(ratio, 0.0f, 1.0f) * 360.0f * 16.0f));
 
-      // Label budget is the disc minus the ring, not just the disc.
-      drawTileText(cx_, cy, label, value, QColor(255, 255, 255, 245), SD - 22, 230, size_ref);
+      // Inside the ring, not just inside the disc: the ring's circle is inset
+      // 6 and stroked 7, so its inner edge is at SD / 2 - 9.5.
+      drawTileText(cx_, cy, label, value, QColor(255, 255, 255, 245), SD / 2 - 13, 230, size_ref);
       p.setBrush(Qt::NoBrush);
       p.setPen(Qt::NoPen);
     };
@@ -1481,8 +1541,14 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       p.setOpacity(1.0);
     };
 
-    const int col_l = thermal_panel_cx_ - (SD + SGAP_X) / 2;
-    const int col_r = thermal_panel_cx_ + (SD + SGAP_X) / 2;
+    // Right edge flush with the panel below, so the block keeps that panel's
+    // margin off the screen edge and grows to the left. Centred on the panel
+    // it would come within 6 px of the edge.
+    const int block_cx = thermal_panel_right_ > 0
+                         ? thermal_panel_right_ - SD - SGAP_X / 2
+                         : thermal_panel_cx_;
+    const int col_l = block_cx - (SD + SGAP_X) / 2;
+    const int col_r = block_cx + (SD + SGAP_X) / 2;
     // Anchored from the bottom so the block always grows away from the panel.
     const int row_b = thermal_panel_top_ - PANEL_GAP - SD / 2;
     const int row_t = row_b - SD - SGAP_Y;
@@ -1512,7 +1578,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       statusCircle(speed_panel_cx_ - (SD + SGAP_X) / 2, speed_row,
                    tr_label, tr_str, QColor(120, 255, 120, 200), "8.88");
       statusCircle(speed_panel_cx_ + (SD + SGAP_X) / 2, speed_row,
-                   "PEDAL STATUS", pedal_status_str, pedalStatusColor, "브레이크");
+                   // size_ref is the widest state this tile can ever show. With
+                   // 브레이크 shortened to 제동 that is no longer a Korean
+                   // string: BOOST is 5 Latin glyphs (~3.4 em) against 2 em.
+                   "페달 상태", pedal_status_str, pedalStatusColor, "BOOST");
     }
   }
 }
@@ -2515,6 +2584,7 @@ void NvgWindow::drawThermal(QPainter &p) {
   // top of it (see the members' comment in onroad.h).
   thermal_panel_top_ = y - pad;
   thermal_panel_cx_ = x + tile_w / 2;
+  thermal_panel_right_ = x + tile_w + pad;
 
   // ✅ 배경: 투명 검정 + 라운드
   QRect bg_rect(x - pad, y - pad, total_w + pad * 2, total_h + pad * 2);

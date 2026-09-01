@@ -93,6 +93,7 @@ protected:
   // current by the time the stack is drawn.
   int thermal_panel_top_ = 0;
   int thermal_panel_cx_ = 0;
+  int thermal_panel_right_ = 0;
 
   // Same idea for the speed panel: drawSpeed runs before drawBottomIcons in
   // paintGL, so the tiles that sit above it can line up with its real box
