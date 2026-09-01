@@ -926,12 +926,15 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   const int y1 = rect().bottom() - footer_h / 2 - 10;
   const int y2 = y1 - radius - row_gap;
 
-  // Steering-effort gauge sits on the upper row, spanning its width. Every
-  // tile now lives on the lower row, so the bar takes the row they vacated,
-  // raised a fifth of the row pitch (y1 - y2) to open a little more space
-  // above the tiles without floating back up where it used to sit.
+  // A fifth of the row pitch, used to drop the steering bar and the wheel
+  // tile. Expressed against the pitch rather than as a pixel count so it
+  // keeps its proportion if radius or row_gap change.
+  const int row_drop = (y1 - y2) / 5;
+
+  // Steering-effort gauge spans the upper row's width. It had been raised by
+  // row_drop; dropping it by the same amount lands it back on the row itself.
   drawSteerGauge(p, icon_start_x + (icon_step * 5) / 2,
-                 y2 - (y1 - y2) / 5, icon_step * 5 + radius);
+                 y2, icon_step * 5 + radius);
 
   // Confidence gauge sits beside the ACC/LKAS column (icon_step * 5),
   // spanning the same vertical extent as that stacked pair.
@@ -1316,15 +1319,16 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   {
     const float steer_angle_deg = car_state.getSteeringAngleDeg();
     const bool hands_on_wheel = car_state.getSteeringPressed();
+    const int wheel_cy = y1 + row_drop;
 
     p.setPen(Qt::NoPen);
     // Green when hands-off (system driving alone), black when the driver is
     // holding the wheel -- gives an at-a-glance signal matching steeringPressed.
     p.setBrush(hands_on_wheel ? blackColor(220) : QColor(23, 134, 68, 220));
-    p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
+    p.drawEllipse(x - radius / 2, wheel_cy - radius / 2, radius, radius);
 
     p.save();
-    p.translate(x, y1);
+    p.translate(x, wheel_cy);
     // QPainter::rotate() is clockwise for positive angles, opposite of the
     // drawArc() convention above -- negate so positive (left) still spins CCW.
     p.rotate(-steer_angle_deg);
