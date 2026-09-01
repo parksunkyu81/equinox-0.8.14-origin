@@ -1353,7 +1353,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // Skipped if drawThermal has not run yet (it does, earlier in paintGL) so a
   // zero panel top can never park these at the top of the screen.
   if (thermal_panel_top_ > 0) {
-    constexpr int SD = 72;         // status circle diameter
+    // 30% up from 72. The binding constraint is the temperature panel: two
+    // tiles plus SGAP_X have to fit its 213 px background, which caps SD at
+    // 100. The tiles above the speed panel have far more room (that panel is
+    // ~290 px wide) but stay the same size so the two groups match.
+    constexpr int SD = 94;         // status circle diameter
     constexpr int SGAP_X = 12;     // horizontal gap between the two columns
     constexpr int SGAP_Y = 10;     // vertical gap between the two rows
     constexpr int PANEL_GAP = 16;  // clearance above the temperature panel
