@@ -1565,15 +1565,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     const int col_l = block_cx - (SD + SGAP_X) / 2;
     const int col_r = block_cx + (SD + SGAP_X) / 2;
     // Anchored from the bottom so the block always grows away from the panel.
+    // Two rows of icon/state pairs; the pedal tiles moved over to the speed
+    // panel's group, where they sit with the other pedal readings.
     const int row_b = thermal_panel_top_ - PANEL_GAP - SD / 2;
     const int row_t = row_b - SD - SGAP_Y;
-    // Top row is the two pedal tiles, then the icon/state pairs below.
-    const int row_top = row_t - SD - SGAP_Y;
 
-    QString pedal_max_str;
-    pedal_max_str.sprintf("%.0f", comma_pedal * 100.0f);
-    statusRing(col_l, row_top, "PEDAL MAX", pedal_max_str, comma_pedal_ratio, "88");
-    statusCircle(col_r, row_top, "PEDAL LEVEL", ai_pedal_profile, aiProfileColor, "HIGH");
     statusIcon(col_l, row_t, ic_brake, brake_valid);
     if (autohold >= 0) {
       statusIcon(col_l, row_b,
@@ -1584,15 +1580,28 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
                  acc_bool ? QColor(120, 255, 120, 200) : QColor(254, 32, 32, 200), "OFF");
     statusCircle(col_r, row_b, "LKAS", lkas_str, lkas_color, "OFF");
 
-    // TR and PEDAL STATUS ride above the speed panel, at the same size and
-    // with the same horizontal gap as the block above -- so the two groups
-    // read as one system rather than two sizes of tile. Skipped until
-    // drawSpeed has published its box (it runs earlier in paintGL).
+    // The four pedal/following readings ride above the speed panel, at the
+    // same size and horizontal gap as the block on the right -- so the two
+    // groups read as one system rather than two sizes of tile. Anchored from
+    // the panel up, so the pair nearest the driver's eye line stays put and
+    // the pedal pair stacks above it. Skipped until drawSpeed has published
+    // its box (it runs earlier in paintGL).
     if (speed_panel_top_ > 0) {
       const int speed_row = speed_panel_top_ - PANEL_GAP - SD / 2;
-      statusCircle(speed_panel_cx_ - (SD + SGAP_X) / 2, speed_row,
+      const int speed_row_top = speed_row - SD - SGAP_Y;
+      const int scol_l = speed_panel_cx_ - (SD + SGAP_X) / 2;
+      const int scol_r = speed_panel_cx_ + (SD + SGAP_X) / 2;
+
+      QString pedal_max_str;
+      pedal_max_str.sprintf("%.0f", comma_pedal * 100.0f);
+      statusRing(scol_l, speed_row_top, "PEDAL MAX", pedal_max_str,
+                 comma_pedal_ratio, "88");
+      statusCircle(scol_r, speed_row_top, "PEDAL LEVEL", ai_pedal_profile,
+                   aiProfileColor, "HIGH");
+
+      statusCircle(scol_l, speed_row,
                    tr_label, tr_str, QColor(120, 255, 120, 200), "8.88");
-      statusCircle(speed_panel_cx_ + (SD + SGAP_X) / 2, speed_row,
+      statusCircle(scol_r, speed_row,
                    // size_ref is the widest state this tile can ever show, and
                    // 브레이크 is 4 full-width glyphs against BOOST's ~3.4 em.
                    // Sizing off BOOST instead let 브레이크 run 136 px wide --
@@ -1790,8 +1799,15 @@ void NvgWindow::drawSpeed(QPainter &p) {
   const int extraGapX = 14;
   const int gap = baseGap + extraGapX;
 
+  // The whole speed group -- this panel and the four tiles drawBottomIcons
+  // stacks on top of it -- sits a tenth of the panel's own height lower than
+  // the reference box. Against the height rather than a pixel count so it
+  // keeps its proportion if the fonts change. Only the panel moves here; the
+  // tiles follow because they anchor off the box published below.
+  const qreal group_drop = panel_content_h * 0.10;
+
   QRectF panelBg(bgFixed.left() - gap - panel_bg_w,
-                 bgFixed.top(),
+                 bgFixed.top() + group_drop,
                  panel_bg_w,
                  panel_bg_h);
 
@@ -2586,14 +2602,19 @@ void NvgWindow::drawThermal(QPainter &p) {
   const int x_calc = width() - tile_w - 35;
   const int x = x_calc > 35 ? x_calc : 35;
 
-  // 화면 맨 아래로 내림. 배경 사각형의 아래변이 하단 디버그 텍스트의
-  // baseline(paintGL에서 rect().height() - 15에 그림)과 같은 높이에 오도록
-  // 맞춰서, 둘이 하나의 하단 줄처럼 읽히게 한다. 배경은 타일보다 pad 만큼
-  // 더 내려가므로 그만큼 빼 준다.
+  // 하단 기준선은 디버그 텍스트의 baseline(paintGL에서 rect().height() - 15에
+  // 그림)이고, 배경은 타일보다 pad 만큼 더 내려가므로 그만큼 빼 준다.
   // 디버그 텍스트는 왼쪽(left + 20)에서 시작하고 이 패널은 오른쪽 끝에
   // 붙으므로 같은 높이에 있어도 가로로 겹치지 않는다.
   constexpr int debug_text_up = 15;
-  const int y_calc = rect().bottom() - debug_text_up - pad - total_h;
+  // The whole thermal group -- this panel and the status tiles drawBottomIcons
+  // stacks on top of it -- now sits 15% of the panel's own height above that
+  // bottom line, so the two no longer share it. Against the height rather than
+  // a pixel count so it keeps its proportion if the fonts change. Only the
+  // panel moves here; the tiles follow because they anchor off the box
+  // published below.
+  const int group_lift = (total_h + pad * 2) * 3 / 20;
+  const int y_calc = rect().bottom() - debug_text_up - pad - total_h - group_lift;
   const int y = y_calc > 80 ? y_calc : 80;
 
   // Publish the panel's box for the status column drawBottomIcons stacks on
