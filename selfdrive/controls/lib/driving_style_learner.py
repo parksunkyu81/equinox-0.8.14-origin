@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 
 
-STATE_VERSION = 3
+STATE_VERSION = 4
 
 GAIN_MIN = 0.85
 GAIN_MAX = 1.12
@@ -99,6 +99,25 @@ BRAKE_VETO_TARGET_GAIN = (1.00, 0.95, 0.90, 0.85)
 # A brake landing in the first moments of an episode is usually a reaction to
 # something outside the car, not a verdict on how hard it just accelerated.
 BRAKE_VETO_MIN_EPISODE_S = 0.5
+
+# --- gas assist: the upward mirror of the brake veto --------------------------
+# The driver adding gas on top of openpilot's own acceleration is the direct
+# complaint that it is too slow, exactly as braking out of it is the complaint
+# that it is too fast. Both are scored on the same openpilot-acceleration
+# episode, so their rates share a denominator and can be compared directly.
+#
+# Before this existed a gas override ended the episode through the idle path
+# and was recorded as brake_veto(False) -- an override that meant "too slow"
+# was being counted as approval.
+GAS_ASSIST_MIN_ALPHA = 1.0 / 60.0
+GAS_ASSIST_COUNT_MAX = 100000
+GAS_ASSIST_MIN_SAMPLES = 12
+# Deliberately gentler than the brake table: adding gas is also how a driver
+# handles a merge or a gap that openpilot cannot see, so it carries a little
+# more noise than a brake press does. Top end stays inside GAIN_MAX.
+GAS_ASSIST_BP = (0.00, 0.15, 0.30, 0.50)
+GAS_ASSIST_TARGET_GAIN = (1.00, 1.03, 1.07, 1.12)
+GAS_ASSIST_MIN_EPISODE_S = 0.5
 
 # Low-speed manual-brake learning does not change the always-on following TR.
 # It learns a small, closing-only predictive-coasting headway so the comma
@@ -219,6 +238,10 @@ class DrivingStyleLearner:
     # Fraction of openpilot acceleration episodes the driver braked out of.
     self.brake_veto_rate = 0.0
     self.brake_veto_count = 0
+    # Fraction of those same episodes the driver added gas to. Same denominator
+    # as the brake veto, so the two rates are directly comparable.
+    self.gas_assist_rate = 0.0
+    self.gas_assist_count = 0
 
     self.gas_events = 0
     self.brake_events = 0
@@ -251,6 +274,7 @@ class DrivingStyleLearner:
     self._sample_accum = 0.0
     self._last_op_pedal_time = -1e9
     self._prev_brake_pressed = False
+    self._prev_gas_pressed = False
     self._op_episode_active = False
     self._op_episode_idle_s = 0.0
     self._op_episode_elapsed_s = 0.0
@@ -354,11 +378,17 @@ class DrivingStyleLearner:
             setattr(self, name, [int(_clip(int(v), 0, ACCEL_SAMPLE_COUNT_MAX)) for v in values])
         self.gain_evidence_events = max(0, int(state.get("gain_evidence_events", 0)))
 
-      if version >= STATE_VERSION:
+      if version >= 3:
         # v2 counted a brake-veto episode as ending only once the pedal had been
         # released, which openpilot rarely does while holding speed. Every
         # episode therefore closed on a brake press and the stored rate ran to
         # ~1.0, so v2 values are discarded rather than migrated.
+        #
+        # v3 brake evidence IS carried into v4: the episode definition did not
+        # change, only what else is scored on it. The v3 rate is however biased
+        # low-by-omission -- gas overrides resolved through the idle path as
+        # brake_veto(False) -- but it is biased toward approval, not complaint,
+        # so keeping it is the conservative choice.
         self.brake_veto_rate = _clip(_finite(state.get("brake_veto_rate")), 0.0, 1.0)
         self.brake_veto_count = max(0, min(BRAKE_VETO_COUNT_MAX,
                                            int(state.get("brake_veto_count", 0))))
@@ -369,6 +399,15 @@ class DrivingStyleLearner:
         if isinstance(offsets, list) and len(offsets) == _NUM_BINS:
           self.bin_offsets = [_clip(_finite(v), -BIN_OFFSET_MAX, BIN_OFFSET_MAX) for v in offsets]
         self.gain_updates = max(0, int(state.get("gain_updates", 0)))
+
+      if version >= STATE_VERSION:
+        # Only v4 onward records the gas side. A v3 state carries no gas
+        # evidence, so it starts at zero and the gain is brake-only until the
+        # first episodes are scored -- i.e. exactly the old behaviour, which
+        # then relaxes as the upward signal accumulates.
+        self.gas_assist_rate = _clip(_finite(state.get("gas_assist_rate")), 0.0, 1.0)
+        self.gas_assist_count = max(0, min(GAS_ASSIST_COUNT_MAX,
+                                           int(state.get("gas_assist_count", 0))))
 
       self._dirty = True
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -402,6 +441,8 @@ class DrivingStyleLearner:
       "op_count": list(self.op_count),
       "brake_veto_rate": round(self.brake_veto_rate, 6),
       "brake_veto_count": self.brake_veto_count,
+      "gas_assist_rate": round(self.gas_assist_rate, 6),
+      "gas_assist_count": self.gas_assist_count,
       "gas_events": self.gas_events,
       "brake_events": self.brake_events,
       "gain_evidence_events": self.gain_evidence_events,
@@ -513,13 +554,22 @@ class DrivingStyleLearner:
     self.brake_veto_rate = _clip(self.brake_veto_rate, 0.0, 1.0)
     self._dirty = True
 
+  def _push_gas_assist(self, assisted):
+    count = self.gas_assist_count
+    if count < GAS_ASSIST_COUNT_MAX:
+      count += 1
+      self.gas_assist_count = count
+    alpha = max(GAS_ASSIST_MIN_ALPHA, 1.0 / count)
+    self.gas_assist_rate += alpha * ((1.0 if assisted else 0.0) - self.gas_assist_rate)
+    self.gas_assist_rate = _clip(self.gas_assist_rate, 0.0, 1.0)
+    self._dirty = True
+
   def brake_veto_target(self):
     """Target gain implied by how often the driver brakes out of acceleration.
 
     Returns (target, confidence), or (1.0, 0.0) when there is not yet enough
-    evidence. This is the primary downward signal: a driver who lets the comma
-    pedal do the accelerating produces almost no gas samples, so braking is the
-    only preference this setup reliably observes.
+    evidence. This is the downward half of the pair; gas_assist_target is the
+    upward half, and _maybe_apply_gain blends the two.
     """
     if self.brake_veto_count < BRAKE_VETO_MIN_SAMPLES:
       return 1.0, 0.0
@@ -527,14 +577,29 @@ class DrivingStyleLearner:
     confidence = min(1.0, self.brake_veto_count / (4.0 * BRAKE_VETO_MIN_SAMPLES))
     return target, confidence
 
+  def gas_assist_target(self):
+    """Target gain implied by how often the driver adds gas to acceleration.
+
+    The mirror of brake_veto_target: same episodes, opposite complaint. Scored
+    separately from the paired manual-driving ratio because this one is a
+    verdict on openpilot's own acceleration as it happens, not a comparison
+    against how the driver behaves when driving by hand.
+    """
+    if self.gas_assist_count < GAS_ASSIST_MIN_SAMPLES:
+      return 1.0, 0.0
+    target = _interp(self.gas_assist_rate, GAS_ASSIST_BP, GAS_ASSIST_TARGET_GAIN)
+    confidence = min(1.0, self.gas_assist_count / (4.0 * GAS_ASSIST_MIN_SAMPLES))
+    return target, confidence
+
   def _maybe_apply_gain(self, now):
     if now - self._last_gain_update < LEARNING_UPDATE_COOLDOWN_S:
       return False
 
     brake_target, brake_confidence = self.brake_veto_target()
+    gas_target, gas_confidence = self.gas_assist_target()
     accel_ready = (self._paired_ratio is not None and
                    self._paired_weight >= ACCEL_MIN_TOTAL_SAMPLES)
-    if brake_confidence <= 0.0 and not accel_ready:
+    if brake_confidence <= 0.0 and gas_confidence <= 0.0 and not accel_ready:
       return False
 
     self._last_gain_update = now
@@ -543,17 +608,49 @@ class DrivingStyleLearner:
     # handful of gentle manual-driving samples as "this driver wants half the
     # acceleration" is what pinned the gain to its floor for a driver who lets
     # the comma pedal do the accelerating.
+    # paired_confidence is how well the manual-vs-openpilot comparison is
+    # supported, whichever way it points. accel_confidence is that same number
+    # but only once the comparison is asking for MORE -- kept separate so the
+    # per-speed residuals below can use the measurement without the global
+    # target having to come from it.
     accel_target, accel_confidence = 1.0, 0.0
-    if accel_ready and self._paired_ratio > 1.0:
-      accel_target = min(ACCEL_RATIO_MAX, self._paired_ratio)
-      accel_confidence = min(1.0, self._paired_weight / (4.0 * ACCEL_MIN_TOTAL_SAMPLES))
+    paired_confidence = 0.0
+    if accel_ready:
+      paired_confidence = min(1.0, self._paired_weight / (4.0 * ACCEL_MIN_TOTAL_SAMPLES))
+      if self._paired_ratio > 1.0:
+        accel_target = min(ACCEL_RATIO_MAX, self._paired_ratio)
+        accel_confidence = paired_confidence
 
-    # Braking wins outright when it asks for less: it is a direct complaint
-    # about acceleration that already happened.
-    if brake_target < 1.0:
-      target, confidence = brake_target, brake_confidence
+    # Two upward sources: the driver adding gas to openpilot's own acceleration,
+    # and the driver out-accelerating openpilot when driving by hand. Take the
+    # better-supported of the two rather than stacking them, so a single
+    # preference cannot be counted twice.
+    if (gas_confidence * (gas_target - 1.0) >=
+        accel_confidence * (accel_target - 1.0)):
+      up_target, up_confidence = gas_target, gas_confidence
     else:
-      target, confidence = accel_target, accel_confidence
+      up_target, up_confidence = accel_target, accel_confidence
+
+    # Blend the two complaints by confidence instead of letting braking veto
+    # everything. Braking used to win outright, which meant a driver who both
+    # brakes out of some accelerations AND adds gas to others could only ever
+    # be read as wanting less: the gain settled at the brake table's value and
+    # no amount of gas evidence could lift it. Averaging the two signed
+    # deviations lets them offset, and leaves each one's behaviour unchanged
+    # when the other has no evidence.
+    down_delta = brake_target - 1.0                 # <= 0
+    up_delta = up_target - 1.0                      # >= 0
+    weight_down = brake_confidence if down_delta < 0.0 else 0.0
+    weight_up = up_confidence if up_delta > 0.0 else 0.0
+    total_weight = weight_down + weight_up
+    if total_weight <= 0.0:
+      target, confidence = 1.0, 0.0
+    else:
+      target = 1.0 + ((weight_down * down_delta + weight_up * up_delta) /
+                      total_weight)
+      # Authority follows the strongest single line of evidence, not their sum:
+      # two half-supported opposing signals should not grant full authority.
+      confidence = max(weight_down, weight_up)
 
     # Authority grows with evidence, so a thin measurement can only nudge.
     target = _clip(target,
@@ -564,9 +661,13 @@ class DrivingStyleLearner:
     changed = abs(new_gain - self.global_gain) > 1e-6
     self.global_gain = new_gain
 
-    # Per-speed residuals come from the paired measurement, so they are only
-    # meaningful while that measurement is the one steering the gain.
-    if accel_confidence > 0.0 and target == accel_target:
+    # Per-speed residuals come from the paired measurement. They are relative
+    # to that measurement's own mean (bin_ratio - paired_ratio), so they say
+    # "this speed band wants more than the others" regardless of where the
+    # global level ended up -- no reason to gate them on the paired ratio
+    # having won the global target. Under the old brake-wins rule that gate was
+    # never satisfied on this car, which left every bin offset pinned at 0.
+    if paired_confidence > 0.0:
       for index in range(_NUM_BINS):
         paired = min(self.driver_count[index], self.op_count[index])
         if paired < ACCEL_MIN_PAIRED_SAMPLES or self.op_accel[index] <= 1e-3:
@@ -828,6 +929,7 @@ class DrivingStyleLearner:
       self._op_episode_idle_s = 0.0
       self._op_episode_elapsed_s = 0.0
       self._prev_brake_pressed = brake_pressed
+      self._prev_gas_pressed = gas_pressed
       self._clear_snapshot()
       self._clear_low_speed_snapshot()
       self._last_control_active = bool(control_active and cruise_enabled)
@@ -848,9 +950,19 @@ class DrivingStyleLearner:
     # pedal: openpilot holds pedal continuously to maintain speed, so waiting
     # for a released pedal left every episode open until a brake press and drove
     # the measured rate toward 1.0.
+    # One episode resolves exactly once, into one of three outcomes, and each
+    # outcome pushes a sample to BOTH rates so they share a denominator:
+    #   braked  -> brake_veto(True),  gas_assist(False)
+    #   gassed  -> brake_veto(False), gas_assist(True)
+    #   clean   -> brake_veto(False), gas_assist(False)
+    # The gas branch is what makes the two signals symmetric. Without it a gas
+    # override fell through the idle path below and was recorded as
+    # brake_veto(False) -- "the driver was happy with that acceleration" -- when
+    # it means the opposite.
     op_accelerating = bool(op_pedal_live and not gas_pressed and
                            a_ego_f >= ACCEL_SAMPLE_MIN_MS2)
     brake_edge = brake_pressed and not self._prev_brake_pressed
+    gas_edge = gas_pressed and not self._prev_gas_pressed
     if not self._op_episode_active:
       if op_accelerating and style_context_ok:
         self._op_episode_active = True
@@ -864,6 +976,14 @@ class DrivingStyleLearner:
         # scoring it either way.
         if self._op_episode_elapsed_s >= BRAKE_VETO_MIN_EPISODE_S:
           self._push_brake_veto(True)
+          self._push_gas_assist(False)
+        self._op_episode_active = False
+      elif gas_edge:
+        # Same reasoning in the other direction: gas added right at the start
+        # is the driver reacting to a gap opening, not judging the ramp.
+        if self._op_episode_elapsed_s >= GAS_ASSIST_MIN_EPISODE_S:
+          self._push_gas_assist(True)
+          self._push_brake_veto(False)
         self._op_episode_active = False
       elif op_accelerating:
         self._op_episode_idle_s = 0.0
@@ -871,8 +991,10 @@ class DrivingStyleLearner:
         self._op_episode_idle_s += dt
         if self._op_episode_idle_s >= BRAKE_VETO_EPISODE_END_S:
           self._push_brake_veto(False)
+          self._push_gas_assist(False)
           self._op_episode_active = False
     self._prev_brake_pressed = brake_pressed
+    self._prev_gas_pressed = gas_pressed
 
     # --- paired acceleration sampling ---------------------------------------
     # The driver reference deliberately does not require cruise_enabled or an
