@@ -1353,11 +1353,14 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // Skipped if drawThermal has not run yet (it does, earlier in paintGL) so a
   // zero panel top can never park these at the top of the screen.
   if (thermal_panel_top_ > 0) {
-    // 30% up from 72. The binding constraint is the temperature panel: two
-    // tiles plus SGAP_X have to fit its 213 px background, which caps SD at
-    // 100. The tiles above the speed panel have far more room (that panel is
-    // ~290 px wide) but stay the same size so the two groups match.
-    constexpr int SD = 94;         // status circle diameter
+    // The largest that fits: two tiles plus SGAP_X have to sit inside the
+    // temperature panel's 213 px background, so 2*SD + 12 <= 213 caps SD at
+    // 100 and it lands flush with 0-1 px either side. Going bigger needs a
+    // different arrangement, not a bigger number.
+    //
+    // The tiles above the speed panel have far more room (that panel is
+    // ~290 px wide) but stay the same size so the two groups read as one set.
+    constexpr int SD = 100;        // status circle diameter
     constexpr int SGAP_X = 12;     // horizontal gap between the two columns
     constexpr int SGAP_Y = 10;     // vertical gap between the two rows
     constexpr int PANEL_GAP = 16;  // clearance above the temperature panel
@@ -1379,7 +1382,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
                             const QString &value, const QColor &value_color,
                             int label_budget, int label_alpha,
                             const QString &size_ref) {
-      int label_pt = 20;
+      int label_pt = 24;
       while (label_pt > 9) {
         configFont(p, "Open Sans", label_pt, "Bold");
         if (QFontMetrics(p.font()).width(label) <= label_budget) {
@@ -1391,10 +1394,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       const int label_h = QFontMetrics(p.font()).tightBoundingRect(label).height();
 
       // The value sits across the disc's widest part, so it gets a little
-      // more room than the label. "브레이크" at a fixed 28 px is 112 px wide
-      // and would run well outside a 72 px disc.
+      // more room than the label. Both caps are ceilings, not fixed sizes:
+      // short values ("ON", "MID") take the full 36 px while "브레이크" is
+      // 4 full-width glyphs and settles around 25 px to stay on the disc.
       const int value_budget = label_budget + 8;
-      int value_pt = 28;
+      int value_pt = 36;
       while (value_pt > 14) {
         configFont(p, "Open Sans", value_pt, "Bold");
         if (QFontMetrics(p.font()).width(size_ref) <= value_budget) {
