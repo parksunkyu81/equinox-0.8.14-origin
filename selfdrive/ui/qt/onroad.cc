@@ -931,6 +931,12 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // first in paintGL) rather than off a column index -- at column 0 it
   // overlapped that panel. The bar takes whatever is left up to the row's
   // original right end, so it narrows instead of anything else moving.
+  // The wheel and the bar sit a fifth of the row pitch below the upper row.
+  // Expressed against the pitch rather than as a pixel count so it keeps its
+  // proportion if radius or row_gap change.
+  const int row_drop = (y1 - y2) / 5;
+  const int bar_cy = y2 + row_drop;
+
   constexpr int WHEEL_GAP = 22;
   // drawSteerGauge strokes the bar with a round cap, so the ink reaches half
   // the stroke width past the path's endpoint. Measure the gap from that
@@ -942,7 +948,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
                         ? speed_panel_right_ + WHEEL_GAP + radius / 2
                         : icon_start_x);
   const int bar_left = wheel_cx + radius / 2 + WHEEL_GAP + BAR_CAP;
-  drawSteerGauge(p, (bar_left + bar_right) / 2, y2, bar_right - bar_left);
+  drawSteerGauge(p, (bar_left + bar_right) / 2, bar_cy, bar_right - bar_left);
 
   // Confidence gauge sits beside the ACC/LKAS column (icon_step * 5),
   // spanning the same vertical extent as that stacked pair.
@@ -1329,7 +1335,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   {
     const float steer_angle_deg = car_state.getSteeringAngleDeg();
     const bool hands_on_wheel = car_state.getSteeringPressed();
-    const int wheel_cy = y2;
+    const int wheel_cy = bar_cy;
 
     p.setPen(Qt::NoPen);
     // Green when hands-off (system driving alone), black when the driver is
