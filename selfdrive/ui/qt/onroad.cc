@@ -1149,13 +1149,9 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     ai_pedal_profile = pedal_profile;
   }
 
-  // Circular dial matching the PEDAL STATUS / ACC gauges: title on the disc,
-  // value under it. Colour encodes the level rather than being fixed green,
-  // so the setting reads at a glance without looking at the word.
-  p.setPen(Qt::NoPen);
-  p.setBrush(blackColor(200));
-  p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
-
+  // Colour encodes the level so the setting reads at a glance without having
+  // to read the word. The tile itself is drawn with the right-hand status
+  // block below, above ACC and at that block's size.
   QColor aiProfileColor;
   if (ai_pedal_profile == "HIGH") {
     aiProfileColor = QColor(254, 32, 32, 220);
@@ -1164,13 +1160,6 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   } else {
     aiProfileColor = QColor(255, 255, 255, 200);
   }
-
-  configFont(p, "Open Sans", 20, "Bold");
-  drawText(p, x, y1 - 14, "PEDAL LEVEL", 200);
-
-  configFont(p, "Open Sans", 38, "Bold");
-  drawTextWithColor(p, x, y1 + 35, ai_pedal_profile, aiProfileColor);
-  p.setOpacity(1.0);
 
 
   // ================================================================================================================ //
@@ -1432,7 +1421,19 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       p.setPen(Qt::NoPen);
       p.setBrush(blackColor(200));
       p.drawEllipse(cx_ - SD / 2, cy - SD / 2, SD, SD);
-      configFont(p, "Open Sans", 20, "Bold");
+      // Shrink the label until it fits the disc. These tiles are narrower than
+      // the bottom row they came from, and "PEDAL LEVEL" is four times the
+      // width of "ACC" at the same size -- fixed 20 px would run off the edge.
+      int label_pt = 20;
+      const int label_max_w = SD - 8;
+      while (label_pt > 11) {
+        configFont(p, "Open Sans", label_pt, "Bold");
+        if (QFontMetrics(p.font()).width(label) <= label_max_w) {
+          break;
+        }
+        label_pt--;
+      }
+      configFont(p, "Open Sans", label_pt, "Bold");
       drawText(p, cx_, cy - 10, label, 200);
       QColor c = value_color;
       configFont(p, "Open Sans", 28, "Bold");
@@ -1455,7 +1456,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // Anchored from the bottom so the block always grows away from the panel.
     const int row_b = thermal_panel_top_ - PANEL_GAP - SD / 2;
     const int row_t = row_b - SD - SGAP_Y;
+    // PEDAL LEVEL sits above ACC, so the right column reads as the three
+    // settings/state tiles while the left keeps the two icon tiles.
+    const int row_top = row_t - SD - SGAP_Y;
 
+    statusCircle(col_r, row_top, "PEDAL LEVEL", ai_pedal_profile, aiProfileColor);
     statusIcon(col_l, row_t, ic_brake, brake_valid);
     if (autohold >= 0) {
       statusIcon(col_l, row_b,
