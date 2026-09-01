@@ -926,9 +926,12 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   const int y1 = rect().bottom() - footer_h / 2 - 10;
   const int y2 = y1 - radius - row_gap;
 
-  // Steering-effort gauge sits above the upper icon row, spanning its width.
+  // Steering-effort gauge sits on the upper row, spanning its width. Every
+  // tile now lives on the lower row, so the bar takes the row they vacated,
+  // raised a fifth of the row pitch (y1 - y2) to open a little more space
+  // above the tiles without floating back up where it used to sit.
   drawSteerGauge(p, icon_start_x + (icon_step * 5) / 2,
-                 y2 - radius / 2 - 52, icon_step * 5 + radius);
+                 y2 - (y1 - y2) / 5, icon_step * 5 + radius);
 
   // Confidence gauge sits beside the ACC/LKAS column (icon_step * 5),
   // spanning the same vertical extent as that stacked pair.
@@ -964,9 +967,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.setOpacity(1.0);
   */
 
-  // 1. PEDAL MAX
+  // 1. PEDAL MAX  -- lower row, column 3
   // GM CarController clips the command sent to the comma pedal to 0.00..0.85.
   // actuatorsOutput.gas is the post-controller value that matches the CAN output.
+  x = icon_start_x + (icon_step * 3);
   constexpr float comma_pedal_min = 0.0f;
   constexpr float comma_pedal_max = 0.85f;
   const float comma_pedal = std::clamp(car_control.getActuatorsOutput().getGas(),
@@ -1173,7 +1177,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   x = 140;
   x = icon_start_x;
 
-  // 2. TR Value
+  // 2. TR Value  -- lower row, column 1
   x = icon_start_x + icon_step;
   float tr_value = controls_state.getDynamicTRValue();
   auto tr_mode = controls_state.getDynamicTRMode();
@@ -1181,7 +1185,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
   p.setPen(Qt::NoPen);
   p.setBrush(blackColor(200));
-  p.drawEllipse(x - radius / 2, y2 - radius / 2, radius, radius);
+  p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
 
   str.sprintf("%s", tr_mode.cStr());
   str2.sprintf("%.2f", tr_value);
@@ -1192,10 +1196,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
 
   configFont(p, "Open Sans", 27, "Bold");
-  drawText(p, x, y2-14, str, 200);
+  drawText(p, x, y1-14, str, 200);
 
   configFont(p, "Open Sans", textSize, "Bold");
-  drawTextWithColor(p, x, y2+35, str2, textColor);
+  drawTextWithColor(p, x, y1+35, str2, textColor);
   p.setOpacity(1.0);
 
   /*
@@ -1228,13 +1232,13 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   drawTextWithColor(p, x, y2+50, str, textColor);
   p.setOpacity(1.0);*/
 
-  // 1. PEDAL
-  x = icon_start_x;
+  // 1. PEDAL  -- lower row, column 2
+  x = icon_start_x + (icon_step * 2);
   float accel = car_control.getActuators().getAccel();
 
   p.setPen(Qt::NoPen);
   p.setBrush(stop_accel_boost_active ? QColor(0, 170, 90, 235) : blackColor(200));
-  p.drawEllipse(x - radius / 2, y2 - radius / 2, radius, radius);
+  p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
 
   textColor = QColor(255, 255, 255, 200);
 
@@ -1262,10 +1266,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   }
 
   configFont(p, "Open Sans", 20, "Bold");
-  drawText(p, x, y2-14, "PEDAL STATUS", 200);
+  drawText(p, x, y1-14, "PEDAL STATUS", 200);
 
   configFont(p, "Open Sans", textSize, "Bold");
-  drawTextWithColor(p, x, y2+35, str, textColor);
+  drawTextWithColor(p, x, y1+35, str, textColor);
   p.setOpacity(1.0);
 
   // ACC and BRAKE moved to the right-hand status column below; only their
@@ -1378,11 +1382,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   }
   */
 
-  // 7. WHEEL -- same live steeringAngleDeg as "STEER" above, rendered as a
+  // 7. WHEEL -- lower row, column 0. The live steeringAngleDeg rendered as a
   // physically rotating wheel icon instead of a number. Not present in the
   // original source; uses the previously-unused ../assets/img_chffr_wheel.png.
-  // (swapped column with LKAS, per user request)
-  x = icon_start_x + (icon_step * 2);
+  x = icon_start_x;
   {
     const float steer_angle_deg = car_state.getSteeringAngleDeg();
     const bool hands_on_wheel = car_state.getSteeringPressed();
