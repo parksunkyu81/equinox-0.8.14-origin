@@ -1483,9 +1483,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       }
 
       // Applied after the fit, so it deliberately breaks out of the disc. The
-      // pedal-state tile needs it: its widest state, BOOST, is 5 Latin glyphs
-      // and pins the value at 28 px, which is too small to read at a glance
-      // for the three states actually shown while driving.
+      // pedal-state tile needs it: its widest state, 브레이크, pins the value
+      // at 24 px, which is too small to read at a glance while driving.
       if (value_scale != 1.0f) {
         value_pt = (int)(value_pt * value_scale + 0.5f);
         configFont(p, "Open Sans", value_pt, "Bold");
@@ -1594,10 +1593,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       statusCircle(speed_panel_cx_ - (SD + SGAP_X) / 2, speed_row,
                    tr_label, tr_str, QColor(120, 255, 120, 200), "8.88");
       statusCircle(speed_panel_cx_ + (SD + SGAP_X) / 2, speed_row,
-                   // size_ref is the widest state this tile can ever show. With
-                   // 브레이크 shortened to 제동 that is no longer a Korean
-                   // string: BOOST is 5 Latin glyphs (~3.4 em) against 2 em.
-                   "페달 상태", pedal_status_str, pedalStatusColor, "BOOST", 1.2f);
+                   // size_ref is the widest state this tile can ever show, and
+                   // 브레이크 is 4 full-width glyphs against BOOST's ~3.4 em.
+                   // Sizing off BOOST instead let 브레이크 run 136 px wide --
+                   // 40 px past the disc, against BOOST's own 21.
+                   "페달 상태", pedal_status_str, pedalStatusColor, "브레이크", 1.2f);
     }
   }
 }
