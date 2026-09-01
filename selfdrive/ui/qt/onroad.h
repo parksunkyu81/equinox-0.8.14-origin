@@ -99,6 +99,7 @@ protected:
   // instead of re-deriving a font-metric-driven layout.
   int speed_panel_top_ = 0;
   int speed_panel_cx_ = 0;
+  int speed_panel_right_ = 0;
   void drawSpeedLimit(QPainter &p);
   void drawSteer(QPainter &p);
   void drawRestArea(QPainter &p);

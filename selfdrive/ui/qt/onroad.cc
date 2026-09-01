@@ -926,11 +926,18 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   const int y1 = rect().bottom() - footer_h / 2 - 10;
   const int y2 = y1 - radius - row_gap;
 
-  // Steering-effort gauge, with the wheel tile sitting immediately left of it
-  // on the same line. The bar gives up exactly the wheel's diameter, so the
-  // pair still ends where the bar used to (icon_start_x - radius/2 .. +946).
-  drawSteerGauge(p, icon_start_x + radius / 2 + (icon_step * 5) / 2,
-                 y2, icon_step * 5);
+  // Wheel then steering bar, both on the upper row. The wheel is placed off
+  // the speed panel's real right edge (drawSpeed publishes it, and it runs
+  // first in paintGL) rather than off a column index -- at column 0 it
+  // overlapped that panel. The bar takes whatever is left up to the row's
+  // original right end, so it narrows instead of anything else moving.
+  constexpr int WHEEL_GAP = 16;
+  const int bar_right = icon_start_x + (icon_step * 5) + radius / 2;
+  const int wheel_cx = (speed_panel_right_ > 0
+                        ? speed_panel_right_ + WHEEL_GAP + radius / 2
+                        : icon_start_x);
+  const int bar_left = wheel_cx + radius / 2 + WHEEL_GAP;
+  drawSteerGauge(p, (bar_left + bar_right) / 2, y2, bar_right - bar_left);
 
   // Confidence gauge sits beside the ACC/LKAS column (icon_step * 5),
   // spanning the same vertical extent as that stacked pair.
@@ -1313,7 +1320,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // instead of a number, so it reads together with the bar's effort and
   // lane-centring rather than as a separate row. Not present in the original
   // source; uses the previously-unused ../assets/img_chffr_wheel.png.
-  x = icon_start_x;
+  x = wheel_cx;
   {
     const float steer_angle_deg = car_state.getSteeringAngleDeg();
     const bool hands_on_wheel = car_state.getSteeringPressed();
@@ -1699,6 +1706,7 @@ void NvgWindow::drawSpeed(QPainter &p) {
   // (see the members' comment in onroad.h).
   speed_panel_top_ = (int)panelBg.top();
   speed_panel_cx_ = (int)panelBg.center().x();
+  speed_panel_right_ = (int)panelBg.right();
 
   // 패널 배경 (✅ 더 투명)
   p.setPen(Qt::NoPen);
