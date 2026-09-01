@@ -882,12 +882,6 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                           "../assets/offroad/icon_road.png",
                                           this));
 
-  toggles.append(new ParamControl("DrivingStyleAI",
-                                          "Driving Style AI Integration",
-                                          "Learn the driver's acceleration, braking, and following preferences. Predictive coasting eases the comma pedal for a slowing lead, an approaching curve, or a speed limit while natural deceleration learns in shadow mode.",
-                                          "../assets/offroad/icon_road.png",
-                                          this));
-
   toggles.append(new ParamControl("PredictiveBrakeAlert",
                                           "Enable predictive brake alert",
                                           "Show a visual alert and play the configured Korean voice when learned natural deceleration is not enough.",

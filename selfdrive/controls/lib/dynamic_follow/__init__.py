@@ -11,7 +11,6 @@ from common.params import Params
 from selfdrive.controls.lib.dynamic_follow.auto_df import predict
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.dynamic_follow.support import LeadData, CarData, dfData, dfProfiles
-from selfdrive.controls.lib.driving_style_learner import applied_driving_style_tr_offset
 from common.data_collector import DataCollector
 
 travis = False
@@ -165,7 +164,6 @@ class DynamicFollow:
     self.df_data = dfData()  # dynamic follow data
     self.base_TR = DEFAULT_TR
     self.base_TR_unadjusted = DEFAULT_TR
-    self.applied_driving_style_tr_offset = 0.0
 
     self.lead_launch_state = LEAD_LAUNCH_IDLE
     self.lead_launch_blend = 0.0
@@ -202,7 +200,7 @@ class DynamicFollow:
       self.base_TR_unadjusted = self._get_TR()
       #print("if self.lead_data.status: ======================================== : ", self.TR)
 
-    self.base_TR = self._apply_driving_style_tr(self.base_TR_unadjusted)
+    self.base_TR = self._apply_following_floor(self.base_TR_unadjusted)
     self.TR = self._update_lead_launch_TR(self.base_TR)
 
     if not travis:
@@ -217,16 +215,12 @@ class DynamicFollow:
     if df_out.is_auto:  # todo: find some way to share prediction between the two mpcs to reduce processing overhead
       self._get_pred()  # sets self.model_profile, all other checks are inside function
 
-  def _apply_driving_style_tr(self, base_tr):
-    # Coarse distance selection belongs to DynamicTRGap; learned style is the
-    # only offset applied on top, so the legacy traffic/stock/roadtrip/auto
-    # behavior remains intact.
-    self.applied_driving_style_tr_offset = (applied_driving_style_tr_offset(
-      self.driving_style_tr_offset, self.car_data.v_ego)
-      if self.driving_style_ai_enabled else 0.0)
+  def _apply_following_floor(self, base_tr):
+    # Coarse distance selection belongs to DynamicTRGap. The driving-style
+    # learner used to add an offset here; with it removed only the speed-based
+    # floor is applied, which is what an offset of 0 already did.
     dynamic_floor = max(float(self.min_TR), speed_based_min_tr(self.car_data.v_ego))
-    return combine_following_tr(base_tr, self.applied_driving_style_tr_offset,
-                                dynamic_floor)
+    return combine_following_tr(base_tr, 0.0, dynamic_floor)
 
   def _gather_data(self):
     self.sm_collector.update(0)
@@ -271,7 +265,7 @@ class DynamicFollow:
       dat.dynamicFollowData.leadDistance = float(self.lead_data.x_lead or 0.0)
       dat.dynamicFollowData.egoSpeed = float(self.car_data.v_ego)
       dat.dynamicFollowData.rawTR = float(self.base_TR_unadjusted)
-      dat.dynamicFollowData.learnedTROffset = float(self.applied_driving_style_tr_offset)
+      dat.dynamicFollowData.learnedTROffset = 0.0
       #print("dat.dynamicFollowData.mpcTR ======================================== : ", dat.dynamicFollowData.mpcTR)
       #print("dat.dynamicFollowData.profilePred ======================================== : ", dat.dynamicFollowData.profilePred)
       self.pm.send('dynamicFollowData', dat)
@@ -612,14 +606,6 @@ class DynamicFollow:
     # switch takes effect without restarting controls.
     params = Params()
     self.stop_accel_boost_enabled = params.get_bool("ActiveStopAccelBoost")
-    self.driving_style_ai_enabled = params.get_bool("DrivingStyleAI")
-    try:
-      self.driving_style_tr_offset = float(params.get("DrivingStyleAITrOffset", encoding="utf8") or 0.0)
-    except (TypeError, ValueError):
-      self.driving_style_tr_offset = 0.0
-    if not math.isfinite(self.driving_style_tr_offset):
-      self.driving_style_tr_offset = 0.0
-    self.driving_style_tr_offset = float(clip(self.driving_style_tr_offset, -0.20, 0.40))
 
     #self.global_df_mod = self.op_params.get('global_df_mod')
     self.global_df_mod = float(params.get("globalDfMod", encoding="utf8"))

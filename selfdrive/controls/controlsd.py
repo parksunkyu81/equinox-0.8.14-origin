@@ -54,10 +54,8 @@ from selfdrive.controls.lib.process_health import (
   controlsd_communication_ok, expected_not_running_processes,
   panda_power_down_in_progress, update_process_not_running_state,
 )
-from selfdrive.controls.lib.driving_style_learner import DrivingStyleLearner
 from selfdrive.controls.lib.comma_pedal_profile import (
-  CommaPedalProfileController, combine_comma_pedal_gain,
-  normalize_comma_pedal_profile,
+  CommaPedalProfileController, normalize_comma_pedal_profile,
 )
 from selfdrive.controls.lib.pedal_force_recovery import (
   PEDAL_FORCE_RECOVERY_PEDAL_FLOOR, RECOVERY_MODE_HARD_ZERO,
@@ -340,15 +338,19 @@ class Controls:
         self.right_lane_visible = False
         self.stop_accel_boost_latch = StopAccelBoostLatch(DT_CTRL)
         self.stop_accel_boost_active = False
-        self.driving_style_learner = DrivingStyleLearner(params=params)
-        self.driving_style_status = self.driving_style_learner.status(0.0)
-        self.driving_style_gain = 1.0
+        # Comma-pedal response comes from the user's CommaPedalResistance
+        # profile alone. The driving-style learner that used to shade it was
+        # removed: on this car openpilot cannot brake at all, so the driver
+        # supplies every deceleration, and the brake-based evidence the learner
+        # relied on could not tell "openpilot accelerated too hard" from
+        # "openpilot was holding speed and I needed to slow". Measured on
+        # 2026-09-01--07-13-55, that pushed the gain to 0.85-0.90 with no
+        # upward signal available to bring it back.
         self.comma_pedal_profile = normalize_comma_pedal_profile(
           params.get("CommaPedalResistance", encoding="utf8") or 'mid')
         self.comma_pedal_profile_controller = CommaPedalProfileController(
           self.comma_pedal_profile)
         self.comma_pedal_profile_gain = 1.0
-        self.comma_pedal_learned_gain = 1.0
         self.comma_pedal_effective_gain = 1.0
         self.comma_pedal_profile_changing = False
         self.comma_pedal_raw_command = 0.0
@@ -1585,11 +1587,13 @@ class Controls:
             # independent smoothers cannot multiply each other.
             self.curve_pedal_final_accel = float(actuators.accel)
 
-            # Driving-style gain is applied later in CarController. Predictive
-            # coasting supplies a final 0..1 pedal ceiling so learned response
-            # cannot add back pedal while a lead is consuming the desired gap.
-            predictive_enabled = bool(self.CP.enableGasInterceptor and
-                                      self.driving_style_status.enabled)
+            # Predictive coasting supplies a final 0..1 pedal ceiling so the
+            # profile response cannot add back pedal while a lead is consuming
+            # the desired gap. It used to be gated on the driving-style learner
+            # being enabled as well; with the learner gone it follows the
+            # interceptor alone, which is what that gate evaluated to while the
+            # learner was on.
+            predictive_enabled = bool(self.CP.enableGasInterceptor)
             curve_diag = dict(getattr(self.curve_speed_limiter, "last_diag", {}) or {})
             curve_target_ms = (self.curve_pedal_coordinator.plan_speed_kph * CV.KPH_TO_MS
                                if self.curve_pedal_coordinator.plan_speed_kph > 0.0 else CS.vEgo)
@@ -1628,8 +1632,9 @@ class Controls:
                 self.lead_coast_assist.active or
                 self.lead_loss_cruise_assist.active or
                 self.moving_gap_catchup_assist.active),
-              learned_low_speed_coast_offset_s=(
-                self.driving_style_status.low_speed_coast_offset_s))
+              # Was a learned offset; the learner is gone, so predictive
+              # coasting uses its own unshifted low-speed behaviour.
+              learned_low_speed_coast_offset_s=0.0)
 
             coast_lane_change = lat_plan.laneChangeState != LaneChangeState.off
             coast_orientation = self.sm['liveLocationKalman'].calibratedOrientationNED
@@ -1725,51 +1730,11 @@ class Controls:
         self.comma_pedal_profile_changing = bool(
           self.comma_pedal_profile_controller.changing)
 
-        # Event-based driver-style learning. Inputs are evaluated only in clean,
-        # straight, stable-control context. Curve slowdown, lane changes, FCW,
-        # and stop-launch boost are excluded so those safety/context responses
-        # are not mistaken for driver preference.
-        lane_change_active = lat_plan.laneChangeState != LaneChangeState.off
-        style_unsafe_context = bool(self.joystick_mode or not self.CP.enableGasInterceptor or
-                                    CS.leftBlinker or CS.rightBlinker or lane_change_active or
-                                    self.is_curv_driving or long_plan.fcw or
-                                    self.stop_accel_boost_active or
-                                    self.moving_gap_catchup_assist.active or
-                                    self.comma_pedal_profile_changing or
-                                    self.predictive_coasting.learning_blocked)
-        low_speed_brake_context_ok = bool(
-          not self.joystick_mode and self.CP.enableGasInterceptor and
-          not CS.leftBlinker and not CS.rightBlinker and not lane_change_active and
-          not self.is_curv_driving and not self.curve_pedal_coordinator.engaged and
-          not self.speed_limit_coast_active and not long_plan.fcw and CS.canValid)
-        style_lead_valid = bool(dynamic_follow_valid and dynamic_follow.leadDistance > 0.0)
-        self.driving_style_status = self.driving_style_learner.update(
-          v_ego=CS.vEgo,
-          a_ego=CS.aEgo,
-          gas=CS.gas,
-          gas_pressed=CS.gasPressed,
-          brake=CS.brake,
-          brake_pressed=CS.brakePressed,
-          cruise_enabled=CS.cruiseState.enabled,
-          control_active=self.active and self.CP.enableGasInterceptor,
-          requested_accel=actuators.accel,
-          lead_valid=style_lead_valid,
-          lead_distance=dynamic_follow.leadDistance if style_lead_valid else 0.0,
-          lead_rel_speed=dynamic_follow.leadRelativeSpeed if style_lead_valid else 0.0,
-          base_tr=dynamic_follow.mpcTR if dynamic_follow_valid else 1.3,
-          pedal_output=self.last_actuators.gas,
-          unsafe_context=style_unsafe_context,
-          low_speed_brake_context_ok=low_speed_brake_context_ok,
-          can_valid=CS.canValid,
-          dt=DT_CTRL)
-        # Never stack learned pedal gain on top of the dedicated 40% lead-launch
-        # boost. The learner remains bounded, but the two features serve
-        # different purposes and must not compound each other.
-        self.driving_style_gain = 1.0 if self.stop_accel_boost_active else self.driving_style_status.gain
-        self.comma_pedal_learned_gain = float(self.driving_style_status.gain)
-        self.comma_pedal_effective_gain = combine_comma_pedal_gain(
-          self.comma_pedal_profile_gain, self.comma_pedal_learned_gain,
-          self.stop_accel_boost_active)
+        # The user's profile is the whole response now. The dedicated 40%
+        # lead-launch boost still owns the pedal outright while it is active,
+        # so the profile does not compound with it.
+        self.comma_pedal_effective_gain = (
+          1.0 if self.stop_accel_boost_active else float(self.comma_pedal_profile_gain))
 
         # Steering-authority prompt (조향 제어 초과).
         # A tight city corner saturates the steering command for seconds before
@@ -2110,16 +2075,12 @@ class Controls:
           self.moving_gap_catchup_assist.activation_count)
         controlsState.movingGapCatchupLeadJump = bool(
           self.moving_gap_catchup_assist.lead_jump_detected)
-        controlsState.drivingStyleAIActive = bool(self.driving_style_status.enabled)
-        controlsState.drivingStyleAIGain = float(self.driving_style_gain)
-        controlsState.drivingStyleAITrOffset = float(self.driving_style_status.tr_offset)
-        controlsState.drivingStyleAIConfidence = float(self.driving_style_status.confidence)
-        controlsState.drivingStyleAIGasEvents = int(self.driving_style_status.gas_events)
-        controlsState.drivingStyleAIBrakeEvents = int(self.driving_style_status.brake_events)
-        controlsState.drivingStyleAIStableFollowSec = float(self.driving_style_status.stable_follow_s)
+        # drivingStyleAI* fields are left in the schema (removing capnp fields
+        # would break replay of every log recorded before this) but nothing
+        # writes them any more, so they read as their defaults.
         controlsState.commaPedalResistanceProfile = str(self.comma_pedal_profile)
         controlsState.commaPedalProfileGain = float(self.comma_pedal_profile_gain)
-        controlsState.commaPedalLearnedGain = float(self.comma_pedal_learned_gain)
+        # commaPedalLearnedGain is no longer written -- nothing learns a gain.
         controlsState.commaPedalEffectiveGain = float(self.comma_pedal_effective_gain)
         controlsState.commaPedalProfileChanging = bool(self.comma_pedal_profile_changing)
         controlsState.commaPedalRawCommand = float(self.comma_pedal_raw_command)

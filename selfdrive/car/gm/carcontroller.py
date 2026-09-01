@@ -121,12 +121,10 @@ class CarController():
                           )
 
         # 연비 향상을 위해 클리핑
-        # The user profile supplies the coarse response and the driving-style
-        # learner supplies only a fine offset around it. Keep a controller-side
-        # clamp and preserve the existing absolute comma-pedal ceiling.
+        # The user's CommaPedalResistance profile is the whole response. Keep
+        # a controller-side clamp and the existing absolute comma-pedal ceiling.
         response_gain = clip(float(getattr(
-          controls, 'comma_pedal_effective_gain',
-          getattr(controls, 'driving_style_gain', 1.0))), 0.82, 1.22)
+          controls, 'comma_pedal_effective_gain', 1.0)), 0.82, 1.22)
         raw_pedal = clip(acc_mult * actuators.accel, 0.0, 0.85)
         # Apply the combined response first, then predictive coasting as the final
         # positive-pedal ceiling. Coasting can only remove pedal; it can never

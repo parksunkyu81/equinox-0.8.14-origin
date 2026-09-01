@@ -11,8 +11,6 @@ COMMA_PEDAL_PROFILE_GAINS = {
   'high': (1.18, 1.18, 1.12, 1.08),
 }
 COMMA_PEDAL_PROFILE_SLEW_PER_S = 0.16
-COMMA_PEDAL_EFFECTIVE_GAIN_MIN = 0.82
-COMMA_PEDAL_EFFECTIVE_GAIN_MAX = 1.22
 
 
 def _finite_float(value, default):
@@ -48,17 +46,6 @@ def comma_pedal_profile_gain(profile, v_ego):
       ratio = (speed_kph - lower_speed) / (upper_speed - lower_speed)
       return gains[index - 1] + ratio * (gains[index] - gains[index - 1])
   return gains[-1]
-
-
-def combine_comma_pedal_gain(profile_gain, learned_gain, launch_boost_active=False):
-  """Combine a coarse user profile with the learner's offset from neutral."""
-  if bool(launch_boost_active):
-    return 1.0
-  profile_gain = _finite_float(profile_gain, 1.0)
-  learned_gain = _finite_float(learned_gain, 1.0)
-  combined = profile_gain + (learned_gain - 1.0)
-  return max(COMMA_PEDAL_EFFECTIVE_GAIN_MIN,
-             min(COMMA_PEDAL_EFFECTIVE_GAIN_MAX, combined))
 
 
 class CommaPedalProfileController:
