@@ -86,6 +86,13 @@ protected:
   void drawBottomIcons(QPainter &p);
   void drawSteerGauge(QPainter &p, int cx, int cy, int w);
   void drawConfidenceGauge(QPainter &p, int cx, int top_y, int bottom_y);
+
+  // Where drawThermal put its panel this frame, so the status icons stacked
+  // above it can line up without re-deriving the panel's font-metric-driven
+  // height. drawThermal runs before drawBottomIcons in paintGL, so these are
+  // current by the time the stack is drawn.
+  int thermal_panel_top_ = 0;
+  int thermal_panel_cx_ = 0;
   void drawSpeedLimit(QPainter &p);
   void drawSteer(QPainter &p);
   void drawRestArea(QPainter &p);

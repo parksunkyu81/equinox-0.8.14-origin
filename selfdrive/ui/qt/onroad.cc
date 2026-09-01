@@ -938,8 +938,6 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   float cur_speed = std::max(0.0, car_state.getVEgo() * MS_TO_KPH);
   QString str;
   QString str2;
-  float img_alpha;
-  float bg_alpha;
   QColor textColor = QColor(255, 255, 255, 200);
 
   /*
@@ -1004,7 +1002,12 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
   float textSize = 34.f;
 
-  // 2. VISION DIST
+  // 2. VISION DIST -- hidden, kept for easy restoration.
+  // This assignment stays OUTSIDE the comment on purpose: tiles further down
+  // (TR mode, PEDAL STATUS) draw with whatever textSize holds, and hiding it
+  // along with the rest would silently shrink them from 48 to 34 px.
+  textSize = 48.f;
+  /*
   x = icon_start_x + (icon_step * 4);
 
   p.setPen(Qt::NoPen);
@@ -1016,8 +1019,6 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   auto lead_vision = sm["modelV2"].getModelV2().getLeadsV3()[0];
   float vision_dist = lead_vision.getProb() > .5 ? (lead_vision.getX()[0] - 1.5) : 0;
   //float vision_second = vision_dist / cur_speed;    // [거리 / 속력]
-
-  textSize = 48.f;
 
   // Orange Color if less than 15ｍ / Red Color if less than 5ｍ
   if (lead_vision.getProb()) {
@@ -1039,6 +1040,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   configFont(p, "Open Sans", textSize, "Bold");
   drawTextWithColor(p, x, y2+35, str, textColor);
   p.setOpacity(1.0);
+  */
 
   // 3. LKAS (swapped column with WHEEL, per user request)
   // carControl.latActive is the exact flag the GM CarController gates LKAS on
@@ -1046,20 +1048,18 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // limit). Read it instead of re-deriving from speed -- the old
   // "cur_speed > 10" copy showed ON while steering was actually cut, and
   // duplicated GM_MIN_STEER_SPEED_KPH as a literal.
-  x = icon_start_x + (icon_step * 5);
   //const bool lkas_bool = car_state.getLkasEnable();
   const bool lat_active = car_control.getLatActive();
   //const bool engaged = controls_state.getEnabled();
   const float min_steer_kph = sm["carParams"].getCarParams().getMinSteerSpeed() * MS_TO_KPH;
 
-  p.setPen(Qt::NoPen);
-  p.setBrush(blackColor(200));
-  p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
-
-  textSize = 48.f;
+  // Value/colour only -- LKAS itself is drawn in the right-hand status column
+  // stacked above the temperature panel, at the end of this function.
+  QString lkas_str;
+  QColor lkas_color;
   if (lat_active && cur_speed > min_steer_kph) {
-    str = "ON";
-    textColor = QColor(120, 255, 120, 200);
+    lkas_str = "ON";
+    lkas_color = QColor(120, 255, 120, 200);
   }
   else if (lat_active && cur_speed < min_steer_kph) {
     // City stop-and-go: steering is cut by the speed gate and comes back on
@@ -1069,9 +1069,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // creeping simply because it is not delivering LKA torque there. In the
     // 2026-08-26 city drive every one of those 24.9s sat under 10 km/h, so
     // ranking the fault first would paint normal stop-and-go red.
-    str = "OFF";
-    textSize = 40.f;
-    textColor = QColor(255, 175, 0, 220);
+    lkas_str = "OFF";
+    lkas_color = QColor(255, 175, 0, 220);
   }
   else  {
     // City stop-and-go: steering is cut by the speed gate and comes back on
@@ -1081,28 +1080,13 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // creeping simply because it is not delivering LKA torque there. In the
     // 2026-08-26 city drive every one of those 24.9s sat under 10 km/h, so
     // ranking the fault first would paint normal stop-and-go red.
-    str = "OFF";
-    textSize = 40.f;
-    textColor = QColor(255, 175, 0, 220);
+    lkas_str = "OFF";
+    lkas_color = QColor(255, 175, 0, 220);
   }
 
-  configFont(p, "Open Sans", 27, "Bold");
-  drawText(p, x, y1-14, "LKAS", 200);
-
-  configFont(p, "Open Sans", textSize, "Bold");
-  drawTextWithColor(p, x, y1+35, str, textColor);
-  p.setOpacity(1.0);
-
-  // 4.auto hold
-  int autohold = car_state.getAutoHold();
-  if(autohold >= 0) {
-    x = icon_start_x + (icon_step * 3);
-    img_alpha = autohold > 0 ? 1.0f : 0.15f;
-    bg_alpha = autohold > 0 ? 0.3f : 0.1f;
-    drawIcon(p, x, y1, autohold > 1 ? ic_autohold_warning : ic_autohold_active,
-            QColor(0, 0, 0, (255 * bg_alpha)), img_alpha);
-    p.setOpacity(1.0);
-  }
+  // AUTO HOLD is drawn in the right-hand status column below; only its state
+  // is read here.
+  const int autohold = car_state.getAutoHold();
 
   // 5. AI driving profiles
   x = icon_start_x + (icon_step * 4);
@@ -1284,38 +1268,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   drawTextWithColor(p, x, y2+35, str, textColor);
   p.setOpacity(1.0);
 
-  // 3. ACC (swapped column with STEER/DESIRE, per user request)
-  x = icon_start_x + (icon_step * 5);
-  bool acc_bool = car_state.getAdaptiveCruise();
-  p.setPen(Qt::NoPen);
-  p.setBrush(blackColor(200));
-  p.drawEllipse(x - radius / 2, y2 - radius / 2, radius, radius);
-
-  textColor = QColor(255, 255, 255, 200);
-
-  if(acc_bool == true) {
-    str = "ON";
-    textColor = QColor(120, 255, 120, 200);
-  }
-  else {
-    str = "OFF";
-    textColor = QColor(254, 32, 32, 200);
-  }
-
-  configFont(p, "Open Sans", 27, "Bold");
-  drawText(p, x, y2-14, "ACC", 200);
-
-  configFont(p, "Open Sans", textSize, "Bold");
-  drawTextWithColor(p, x, y2+35, str, textColor);
-  p.setOpacity(1.0);
-
-  // 4. brake
-  x = icon_start_x + (icon_step * 3);
-  bool brake_valid = car_state.getBrakePressed();
-  img_alpha = brake_valid ? 1.0f : 0.15f;
-  bg_alpha = brake_valid ? 0.3f : 0.1f;
-  drawIcon(p, x, y2, ic_brake, QColor(0, 0, 0, (255 * bg_alpha)), img_alpha);
-  p.setOpacity(1.0);
+  // ACC and BRAKE moved to the right-hand status column below; only their
+  // state is read here.
+  const bool acc_bool = car_state.getAdaptiveCruise();
+  const bool brake_valid = car_state.getBrakePressed();
 
   /*// 5. long control state
   x = icon_start_x + (icon_step * 1);
@@ -1335,9 +1291,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   drawTextWithColor(p, x, y1+50, str, textColor);
   p.setOpacity(1.0);*/
 
-  // 5. STEER MAX
-  // CarControl.steer is normalized to -1.0..1.0. Convert its magnitude to
-  // the GM steering command scale (0..300) and draw it without a percent sign.
+  // 5. STEER MAX -- hidden, kept for easy restoration. The same normalized
+  // actuators.steer it scaled to 0..300 still drives the steering gauge on
+  // the lane bar, so nothing is lost by hiding this tile.
+  /*
   x = icon_start_x + (icon_step * 1);
   constexpr float steer_max = 300.0f;
   const float steer_command = std::clamp(std::abs(car_control.getActuators().getSteer()) * steer_max,
@@ -1368,11 +1325,12 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.setOpacity(1.0);
   p.setBrush(Qt::NoBrush);
   p.setPen(Qt::NoPen);
+  */
 
-  // 6. STEER / DESIRE -- revived from the commented-out steering-angle block
-  // above, shown as a signed dual ring instead of plain text so left/right
-  // direction reads at a glance and not just magnitude.
-  // (swapped column with ACC, per user request)
+  // 6. STEER / DESIRE -- hidden, kept for easy restoration. A signed dual
+  // ring plus the STEER/DESIRE readout; the WHEEL tile below still shows the
+  // same live steeringAngleDeg.
+  /*
   x = icon_start_x + (icon_step * 2);
   {
     constexpr float steer_desire_max_deg = 120.0f;
@@ -1418,6 +1376,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     drawTextWithColor(p, x, y2 + 32, str2, textColor);
     p.setOpacity(1.0);
   }
+  */
 
   // 7. WHEEL -- same live steeringAngleDeg as "STEER" above, rendered as a
   // physically rotating wheel icon instead of a number. Not present in the
@@ -1447,6 +1406,63 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     p.restore();
   }
 
+  // 8. Right-hand status block, sitting above the temperature panel and
+  // centred on it:
+  //
+  //     BRAKE   ACC
+  //     HOLD    LKAS
+  //
+  // Laid out 2x2 rather than as one tall column so the block stays short --
+  // two circles plus their gap still fit inside the panel's background width.
+  // The split also puts the two icon tiles in the left column and the two
+  // labelled text tiles in the right, so each column reads consistently.
+  // Skipped if drawThermal has not run yet (it does, earlier in paintGL) so a
+  // zero panel top can never park these at the top of the screen.
+  if (thermal_panel_top_ > 0) {
+    constexpr int SD = 88;         // status circle diameter
+    constexpr int SGAP_X = 12;     // horizontal gap between the two columns
+    constexpr int SGAP_Y = 10;     // vertical gap between the two rows
+    constexpr int PANEL_GAP = 16;  // clearance above the temperature panel
+
+    auto statusCircle = [&](int cx_, int cy, const QString &label,
+                            const QString &value, const QColor &value_color) {
+      p.setPen(Qt::NoPen);
+      p.setBrush(blackColor(200));
+      p.drawEllipse(cx_ - SD / 2, cy - SD / 2, SD, SD);
+      configFont(p, "Open Sans", 20, "Bold");
+      drawText(p, cx_, cy - 10, label, 200);
+      QColor c = value_color;
+      configFont(p, "Open Sans", 28, "Bold");
+      drawTextWithColor(p, cx_, cy + 27, value, c);
+      p.setOpacity(1.0);
+    };
+
+    auto statusIcon = [&](int cx_, int cy, QPixmap &img, bool on) {
+      p.setPen(Qt::NoPen);
+      p.setBrush(QColor(0, 0, 0, on ? 77 : 26));
+      p.drawEllipse(cx_ - SD / 2, cy - SD / 2, SD, SD);
+      p.setOpacity(on ? 1.0f : 0.15f);
+      const int isz = (SD / 2) * 1.5;
+      p.drawPixmap(cx_ - isz / 2, cy - isz / 2, isz, isz, img);
+      p.setOpacity(1.0);
+    };
+
+    const int col_l = thermal_panel_cx_ - (SD + SGAP_X) / 2;
+    const int col_r = thermal_panel_cx_ + (SD + SGAP_X) / 2;
+    // Anchored from the bottom so the block always grows away from the panel.
+    const int row_b = thermal_panel_top_ - PANEL_GAP - SD / 2;
+    const int row_t = row_b - SD - SGAP_Y;
+
+    statusIcon(col_l, row_t, ic_brake, brake_valid);
+    if (autohold >= 0) {
+      statusIcon(col_l, row_b,
+                 autohold > 1 ? ic_autohold_warning : ic_autohold_active,
+                 autohold > 0);
+    }
+    statusCircle(col_r, row_t, "ACC", acc_bool ? "ON" : "OFF",
+                 acc_bool ? QColor(120, 255, 120, 200) : QColor(254, 32, 32, 200));
+    statusCircle(col_r, row_b, "LKAS", lkas_str, lkas_color);
+  }
 }
 
 /*
@@ -2433,6 +2449,11 @@ void NvgWindow::drawThermal(QPainter &p) {
   constexpr int debug_text_up = 15;
   const int y_calc = rect().bottom() - debug_text_up - pad - total_h;
   const int y = y_calc > 80 ? y_calc : 80;
+
+  // Publish the panel's box for the status column drawBottomIcons stacks on
+  // top of it (see the members' comment in onroad.h).
+  thermal_panel_top_ = y - pad;
+  thermal_panel_cx_ = x + tile_w / 2;
 
   // ✅ 배경: 투명 검정 + 라운드
   QRect bg_rect(x - pad, y - pad, total_w + pad * 2, total_h + pad * 2);
