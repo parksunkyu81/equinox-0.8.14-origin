@@ -939,9 +939,9 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
                       y2 - radius / 2, y1 + radius / 2);
 
   float cur_speed = std::max(0.0, car_state.getVEgo() * MS_TO_KPH);
-  QString str;
-  QString str2;
-  QColor textColor = QColor(255, 255, 255, 200);
+  // The old shared str / str2 / textColor scratch locals are gone: every tile
+  // now builds its own strings and colour. The commented-out blocks below
+  // still reference them, so restoring one means declaring them again.
 
   /*
   // Previous steering-angle display (kept for easy restoration).
@@ -978,14 +978,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   const float comma_pedal_ratio = (comma_pedal - comma_pedal_min) /
                                   (comma_pedal_max - comma_pedal_min);
 
-  float textSize = 34.f;
-
   // 2. VISION DIST -- hidden, kept for easy restoration.
-  // This assignment stays OUTSIDE the comment on purpose: tiles further down
-  // (TR mode, PEDAL STATUS) draw with whatever textSize holds, and hiding it
-  // along with the rest would silently shrink them from 48 to 34 px.
-  textSize = 48.f;
+  // The shared textSize local that used to live here is gone with the tiles
+  // that read it (TR, PEDAL STATUS); those now size their own text.
   /*
+  float textSize = 48.f;
   x = icon_start_x + (icon_step * 4);
 
   p.setPen(Qt::NoPen);
@@ -1140,30 +1137,14 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   x = 140;
   x = icon_start_x;
 
-  // 2. TR Value  -- lower row, column 1
-  x = icon_start_x + icon_step;
-  float tr_value = controls_state.getDynamicTRValue();
-  auto tr_mode = controls_state.getDynamicTRMode();
+  // 2. TR Value -- values only; the tile is drawn above the speed panel at
+  // the end of this function.
+  const float tr_value = controls_state.getDynamicTRValue();
+  const auto tr_mode = controls_state.getDynamicTRMode();
   //int cruise_gap = car_state.getCruiseGap();
-
-  p.setPen(Qt::NoPen);
-  p.setBrush(blackColor(200));
-  p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
-
-  str.sprintf("%s", tr_mode.cStr());
-  str2.sprintf("%.2f", tr_value);
-
-  configFont(p, "Open Sans", textSize, "Bold");
-  //textColor = QColor(255, 255, 255, 200);  white
-  textColor = QColor(120, 255, 120, 200);   // green
-
-
-  configFont(p, "Open Sans", 27, "Bold");
-  drawText(p, x, y1-14, str, 200);
-
-  configFont(p, "Open Sans", textSize, "Bold");
-  drawTextWithColor(p, x, y1+35, str2, textColor);
-  p.setOpacity(1.0);
+  QString tr_label = QString::fromUtf8(tr_mode.cStr());
+  QString tr_str;
+  tr_str.sprintf("%.2f", tr_value);
 
   /*
   // 1. SPEED
@@ -1195,45 +1176,28 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   drawTextWithColor(p, x, y2+50, str, textColor);
   p.setOpacity(1.0);*/
 
-  // 1. PEDAL  -- lower row, column 2
-  x = icon_start_x + (icon_step * 2);
-  float accel = car_control.getActuators().getAccel();
+  // 1. PEDAL -- state and colour only; the tile is drawn above the speed
+  // panel at the end of this function.
+  const float accel = car_control.getActuators().getAccel();
 
-  p.setPen(Qt::NoPen);
-  p.setBrush(stop_accel_boost_active ? QColor(0, 170, 90, 235) : blackColor(200));
-  p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
-
-  textColor = QColor(255, 255, 255, 200);
-
-  if(accel > 0) {
-    //str = "ACCEL";
-    str = "가속";
-    textColor = QColor(120, 255, 120, 200);
+  QString pedal_status_str;
+  QColor pedalStatusColor;
+  if (accel > 0) {
+    pedal_status_str = "가속";
+    pedalStatusColor = QColor(120, 255, 120, 200);
+  } else if (accel == 0.0) {
+    pedal_status_str = "브레이크";
+    pedalStatusColor = QColor(255, 185, 15, 200);
+  } else {
+    pedal_status_str = "감속";
+    pedalStatusColor = QColor(254, 32, 32, 200);
   }
-  else if(accel == 0.0) {
-    //str = "──";
-    str = "브레이크";
-    textColor = QColor(255, 185, 15, 200);
+  // Only its state text and colour change while the confirmed stop-and-go
+  // launch assist is operating.
+  if (stop_accel_boost_active) {
+    pedal_status_str = "BOOST";
+    pedalStatusColor = QColor(225, 255, 239, 255);
   }
-  else {
-    //str = "DECEL";
-    str = "감속";
-    textColor = QColor(254, 32, 32, 200);
-  }
-
-  // Keep the existing PEDAL gauge layout. Only its active color and state
-  // text change while the confirmed stop-and-go launch assist is operating.
-  if(stop_accel_boost_active) {
-    str = "BOOST";
-    textColor = QColor(225, 255, 239, 255);
-  }
-
-  configFont(p, "Open Sans", 20, "Bold");
-  drawText(p, x, y1-14, "PEDAL STATUS", 200);
-
-  configFont(p, "Open Sans", textSize, "Bold");
-  drawTextWithColor(p, x, y1+35, str, textColor);
-  p.setOpacity(1.0);
 
   // ACC and BRAKE moved to the right-hand status column below; only their
   // state is read here.
@@ -1390,29 +1354,49 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     constexpr int SGAP_Y = 10;     // vertical gap between the two rows
     constexpr int PANEL_GAP = 16;  // clearance above the temperature panel
 
-    auto statusCircle = [&](int cx_, int cy, const QString &label,
-                            const QString &value, const QColor &value_color) {
-      p.setPen(Qt::NoPen);
-      p.setBrush(blackColor(200));
-      p.drawEllipse(cx_ - SD / 2, cy - SD / 2, SD, SD);
-      // Shrink the label until it fits the disc. These tiles are narrower than
-      // the bottom row they came from, and "PEDAL LEVEL" is four times the
-      // width of "ACC" at the same size -- fixed 20 px would run off the edge.
+    // Label over value, the pair centred on the disc by their actual ink.
+    // Fixed baseline offsets scaled from the 116 px tiles do not survive the
+    // move: once the label shrinks to fit, they leave a 17 px hole between
+    // the two and push the value 17 px below the disc's centre.
+    //
+    // The label shrinks until it fits, because "PEDAL LEVEL" is four times
+    // the width of "ACC" and a fixed 20 px would run off the edge. The value
+    // is measured from "8" rather than the live string so a changing reading
+    // can never shift the pair.
+    auto drawTileText = [&](int cx_, int cy, const QString &label,
+                            const QString &value, const QColor &value_color,
+                            int label_budget, int label_alpha) {
       int label_pt = 20;
-      const int label_max_w = SD - 8;
       while (label_pt > 11) {
         configFont(p, "Open Sans", label_pt, "Bold");
-        if (QFontMetrics(p.font()).width(label) <= label_max_w) {
+        if (QFontMetrics(p.font()).width(label) <= label_budget) {
           break;
         }
         label_pt--;
       }
       configFont(p, "Open Sans", label_pt, "Bold");
-      drawText(p, cx_, cy - 10, label, 200);
+      const int label_h = QFontMetrics(p.font()).tightBoundingRect(label).height();
+      configFont(p, "Open Sans", 28, "Bold");
+      const int value_h = QFontMetrics(p.font()).tightBoundingRect("8").height();
+
+      constexpr int TEXT_GAP = 7;
+      const int total_h = label_h + TEXT_GAP + value_h;
+      const int top = cy - total_h / 2;
+
+      configFont(p, "Open Sans", label_pt, "Bold");
+      drawText(p, cx_, top + label_h, label, label_alpha);
       QColor c = value_color;
       configFont(p, "Open Sans", 28, "Bold");
-      drawTextWithColor(p, cx_, cy + 27, value, c);
+      drawTextWithColor(p, cx_, top + total_h, value, c);
       p.setOpacity(1.0);
+    };
+
+    auto statusCircle = [&](int cx_, int cy, const QString &label,
+                            const QString &value, const QColor &value_color) {
+      p.setPen(Qt::NoPen);
+      p.setBrush(blackColor(200));
+      p.drawEllipse(cx_ - SD / 2, cy - SD / 2, SD, SD);
+      drawTileText(cx_, cy, label, value, value_color, SD - 8, 200);
     };
 
     // Same tile as statusCircle plus a progress ring, so the live comma-pedal
@@ -1431,21 +1415,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       p.drawArc(ring, 90 * 16,
                 -static_cast<int>(std::clamp(ratio, 0.0f, 1.0f) * 360.0f * 16.0f));
 
-      int label_pt = 20;
-      const int label_max_w = SD - 22;   // inside the ring, not just the disc
-      while (label_pt > 11) {
-        configFont(p, "Open Sans", label_pt, "Bold");
-        if (QFontMetrics(p.font()).width(label) <= label_max_w) {
-          break;
-        }
-        label_pt--;
-      }
-      configFont(p, "Open Sans", label_pt, "Bold");
-      drawText(p, cx_, cy - 10, label, 230);
-      QColor c(255, 255, 255, 245);
-      configFont(p, "Open Sans", 28, "Bold");
-      drawTextWithColor(p, cx_, cy + 27, value, c);
-      p.setOpacity(1.0);
+      // Label budget is the disc minus the ring, not just the disc.
+      drawTileText(cx_, cy, label, value, QColor(255, 255, 255, 245), SD - 22, 230);
       p.setBrush(Qt::NoBrush);
       p.setPen(Qt::NoPen);
     };
@@ -1481,6 +1452,18 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     statusCircle(col_r, row_t, "ACC", acc_bool ? "ON" : "OFF",
                  acc_bool ? QColor(120, 255, 120, 200) : QColor(254, 32, 32, 200));
     statusCircle(col_r, row_b, "LKAS", lkas_str, lkas_color);
+
+    // TR and PEDAL STATUS ride above the speed panel, at the same size and
+    // with the same horizontal gap as the block above -- so the two groups
+    // read as one system rather than two sizes of tile. Skipped until
+    // drawSpeed has published its box (it runs earlier in paintGL).
+    if (speed_panel_top_ > 0) {
+      const int speed_row = speed_panel_top_ - PANEL_GAP - SD / 2;
+      statusCircle(speed_panel_cx_ - (SD + SGAP_X) / 2, speed_row,
+                   tr_label, tr_str, QColor(120, 255, 120, 200));
+      statusCircle(speed_panel_cx_ + (SD + SGAP_X) / 2, speed_row,
+                   "PEDAL STATUS", pedal_status_str, pedalStatusColor);
+    }
   }
 }
 
@@ -1681,6 +1664,11 @@ void NvgWindow::drawSpeed(QPainter &p) {
                       panelBg.top(),
                       panel_content_w,
                       panel_content_h);
+
+  // Publish the panel box for the tiles drawBottomIcons stacks above it
+  // (see the members' comment in onroad.h).
+  speed_panel_top_ = (int)panelBg.top();
+  speed_panel_cx_ = (int)panelBg.center().x();
 
   // 패널 배경 (✅ 더 투명)
   p.setPen(Qt::NoPen);
