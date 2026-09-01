@@ -2614,17 +2614,21 @@ void NvgWindow::drawThermal(QPainter &p) {
   // ink block (valid because none of these strings has a descender), and the
   // horizontal centre uses the string's own ink width so the digits look
   // optically centred rather than advance-centred.
-  auto drawTile = [&](int ty, const QString &value, const QString &label, const QColor &valColor) {
+  // content_lift raises both of a tile's lines together, so one tile can be
+  // nudged without moving its slot or the two tiles below it. The pair keeps
+  // its own value_label_gap; only the block's position in the slot changes.
+  auto drawTile = [&](int ty, const QString &value, const QString &label,
+                      const QColor &valColor, int content_lift = 0) {
     configFont(p, "Open Sans", 56, "Bold");
     const QRect vi = QFontMetrics(p.font()).tightBoundingRect(value);
     p.setPen(valColor);
-    p.drawText(x + (tile_w - vi.width()) / 2 - vi.left(), ty + val_ink_h, value);
+    p.drawText(x + (tile_w - vi.width()) / 2 - vi.left(), ty + val_ink_h - content_lift, value);
 
     configFont(p, "Open Sans", 31, "Bold");
     const QRect li = QFontMetrics(p.font()).tightBoundingRect(label);
     p.setPen(QColor(0, 255, 0, 220));
     p.drawText(x + (tile_w - li.width()) / 2 - li.left(),
-               ty + val_ink_h + value_label_gap + lab_ink_h, label);
+               ty + val_ink_h + value_label_gap + lab_ink_h - content_lift, label);
   };
 
   // =========================
@@ -2635,7 +2639,10 @@ void NvgWindow::drawThermal(QPainter &p) {
 
   int r = interp<float>(cpuTemp, {50.f, 90.f}, {200.f, 255.f}, false);
   int g = interp<float>(cpuTemp, {50.f, 90.f}, {255.f, 200.f}, false);
-  drawTile(y, batStr, "BAT.L", QColor(r, g, 200, 220));
+  // Battery tile's reading and label both sit a twentieth of the tile pitch
+  // above their slot. Against the pitch rather than a pixel count so it keeps
+  // its proportion if the fonts or the gap change.
+  drawTile(y, batStr, "BAT.L", QColor(r, g, 200, 220), (tile_h + gap) / 20);
 
   // =========================
   // CPU
