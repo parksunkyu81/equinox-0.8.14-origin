@@ -926,15 +926,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   const int y1 = rect().bottom() - footer_h / 2 - 10;
   const int y2 = y1 - radius - row_gap;
 
-  // A fifth of the row pitch, used to drop the steering bar and the wheel
-  // tile. Expressed against the pitch rather than as a pixel count so it
-  // keeps its proportion if radius or row_gap change.
-  const int row_drop = (y1 - y2) / 5;
-
-  // Steering-effort gauge spans the upper row's width. It had been raised by
-  // row_drop; dropping it by the same amount lands it back on the row itself.
-  drawSteerGauge(p, icon_start_x + (icon_step * 5) / 2,
-                 y2, icon_step * 5 + radius);
+  // Steering-effort gauge, with the wheel tile sitting immediately left of it
+  // on the same line. The bar gives up exactly the wheel's diameter, so the
+  // pair still ends where the bar used to (icon_start_x - radius/2 .. +946).
+  drawSteerGauge(p, icon_start_x + radius / 2 + (icon_step * 5) / 2,
+                 y2, icon_step * 5);
 
   // Confidence gauge sits beside the ACC/LKAS column (icon_step * 5),
   // spanning the same vertical extent as that stacked pair.
@@ -1312,14 +1308,16 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   }
   */
 
-  // 7. WHEEL -- lower row, column 0. The live steeringAngleDeg rendered as a
-  // physically rotating wheel icon instead of a number. Not present in the
-  // original source; uses the previously-unused ../assets/img_chffr_wheel.png.
+  // 7. WHEEL -- immediately left of the steering bar, on the same line. The
+  // live steeringAngleDeg rendered as a physically rotating wheel icon
+  // instead of a number, so it reads together with the bar's effort and
+  // lane-centring rather than as a separate row. Not present in the original
+  // source; uses the previously-unused ../assets/img_chffr_wheel.png.
   x = icon_start_x;
   {
     const float steer_angle_deg = car_state.getSteeringAngleDeg();
     const bool hands_on_wheel = car_state.getSteeringPressed();
-    const int wheel_cy = y1 + row_drop;
+    const int wheel_cy = y2;
 
     p.setPen(Qt::NoPen);
     // Green when hands-off (system driving alone), black when the driver is
