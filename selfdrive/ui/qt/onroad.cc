@@ -931,12 +931,17 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // first in paintGL) rather than off a column index -- at column 0 it
   // overlapped that panel. The bar takes whatever is left up to the row's
   // original right end, so it narrows instead of anything else moving.
-  constexpr int WHEEL_GAP = 16;
+  constexpr int WHEEL_GAP = 22;
+  // drawSteerGauge strokes the bar with a round cap, so the ink reaches half
+  // the stroke width past the path's endpoint. Measure the gap from that
+  // visual edge: at a 16 px gap measured from the endpoint the cap actually
+  // overlapped the wheel by 7 px.
+  constexpr int BAR_CAP = 46 / 2;   // BAR_W / 2 in drawSteerGauge
   const int bar_right = icon_start_x + (icon_step * 5) + radius / 2;
   const int wheel_cx = (speed_panel_right_ > 0
                         ? speed_panel_right_ + WHEEL_GAP + radius / 2
                         : icon_start_x);
-  const int bar_left = wheel_cx + radius / 2 + WHEEL_GAP;
+  const int bar_left = wheel_cx + radius / 2 + WHEEL_GAP + BAR_CAP;
   drawSteerGauge(p, (bar_left + bar_right) / 2, y2, bar_right - bar_left);
 
   // Confidence gauge sits beside the ACC/LKAS column (icon_step * 5),
