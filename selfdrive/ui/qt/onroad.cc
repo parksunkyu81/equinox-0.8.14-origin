@@ -967,42 +967,16 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   p.setOpacity(1.0);
   */
 
-  // 1. PEDAL MAX  -- lower row, column 3
+  // 1. PEDAL MAX -- value only; the tile is drawn with the right-hand status
+  // block below, left of PEDAL LEVEL and at that block's size.
   // GM CarController clips the command sent to the comma pedal to 0.00..0.85.
   // actuatorsOutput.gas is the post-controller value that matches the CAN output.
-  x = icon_start_x + (icon_step * 3);
   constexpr float comma_pedal_min = 0.0f;
   constexpr float comma_pedal_max = 0.85f;
   const float comma_pedal = std::clamp(car_control.getActuatorsOutput().getGas(),
                                         comma_pedal_min, comma_pedal_max);
   const float comma_pedal_ratio = (comma_pedal - comma_pedal_min) /
                                   (comma_pedal_max - comma_pedal_min);
-  const QRectF pedal_ring(x - radius / 2 + 7, y1 - radius / 2 + 7,
-                          radius - 14, radius - 14);
-
-  p.setPen(QPen(QColor(55, 61, 74, 255), 3));
-  p.setBrush(QColor(55, 61, 74, 235));
-  p.drawEllipse(x - radius / 2, y1 - radius / 2, radius, radius);
-
-  // Full-scale background ring and clockwise live comma-pedal command ring.
-  p.setBrush(Qt::NoBrush);
-  p.setPen(QPen(QColor(118, 126, 139, 180), 9, Qt::SolidLine, Qt::FlatCap));
-  p.drawEllipse(pedal_ring);
-  p.setPen(QPen(QColor(255, 0, 0, 255), 9, Qt::SolidLine, Qt::FlatCap));
-  p.drawArc(pedal_ring, 90 * 16,
-            -static_cast<int>(comma_pedal_ratio * 360.0f * 16.0f));
-
-  str = "PEDAL MAX";
-  configFont(p, "Open Sans", 20, "Bold");
-  drawText(p, x, y1 - 17, str, 230);
-
-  str2.sprintf("%.0f", comma_pedal * 100.0f);
-  textColor = QColor(255, 255, 255, 245);
-  configFont(p, "Open Sans", 36, "Bold");
-  drawTextWithColor(p, x, y1 + 21, str2, textColor);
-  p.setOpacity(1.0);
-  p.setBrush(Qt::NoBrush);
-  p.setPen(Qt::NoPen);
 
   float textSize = 34.f;
 
@@ -1441,6 +1415,41 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       p.setOpacity(1.0);
     };
 
+    // Same tile as statusCircle plus a progress ring, so the live comma-pedal
+    // command still reads as a filling arc rather than only as a number.
+    auto statusRing = [&](int cx_, int cy, const QString &label,
+                          const QString &value, float ratio) {
+      p.setPen(QPen(QColor(55, 61, 74, 255), 3));
+      p.setBrush(QColor(55, 61, 74, 235));
+      p.drawEllipse(cx_ - SD / 2, cy - SD / 2, SD, SD);
+
+      const QRectF ring(cx_ - SD / 2 + 6, cy - SD / 2 + 6, SD - 12, SD - 12);
+      p.setBrush(Qt::NoBrush);
+      p.setPen(QPen(QColor(118, 126, 139, 180), 7, Qt::SolidLine, Qt::FlatCap));
+      p.drawEllipse(ring);
+      p.setPen(QPen(QColor(255, 0, 0, 255), 7, Qt::SolidLine, Qt::FlatCap));
+      p.drawArc(ring, 90 * 16,
+                -static_cast<int>(std::clamp(ratio, 0.0f, 1.0f) * 360.0f * 16.0f));
+
+      int label_pt = 20;
+      const int label_max_w = SD - 22;   // inside the ring, not just the disc
+      while (label_pt > 11) {
+        configFont(p, "Open Sans", label_pt, "Bold");
+        if (QFontMetrics(p.font()).width(label) <= label_max_w) {
+          break;
+        }
+        label_pt--;
+      }
+      configFont(p, "Open Sans", label_pt, "Bold");
+      drawText(p, cx_, cy - 10, label, 230);
+      QColor c(255, 255, 255, 245);
+      configFont(p, "Open Sans", 28, "Bold");
+      drawTextWithColor(p, cx_, cy + 27, value, c);
+      p.setOpacity(1.0);
+      p.setBrush(Qt::NoBrush);
+      p.setPen(Qt::NoPen);
+    };
+
     auto statusIcon = [&](int cx_, int cy, QPixmap &img, bool on) {
       p.setPen(Qt::NoPen);
       p.setBrush(QColor(0, 0, 0, on ? 77 : 26));
@@ -1456,10 +1465,12 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // Anchored from the bottom so the block always grows away from the panel.
     const int row_b = thermal_panel_top_ - PANEL_GAP - SD / 2;
     const int row_t = row_b - SD - SGAP_Y;
-    // PEDAL LEVEL sits above ACC, so the right column reads as the three
-    // settings/state tiles while the left keeps the two icon tiles.
+    // Top row is the two pedal tiles, then the icon/state pairs below.
     const int row_top = row_t - SD - SGAP_Y;
 
+    QString pedal_max_str;
+    pedal_max_str.sprintf("%.0f", comma_pedal * 100.0f);
+    statusRing(col_l, row_top, "PEDAL MAX", pedal_max_str, comma_pedal_ratio);
     statusCircle(col_r, row_top, "PEDAL LEVEL", ai_pedal_profile, aiProfileColor);
     statusIcon(col_l, row_t, ic_brake, brake_valid);
     if (autohold >= 0) {
