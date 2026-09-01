@@ -1335,7 +1335,9 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   {
     const float steer_angle_deg = car_state.getSteeringAngleDeg();
     const bool hands_on_wheel = car_state.getSteeringPressed();
-    const int wheel_cy = bar_cy;
+    // The wheel sits a further twentieth of the row pitch below the bar, so
+    // its centre no longer lines up with the bar's spine.
+    const int wheel_cy = bar_cy + (y1 - y2) / 20;
 
     p.setPen(Qt::NoPen);
     // Green when hands-off (system driving alone), black when the driver is
@@ -1764,7 +1766,10 @@ void NvgWindow::drawSpeed(QPainter &p) {
   QString strCur;
   strCur.sprintf("%d", (int)(cur_speed + 0.5f));
   configFont(p, "Inter", unifiedSpdFont, "Bold");
-  drawTextWithColor(p, panel_cx, baselineAt(panel_cy), strCur, curSpeedColor);
+  // 가운데 줄만 줄 간격의 1/20 만큼 위로. 픽셀 상수가 아니라 간격 비율이라
+  // 패널 높이가 바뀌어도 비율이 유지된다.
+  const int cur_speed_lift = lineGap / 20;
+  drawTextWithColor(p, panel_cx, baselineAt(panel_cy - cur_speed_lift), strCur, curSpeedColor);
 
   // Apply
   QString strApply;
