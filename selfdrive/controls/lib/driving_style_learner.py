@@ -242,6 +242,10 @@ class DrivingStyleLearner:
     # as the brake veto, so the two rates are directly comparable.
     self.gas_assist_rate = 0.0
     self.gas_assist_count = 0
+    # Brakes that landed after openpilot had already lifted, so they were
+    # scored as clean rather than as a veto. Diagnostic only: it says how much
+    # of this driver's braking is deceleration openpilot cannot perform.
+    self.brake_exempt_events = 0
 
     self.gas_events = 0
     self.brake_events = 0
@@ -408,6 +412,7 @@ class DrivingStyleLearner:
         self.gas_assist_rate = _clip(_finite(state.get("gas_assist_rate")), 0.0, 1.0)
         self.gas_assist_count = max(0, min(GAS_ASSIST_COUNT_MAX,
                                            int(state.get("gas_assist_count", 0))))
+        self.brake_exempt_events = max(0, int(state.get("brake_exempt_events", 0)))
 
       self._dirty = True
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -443,6 +448,7 @@ class DrivingStyleLearner:
       "brake_veto_count": self.brake_veto_count,
       "gas_assist_rate": round(self.gas_assist_rate, 6),
       "gas_assist_count": self.gas_assist_count,
+      "brake_exempt_events": self.brake_exempt_events,
       "gas_events": self.gas_events,
       "brake_events": self.brake_events,
       "gain_evidence_events": self.gain_evidence_events,
@@ -975,8 +981,20 @@ class DrivingStyleLearner:
         # car, not a verdict on the acceleration. Drop the episode rather than
         # scoring it either way.
         if self._op_episode_elapsed_s >= BRAKE_VETO_MIN_EPISODE_S:
-          self._push_brake_veto(True)
-          self._push_gas_assist(False)
+          if op_pedal_live:
+            self._push_brake_veto(True)
+            self._push_gas_assist(False)
+          else:
+            # openpilot had already lifted off the pedal. On a comma-pedal car
+            # it cannot brake at all -- GM's get_pid_accel_limits clamps
+            # accel_min to 0.0 -- so every deceleration is the driver's to
+            # make, and a brake landing after the lift is that driver doing
+            # the part openpilot structurally cannot. It says nothing about
+            # how hard openpilot accelerated, and counting it was inflating
+            # the veto rate on exactly the driving style this setup requires.
+            self._push_brake_veto(False)
+            self._push_gas_assist(False)
+            self.brake_exempt_events += 1
         self._op_episode_active = False
       elif gas_edge:
         # Same reasoning in the other direction: gas added right at the start
