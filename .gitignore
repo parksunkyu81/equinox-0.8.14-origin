@@ -83,3 +83,7 @@ build/
 
 !**/.gitkeep
 *.patch
+
+# Cython output. Every other .pyx in the tree has its generated .cpp covered
+# by the subproject's own .gitignore; rednose is vendored without one.
+rednose/helpers/ekf_sym_pyx.cpp
