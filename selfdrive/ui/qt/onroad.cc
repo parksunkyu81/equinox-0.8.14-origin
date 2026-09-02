@@ -2177,29 +2177,20 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   const int y_start = base_y_start + y_shift;
 
   // ---- NDA/HDA 아이콘 ----
-  // 요구사항: roadLimit_Speed(SPEED LIMIT 박스) 있으면 박스 "위"에 표시
+  // 어느 표지가 그려지든 그 표지 바로 위에 중앙 정렬한다. CAM/SECTION 분기는
+  // x_icon = 280 으로 고정돼 있었는데, 그 자리가 속도 패널(x 268~558) 안쪽이라
+  // 배지가 패널 위에 겹쳐 그려졌다. 아래 폭만 분기하면 두 경우가 같아진다.
   if (activeNDA > 0) {
     const int w = S(120);
     const int h = S(54);
+    const int top_margin = S(10);
+    const int board_width = show_road ? S(210)
+                                      : S((limit_speed < 100) ? 210 : 230);
+    const int x_icon = x_start + (board_width - w) / 2;
+    const int y_icon = std::max(0, y_start - h - top_margin);
+
     p.setOpacity(1.f);
-
-    if (show_road) {
-      // SPEED LIMIT 박스 위 중앙 정렬
-      const int board_width = S(210);
-      const int top_margin = S(10);
-      const int x_icon = x_start + (board_width - w) / 2;
-      int y_icon = y_start - h - top_margin;
-      y_icon = std::max(0, y_icon);
-
-      p.drawPixmap(x_icon, y_icon, w, h, (activeNDA == 1) ? ic_nda : ic_hda);
-    } else {
-      // CAM/SECTION일 때는 기존 위치 유지(크기만 확대), 이동량만 반영
-      const int x_icon = 280;
-      const int base_nda_y = 80 - bdr_s;
-      const int y_icon = base_nda_y + y_shift;
-
-      p.drawPixmap(x_icon, y_icon, w, h, (activeNDA == 1) ? ic_nda : ic_hda);
-    }
+    p.drawPixmap(x_icon, y_icon, w, h, (activeNDA == 1) ? ic_nda : ic_hda);
   }
 
   p.setOpacity(1.f);
