@@ -12,6 +12,7 @@ from opendbc.can.packer import CANPacker
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
 from selfdrive.controls.lib.stop_accel_boost import pedal_command_allowed
 from selfdrive.controls.lib.pedal_force_recovery import PEDAL_FORCE_RECOVERY_PEDAL_FLOOR
+from selfdrive.controls.lib.comma_pedal_rise_limiter import CommaPedalRiseLimiter
 
 VisualAlert = car.CarControl.HUDControl.VisualAlert
 GearShifter = car.CarState.GearShifter
@@ -22,6 +23,9 @@ class CarController():
     self.comma_pedal = 0.0
     self.predictive_coast_styled_pedal = 0.0
     self.predictive_coast_pedal_scale = 1.0
+    # Rise-rate limit and post-brake suppression; see the module docstring for
+    # the drive-log measurements behind its constants.
+    self.pedal_rise_limiter = CommaPedalRiseLimiter(DT_CTRL)
 
     # Dynamic steering delta diagnostics/state
     self._dyn_steer_limited_prev = False
@@ -149,23 +153,37 @@ class CarController():
         coast_scale = clip(float(getattr(controls, 'predictive_coast_pedal_scale', 1.0)), 0.0, 1.0)
         self.predictive_coast_styled_pedal = float(styled_pedal)
         self.predictive_coast_pedal_scale = float(coast_scale)
-        self.comma_pedal = float(styled_pedal * coast_scale)  # Actual comma-pedal command range: 0.00..0.85
+        pedal_target = float(styled_pedal * coast_scale)  # Actual comma-pedal command range: 0.00..0.85
+        # The launch boost and the recovery floors are separately gated, carry
+        # their own confirmation logic, and measured 0-3% of this driver's brake
+        # presses, so they keep owning the pedal outright.
+        pedal_bypass = bool(recovery is not None or
+                            getattr(controls, 'stop_accel_boost_active', False))
         controls.comma_pedal_raw_command = float(raw_pedal)
         controls.comma_pedal_styled_command = float(styled_pedal)
-        controls.comma_pedal_final_command = float(self.comma_pedal)
 
         # self.comma_pedal = pedal_command
       else:
-        self.comma_pedal = 0.0
+        pedal_target = 0.0
+        pedal_bypass = False
         self.predictive_coast_styled_pedal = 0.0
         self.predictive_coast_pedal_scale = 1.0
         controls.comma_pedal_raw_command = 0.0
         controls.comma_pedal_styled_command = 0.0
-        controls.comma_pedal_final_command = 0.0
+
+      # Applied last, after coasting and the recovery floors, so it is the final
+      # authority on how fast the command may grow. Runs on every frame -- brake
+      # and gas frames included -- because the post-brake window is timed from
+      # the driver's release.
+      self.comma_pedal = float(self.pedal_rise_limiter.update(
+        pedal_target, v_ego=CS.out.vEgo, brake_pressed=brake_pressed,
+        gas_pressed=bool(CS.out.gasPressed), bypass=pedal_bypass))
+      controls.comma_pedal_final_command = float(self.comma_pedal)
     else:
       self.comma_pedal = 0.0
       self.predictive_coast_styled_pedal = 0.0
       self.predictive_coast_pedal_scale = 1.0
+      self.pedal_rise_limiter.reset()
       controls.comma_pedal_raw_command = 0.0
       controls.comma_pedal_styled_command = 0.0
       controls.comma_pedal_final_command = 0.0
