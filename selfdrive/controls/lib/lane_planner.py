@@ -121,6 +121,25 @@ LOW_CONFIDENCE_MAX_CORRECTION_M = 0.35
 CURVE_LOW_CONFIDENCE_MAX_CORRECTION_NEAR_M = 0.20
 CURVE_LOW_CONFIDENCE_MAX_CORRECTION_M = 0.70
 
+# Unconditional bound on ordinary lane blending. The correction clamp above is
+# reached only when target_d_prob < 0.50, so a confident-but-wrong lane frame
+# could move the planned path by an arbitrary amount. Measured on
+# 2026-09-03--11-00-22 at +193.4 s (26 km/h): the path was displaced 10.93 m at
+# 20 m ahead, from a single 9.61 m frame-to-frame step, while every documented
+# limit in this file is well under 1 m. The lateral MPC absorbed it that time
+# (desired lateral accel stayed at 0.12 m/s^2), but the same spike on a
+# straight at speed would go through as steering.
+#
+# The ceiling is deliberately well above normal blending -- over that drive the
+# p95 of the applied correction was 0.39 m -- so it changes nothing in ordinary
+# driving and only truncates outliers.
+LANE_CENTER_MAX_CORRECTION_NEAR_M = 0.25
+LANE_CENTER_MAX_CORRECTION_M = 1.00
+# Frame-to-frame slew limit on the same correction. parse_model runs at 20 Hz
+# and the measured p95 step was 0.062 m (1.24 m/s), so 2.0 m/s leaves normal
+# motion untouched while capping a spike at 0.10 m per frame.
+LANE_CENTER_MAX_CORRECTION_RATE_MS = 2.0
+
 # Short temporal continuation for tight curves. Cache the last trustworthy
 # lane-path shape, compensate it for the car's short ego-motion, hold it
 # strongly for 0.10 s, then fade it out completely by 1.20 s. This narrow EON
@@ -338,6 +357,10 @@ class LanePlanner:
     self.lane_center_correction_m = 0.0
     self.lane_center_correction_active = False
     self._last_lane_center_refs = None
+    # Previous frame's applied lane-center offset at 20 m, for the slew limit.
+    # Kept in sync with the fallback paths so leaving a fallback does not look
+    # like a step change to the rate limiter.
+    self._prev_center_delta_m = 0.0
 
     # Diagnostic-only mirrors of the temporal-hold store gate inputs. They never
     # feed control; they exist so a drive log can show which condition blocks
@@ -957,6 +980,9 @@ class LanePlanner:
         np.interp(20.0, path_xyz[:, 0], applied_delta))
       self.lane_center_correction_active = bool(
         abs(self.lane_center_correction_m) > 0.01)
+      # This fallback already bounds applied_delta itself; seed the ordinary
+      # path's slew limiter so returning to it is not read as a step.
+      self._prev_center_delta_m = self.lane_center_correction_m
       self.curve_fallback_source_diag = 2
       self._fallback_mode_active = True
       self._fresh_lane_recovery_frames = 0
@@ -973,6 +999,9 @@ class LanePlanner:
         np.interp(20.0, path_xyz[:, 0], applied_delta))
       self.lane_center_correction_active = bool(
         abs(self.lane_center_correction_m) > 0.01)
+      # This fallback already bounds applied_delta itself; seed the ordinary
+      # path's slew limiter so returning to it is not read as a step.
+      self._prev_center_delta_m = self.lane_center_correction_m
       self.curve_fallback_source_diag = 3
       self._fallback_mode_active = True
       self._fresh_lane_recovery_frames = 0
@@ -997,6 +1026,9 @@ class LanePlanner:
         np.interp(20.0, path_xyz[:, 0], applied_delta))
       self.lane_center_correction_active = bool(
         abs(self.lane_center_correction_m) > 0.01)
+      # This fallback already bounds applied_delta itself; seed the ordinary
+      # path's slew limiter so returning to it is not read as a step.
+      self._prev_center_delta_m = self.lane_center_correction_m
       self.curve_fallback_source_diag = 4
       self._fallback_mode_active = True
       self._fresh_lane_recovery_frames = 0
@@ -1169,6 +1201,7 @@ class LanePlanner:
       self.d_prob = 0.0
       self.lane_center_correction_m = 0.0
       self.lane_center_correction_active = False
+      self._prev_center_delta_m = 0.0
       self._fallback_mode_active = False
       cloudlog.warning("Lateral mpc - incomplete laneline x/y geometry, ignoring")
       return path_xyz
@@ -1200,6 +1233,7 @@ class LanePlanner:
       self.d_prob = 0.0
       self.lane_center_correction_m = 0.0
       self.lane_center_correction_active = False
+      self._prev_center_delta_m = 0.0
       self._fallback_mode_active = False
       return path_xyz
 
@@ -1498,8 +1532,27 @@ class LanePlanner:
         self._fallback_mode_active = False
         self._fresh_lane_recovery_frames = 0
 
-    self.lane_center_correction_m = float(
-      self.d_prob * np.interp(20.0, path_xyz[:, 0], center_delta))
+    # Bound ordinary lane blending on every frame, not only the low-confidence
+    # ones handled above, then slew-limit what is left. Shape is preserved by
+    # scaling the whole profile with the ratio the 20 m sample was limited by,
+    # so the path stays smooth instead of developing a kink at the clamp.
+    center_max = np.interp(
+      np.abs(path_xyz[:, 0]), [0.0, 20.0],
+      [LANE_CENTER_MAX_CORRECTION_NEAR_M, LANE_CENTER_MAX_CORRECTION_M])
+    center_delta = np.clip(center_delta, -center_max, center_max)
+
+    center_delta_ref = float(np.interp(20.0, path_xyz[:, 0], center_delta))
+    max_step = LANE_CENTER_MAX_CORRECTION_RATE_MS * DT_MDL
+    limited_ref = float(np.clip(
+      center_delta_ref,
+      self._prev_center_delta_m - max_step,
+      self._prev_center_delta_m + max_step))
+    if abs(center_delta_ref) > 1e-6 and limited_ref != center_delta_ref:
+      center_delta = center_delta * (limited_ref / center_delta_ref)
+    self._prev_center_delta_m = limited_ref
+    lane_path_y_interp = path_xyz[:, 1] + center_delta
+
+    self.lane_center_correction_m = float(self.d_prob * limited_ref)
     self.lane_center_correction_active = bool(
       self.d_prob > 0.05 and
       abs(self.lane_center_correction_m) > 0.01)

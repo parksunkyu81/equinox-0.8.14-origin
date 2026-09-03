@@ -14,6 +14,26 @@ from selfdrive.controls.lib.vehicle_model import ACCELERATION_DUE_TO_GRAVITY
 LOW_SPEED_FACTOR_BP_MS = [0.0, 10.0 / 3.6, 20.0 / 3.6,
                           30.0 / 3.6, 40.0 / 3.6, 50.0 / 3.6]
 LOW_SPEED_FACTOR_V = [200.0, 170.0, 120.0, 60.0, 20.0, 0.0]
+
+# The low-speed factor enters the error as low_speed_factor / v^2, so the
+# effective proportional gain on lateral-acceleration error is
+# (1 + low_speed_factor / v^2) / latAccelFactor. With the table above and
+# latAccelFactor 1.6 that is 14.4 at 10 km/h against 5.8 at 15, 3.1 at 20 and
+# 0.6 at 50 -- the gain grows fastest exactly where the LKAS gate lets control
+# start, because v^2 is collapsing faster than the table falls.
+#
+# Measured on 2026-09-03--11-00-22 in the 10-20 km/h band: hands off the wheel
+# the controller is comfortable (|p| p95 1.01, command clipped 8.2% of the
+# time), but with the driver holding the wheel -- where freeze_integrator
+# leaves P alone -- |p| p95 reaches 6.70 and the command is clipped 52.3% of
+# the time. That is the controller opposing the driver at several times full
+# steering authority, and this band ended up with the drive's worst tracking
+# error (|err| 0.124 m/s^2 against 0.051 at 20-30 km/h).
+#
+# Hold the effective gain at its 15 km/h value instead of letting it keep
+# climbing below that. The cap binds under roughly 15 km/h only; from there up
+# the table is untouched.
+MAX_EFFECTIVE_KP = 6.0
 LAT_ACCEL_FACTOR_MIN = 0.50
 LAT_ACCEL_FACTOR_MAX = 5.00
 FRICTION_MIN = 0.0
@@ -144,8 +164,10 @@ class LatControlTorque(LatControl):
       desired_lateral_accel = desired_curvature * CS.vEgo ** 2
       actual_lateral_accel = actual_curvature * CS.vEgo ** 2
       lateral_accel_deadzone = curvature_deadzone * CS.vEgo ** 2
-      low_speed_factor = interp(
-        CS.vEgo, LOW_SPEED_FACTOR_BP_MS, LOW_SPEED_FACTOR_V)
+      lat_accel_factor = self.fixed_torque_params['latAccelFactor']
+      low_speed_factor = min(
+        interp(CS.vEgo, LOW_SPEED_FACTOR_BP_MS, LOW_SPEED_FACTOR_V),
+        max(0.0, (MAX_EFFECTIVE_KP * lat_accel_factor - 1.0) * CS.vEgo ** 2))
       setpoint = desired_lateral_accel + low_speed_factor * desired_curvature
       measurement = actual_lateral_accel + low_speed_factor * actual_curvature
       error = setpoint - measurement
