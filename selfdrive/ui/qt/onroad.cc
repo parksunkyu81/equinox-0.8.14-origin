@@ -1606,7 +1606,16 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
                    // 브레이크 is 4 full-width glyphs against BOOST's ~3.4 em.
                    // Sizing off BOOST instead let 브레이크 run 136 px wide --
                    // 40 px past the disc, against BOOST's own 21.
-                   "페달 상태", pedal_status_str, pedalStatusColor, "브레이크", 1.2f);
+                   //
+                   // The scale is bounded by the neighbouring TR tile, not by
+                   // this disc: the columns are 128 px apart with 116 px discs,
+                   // so a centred value has 70 px before it reaches the TR
+                   // disc's edge. 브레이크 grows 4 px per point, so every extra
+                   // point costs 2 px of that clearance -- 1.2f (29 pt) leaves
+                   // 12 px, and 1.46f (35 pt) lands exactly on the edge. 1.33f
+                   // is 32 pt: clearly larger to read at a glance while still
+                   // keeping 6 px, which survives Qt's pixel rounding.
+                   "페달 상태", pedal_status_str, pedalStatusColor, "브레이크", 1.33f);
     }
   }
 }
