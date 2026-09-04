@@ -5,6 +5,7 @@ from common.realtime import DT_MDL
 from common.conversions import Conversions as CV
 from selfdrive.modeld.constants import T_IDXS
 from selfdrive.ntune import ntune_common_get
+from selfdrive.swaglog import cloudlog
 from selfdrive.controls.lib.v0813_lateral_compat import compensated_steer_delay
 
 # 경고: 이 값은 모델의 훈련 분포를 기반으로 결정되었으며,
@@ -24,6 +25,24 @@ CAR_ROTATION_RADIUS = 0.0
 
 # EU guidelines
 MAX_LATERAL_JERK = 5.0
+
+# Ceiling on how hard the plan may ask the car to turn. get_lag_adjusted_curvature
+# rate-limits the target, but it anchors that limit on curvatures[0], so nothing
+# bounded the magnitude when the planner itself emitted an implausible value: on
+# the 2026-09-04 drive the curve fallback asked for 6.3 m/s^2 at 28 km/h while the
+# car was tracking a nearly straight path, and the torque controller sat pinned at
+# full output for 0.73 s with no alert raised.
+#
+# Expressed as lateral acceleration so it scales with speed -- about a 20 m radius
+# at 28 km/h and a 257 m one at 100 km/h. Normal planning stays well below it: the
+# 99th percentile of |desired lateral accel| across logged drives is ~1.4 m/s^2,
+# and the highest value ever seen from the stock model was 2.1 m/s^2. This is a
+# guard against a broken plan, not a tuning knob for how the car corners.
+MAX_LATERAL_ACCEL = 3.0
+
+# Backstop for the low-speed end, where the lateral-accel ceiling alone allows
+# curvatures tighter than the car can physically steer. ~5 m turning radius.
+MAX_CURVATURE = 0.2
 
 ButtonType = car.CarState.ButtonEvent.Type
 CRUISE_LONG_PRESS = 50
@@ -96,6 +115,32 @@ def initialize_v_cruise(v_ego, buttonEvents, v_cruise_last):
 
   return int(round(clip(v_ego * CV.MS_TO_KPH, V_CRUISE_MIN, V_CRUISE_MAX)))
 
+def limit_curvature(curvature, v_ego):
+  """Clamp a desired curvature to one the car can hold at this speed.
+
+  The bound is a lateral-acceleration ceiling, so it tightens as speed rises and
+  effectively disappears at parking speeds, where MAX_CURVATURE takes over.
+  """
+  max_curvature = min(MAX_LATERAL_ACCEL / (v_ego ** 2), MAX_CURVATURE)
+  return clip(curvature, -max_curvature, max_curvature)
+
+
+_curvature_limited_frames = 0
+
+def _log_curvature_limit(requested, limited, v_ego):
+  # Log the first frame of a burst and then at most once a second, so a stuck
+  # plan stays visible without flooding the log from this 100 Hz path.
+  global _curvature_limited_frames
+  if requested == limited:
+    _curvature_limited_frames = 0
+    return
+  if _curvature_limited_frames % 100 == 0:
+    cloudlog.warning(
+      "desired curvature limited: %.5f -> %.5f 1/m (%.2f -> %.2f m/s^2 at %.1f m/s)"
+      % (requested, limited, requested * v_ego ** 2, limited * v_ego ** 2, v_ego))
+  _curvature_limited_frames += 1
+
+
 def get_lag_adjusted_curvature(CP, v_ego, psis, curvatures, curvature_rates):
   if len(psis) != CONTROL_N:
     psis = [0.0]*CONTROL_N
@@ -107,7 +152,9 @@ def get_lag_adjusted_curvature(CP, v_ego, psis, curvatures, curvature_rates):
   # Match the official v0.8.13 planner lookahead and torqued sample alignment.
   delay = compensated_steer_delay(CP.steerActuatorDelay)
   # MPC가 휠을 돌리고 지연 전의 조정을 계획할 수 있음.
-  current_curvature_desired = curvatures[0]
+  # Bound curvatures[0] before it is used, since it anchors the rate limit below:
+  # an implausible value there would otherwise carry straight through.
+  current_curvature_desired = limit_curvature(curvatures[0], v_ego)
   psi = interp(delay, T_IDXS[:CONTROL_N], psis)
   average_curvature_desired = psi / (v_ego * delay)
   desired_curvature = 2 * average_curvature_desired - current_curvature_desired
@@ -122,4 +169,10 @@ def get_lag_adjusted_curvature(CP, v_ego, psis, curvatures, curvature_rates):
                                      current_curvature_desired - max_curvature_rate * DT_MDL,
                                      current_curvature_desired + max_curvature_rate * DT_MDL)
 
-  return safe_desired_curvature, safe_desired_curvature_rate
+  # The rate limit above only constrains movement away from the anchor; the psi
+  # extrapolation can still land outside what the car can hold, so bound the
+  # result itself. This is the last thing between the plan and the steering.
+  limited_curvature = limit_curvature(safe_desired_curvature, v_ego)
+  _log_curvature_limit(safe_desired_curvature, limited_curvature, v_ego)
+
+  return limited_curvature, safe_desired_curvature_rate
