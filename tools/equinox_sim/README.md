@@ -11,8 +11,7 @@ openpilot이 실제로 생성한 `sendcan` 페달·조향 명령을 디코딩하
 
 시간에 민감한 `equinoxcan`은 CAN·sendcan·차량 모델만 100Hz로 처리합니다.
 `equinoxservices`는 modelV2·주행계획·위치·레이더를 20Hz/4Hz로 별도 처리하여
-모델 메시지 생성이 CAN 주기를 늦추지 않게 합니다. `recoverylogger`는 제어에
-개입하지 않고 복구 이벤트 전후 데이터만 메모리에 수집합니다.
+모델 메시지 생성이 CAN 주기를 늦추지 않게 합니다.
 
 ## 안전 범위
 
@@ -126,48 +125,7 @@ python3 -m tools.equinox_sim.control status
 python3 -m tools.equinox_sim.control production off
 ```
 
-## 복구 이벤트 로그
-
-`recoverylogger`는 manager가 자동으로 시작합니다. 평상시에는 최근 5초를
-메모리에만 보관하고, 복구 또는 production 조건의 `accel = 0` 후보가 발생하면
-이전 5초와 이후 10초를 다음 위치에 JSONL로 저장합니다.
-
-```text
-/data/media/0/pedal_recovery_logs/
-```
-
-최근 이벤트와 분석 결과는 다음 명령으로 확인합니다.
-
-```bash
-ls -lt /data/media/0/pedal_recovery_logs/ | head
-python3 -m tools.equinox_sim.analyze_recovery \
-  /data/media/0/pedal_recovery_logs/<이벤트파일>.jsonl
-```
-
-분석 결과는 소프트웨어 복구, CarController 페달 출력, checksum이 정상인
-sendcan 요청, Panda의 성공 송신 receipt(`can`의 반환 source `0x80`), 차량 가속
-반응을 분리해서 표시합니다. 첫 `accel = 0` 시점의 실차 복구 조건을 모두 검사하며,
-실패한 조건은 `failedEligibilityGates`에 이름으로 출력합니다. `sendcan`만 성공하고
-`pandaCanPathPassed`가 거짓이면 Panda 안전 필터·송신 단계까지 통과했다고 판정하지
-않습니다. 실제 배선 이후 ECU 수신 여부는 차량의 `aEgo` 반응과 별도 버스 계측으로
-최종 확인해야 합니다.
-
-과거 전체 `rlog.bz2`가 있다면 파일을 별도 PC의 같은 저장소로 복사한 뒤 현재
-controlsd로 재생한 새 로그와 분석 JSON을 한 번에 생성할 수 있습니다. process
-replay는 테스트 Params를 초기화하므로 콤마 장치에서는 실행을 거부합니다.
-
-```bash
-python3 -m tools.equinox_sim.replay_recovery /복사한/경로/rlog.bz2
-```
-
-로그만으로 차량 fingerprint를 찾지 못할 때만 다음 인자를 추가합니다.
-
-```bash
---fingerprint "CHEVROLET EQUINOX NO RADAR"
-```
-
-실차에서는 장애를 인위적으로 주입하지 말고, 기록기를 읽기 전용으로 사용하여
-자연 발생 이벤트나 폐쇄 시험 이벤트를 확인하십시오.
+## 종료
 
 시뮬레이터를 종료하려면 실행 중인 첫 번째 터미널에서 `Ctrl+C`를 누릅니다.
 EON/comma two에서 일반 openpilot 동작을 다시 시작하려면 시뮬레이터 종료 후
