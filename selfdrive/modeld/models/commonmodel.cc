@@ -38,12 +38,15 @@ float* ModelFrame::prepare(cl_mem yuv_cl, int frame_width, int frame_height, con
     loadyuv_queue(&loadyuv, q, y_cl, u_cl, v_cl, *output, true);
     if (mirror != NULL) {
       // A second model input fed from the same camera with the same transform
-      // comes out byte-identical, so copy the finished buffer on the device
-      // rather than running the warp and pack kernels a second time.
-      size_t output_size = 0, mirror_size = 0;
-      CL_CHECK(clGetMemObjectInfo(*output, CL_MEM_SIZE, sizeof(output_size), &output_size, nullptr));
-      CL_CHECK(clGetMemObjectInfo(*mirror, CL_MEM_SIZE, sizeof(mirror_size), &mirror_size, nullptr));
-      CL_CHECK(clEnqueueCopyBuffer(q, *output, *mirror, 0, 0, std::min(output_size, mirror_size), 0, nullptr, nullptr));
+      // comes out byte-identical, so fill it from the warp output already
+      // sitting in y_cl/u_cl/v_cl -- only the pack kernel runs a second time.
+      //
+      // Do NOT use clEnqueueCopyBuffer here: Thneed::clinit creates its own
+      // cl_context, so *output and *mirror live in a different context than q
+      // and the copy is rejected with CL_INVALID_CONTEXT, which CL_CHECK turns
+      // into an abort on the first camera frame. Handing them to a kernel works
+      // because clSetKernelArg does not validate the buffer's context.
+      loadyuv_queue(&loadyuv, q, y_cl, u_cl, v_cl, *mirror, true);
     }
     // NOTE: Since thneed is using a different command queue, this clFinish is needed to ensure the image is ready.
     clFinish(q);

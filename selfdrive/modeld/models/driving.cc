@@ -106,8 +106,8 @@ ModelOutput* model_eval_frame(ModelState* s, cl_mem yuv_cl, int width, int heigh
 #ifdef BIG_MODEL
   // big_input_imgs would be prepared from the same road frame with the same
   // transform as input_imgs -- there is no wide camera to read. Hand prepare()
-  // the second buffer so it is filled by a device-side copy instead: running
-  // the warp and pack kernels twice cost ~5.7ms of the 50ms frame budget.
+  // the second buffer so it reuses the warp result and only repeats the pack
+  // kernel, instead of running the warp a second time as well.
   cl_mem *net_extra_cl = static_cast<cl_mem*>(s->m->getExtraBuf());
   auto net_input_buf = s->frame->prepare(yuv_cl, width, height, transform, static_cast<cl_mem*>(s->m->getInputBuf()), net_extra_cl);
   s->m->addImage(net_input_buf, s->frame->buf_size);
