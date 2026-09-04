@@ -87,4 +87,9 @@ build/
 # Cython output. Every other .pyx in the tree has its generated .cpp covered
 # by the subproject's own .gitignore; rednose is vendored without one.
 rednose/helpers/ekf_sym_pyx.cpp
-models/supercombo_big.dlc
+
+# The big model's .dlc is tracked -- the build needs it as an input and it is
+# not reproducible from anything else in the tree. Its .thneed is not: scons
+# recompiles it from the .dlc, and the result is specific to the GPU that
+# recorded it, so a tracked copy would sit permanently modified on the device.
+models/supercombo_big.thneed
