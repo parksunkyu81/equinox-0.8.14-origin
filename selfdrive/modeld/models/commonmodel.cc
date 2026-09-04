@@ -22,7 +22,7 @@ ModelFrame::ModelFrame(cl_device_id device_id, cl_context context) {
   loadyuv_init(&loadyuv, context, device_id, MODEL_WIDTH, MODEL_HEIGHT);
 }
 
-float* ModelFrame::prepare(cl_mem yuv_cl, int frame_width, int frame_height, const mat3 &projection, cl_mem *output) {
+float* ModelFrame::prepare(cl_mem yuv_cl, int frame_width, int frame_height, const mat3 &projection, cl_mem *output, cl_mem *mirror) {
   transform_queue(&this->transform, q,
                   yuv_cl, frame_width, frame_height,
                   y_cl, u_cl, v_cl, MODEL_WIDTH, MODEL_HEIGHT, projection);
@@ -36,6 +36,15 @@ float* ModelFrame::prepare(cl_mem yuv_cl, int frame_width, int frame_height, con
     return &input_frames[0];
   } else {
     loadyuv_queue(&loadyuv, q, y_cl, u_cl, v_cl, *output, true);
+    if (mirror != NULL) {
+      // A second model input fed from the same camera with the same transform
+      // comes out byte-identical, so copy the finished buffer on the device
+      // rather than running the warp and pack kernels a second time.
+      size_t output_size = 0, mirror_size = 0;
+      CL_CHECK(clGetMemObjectInfo(*output, CL_MEM_SIZE, sizeof(output_size), &output_size, nullptr));
+      CL_CHECK(clGetMemObjectInfo(*mirror, CL_MEM_SIZE, sizeof(mirror_size), &mirror_size, nullptr));
+      CL_CHECK(clEnqueueCopyBuffer(q, *output, *mirror, 0, 0, std::min(output_size, mirror_size), 0, nullptr, nullptr));
+    }
     // NOTE: Since thneed is using a different command queue, this clFinish is needed to ensure the image is ready.
     clFinish(q);
     return NULL;

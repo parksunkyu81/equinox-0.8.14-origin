@@ -261,9 +261,6 @@ static_assert(NET_OUTPUT_SIZE == 6472, "v0.8.13 supercombo total output size cha
 // TODO: convert remaining arrays to std::array and update model runners
 struct ModelState {
   ModelFrame *frame;
-#ifdef BIG_MODEL
-  ModelFrame *wide_frame;
-#endif
   std::array<float, NET_OUTPUT_SIZE> output = {};
   std::unique_ptr<RunModel> m;
 #ifdef DESIRE

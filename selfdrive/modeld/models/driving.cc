@@ -10,6 +10,7 @@
 
 #include "selfdrive/common/clutil.h"
 #include "selfdrive/common/params.h"
+#include "selfdrive/common/swaglog.h"
 #include "selfdrive/common/timing.h"
 
 constexpr float FCW_THRESHOLD_5MS2_HIGH = 0.15;
@@ -40,12 +41,6 @@ constexpr const kj::ArrayPtr<const T> to_kj_array_ptr(const std::array<T, size> 
 
 void model_init(ModelState* s, cl_device_id device_id, cl_context context) {
   s->frame = new ModelFrame(device_id, context);
-#ifdef BIG_MODEL
-  // Second buffer for big_input_imgs. This device has no wide camera, so it is
-  // filled from the same road frame below -- the model's wide branch is being
-  // shown a narrow image, which is outside what it was trained on.
-  s->wide_frame = new ModelFrame(device_id, context);
-#endif
 
 #ifdef USE_THNEED
   s->m = std::make_unique<ThneedModel>(BIG_MODEL_PATH("thneed"),
@@ -69,6 +64,25 @@ void model_init(ModelState* s, cl_device_id device_id, cl_context context) {
   s->traffic_convention[idx] = 1.0;
   s->m->addTrafficConvention(s->traffic_convention, TRAFFIC_CONVENTION_LEN);
 #endif
+
+#ifdef BIG_MODEL
+  // model_eval_frame fills big_input_imgs by copying the finished input_imgs
+  // buffer. That is only equivalent to preparing it twice while the two hold
+  // the same number of bytes, so say what they are: a short copy would leave
+  // the wide branch reading a half-written image and nothing else would notice.
+  cl_mem *input_cl = static_cast<cl_mem*>(s->m->getInputBuf());
+  cl_mem *extra_cl = static_cast<cl_mem*>(s->m->getExtraBuf());
+  if (input_cl != NULL && extra_cl != NULL) {
+    size_t input_size = 0, extra_size = 0;
+    CL_CHECK(clGetMemObjectInfo(*input_cl, CL_MEM_SIZE, sizeof(input_size), &input_size, nullptr));
+    CL_CHECK(clGetMemObjectInfo(*extra_cl, CL_MEM_SIZE, sizeof(extra_size), &extra_size, nullptr));
+    if (input_size == extra_size) {
+      LOGW("big model image inputs match at %zu bytes, mirroring input_imgs into big_input_imgs", input_size);
+    } else {
+      LOGE("big model image inputs differ: input_imgs %zu bytes, big_input_imgs %zu bytes", input_size, extra_size);
+    }
+  }
+#endif
 }
 
 ModelOutput* model_eval_frame(ModelState* s, cl_mem yuv_cl, int width, int height,
@@ -89,13 +103,18 @@ ModelOutput* model_eval_frame(ModelState* s, cl_mem yuv_cl, int width, int heigh
 #endif
 
   // if getInputBuf is not NULL, net_input_buf will be
+#ifdef BIG_MODEL
+  // big_input_imgs would be prepared from the same road frame with the same
+  // transform as input_imgs -- there is no wide camera to read. Hand prepare()
+  // the second buffer so it is filled by a device-side copy instead: running
+  // the warp and pack kernels twice cost ~5.7ms of the 50ms frame budget.
+  cl_mem *net_extra_cl = static_cast<cl_mem*>(s->m->getExtraBuf());
+  auto net_input_buf = s->frame->prepare(yuv_cl, width, height, transform, static_cast<cl_mem*>(s->m->getInputBuf()), net_extra_cl);
+  s->m->addImage(net_input_buf, s->frame->buf_size);
+  s->m->addExtra(net_input_buf, s->frame->buf_size);
+#else
   auto net_input_buf = s->frame->prepare(yuv_cl, width, height, transform, static_cast<cl_mem*>(s->m->getInputBuf()));
   s->m->addImage(net_input_buf, s->frame->buf_size);
-#ifdef BIG_MODEL
-  // Same camera, same transform, second buffer: the wide input gets a copy of
-  // the road frame because there is no wide camera to read.
-  auto net_extra_buf = s->wide_frame->prepare(yuv_cl, width, height, transform, static_cast<cl_mem*>(s->m->getExtraBuf()));
-  s->m->addExtra(net_extra_buf, s->wide_frame->buf_size);
 #endif
   s->m->execute();
 
@@ -104,9 +123,6 @@ ModelOutput* model_eval_frame(ModelState* s, cl_mem yuv_cl, int width, int heigh
 
 void model_free(ModelState* s) {
   delete s->frame;
-#ifdef BIG_MODEL
-  delete s->wide_frame;
-#endif
 }
 
 void fill_lead(cereal::ModelDataV2::LeadDataV3::Builder lead, const ModelOutputLeads &leads, int t_idx, float prob_t) {
