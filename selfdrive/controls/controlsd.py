@@ -40,7 +40,7 @@ from selfdrive.car.gm.values import MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.stop_accel_boost import (
-  STOP_ACCEL_BOOST_FACTOR, StopAccelBoostLatch,
+  StopAccelBoostLatch,
   boost_floor_context_allowed, speed_limit_decel_requested,
 )
 from selfdrive.controls.lib.curve_speed_limiter import (
@@ -54,6 +54,7 @@ from selfdrive.controls.lib.process_health import (
   controlsd_communication_ok, expected_not_running_processes,
   panda_power_down_in_progress, update_process_not_running_state,
 )
+from selfdrive.controls.lib.comma_pedal_rise_limiter import PEDAL_RISE_DEFAULT_TR_S
 from selfdrive.controls.lib.comma_pedal_profile import (
   CommaPedalProfileController, normalize_comma_pedal_profile,
 )
@@ -338,6 +339,13 @@ class Controls:
         self.right_lane_visible = False
         self.stop_accel_boost_latch = StopAccelBoostLatch(DT_CTRL)
         self.stop_accel_boost_active = False
+        # Lead picture handed to the interceptor rise-rate limit. Seeded with
+        # the no-lead case; only the longitudinal path below refreshes it, so
+        # joystick mode never gets a lead-relaxed rise rate.
+        self.pedal_rise_lead_valid = False
+        self.pedal_rise_lead_distance = 0.0
+        self.pedal_rise_lead_rel_speed = 0.0
+        self.pedal_rise_desired_tr = PEDAL_RISE_DEFAULT_TR_S
         # Comma-pedal response comes from the user's CommaPedalResistance
         # profile alone. The driving-style learner that used to shade it was
         # removed: on this car openpilot cannot brake at all, so the driver
@@ -1519,7 +1527,8 @@ class Controls:
             raw_long_accel = self.LoC.update(
               self.active, CS, long_plan, pid_accel_limits, t_since_plan,
               self.stop_accel_boost_active, boost_floor_accel,
-              self.stop_accel_boost_latch.driver_launch_handoff)
+              self.stop_accel_boost_latch.driver_launch_handoff,
+              stop_accel_boost_factor=self.stop_accel_boost_latch.boost_factor)
             lead_one = self.sm['radarState'].leadOne
             radar_valid = bool(self.sm.valid['radarState'] and
                                len(self.sm['radarState'].radarErrors) == 0)
@@ -1565,7 +1574,8 @@ class Controls:
               CS, long_plan, t_since_plan, radar_valid) and \
               not self.pedal_force_recovery.active and \
               not self.lead_loss_cruise_assist.active and \
-              not self.lead_coast_assist.active
+              not self.lead_coast_assist.active and \
+              not self.stop_accel_boost_active
             moving_gap_accel = self.moving_gap_catchup_assist.update(
               base_safe=moving_gap_base_safe,
               lead_valid=bool(lead_one.status),
@@ -1581,6 +1591,17 @@ class Controls:
                                else lead_loss_accel if self.lead_loss_cruise_assist.active
                                else lead_assist_accel if self.lead_coast_assist.active
                                else moving_gap_accel)
+
+            # Lead picture for the interceptor's rise-rate limit. Published here
+            # rather than read again in the CarController so both see the same
+            # radar frame the longitudinal decisions above were made on.
+            self.pedal_rise_lead_valid = bool(lead_one.status and radar_valid)
+            self.pedal_rise_lead_distance = float(
+              lead_one.dRel if self.pedal_rise_lead_valid else 0.0)
+            self.pedal_rise_lead_rel_speed = float(
+              lead_one.vRel if self.pedal_rise_lead_valid else 0.0)
+            self.pedal_rise_desired_tr = float(effective_tr)
+
             self.curve_pedal_raw_accel = float(actuators.accel)
             # Curve target shaping remains in the longitudinal plan. Lead,
             # curve, and speed-limit pedal lift are arbitrated once below so
@@ -2008,7 +2029,9 @@ class Controls:
         controlsState.stopAccelBoostApplied = bool(self.LoC.stop_accel_boost_applied)
         controlsState.stopAccelBoostRawAccel = float(self.LoC.stop_accel_boost_raw_accel)
         controlsState.stopAccelBoostFinalAccel = float(self.LoC.stop_accel_boost_final_accel)
-        controlsState.stopAccelBoostFactor = float(STOP_ACCEL_BOOST_FACTOR)
+        # The live lead-tapered multiplier, not the fixed ceiling it replaced.
+        controlsState.stopAccelBoostFactor = float(
+          self.stop_accel_boost_latch.boost_factor)
         controlsState.driverLaunchHandoffActive = bool(
           self.LoC.driver_launch_handoff_active)
         controlsState.driverLaunchHandoffShadowAccel = float(

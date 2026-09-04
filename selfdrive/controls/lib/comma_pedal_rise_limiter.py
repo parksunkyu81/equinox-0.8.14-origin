@@ -56,6 +56,38 @@ from common.realtime import DT_CTRL
 # by then -- so what this removes is the lunge, not the cruising speed.
 PEDAL_RISE_PER_S = 0.12
 
+# 0.12/s buys its brake presses by slowing the approach to a lead. Applying it
+# with no lead in front buys nothing and only costs response.
+#
+# Re-measured on 2026-09-04--00-09-20 (6.4 min of automatic pedal): the final
+# command sat more than 0.05 below what the controller asked for 53.5 s, in
+# stretches up to 4.4 s, and five of the seven longest of those had no radar
+# lead at all -- 21-50 km/h on open road, request 0.35 delivered as 0.28.
+# Overall only 77.9% of the requested pedal was reaching the interceptor.
+#
+# So the rate is now a function of what is actually in front:
+#
+#   no lead, or a lead beyond FREE_GAP_M      PEDAL_RISE_FREE_PER_S
+#   lead opening with room above desired gap  interpolated
+#   lead close, or closing                    PEDAL_RISE_PER_S (unchanged)
+#
+# The cases the 0.12 measurement was taken from -- ramping toward a lead the
+# car is about to have to brake for -- are exactly the ones that keep it.
+PEDAL_RISE_FREE_PER_S = 0.35
+PEDAL_RISE_FREE_GAP_M = 45.0
+PEDAL_RISE_GAP_FULL_MARGIN_M = 8.0
+PEDAL_RISE_OPENING_FULL_VREL_MS = 0.60
+PEDAL_RISE_STANDSTILL_GAP_M = 4.5
+PEDAL_RISE_DEFAULT_TR_S = 1.4
+# Room is measured against the gap below which a ramp would actually risk a
+# brake press, not against the driver's comfort following time. Measuring it
+# against the comfort gap is what made this useless: with the 'long' profile
+# and cruise gap 4 the desired gap at 20 km/h is ~12 m, so a lead sitting at a
+# perfectly normal 12 m counted as having no room at all and the limit stayed
+# at 0.12/s no matter how hard the lead was pulling away. A shorter driver TR
+# still tightens this; a longer one no longer loosens the safety margin.
+PEDAL_RISE_ROOM_TR_S = 0.9
+
 # A brake application is the driver stating they want to be slower here.
 # Hold the pedal down for a moment afterwards instead of resuming in 0.16 s,
 # then come back at a reduced rate rather than snapping to the request.
@@ -83,6 +115,34 @@ def _finite(value, default=0.0):
     return float(default)
 
 
+def _clip01(value):
+  return 0.0 if value < 0.0 else (1.0 if value > 1.0 else float(value))
+
+
+def pedal_rise_rate(v_ego=0.0, lead_valid=False, lead_distance=0.0,
+                    lead_rel_speed=0.0, desired_tr=PEDAL_RISE_DEFAULT_TR_S):
+  """Return the allowed pedal rise rate for the current lead picture.
+
+  Room and opening rate both have to be there. A large gap to a lead that is
+  braking is not room, and a lead pulling away from two metres is not either.
+  """
+  v_ego = max(0.0, _finite(v_ego, 0.0))
+  lead_distance = max(0.0, _finite(lead_distance, 0.0))
+  if not bool(lead_valid) or lead_distance <= 0.0:
+    return PEDAL_RISE_FREE_PER_S
+  if lead_distance >= PEDAL_RISE_FREE_GAP_M:
+    return PEDAL_RISE_FREE_PER_S
+
+  room_tr = min(PEDAL_RISE_ROOM_TR_S,
+                max(0.0, _finite(desired_tr, PEDAL_RISE_DEFAULT_TR_S)))
+  room_gap = PEDAL_RISE_STANDSTILL_GAP_M + v_ego * room_tr
+  room = _clip01((lead_distance - room_gap) / PEDAL_RISE_GAP_FULL_MARGIN_M)
+  opening = _clip01(_finite(lead_rel_speed, 0.0) /
+                    PEDAL_RISE_OPENING_FULL_VREL_MS)
+  freedom = min(room, opening)
+  return PEDAL_RISE_PER_S + (PEDAL_RISE_FREE_PER_S - PEDAL_RISE_PER_S) * freedom
+
+
 class CommaPedalRiseLimiter:
   """Limit how fast the pedal command may rise; never how fast it may fall."""
 
@@ -96,6 +156,7 @@ class CommaPedalRiseLimiter:
     # post-brake window", which is also the state after a gas override.
     self.post_brake_elapsed = math.inf
     self.rise_rate = PEDAL_RISE_PER_S
+    self.base_rise_rate = PEDAL_RISE_PER_S
     self.holding = False
     self.bypassed = False
     self._brake_pressed_prev = False
@@ -105,7 +166,8 @@ class CommaPedalRiseLimiter:
             else POST_BRAKE_HOLD_S)
 
   def update(self, target, v_ego=0.0, brake_pressed=False, gas_pressed=False,
-             bypass=False):
+             bypass=False, lead_valid=False, lead_distance=0.0,
+             lead_rel_speed=0.0, desired_tr=PEDAL_RISE_DEFAULT_TR_S):
     """Return the pedal command to send.
 
     target       the pedal the controller wants, already 0.0 whenever the pedal
@@ -114,11 +176,16 @@ class CommaPedalRiseLimiter:
                  (launch boost or one of the recovery floors); those carry their
                  own confirmation logic and measured 0-3% of brake presses, so
                  they are not slowed down here
+    lead_*       the tracked lead, used only to decide how fast the command may
+                 rise; with no lead the limit relaxes to PEDAL_RISE_FREE_PER_S
     """
     target = max(0.0, _finite(target, 0.0))
     v_ego_kph = max(0.0, _finite(v_ego, 0.0)) * 3.6
     brake_pressed = bool(brake_pressed)
     gas_pressed = bool(gas_pressed)
+    self.base_rise_rate = pedal_rise_rate(
+      v_ego=v_ego, lead_valid=lead_valid, lead_distance=lead_distance,
+      lead_rel_speed=lead_rel_speed, desired_tr=desired_tr)
 
     if brake_pressed:
       # The pedal is already zero while braking; arm the window so the timer
@@ -141,7 +208,7 @@ class CommaPedalRiseLimiter:
       # request (which is 0.0 while they hold the pedal) without a ramp.
       self.post_brake_elapsed = math.inf
       self.pedal = target
-      self.rise_rate = PEDAL_RISE_PER_S
+      self.rise_rate = self.base_rise_rate
       self.holding = False
       self.bypassed = False
       return self.pedal
@@ -161,9 +228,9 @@ class CommaPedalRiseLimiter:
     if self.post_brake_elapsed < hold_s:
       rate = 0.0
     elif self.post_brake_elapsed < hold_s + POST_BRAKE_RAMP_S:
-      rate = PEDAL_RISE_PER_S * POST_BRAKE_RISE_SCALE
+      rate = self.base_rise_rate * POST_BRAKE_RISE_SCALE
     else:
-      rate = PEDAL_RISE_PER_S
+      rate = self.base_rise_rate
       self.post_brake_elapsed = math.inf
 
     if target <= self.pedal:

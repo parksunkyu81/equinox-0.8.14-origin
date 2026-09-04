@@ -12,7 +12,8 @@ from opendbc.can.packer import CANPacker
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
 from selfdrive.controls.lib.stop_accel_boost import pedal_command_allowed
 from selfdrive.controls.lib.pedal_force_recovery import PEDAL_FORCE_RECOVERY_PEDAL_FLOOR
-from selfdrive.controls.lib.comma_pedal_rise_limiter import CommaPedalRiseLimiter
+from selfdrive.controls.lib.comma_pedal_rise_limiter import (
+  CommaPedalRiseLimiter, PEDAL_RISE_DEFAULT_TR_S)
 
 VisualAlert = car.CarControl.HUDControl.VisualAlert
 GearShifter = car.CarState.GearShifter
@@ -175,9 +176,17 @@ class CarController():
       # authority on how fast the command may grow. Runs on every frame -- brake
       # and gas frames included -- because the post-brake window is timed from
       # the driver's release.
+      # The rise rate itself now depends on the lead: 0.12/s while closing on
+      # one, up to 0.35/s with the road clear. controlsd publishes the same
+      # radar frame its own longitudinal decisions were made on.
       self.comma_pedal = float(self.pedal_rise_limiter.update(
         pedal_target, v_ego=CS.out.vEgo, brake_pressed=brake_pressed,
-        gas_pressed=bool(CS.out.gasPressed), bypass=pedal_bypass))
+        gas_pressed=bool(CS.out.gasPressed), bypass=pedal_bypass,
+        lead_valid=bool(getattr(controls, 'pedal_rise_lead_valid', False)),
+        lead_distance=float(getattr(controls, 'pedal_rise_lead_distance', 0.0)),
+        lead_rel_speed=float(getattr(controls, 'pedal_rise_lead_rel_speed', 0.0)),
+        desired_tr=float(getattr(controls, 'pedal_rise_desired_tr',
+                                 PEDAL_RISE_DEFAULT_TR_S))))
       controls.comma_pedal_final_command = float(self.comma_pedal)
     else:
       self.comma_pedal = 0.0

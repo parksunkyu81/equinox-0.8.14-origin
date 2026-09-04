@@ -34,7 +34,13 @@ LEAD_COAST_ASSIST_ACCEL_PER_PEDAL = 1.0 / 0.17
 # LeadCoastAssist deadzone recovery above. It never shortens the selected
 # following time; it only supplies a bounded positive floor while a stable lead
 # is farther away than the distance implied by that time.
-MOVING_GAP_MIN_SPEED_KPH = 20.0
+# The 20 km/h floor put the whole stop-and-go band out of reach: on
+# 2026-09-04--00-09-20 this supervisor activated for 0.0 s across 19 minutes,
+# while the drive contained repeated stretches of a lead opening away from a
+# 5-10 m gap below 20 km/h. Launch itself belongs to StopAccelBoostLatch and is
+# excluded by the caller, so this now covers the band between the end of a
+# launch and normal following.
+MOVING_GAP_MIN_SPEED_KPH = 8.0
 MOVING_GAP_MAX_SPEED_KPH = 70.0
 MOVING_GAP_STANDSTILL_GAP_M = 4.5
 MOVING_GAP_MIN_MODEL_PROB = 0.80
@@ -95,12 +101,18 @@ def _interp(x, xp, fp):
 
 
 def moving_gap_accel_cap(v_ego):
-  """Return the absolute catch-up acceleration ceiling for the current speed."""
+  """Return the absolute catch-up acceleration ceiling for the current speed.
+
+  The low-speed end is deliberately modest. Down here the supervisor is closing
+  a gap the planner has already conceded, not launching, and this car repays
+  every excess with a driver brake press.
+  """
   speed_kph = max(0.0, float(v_ego)) * 3.6
   return _interp(
     speed_kph,
-    [MOVING_GAP_MIN_SPEED_KPH, 25.0, 30.0, 45.0, 60.0, MOVING_GAP_MAX_SPEED_KPH],
-    [0.08, 0.22, 0.22, 0.30, 0.35, 0.0])
+    [MOVING_GAP_MIN_SPEED_KPH, 15.0, 20.0, 25.0, 30.0, 45.0, 60.0,
+     MOVING_GAP_MAX_SPEED_KPH],
+    [0.10, 0.16, 0.20, 0.22, 0.22, 0.30, 0.35, 0.0])
 
 
 class MovingGapCatchupAssist:
