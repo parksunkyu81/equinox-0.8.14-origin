@@ -52,6 +52,16 @@ AddOption('--no-thneed',
           dest='no_thneed',
           help='avoid using thneed')
 
+# Experimental: run the 2022-07 two-image supercombo (models/supercombo_big.dlc)
+# instead of the single-image one this device shipped with. The wide-camera
+# input it requires does not exist on a comma two, so it is fed a copy of the
+# road frame -- see selfdrive/modeld/models/driving.cc. Off by default; nothing
+# about the normal build changes unless this flag is passed.
+AddOption('--big-model',
+          action='store_true',
+          dest='big_model',
+          help='use the experimental two-image supercombo (bench testing only)')
+
 real_arch = arch = subprocess.check_output(["uname", "-m"], encoding='utf8').rstrip()
 if platform.system() == "Darwin":
   arch = "Darwin"

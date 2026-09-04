@@ -200,11 +200,43 @@ struct ModelOutputMeta {
 };
 static_assert(sizeof(ModelOutputMeta) == sizeof(ModelOutputDesireProb) + sizeof(float) + (sizeof(ModelOutputDisengageProb)*DISENGAGE_LEN) + (sizeof(ModelOutputBlinkerProb)*BLINKER_LEN) + (sizeof(ModelOutputDesireProb)*DESIRE_PRED_LEN));
 
+#ifdef BIG_MODEL
+// The 2022-07 supercombo emits a stop-line block between leads and meta. It is
+// not read anywhere -- nothing downstream consumes stop lines -- but it has to
+// be in the struct or every field after leads is parsed from the wrong offset,
+// including the recurrent state that gets fed back in each frame.
+constexpr int STOP_LINE_MHP_N = 3;
+
+struct ModelOutputStopLineElement {
+  ModelOutputXYZ position;
+  ModelOutputXYZ rotation;
+  float speed;
+  float time;
+};
+static_assert(sizeof(ModelOutputStopLineElement) == (sizeof(ModelOutputXYZ)*2 + sizeof(float)*2));
+
+struct ModelOutputStopLinePrediction {
+  ModelOutputStopLineElement mean;
+  ModelOutputStopLineElement std;
+  float prob;
+};
+static_assert(sizeof(ModelOutputStopLinePrediction) == (sizeof(ModelOutputStopLineElement)*2 + sizeof(float)));
+
+struct ModelOutputStopLines {
+  std::array<ModelOutputStopLinePrediction, STOP_LINE_MHP_N> prediction;
+  float prob;
+};
+static_assert(sizeof(ModelOutputStopLines) == (sizeof(ModelOutputStopLinePrediction)*STOP_LINE_MHP_N) + sizeof(float));
+#endif
+
 struct ModelOutput {
   const ModelOutputPlans plans;
   const ModelOutputLaneLines lane_lines;
   const ModelOutputRoadEdges road_edges;
   const ModelOutputLeads leads;
+#ifdef BIG_MODEL
+  const ModelOutputStopLines stop_lines;
+#endif
   const ModelOutputMeta meta;
   const ModelOutputPose pose;
 };
@@ -216,12 +248,22 @@ constexpr int OUTPUT_SIZE = sizeof(ModelOutput) / sizeof(float);
   constexpr int TEMPORAL_SIZE = 0;
 #endif
 constexpr int NET_OUTPUT_SIZE = OUTPUT_SIZE + TEMPORAL_SIZE;
+#ifdef BIG_MODEL
+// 5960 + 52 (stop lines). If these fire, the model's output layout is not the
+// one this parser was extended for -- do not "fix" them by editing the number.
+static_assert(OUTPUT_SIZE == 6012, "2022-07 supercombo parser output size changed");
+static_assert(NET_OUTPUT_SIZE == 6524, "2022-07 supercombo total output size changed");
+#else
 static_assert(OUTPUT_SIZE == 5960, "v0.8.13 supercombo parser output size changed");
 static_assert(NET_OUTPUT_SIZE == 6472, "v0.8.13 supercombo total output size changed");
+#endif
 
 // TODO: convert remaining arrays to std::array and update model runners
 struct ModelState {
   ModelFrame *frame;
+#ifdef BIG_MODEL
+  ModelFrame *wide_frame;
+#endif
   std::array<float, NET_OUTPUT_SIZE> output = {};
   std::unique_ptr<RunModel> m;
 #ifdef DESIRE

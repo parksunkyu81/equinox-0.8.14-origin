@@ -31,6 +31,15 @@ thneed_src = [
 
 use_thneed = not GetOption('no_thneed')
 
+# Experimental two-image model. Selects a different source .dlc, a different
+# .thneed output and the BIG_MODEL parser layout together, so the model file
+# and the struct that reads it can never end up mismatched.
+big_model = GetOption('big_model')
+model_stem = "supercombo_big" if big_model else "supercombo"
+if big_model:
+  lenv['CFLAGS'].append("-DBIG_MODEL")
+  lenv['CXXFLAGS'].append("-DBIG_MODEL")
+
 if arch == "aarch64" or arch == "larch64":
   libs += ['gsl', 'CB']
   libs += ['gnustl_shared'] if arch == "aarch64" else ['pthread', 'dl']
@@ -65,10 +74,12 @@ common_model = lenv.Object(common_src)
 
 # build thneed model
 if use_thneed and arch in ("aarch64", "larch64"):
-  fn = File("#models/supercombo").abspath
+  fn = File(f"#models/{model_stem}").abspath
   compiler = lenv.Program('thneed/compile', ["thneed/compile.cc"]+common_model, LIBS=libs)
-  # The comma two v0.8.13 model has exactly one image tensor.
-  cmd = f"cd {Dir('.').abspath} && {compiler[0].abspath} {fn}.dlc {fn}.thneed --binary"
+  # The comma two v0.8.13 model has exactly one image tensor; the experimental
+  # 2022-07 one has two and must be recorded with both bound.
+  extra_flag = " --extra" if big_model else ""
+  cmd = f"cd {Dir('.').abspath} && {compiler[0].abspath} {fn}.dlc {fn}.thneed --binary{extra_flag}"
 
   lib_paths = ':'.join(Dir(p).abspath for p in lenv["LIBPATH"])
   kernel_path = os.path.join(Dir('.').abspath, "thneed", "kernels")

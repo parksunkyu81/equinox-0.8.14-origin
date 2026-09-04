@@ -21,6 +21,18 @@ std::array<float, 3> prev_brake_3ms2_probs = {0,0,0};
 
 // #define DUMP_YUV
 
+// Which supercombo to load, and whether it wants a second image tensor. The
+// experimental model lives beside the stock one under its own name, so turning
+// --big-model off restores the original build without touching any file the
+// device shipped with.
+#ifdef BIG_MODEL
+  #define BIG_MODEL_PATH(ext) "../../models/supercombo_big." ext
+  #define USE_EXTRA_INPUT true
+#else
+  #define BIG_MODEL_PATH(ext) "../../models/supercombo." ext
+  #define USE_EXTRA_INPUT false
+#endif
+
 template<class T, size_t size>
 constexpr const kj::ArrayPtr<const T> to_kj_array_ptr(const std::array<T, size> &arr) {
   return kj::ArrayPtr(arr.data(), arr.size());
@@ -28,15 +40,21 @@ constexpr const kj::ArrayPtr<const T> to_kj_array_ptr(const std::array<T, size> 
 
 void model_init(ModelState* s, cl_device_id device_id, cl_context context) {
   s->frame = new ModelFrame(device_id, context);
+#ifdef BIG_MODEL
+  // Second buffer for big_input_imgs. This device has no wide camera, so it is
+  // filled from the same road frame below -- the model's wide branch is being
+  // shown a narrow image, which is outside what it was trained on.
+  s->wide_frame = new ModelFrame(device_id, context);
+#endif
 
 #ifdef USE_THNEED
-  s->m = std::make_unique<ThneedModel>("../../models/supercombo.thneed",
+  s->m = std::make_unique<ThneedModel>(BIG_MODEL_PATH("thneed"),
 #elif USE_ONNX_MODEL
-  s->m = std::make_unique<ONNXModel>("../../models/supercombo.onnx",
+  s->m = std::make_unique<ONNXModel>(BIG_MODEL_PATH("onnx"),
 #else
-  s->m = std::make_unique<SNPEModel>("../../models/supercombo.dlc",
+  s->m = std::make_unique<SNPEModel>(BIG_MODEL_PATH("dlc"),
 #endif
-   &s->output[0], NET_OUTPUT_SIZE, USE_GPU_RUNTIME, false);
+   &s->output[0], NET_OUTPUT_SIZE, USE_GPU_RUNTIME, USE_EXTRA_INPUT);
 
 #ifdef TEMPORAL
   s->m->addRecurrent(&s->output[OUTPUT_SIZE], TEMPORAL_SIZE);
@@ -73,6 +91,12 @@ ModelOutput* model_eval_frame(ModelState* s, cl_mem yuv_cl, int width, int heigh
   // if getInputBuf is not NULL, net_input_buf will be
   auto net_input_buf = s->frame->prepare(yuv_cl, width, height, transform, static_cast<cl_mem*>(s->m->getInputBuf()));
   s->m->addImage(net_input_buf, s->frame->buf_size);
+#ifdef BIG_MODEL
+  // Same camera, same transform, second buffer: the wide input gets a copy of
+  // the road frame because there is no wide camera to read.
+  auto net_extra_buf = s->wide_frame->prepare(yuv_cl, width, height, transform, static_cast<cl_mem*>(s->m->getExtraBuf()));
+  s->m->addExtra(net_extra_buf, s->wide_frame->buf_size);
+#endif
   s->m->execute();
 
   return (ModelOutput*)&s->output;
@@ -80,6 +104,9 @@ ModelOutput* model_eval_frame(ModelState* s, cl_mem yuv_cl, int width, int heigh
 
 void model_free(ModelState* s) {
   delete s->frame;
+#ifdef BIG_MODEL
+  delete s->wide_frame;
+#endif
 }
 
 void fill_lead(cereal::ModelDataV2::LeadDataV3::Builder lead, const ModelOutputLeads &leads, int t_idx, float prob_t) {
