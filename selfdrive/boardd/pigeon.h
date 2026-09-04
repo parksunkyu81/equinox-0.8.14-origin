@@ -21,7 +21,9 @@ class Pigeon {
   static Pigeon* connect(const char * tty);
   virtual ~Pigeon(){};
 
-  void init();
+  // false if the GPS never answered, which is what happens on a panda with no
+  // uBlox fitted. The caller is expected to stop talking to it in that case.
+  bool init();
   void stop();
   bool wait_for_ack();
   bool wait_for_ack(const std::string &ack, const std::string &nack, int timeout_ms = 1000);

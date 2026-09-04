@@ -54,7 +54,9 @@ bool Pigeon::wait_for_ack(const std::string &ack_, const std::string &nack_, int
       LOGE("Received NACK from ublox");
       return false;
     } else if (s.size() > 0x1000 || ((millis_since_boot() - start_t) > timeout_ms)) {
-      LOGE("No response from ublox");
+      // Expected and handled: init() retries on it and reports the real
+      // outcome, and stop() logs its own failure. Not an error on its own.
+      LOGD("No response from ublox");
       return false;
     }
 
@@ -91,10 +93,10 @@ sos_restore_response Pigeon::wait_for_backup_restore_status(int timeout_ms) {
   return error;
 }
 
-void Pigeon::init() {
+bool Pigeon::init() {
+  LOGW("panda GPS start");
   for (int i = 0; i < 10; i++) {
-    if (do_exit) return;
-    LOGW("panda GPS start");
+    if (do_exit) return false;
 
     // power off pigeon
     set_power(false);
@@ -160,9 +162,11 @@ void Pigeon::init() {
     }
 
     LOGW("panda GPS on");
-    return;
+    return true;
   }
-  LOGE("failed to initialize panda GPS");
+  // The caller decides what a total failure means; on a panda with no uBlox
+  // fitted it is the normal outcome, not an error worth logging here.
+  return false;
 }
 
 void Pigeon::stop() {

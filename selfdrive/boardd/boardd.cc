@@ -762,7 +762,16 @@ void pigeon_thread(Panda *panda) {
     // since it was turned off in low power mode
     if((ignition_local && !ignition_last) || need_reset) {
       pigeon_active = true;
-      pigeon->init();
+      if (!pigeon->init()) {
+        // Nothing on the GPS UART answered. A panda with no uBlox fitted never
+        // will, so retrying burns ~20s of USB traffic on every ignition and
+        // fills the log with failures for hardware that is not there. Say it
+        // once, leave the rail off, and stop polling until the next boot.
+        LOGW("panda GPS did not respond, assuming it is not fitted; stopping GPS until reboot");
+        pigeon->set_power(false);
+        pigeon_active = false;
+        return;
+      }
     } else if (!ignition_local && ignition_last) {
       // power off on falling edge of ignition
       LOGD("powering off pigeon\n");
