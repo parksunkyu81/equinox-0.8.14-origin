@@ -1891,12 +1891,12 @@ void NvgWindow::drawSpeed(QPainter &p) {
   const int extraGapX = 14;
   const int gap = baseGap + extraGapX;
 
-  // The whole speed group -- this panel and the four tiles drawBottomIcons
-  // stacks on top of it -- sits a tenth of the panel's own height lower than
-  // the reference box. Against the height rather than a pixel count so it
-  // keeps its proportion if the fonts change. Only the panel moves here; the
-  // tiles follow because they anchor off the box published below.
-  const qreal group_drop = panel_content_h * 0.10;
+  // How far below the reference box the panel sits. It used to be a tenth of
+  // the panel's own height; raised by that tenth, so it is now flush with the
+  // box. Kept as a fraction of the height rather than a pixel count so it
+  // stays the one number to adjust and keeps its proportion if the fonts
+  // change.
+  const qreal group_drop = panel_content_h * 0.0;
 
   QRectF panelBg(bgFixed.left() - gap - panel_bg_w,
                  bgFixed.top() + group_drop,

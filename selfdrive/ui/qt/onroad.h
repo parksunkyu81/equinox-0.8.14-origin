@@ -96,8 +96,10 @@ protected:
   int thermal_panel_right_ = 0;
 
   // Same idea for the speed panel: drawSpeed runs before drawBottomIcons in
-  // paintGL, so the tiles that sit above it can line up with its real box
-  // instead of re-deriving a font-metric-driven layout.
+  // drawHud, so what anchors off it sees its real box rather than re-deriving
+  // a font-metric-driven layout. Only the right edge is read now -- the wheel
+  // is placed off it; the pedal tiles that used to sit above this panel moved
+  // to the NDA badge.
   int speed_panel_top_ = 0;
   int speed_panel_cx_ = 0;
   int speed_panel_right_ = 0;
