@@ -288,7 +288,10 @@ void NvgWindow::initializeGL() {
   ic_satellite = QPixmap("../assets/images/satellite.png");
   // Unused-upstream asset, not under assets/images/ like the icons above.
   {
-    const int wheel_icon_size = static_cast<int>(radius * 0.85f);
+    // 0.85 of the wheel tile's own diameter, which is 20% over the shared
+    // tile size (see drawBottomIcons' wheel_d), so the icon keeps the same
+    // margin inside its disc as before.
+    const int wheel_icon_size = static_cast<int>(radius * 6 / 5 * 0.85f);
     ic_wheel = QPixmap("../assets/img_chffr_wheel.png").scaled(wheel_icon_size, wheel_icon_size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
   }
 
@@ -502,7 +505,10 @@ void NvgWindow::drawLead(QPainter &painter, const cereal::ModelDataV2::LeadDataV
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(0, 0, 0, 160));
     painter.drawRoundedRect(text_rect, 10, 10);
-    painter.setPen(whiteColor());
+    // Green, matching the diagnostic readout along the bottom edge -- both are
+    // live numbers read off the system rather than driving instructions, and
+    // the white it replaced was the same colour as the alert text.
+    painter.setPen(QColor(0, 255, 0, 255));
     painter.drawText(text_rect, Qt::AlignCenter, info_text);
     painter.restore();
   }
@@ -748,12 +754,17 @@ static QColor gaugeColor(float t) {
 // rather than folded into one indicator, which is what made the previous
 // single marker ambiguous.
 void NvgWindow::drawSteerGauge(QPainter &p, int cx, int cy, int w) {
-  constexpr int BOW = 12;      // how much the bar bows up in the middle
-  constexpr int BAR_W = 46;    // track stroke width
-  constexpr int GAUGE_W = 30;  // gauge stroke width, inset inside the track
-  constexpr int REF_W = 40, REF_H = 30;
-  constexpr int MARK = 32;     // lane-centring marker box size
-  constexpr int MARK_PEN = 8;  // marker outline thickness
+  // Every vertical dimension here, and everything drawn inside the track, is
+  // 30% over the sizes this gauge started at (12 / 46 / 30 / 40x30 / 32 / 8).
+  // Scaled as a set so the gauge, the neutral reference and the lane marker
+  // keep their proportions inside the thicker bar rather than one of them
+  // being swallowed by it.
+  constexpr int BOW = 16;      // how much the bar bows up in the middle
+  constexpr int BAR_W = 60;    // track stroke width
+  constexpr int GAUGE_W = 39;  // gauge stroke width, inset inside the track
+  constexpr int REF_W = 52, REF_H = 39;
+  constexpr int MARK = 42;     // lane-centring marker box size
+  constexpr int MARK_PEN = 10; // marker outline thickness
   // Mirrors lane_planner.py CAMERA_OFFSET. The camera does not sit on the
   // car's centreline, so raw lane lines carry a constant lateral bias.
   constexpr float CAMERA_OFFSET_UI = -0.070f;
@@ -872,8 +883,18 @@ void NvgWindow::drawSteerGauge(QPainter &p, int cx, int cy, int w) {
 // in this file/repo, reused here as a general "how sure is it right now"
 // readout rather than adding a second confidence source.
 void NvgWindow::drawConfidenceGauge(QPainter &p, int cx, int top_y, int bottom_y) {
-  constexpr int TRACK_W = 28;
-  constexpr int BALL_D = 44;
+  // Sized 20% up from the original 28 / 44 / 257 so the ball's height reads at
+  // a glance from the driver's seat rather than needing a look. The span grows
+  // about its own centre, so the gauge stays centred on the same point and
+  // still clears the temperature panel beside it (664..972 inside its
+  // 652..976).
+  constexpr int TRACK_W = 41;   // 28 * 1.2 * 1.2
+  constexpr int BALL_D = 64;    // 44 * 1.2 * 1.2
+  constexpr int BALL_PEN = 10;  // black rim, drawn outside the fill
+  const int mid = (top_y + bottom_y) / 2;
+  const int half_span = (bottom_y - top_y) * 6 / 10;   // 0.5 * 1.2
+  top_y = mid - half_span;
+  bottom_y = mid + half_span;
 
   const SubMaster &sm = *(uiState()->sm);
   const auto lp = sm["lateralPlan"].getLateralPlan();
@@ -899,13 +920,19 @@ void NvgWindow::drawConfidenceGauge(QPainter &p, int cx, int top_y, int bottom_y
   const QColor ball_color = gaugeColor(1.0f - shown);
 
   // Ball travels the track's inner extent so it never pokes past the
-  // rounded caps at either end.
-  const float travel_top = top_y + BALL_D / 2.0f;
-  const float travel_bottom = bottom_y - BALL_D / 2.0f;
+  // rounded caps at either end. Measured from the rim, not the fill, or the
+  // outline is what pokes out instead.
+  const float ball_r = (BALL_D + BALL_PEN) / 2.0f;
+  const float travel_top = top_y + ball_r;
+  const float travel_bottom = bottom_y - ball_r;
   const float ball_y = travel_bottom - shown * (travel_bottom - travel_top);
 
+  // Black rim so the ball still reads as a distinct object where its colour
+  // lands close to the track's own white or to a bright road surface behind.
+  p.setPen(QPen(blackColor(255), BALL_PEN));
   p.setBrush(ball_color);
   p.drawEllipse(QPointF(cx, ball_y), BALL_D / 2.0, BALL_D / 2.0);
+  p.setPen(Qt::NoPen);
 
   p.restore();
 }
@@ -932,23 +959,30 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // first in paintGL) rather than off a column index -- at column 0 it
   // overlapped that panel. The bar takes whatever is left up to the row's
   // original right end, so it narrows instead of anything else moving.
-  // The wheel and the bar sit a fifth of the row pitch below the upper row.
-  // Expressed against the pitch rather than as a pixel count so it keeps its
-  // proportion if radius or row_gap change.
-  const int row_drop = (y1 - y2) / 5;
+  // The wheel and the bar sit two fifths of the row pitch below the upper row
+  // -- a further 20% of the pitch down from the one fifth they started at, to
+  // clear the tile rows above them. Expressed against the pitch rather than as
+  // a pixel count so it keeps its proportion if radius or row_gap change.
+  const int row_drop = (y1 - y2) * 2 / 5;
   const int bar_cy = y2 + row_drop;
 
   constexpr int WHEEL_GAP = 22;
+  // The wheel is the one tile that is not part of a grid of equals -- it sits
+  // alone against the steering bar -- so it is sized 20% over the shared tile
+  // diameter to read at a glance without disturbing any of the others. Its
+  // own diameter, not `radius`, drives the anchors below, so the WHEEL_GAP
+  // clearances hold at the new size and only the bar gives up the width.
+  const int wheel_d = radius * 6 / 5;   // 116 -> 139
   // drawSteerGauge strokes the bar with a round cap, so the ink reaches half
   // the stroke width past the path's endpoint. Measure the gap from that
   // visual edge: at a 16 px gap measured from the endpoint the cap actually
   // overlapped the wheel by 7 px.
-  constexpr int BAR_CAP = 46 / 2;   // BAR_W / 2 in drawSteerGauge
+  constexpr int BAR_CAP = 60 / 2;   // BAR_W / 2 in drawSteerGauge
   const int bar_right = icon_start_x + (icon_step * 5) + radius / 2;
   const int wheel_cx = (speed_panel_right_ > 0
-                        ? speed_panel_right_ + WHEEL_GAP + radius / 2
+                        ? speed_panel_right_ + WHEEL_GAP + wheel_d / 2
                         : icon_start_x);
-  const int bar_left = wheel_cx + radius / 2 + WHEEL_GAP + BAR_CAP;
+  const int bar_left = wheel_cx + wheel_d / 2 + WHEEL_GAP + BAR_CAP;
   drawSteerGauge(p, (bar_left + bar_right) / 2, bar_cy, bar_right - bar_left);
 
   // Confidence gauge sits beside the ACC/LKAS column (icon_step * 5),
@@ -1336,15 +1370,16 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   {
     const float steer_angle_deg = car_state.getSteeringAngleDeg();
     const bool hands_on_wheel = car_state.getSteeringPressed();
-    // The wheel sits a further twentieth of the row pitch below the bar, so
-    // its centre no longer lines up with the bar's spine.
-    const int wheel_cy = bar_cy + (y1 - y2) / 20;
+    // The wheel sits three twentieths of the row pitch below the bar -- a
+    // further 10% of the pitch down from the one twentieth it started at -- so
+    // its centre sits clear of the bar's spine rather than near it.
+    const int wheel_cy = bar_cy + (y1 - y2) * 3 / 20;
 
     p.setPen(Qt::NoPen);
     // Green when hands-off (system driving alone), black when the driver is
     // holding the wheel -- gives an at-a-glance signal matching steeringPressed.
     p.setBrush(hands_on_wheel ? blackColor(220) : QColor(23, 134, 68, 220));
-    p.drawEllipse(x - radius / 2, wheel_cy - radius / 2, radius, radius);
+    p.drawEllipse(x - wheel_d / 2, wheel_cy - wheel_d / 2, wheel_d, wheel_d);
 
     p.save();
     p.translate(x, wheel_cy);
@@ -1355,7 +1390,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     p.drawPixmap(-ic_wheel.width() / 2, -ic_wheel.height() / 2, ic_wheel);
     p.setPen(Qt::NoPen);
     p.setBrush(QColor(255, 59, 59, 255));
-    p.drawEllipse(QPointF(0, -radius * 0.42), 4.5, 4.5);
+    p.drawEllipse(QPointF(0, -wheel_d * 0.42), 4.5, 4.5);
     p.restore();
   }
 
@@ -1413,10 +1448,14 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // its own height. That buys the label width but costs the value: the
     // taller block pushes the value down into the narrower part of the disc,
     // which is why 페달 상태 stayed on one line.
+    // label_lift raises the label alone, as a fraction of the text block's own
+    // height, so a tile whose value has been scaled up can buy the two lines
+    // back their separation without moving the value or the disc.
     auto drawTileText = [&](int cx_, int cy, const QString &label,
                             const QString &value, const QColor &value_color,
                             int usable_r, int label_alpha,
-                            const QString &size_ref, float value_scale) {
+                            const QString &size_ref, float value_scale,
+                            float label_lift = 0.0f, float label_scale = 1.0f) {
       constexpr int TEXT_GAP = 7;   // between the label block and the value
       constexpr int LINE_GAP = 2;   // between two label lines
       const QStringList label_lines = label.split('\n');
@@ -1482,6 +1521,23 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
         }
       }
 
+      // Same escape hatch as value_scale below, for the label. The two pedal
+      // tiles need it: "PEDAL MAX" and "PEDAL LEVEL" are long enough that the
+      // fit drives them down to 13 and 15 px, which is a caption rather than a
+      // label you can read at a glance. Applied before value_scale so the
+      // block height is recomputed once, from the final label size.
+      if (label_scale != 1.0f) {
+        label_pt = (int)(label_pt * label_scale + 0.5f);
+        configFont(p, "Open Sans", label_pt, "Bold");
+        const QFontMetrics fm_scaled(p.font());
+        label_h = 0;
+        for (const QString &line : label_lines) {
+          label_h = std::max(label_h, fm_scaled.tightBoundingRect(line).height());
+        }
+        const int n = label_lines.size();
+        total_h = label_h * n + LINE_GAP * (n - 1) + TEXT_GAP + value_h;
+      }
+
       // Applied after the fit, so it deliberately breaks out of the disc. The
       // pedal-state tile needs it: its widest state, 브레이크, pins the value
       // at 24 px, which is too small to read at a glance while driving.
@@ -1495,11 +1551,13 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
       const int top = cy - total_h / 2;
 
+      const int lift = (int)(total_h * label_lift + 0.5f);
+
       configFont(p, "Open Sans", label_pt, "Bold");
       for (int i = 0; i < label_lines.size(); i++) {
         // drawText takes the baseline, which for these all-caps lines is the
         // bottom of the ink.
-        drawText(p, cx_, top + (i + 1) * label_h + i * LINE_GAP,
+        drawText(p, cx_, top + (i + 1) * label_h + i * LINE_GAP - lift,
                  label_lines[i], label_alpha);
       }
       QColor c = value_color;
@@ -1512,20 +1570,22 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // note where it is applied.
     auto statusCircle = [&](int cx_, int cy, const QString &label,
                             const QString &value, const QColor &value_color,
-                            const QString &size_ref, float value_scale = 1.0f) {
+                            const QString &size_ref, float value_scale = 1.0f,
+                            float label_lift = 0.0f, float label_scale = 1.0f) {
       p.setPen(Qt::NoPen);
       p.setBrush(blackColor(200));
       p.drawEllipse(cx_ - SD / 2, cy - SD / 2, SD, SD);
       // A hair inside the disc's edge so the glyphs don't graze it.
       drawTileText(cx_, cy, label, value, value_color, SD / 2 - 3, 200, size_ref,
-                   value_scale);
+                   value_scale, label_lift, label_scale);
     };
 
     // Same tile as statusCircle plus a progress ring, so the live comma-pedal
     // command still reads as a filling arc rather than only as a number.
     auto statusRing = [&](int cx_, int cy, const QString &label,
                           const QString &value, float ratio,
-                          const QString &size_ref) {
+                          const QString &size_ref,
+                          float label_lift = 0.0f, float label_scale = 1.0f) {
       p.setPen(QPen(QColor(55, 61, 74, 255), 3));
       p.setBrush(QColor(55, 61, 74, 235));
       p.drawEllipse(cx_ - SD / 2, cy - SD / 2, SD, SD);
@@ -1541,7 +1601,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       // Inside the ring, not just inside the disc: the ring's circle is inset
       // 6 and stroked 7, so its inner edge is at SD / 2 - 9.5.
       drawTileText(cx_, cy, label, value, QColor(255, 255, 255, 245), SD / 2 - 13, 230,
-                   size_ref, 1.0f);
+                   size_ref, 1.0f, label_lift, label_scale);
       p.setBrush(Qt::NoBrush);
       p.setPen(Qt::NoPen);
     };
@@ -1580,24 +1640,42 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
                  acc_bool ? QColor(120, 255, 120, 200) : QColor(254, 32, 32, 200), "OFF");
     statusCircle(col_r, row_b, "LKAS", lkas_str, lkas_color, "OFF");
 
-    // The four pedal/following readings ride above the speed panel, at the
+    // The four pedal/following readings ride above the NDA/HDA badge, at the
     // same size and horizontal gap as the block on the right -- so the two
     // groups read as one system rather than two sizes of tile. Anchored from
-    // the panel up, so the pair nearest the driver's eye line stays put and
-    // the pedal pair stacks above it. Skipped until drawSpeed has published
-    // its box (it runs earlier in paintGL).
-    if (speed_panel_top_ > 0) {
-      const int speed_row = speed_panel_top_ - PANEL_GAP - SD / 2;
+    // the badge up, so the pair nearest it stays put and the pedal pair stacks
+    // above that. Skipped until drawSpeedLimit has published the badge's box
+    // (it runs earlier in drawHud, and publishes even when it draws nothing).
+    if (nda_badge_top_ > 0) {
+      const int speed_row = nda_badge_top_ - PANEL_GAP - SD / 2;
       const int speed_row_top = speed_row - SD - SGAP_Y;
-      const int scol_l = speed_panel_cx_ - (SD + SGAP_X) / 2;
-      const int scol_r = speed_panel_cx_ + (SD + SGAP_X) / 2;
+      const int scol_l = nda_badge_cx_ - (SD + SGAP_X) / 2;
+      const int scol_r = nda_badge_cx_ + (SD + SGAP_X) / 2;
 
       QString pedal_max_str;
       pedal_max_str.sprintf("%.0f", comma_pedal * 100.0f);
-      statusRing(scol_l, speed_row_top, "PEDAL MAX", pedal_max_str,
-                 comma_pedal_ratio, "88");
-      statusCircle(scol_r, speed_row_top, "PEDAL LEVEL", ai_pedal_profile,
-                   aiProfileColor, "HIGH");
+      // 페달 신호 is matched to 페달 상태 the same way 페달 강도 is, so all
+      // four tiles in this group carry one label size and one value size.
+      // The scale is again chosen for the rendered result, not copied: this
+      // tile fits inside the progress ring rather than the disc (usable_r 45
+      // against 55) and measures its value against a two-digit "88", so it
+      // settles at 17 px and needs 1.40 to reach 24. Its value already lands
+      // on 42 unscaled.
+      statusRing(scol_l, speed_row_top, "페달 신호", pedal_max_str,
+                 comma_pedal_ratio, "88", 0.10f, 1.40f);
+      // 페달 강도 is matched to 페달 상태 below it, so the right-hand column
+      // reads as one pair: same Korean label (the fit lands both on 24 px),
+      // same tenth-of-a-block lift, same rendered 42 px value.
+      //
+      // Matched on the rendered size, not on the 1.60 factor. The factor
+      // multiplies each tile's own fitted size, and the fit depends on
+      // size_ref: 페달 상태 measures against 브레이크 and settles at 26, this
+      // tile measures against the much narrower HIGH and settles at 36. The
+      // same 1.60 would put this value at 58 px against the other's 42 --
+      // visibly mismatched, 23 px past its own disc, and 1 px off the PEDAL
+      // MAX disc beside it. 1.17 lands on 42, which clears that disc by 20.
+      statusCircle(scol_r, speed_row_top, "페달 강도", ai_pedal_profile,
+                   aiProfileColor, "HIGH", 1.17f, 0.10f);
 
       statusCircle(scol_l, speed_row,
                    tr_label, tr_str, QColor(120, 255, 120, 200), "8.88");
@@ -1607,15 +1685,20 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
                    // Sizing off BOOST instead let 브레이크 run 136 px wide --
                    // 40 px past the disc, against BOOST's own 21.
                    //
-                   // The scale is bounded by the neighbouring TR tile, not by
-                   // this disc: the columns are 128 px apart with 116 px discs,
+                   // Raised from 1.33f to 1.60f on request, and the label
+                   // lifted a tenth of the block to keep the two lines apart
+                   // as the value grew into the gap.
+                   //
+                   // This is past the clearance the old value was chosen to
+                   // respect: the columns are 128 px apart with 116 px discs,
                    // so a centred value has 70 px before it reaches the TR
-                   // disc's edge. 브레이크 grows 4 px per point, so every extra
-                   // point costs 2 px of that clearance -- 1.2f (29 pt) leaves
-                   // 12 px, and 1.46f (35 pt) lands exactly on the edge. 1.33f
-                   // is 32 pt: clearly larger to read at a glance while still
-                   // keeping 6 px, which survives Qt's pixel rounding.
-                   "페달 상태", pedal_status_str, pedalStatusColor, "브레이크", 1.33f);
+                   // disc's edge, and 브레이크 -- the widest state, and the only
+                   // one that gets near it -- now reaches roughly 6 px over
+                   // that edge. It overlaps the neighbouring disc's fill, not
+                   // its text, and only in that one state. Widen SGAP_X or
+                   // shorten the state word if that reads badly on the road.
+                   "페달 상태", pedal_status_str, pedalStatusColor, "브레이크",
+                   1.60f, 0.10f);
     }
   }
 }
@@ -2152,11 +2235,6 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   const bool show_cam_or_section = (limit_speed > 0 && left_dist > 0);
   const bool show_road = (roadLimit_Speed > 0 && roadLimit_Speed < 200);
 
-  if (!show_cam_or_section && !show_road) {
-    p.restore();
-    return;
-  }
-
   // ============================================================
   // ✅ 15% 확대 스케일
   // ============================================================
@@ -2171,6 +2249,24 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
 
   // ---- 20% 아래로 이동 (화면 하단 넘어가면 clamp) + 현재 보이던 위치에서 400 더 내리는 것----
   const int desired_shift = (int)std::lround(height() * 0.20f) + 400;
+
+  // Publish where the NDA/HDA badge sits, for the pedal tiles drawBottomIcons
+  // stacks above it (see the members' comment in onroad.h). Always measured
+  // against the road-limit board's geometry, and published before the early
+  // return below, so the tiles hold one position instead of jumping between
+  // board types or vanishing on a road with no published limit.
+  {
+    const int road_needed_h = S(275);
+    const int road_max_shift = std::max(0, height() - (base_y_start + road_needed_h) - S(20));
+    const int road_y_start = base_y_start + std::clamp(desired_shift, 0, road_max_shift);
+    nda_badge_top_ = std::max(0, road_y_start - S(54) - S(10));
+    nda_badge_cx_ = x_start + S(210) / 2;
+  }
+
+  if (!show_cam_or_section && !show_road) {
+    p.restore();
+    return;
+  }
 
   int needed_h = 0;
   if (show_cam_or_section) {
