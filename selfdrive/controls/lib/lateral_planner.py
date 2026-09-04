@@ -207,8 +207,15 @@ class LateralPlanner:
     lateralPlan.pathWobbleFlips = 0
     lateralPlan.laneCenterCorrectionM = float(self.LP.lane_center_correction_m)
     lateralPlan.laneCenterCorrectionActive = bool(self.LP.lane_center_correction_active)
-    # Diagnostic-only readiness for evaluating whether a longer virtual curve
-    # could be trusted on this route. It does not affect lateral control.
+    # Curve-tracking readiness. Published for drive-log analysis, but the same
+    # two values were passed to get_d_path above, where they widen the
+    # curve-fallback limits -- this is not a diagnostic-only signal.
+    #
+    # The field names predate that wiring and mislead: they measure agreement
+    # between steering-derived curvature and IMU yaw rate, not model path
+    # quality, and the model's output is not an input. They also read low
+    # because the monitor only samples inside a curve -- roughly 13% of frames
+    # on a mixed drive -- so a low rate here is mostly "not asked".
     lateralPlan.modelPathQuality = float(self.curve_virtual_readiness.current['quality'])
     lateralPlan.modelPathQualityTrusted = bool(self.curve_virtual_readiness.current['eligible'])
     lateralPlan.modelNearCurvature = float(self.curve_virtual_readiness.current['curvatureMean'])

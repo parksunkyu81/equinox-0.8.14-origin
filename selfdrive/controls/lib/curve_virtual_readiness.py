@@ -1,7 +1,15 @@
-"""Observe whether a deep curve is suitable for a future virtual-path experiment.
+"""Measure whether a curve is being tracked well enough to widen fallback trust.
 
-This module is diagnostic only. It deliberately never changes a trajectory,
-speed request, steering torque, or safety limit.
+This module writes no trajectory of its own, but it is not diagnostic. Its
+'eligible' and 'quality' reach LanePlanner.get_d_path as readiness_eligible and
+readiness_quality, where they relax the curve-fallback correction ceilings, the
+temporal-hold bridge time and the yaw cap. A threshold changed here changes how
+far a fallback path may move the car.
+
+It only samples inside a qualifying curve -- see curve_active in update(). On a
+16-minute mixed drive that was 13% of frames; the rest were too straight
+(|curvature| below MIN_CURVATURE) or under MIN_SPEED_MS, and outside a curve the
+report is empty, so eligible=False there means "not asked", not "not trusted".
 """
 
 from collections import deque
