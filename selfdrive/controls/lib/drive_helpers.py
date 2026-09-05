@@ -1,7 +1,7 @@
 import math
 from cereal import car
 from common.numpy_fast import clip, interp
-from common.realtime import DT_MDL
+from common.realtime import DT_CTRL, DT_MDL
 from common.conversions import Conversions as CV
 from selfdrive.modeld.constants import T_IDXS
 from selfdrive.ntune import ntune_common_get
@@ -140,6 +140,68 @@ def limit_curvature(curvature, v_ego):
   return clip(curvature, -max_curvature, max_curvature)
 
 
+# Frame-to-frame bound on the steering target that actually leaves this module.
+#
+# The clip named "rate limit" further down is anchored on curvatures[0] of the
+# same frame, so it only stops the psi extrapolation from running away from that
+# frame's own value -- it does not constrain how much the delivered target may
+# change since the previous frame, and nothing else did either. That is how the
+# 2026-09-05--09-24-53 +378.43 s plan corruption reached the torque controller as
+# a demand climbing from 0.2 to 19.0 m/s^2 in half a second.
+#
+# Limited as lateral jerk, using the MAX_LATERAL_JERK already declared above, so
+# it scales with speed and disappears at parking speeds. Measured cost, over all
+# four analysed drives with the 8f829051 bug windows excluded: 2 frames in ~57000
+# exceed 3.0 m/s^3 at all, and only one exceeds 5.0 -- a 0.24 m/s^2 step inside a
+# real curve. Genuine cornering ramps far slower than this: the 99.9th percentile
+# of |d(lateral accel)/dt| is 1.54-1.91 m/s^3 on the big model and 1.45 on the
+# stock one, whose all-time maximum across the drive is 2.29.
+#
+# It never reduces steady-state authority in a curve, only the rate of approach,
+# which is what makes it safe to apply unconditionally: unlike a confidence gate,
+# it cannot under-steer a curve the model is tracking correctly.
+_last_limited_curvature = None
+_curvature_rate_limited_frames = 0
+
+
+def _rate_limit_curvature(curvature, v_ego, lat_active):
+  """Bound how fast the delivered steering target may change between frames."""
+  global _last_limited_curvature, _curvature_rate_limited_frames
+
+  # Re-seed whenever lateral control is not in charge, so the first engaged frame
+  # starts from the plan rather than ramping out of a stale value.
+  if not lat_active:
+    _last_limited_curvature = None
+    _curvature_rate_limited_frames = 0
+    return curvature
+  if _last_limited_curvature is None:
+    _last_limited_curvature = curvature
+    return curvature
+
+  max_step = MAX_LATERAL_JERK / (v_ego ** 2) * DT_CTRL
+  limited = clip(curvature,
+                 _last_limited_curvature - max_step,
+                 _last_limited_curvature + max_step)
+  if limited != curvature:
+    if _curvature_rate_limited_frames % 100 == 0:
+      cloudlog.warning(
+        "desired curvature rate limited: %.5f -> %.5f 1/m (%.2f -> %.2f m/s^2 at %.1f m/s)"
+        % (curvature, limited, curvature * v_ego ** 2, limited * v_ego ** 2, v_ego))
+    _curvature_rate_limited_frames += 1
+  else:
+    _curvature_rate_limited_frames = 0
+
+  # This holds a curvature, not a lateral acceleration, so while it lags a
+  # falling target through an acceleration the held value drifts back above the
+  # ceiling -- simulated at 2.34 m/s^2 against a 2.20 ceiling on
+  # 2026-09-05--06-16-06. Re-apply the ceiling before storing, so the state can
+  # never carry a value the ceiling would reject. This only ever moves the value
+  # toward zero, so it cannot breach the rate limit itself.
+  limited = limit_curvature(limited, v_ego)
+  _last_limited_curvature = limited
+  return limited
+
+
 _curvature_limited_frames = 0
 
 def _log_curvature_limit(requested, limited, v_ego):
@@ -156,7 +218,7 @@ def _log_curvature_limit(requested, limited, v_ego):
   _curvature_limited_frames += 1
 
 
-def get_lag_adjusted_curvature(CP, v_ego, psis, curvatures, curvature_rates):
+def get_lag_adjusted_curvature(CP, v_ego, psis, curvatures, curvature_rates, lat_active=True):
   if len(psis) != CONTROL_N:
     psis = [0.0]*CONTROL_N
     curvatures = [0.0]*CONTROL_N
@@ -184,10 +246,15 @@ def get_lag_adjusted_curvature(CP, v_ego, psis, curvatures, curvature_rates):
                                      current_curvature_desired - max_curvature_rate * DT_MDL,
                                      current_curvature_desired + max_curvature_rate * DT_MDL)
 
-  # The rate limit above only constrains movement away from the anchor; the psi
+  # The clip above only constrains movement away from the anchor; the psi
   # extrapolation can still land outside what the car can hold, so bound the
-  # result itself. This is the last thing between the plan and the steering.
+  # result itself.
   limited_curvature = limit_curvature(safe_desired_curvature, v_ego)
   _log_curvature_limit(safe_desired_curvature, limited_curvature, v_ego)
+
+  # How fast the bounded target may move, frame to frame. Applied last, so it
+  # also bounds the approach to the ceiling above: this is the final thing
+  # between the plan and the steering. It re-applies the ceiling internally.
+  limited_curvature = _rate_limit_curvature(limited_curvature, v_ego, lat_active)
 
   return limited_curvature, safe_desired_curvature_rate

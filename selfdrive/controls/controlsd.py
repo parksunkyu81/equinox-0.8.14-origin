@@ -1725,7 +1725,8 @@ class Controls:
             self.desired_curvature, self.desired_curvature_rate = get_lag_adjusted_curvature(self.CP, CS.vEgo,
                                                                                    lat_plan.psis,
                                                                                    lat_plan.curvatures,
-                                                                                   lat_plan.curvatureRates)
+                                                                                   lat_plan.curvatureRates,
+                                                                                   CC.latActive)
             actuators.steer, actuators.steeringAngleDeg, lac_log = self.LaC.update(CC.latActive, CS, self.VM, params,
                                                                                    self.last_actuators,
                                                                                    self.steer_limited,
