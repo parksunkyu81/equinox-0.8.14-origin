@@ -33,27 +33,35 @@ MAX_LATERAL_JERK = 5.0
 # car was tracking a nearly straight path, and the torque controller sat pinned at
 # full output for 0.73 s with no alert raised.
 #
-# Expressed as lateral acceleration so it scales with speed -- about a 26 m radius
-# at 28 km/h and a 350 m one at 100 km/h. This is a guard against a broken plan,
-# not a tuning knob for how the car corners.
+# Expressed as lateral acceleration so it scales with speed -- about a 14 m radius
+# at 28 km/h and a 193 m one at 100 km/h. This is a guard against a broken plan,
+# not a tuning knob for how the car corners, and the frame-to-frame jerk limit
+# below is what actually bounds an excursion now: this only caps where one can
+# settle, and only above anything real driving asks for.
 #
-# 3.0 -> 2.2. The old figure was set before 8f829051, when the lane-blend divide
-# bug and its 1.8 s of MPC ramp were still in the drives and inflated every
-# measurement of what a curve "needs". Re-measured with those frames and a 2.5 s
-# window around them excluded, over 3379 frames where the car was genuinely
-# turning (|measured curvature| >= 0.008 averaged over 3 s, which is derived from
-# steering angle and so is independent of the lane lines):
+# 3.0 -> 2.2 -> 4.0. The 2.2 pass classified any frame near a >5 m planned path
+# as belonging to the lane-blend bug of 8f829051, which was wrong: a genuine
+# tight turn at low speed legitimately reaches ~9 m at the 2.5 s horizon, so that
+# rule swallowed exactly the cornering the ceiling had to clear. Re-classified on
+# the signature that actually distinguishes the bug -- the PLAN diverging from the
+# MODEL path (planned > 5 m while the model path stays under 3 m) -- over 56768
+# engaged frames that are not bug-related:
 #
-#   2026-09-05--09-24-53   p99 1.87   max 1.91     2026-09-05--06-16-06  p99 1.91  max 2.19
-#   2026-09-05--07-36-07   p99 1.82   max 1.83     2026-09-04--09-02-52  p99 2.05  max 2.06 (stock)
+#   demand  p50 0.08   p99 1.94   p99.9 2.84   p99.99 3.54   max 3.61 m/s^2
 #
-# So 2.2 clips none of the recorded cornering, and it cuts the worst case a
-# broken plan can deliver by 27%. It is deliberately tight: the headroom over the
-# 2.19 m/s^2 maximum is 0.5%, so a curve sharper than anything in these four
-# drives would be under-steered and run wide. If that shows up, 2.5 restores a
-# 14% margin and still improves on 3.0 -- this constant is the only thing to
-# change.
-MAX_LATERAL_ACCEL = 2.2
+#   clipped by 2.2: 267 frames (13.4 s), worst cut 39%
+#              2.5: 110            3.0: 37            3.5: 8            4.0: 0
+#
+# The worst clipped frame is 2026-09-05--06-16-06 at +1541.2 s: an 18 m radius
+# turn at 23 km/h where the car was already pulling 2.34 m/s^2 by its own
+# measured curvature and the plan asked for 3.61. A 2.2 ceiling there commands
+# less than the car is already doing -- it straightens the wheel mid-corner and
+# runs the car wide, which on a left turn is into oncoming traffic. 3.0 has the
+# same fault on 37 frames, so the original value was already slightly too tight.
+#
+# 4.0 is the first value that clips none of the recorded cornering, with 11%
+# headroom over the 3.61 m/s^2 maximum.
+MAX_LATERAL_ACCEL = 4.0
 
 # Backstop for the low-speed end, where the lateral-accel ceiling alone allows
 # curvatures tighter than the car can physically steer. ~5 m turning radius.
@@ -150,16 +158,23 @@ def limit_curvature(curvature, v_ego):
 # a demand climbing from 0.2 to 19.0 m/s^2 in half a second.
 #
 # Limited as lateral jerk, using the MAX_LATERAL_JERK already declared above, so
-# it scales with speed and disappears at parking speeds. Measured cost, over all
-# four analysed drives with the 8f829051 bug windows excluded: 2 frames in ~57000
-# exceed 3.0 m/s^3 at all, and only one exceeds 5.0 -- a 0.24 m/s^2 step inside a
-# real curve. Genuine cornering ramps far slower than this: the 99.9th percentile
-# of |d(lateral accel)/dt| is 1.54-1.91 m/s^3 on the big model and 1.45 on the
-# stock one, whose all-time maximum across the drive is 2.29.
+# it scales with speed and disappears at parking speeds. Measured cost over 56768
+# engaged frames that are not bug-related (see MAX_LATERAL_ACCEL above for how
+# those are identified):
+#
+#   |d(lateral accel)/dt|  p99 1.19   p99.9 2.27   max 7.23 m/s^3
+#   frames above the limit:  3.0 -> 17    4.0 -> 5    5.0 -> 3    6.0 -> 1    8.0 -> 0
+#
+# So 5.0 touches 3 frames in 56768 (0.005%), each a single frame, against a p99.9
+# of 2.27 -- genuine cornering ramps well under half the limit. It cost nothing
+# measurable on the stock-model drive, whose ramp never exceeds 2.29 m/s^3.
 #
 # It never reduces steady-state authority in a curve, only the rate of approach,
 # which is what makes it safe to apply unconditionally: unlike a confidence gate,
-# it cannot under-steer a curve the model is tracking correctly.
+# it cannot under-steer a curve the model is tracking correctly. That property is
+# why it, and not the magnitude ceiling, is the load-bearing guard here -- the
+# ceiling had to be relaxed to 4.0 precisely because a tight ceiling does
+# under-steer real corners.
 _last_limited_curvature = None
 _curvature_rate_limited_frames = 0
 

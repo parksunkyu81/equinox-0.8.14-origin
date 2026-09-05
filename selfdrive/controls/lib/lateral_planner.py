@@ -230,19 +230,24 @@ class LateralPlanner:
         self.last_cloudlog_t = t
         cloudlog.warning("Lateral mpc - nan: True")
 
+    if self.lat_mpc.cost > 20000. or mpc_nans:
+      self.solution_invalid_cnt += 1
+    else:
+      self.solution_invalid_cnt = 0
+
     # x0 carries the solution into the next frame, so a frame built on a
     # rejected plan would keep steering the car after the plan itself is sane
     # again -- that carry-over, not the bad frame, is what turned +378.43 s of
     # 2026-09-05--09-24-53 into a full second of rising demand. Re-seed from the
     # curvature the car is actually holding instead.
+    #
+    # After the cost check above, not before it: LateralMpc.reset() zeroes
+    # self.cost, so resetting first would report a genuinely expensive solve on
+    # this frame as a free one and clear solution_invalid_cnt with it. Only the
+    # next frame's x0 depends on this, so the later position is equivalent.
     if self.plan_implausible:
       self.reset_mpc()
       self.x0[3] = measured_curvature
-
-    if self.lat_mpc.cost > 20000. or mpc_nans:
-      self.solution_invalid_cnt += 1
-    else:
-      self.solution_invalid_cnt = 0
 
   def publish(self, sm, pm):
     plan_solution_valid = self.solution_invalid_cnt < 2
