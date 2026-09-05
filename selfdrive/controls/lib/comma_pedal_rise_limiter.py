@@ -88,6 +88,37 @@ PEDAL_RISE_DEFAULT_TR_S = 1.4
 # still tightens this; a longer one no longer loosens the safety margin.
 PEDAL_RISE_ROOM_TR_S = 0.9
 
+# Backing off used to be instant, and that is what the lift-off feels like from
+# the driver's seat: on 2026-09-05--01-13-56 a lead moving from 32 m to 17 m
+# turned a 0.167 command into 0.000 on a single frame. With no brake actuation
+# every negative accel the planner asks for lands on the same zero, so the
+# interceptor has no way to say "ease off" -- it only has "off" -- and the drive
+# ran 4.2 gas-on/gas-off cycles per engaged minute.
+#
+# So the fall is limited too now, but only where easing off is what was actually
+# meant, and much faster than the rise. The asymmetry is deliberate and is the
+# same argument as the rise limit, pointed the other way: this car cannot brake,
+# so every extra moment of gas is a debt the driver repays with the brake pedal.
+# 0.60/s empties a typical 0.18 command in 0.30 s, which is about 0.5 km/h of
+# speed that would otherwise have been given away instantly.
+#
+# The fall stays instant whenever easing off is not what was meant:
+#   * the planner wants real deceleration, or FCW is up (PEDAL_FALL_HARD_DECEL)
+#   * a lead is closing (PEDAL_FALL_LEAD_CLOSING_MS)
+#   * below LOW_SPEED_KPH, where stop-and-go wants the gas gone at once
+#   * the caller did not offer the limit at all -- disengaging, a fault, or any
+#     frame where automatic pedal output is not allowed
+# Brake, gas and the bypassing recovery floors return earlier and never reach
+# this path.
+PEDAL_FALL_PER_S = 0.60
+PEDAL_FALL_LEAD_CLOSING_MS = -1.0
+# The planner's requested acceleration at which "ease off" becomes "slow down".
+# The softened fall only ever lasts the ~0.3 s after the request crosses zero,
+# and the request is barely negative at that moment, so this only has to reject
+# the case where it plunges straight through. The planner's own following floor
+# reaches -1.2, so a request past half of that is not a lift.
+PEDAL_FALL_HARD_DECEL = -0.50
+
 # A brake application is the driver stating they want to be slower here.
 # Hold the pedal down for a moment afterwards instead of resuming in 0.16 s,
 # then come back at a reduced rate rather than snapping to the request.
@@ -119,6 +150,22 @@ def _clip01(value):
   return 0.0 if value < 0.0 else (1.0 if value > 1.0 else float(value))
 
 
+def pedal_fall_rate(v_ego=0.0, fall_limit_ok=False, hard_decel=False,
+                    lead_valid=False, lead_rel_speed=0.0):
+  """Return the allowed pedal fall rate, or inf when it must be instant.
+
+  Softening the lift is only ever right when easing off is what the planner
+  meant. Anything that reads as "be slower now" keeps the old instant drop.
+  """
+  if not bool(fall_limit_ok) or bool(hard_decel):
+    return math.inf
+  if max(0.0, _finite(v_ego, 0.0)) * 3.6 < LOW_SPEED_KPH:
+    return math.inf
+  if bool(lead_valid) and _finite(lead_rel_speed, 0.0) < PEDAL_FALL_LEAD_CLOSING_MS:
+    return math.inf
+  return PEDAL_FALL_PER_S
+
+
 def pedal_rise_rate(v_ego=0.0, lead_valid=False, lead_distance=0.0,
                     lead_rel_speed=0.0, desired_tr=PEDAL_RISE_DEFAULT_TR_S):
   """Return the allowed pedal rise rate for the current lead picture.
@@ -144,7 +191,7 @@ def pedal_rise_rate(v_ego=0.0, lead_valid=False, lead_distance=0.0,
 
 
 class CommaPedalRiseLimiter:
-  """Limit how fast the pedal command may rise; never how fast it may fall."""
+  """Rate limit the pedal command: hard on the way up, lightly on the way down."""
 
   def __init__(self, dt=DT_CTRL):
     self.dt = max(1e-3, _finite(dt, DT_CTRL))
@@ -157,6 +204,7 @@ class CommaPedalRiseLimiter:
     self.post_brake_elapsed = math.inf
     self.rise_rate = PEDAL_RISE_PER_S
     self.base_rise_rate = PEDAL_RISE_PER_S
+    self.fall_rate = math.inf
     self.holding = False
     self.bypassed = False
     self._brake_pressed_prev = False
@@ -167,17 +215,24 @@ class CommaPedalRiseLimiter:
 
   def update(self, target, v_ego=0.0, brake_pressed=False, gas_pressed=False,
              bypass=False, lead_valid=False, lead_distance=0.0,
-             lead_rel_speed=0.0, desired_tr=PEDAL_RISE_DEFAULT_TR_S):
+             lead_rel_speed=0.0, desired_tr=PEDAL_RISE_DEFAULT_TR_S,
+             fall_limit_ok=False, hard_decel=False):
     """Return the pedal command to send.
 
-    target       the pedal the controller wants, already 0.0 whenever the pedal
-                 is not allowed to act
-    bypass       a deliberate, separately gated assist owns the pedal outright
-                 (launch boost or one of the recovery floors); those carry their
-                 own confirmation logic and measured 0-3% of brake presses, so
-                 they are not slowed down here
-    lead_*       the tracked lead, used only to decide how fast the command may
-                 rise; with no lead the limit relaxes to PEDAL_RISE_FREE_PER_S
+    target         the pedal the controller wants, already 0.0 whenever the
+                   pedal is not allowed to act
+    bypass         a deliberate, separately gated assist owns the pedal outright
+                   (launch boost or one of the recovery floors); those carry
+                   their own confirmation logic and measured 0-3% of brake
+                   presses, so they are not slowed down here
+    lead_*         the tracked lead: how fast the command may rise, and whether
+                   the fall may be softened. With no lead the rise limit relaxes
+                   to PEDAL_RISE_FREE_PER_S
+    fall_limit_ok  this frame is one where easing off may be softened at all.
+                   Defaults False, so a caller that does not opt in keeps the
+                   old instant drop
+    hard_decel     the planner wants real deceleration rather than just less
+                   gas; the interceptor cannot tell these apart on its own
     """
     target = max(0.0, _finite(target, 0.0))
     v_ego_kph = max(0.0, _finite(v_ego, 0.0)) * 3.6
@@ -233,9 +288,15 @@ class CommaPedalRiseLimiter:
       rate = self.base_rise_rate
       self.post_brake_elapsed = math.inf
 
+    self.fall_rate = pedal_fall_rate(
+      v_ego=v_ego, fall_limit_ok=fall_limit_ok, hard_decel=hard_decel,
+      lead_valid=lead_valid, lead_rel_speed=lead_rel_speed)
+
     if target <= self.pedal:
-      # Backing off is never delayed.
-      self.pedal = target
+      if math.isfinite(self.fall_rate):
+        self.pedal = max(target, self.pedal - self.fall_rate * self.dt)
+      else:
+        self.pedal = target
     else:
       self.pedal = min(target, self.pedal + rate * self.dt)
 

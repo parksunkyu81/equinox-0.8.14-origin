@@ -162,11 +162,16 @@ class CarController():
                             getattr(controls, 'stop_accel_boost_active', False))
         controls.comma_pedal_raw_command = float(raw_pedal)
         controls.comma_pedal_styled_command = float(styled_pedal)
+        # Automatic pedal output is allowed this frame, so easing off may be
+        # softened -- subject to the limiter's own checks on the planner's
+        # intent, the lead and the speed.
+        pedal_fall_limit_ok = True
 
         # self.comma_pedal = pedal_command
       else:
         pedal_target = 0.0
         pedal_bypass = False
+        pedal_fall_limit_ok = False
         self.predictive_coast_styled_pedal = 0.0
         self.predictive_coast_pedal_scale = 1.0
         controls.comma_pedal_raw_command = 0.0
@@ -178,7 +183,9 @@ class CarController():
       # the driver's release.
       # The rise rate itself now depends on the lead: 0.12/s while closing on
       # one, up to 0.35/s with the road clear. controlsd publishes the same
-      # radar frame its own longitudinal decisions were made on.
+      # radar frame its own longitudinal decisions were made on, and with it
+      # whether the planner is easing off or actually asking to slow down --
+      # the interceptor command is clipped at zero and cannot tell them apart.
       self.comma_pedal = float(self.pedal_rise_limiter.update(
         pedal_target, v_ego=CS.out.vEgo, brake_pressed=brake_pressed,
         gas_pressed=bool(CS.out.gasPressed), bypass=pedal_bypass,
@@ -186,7 +193,9 @@ class CarController():
         lead_distance=float(getattr(controls, 'pedal_rise_lead_distance', 0.0)),
         lead_rel_speed=float(getattr(controls, 'pedal_rise_lead_rel_speed', 0.0)),
         desired_tr=float(getattr(controls, 'pedal_rise_desired_tr',
-                                 PEDAL_RISE_DEFAULT_TR_S))))
+                                 PEDAL_RISE_DEFAULT_TR_S)),
+        fall_limit_ok=pedal_fall_limit_ok,
+        hard_decel=bool(getattr(controls, 'pedal_fall_hard_decel', True))))
       controls.comma_pedal_final_command = float(self.comma_pedal)
     else:
       self.comma_pedal = 0.0

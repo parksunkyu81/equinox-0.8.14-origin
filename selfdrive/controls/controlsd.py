@@ -54,7 +54,8 @@ from selfdrive.controls.lib.process_health import (
   controlsd_communication_ok, expected_not_running_processes,
   panda_power_down_in_progress, update_process_not_running_state,
 )
-from selfdrive.controls.lib.comma_pedal_rise_limiter import PEDAL_RISE_DEFAULT_TR_S
+from selfdrive.controls.lib.comma_pedal_rise_limiter import (
+  PEDAL_FALL_HARD_DECEL, PEDAL_RISE_DEFAULT_TR_S)
 from selfdrive.controls.lib.comma_pedal_profile import (
   CommaPedalProfileController, normalize_comma_pedal_profile,
 )
@@ -360,6 +361,9 @@ class Controls:
         self.pedal_rise_lead_distance = 0.0
         self.pedal_rise_lead_rel_speed = 0.0
         self.pedal_rise_desired_tr = PEDAL_RISE_DEFAULT_TR_S
+        # Seeded True so that any path which never refreshes it -- joystick mode,
+        # a fault before the longitudinal update runs -- keeps the instant drop.
+        self.pedal_fall_hard_decel = True
         # Comma-pedal response comes from the user's CommaPedalResistance
         # profile alone. The driving-style learner that used to shade it was
         # removed: on this car openpilot cannot brake at all, so the driver
@@ -1610,6 +1614,12 @@ class Controls:
             self.pedal_rise_lead_rel_speed = float(
               lead_one.vRel if self.pedal_rise_lead_valid else 0.0)
             self.pedal_rise_desired_tr = float(effective_tr)
+            # Does the planner want real deceleration, or has it just stopped
+            # asking for gas? Both look identical at the interceptor -- the
+            # command is clipped at zero either way -- so the fall-rate limit
+            # has to be told which one this is before it may soften the lift.
+            self.pedal_fall_hard_decel = bool(
+              long_plan.fcw or actuators.accel < PEDAL_FALL_HARD_DECEL)
 
             self.curve_pedal_raw_accel = float(actuators.accel)
             # Curve target shaping remains in the longitudinal plan. Lead,
@@ -1724,6 +1734,9 @@ class Controls:
                                                                                    self.sm['liveLocationKalman'])
         else:
             self.predictive_coasting.reset()
+            # No longitudinal decision was made this frame, so nothing here has
+            # established that easing off is what was meant.
+            self.pedal_fall_hard_decel = True
             self.pedal_force_recovery.update(False, actuators.accel)
             self.lead_coast_assist.update(False, False, 0.0, 0.0, CS.vEgo, 1.3,
                                           0.0, 0.0, CS.aEgo, actuators.accel)
