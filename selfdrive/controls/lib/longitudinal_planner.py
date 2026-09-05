@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 import math
 import numpy as np
-from common.numpy_fast import interp
+from common.numpy_fast import clip, interp
 
 import cereal.messaging as messaging
 from common.conversions import Conversions as CV
 from common.filter_simple import FirstOrderFilter
 from common.realtime import DT_MDL
 from selfdrive.modeld.constants import T_IDXS
+from selfdrive.controls.lib.comma_pedal_profile import COMMA_PEDAL_PROFILE_GAINS
 from selfdrive.controls.lib.longcontrol import LongCtrlState
 from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
 from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
@@ -34,10 +35,24 @@ _A_CRUISE_MAX_BP = _A_CRUISE_MIN_BP
 _A_TOTAL_MAX_V = [2.5, 3.0, 4.0]  # 회전 시 가속 제한을 낮춤
 _A_TOTAL_MAX_BP = [0., 25., 55.]
 
-def calc_cruise_accel_limits(v_ego):
+# The CommaPedalResistance profile scales the cruise acceleration ceiling here,
+# not only the interceptor command. Measured on 2026-09-04--16-42-00, scaling
+# the pedal command alone could not change acceleration with no lead in front:
+# that gain sits inside LongControl's speed PID, which compensates it, and the
+# rise limiter was the binding constraint on the delivered command for 50-67%
+# of the no-lead pedal time anyway (replaying the limiter offline reproduced
+# the logged command on 90-99% of frames). This ceiling, by contrast, was the
+# binding constraint on 38-90% of the no-lead accelerating plan frames, so it
+# is where the profile actually reaches the road.
+_COMMA_PEDAL_ACCEL_GAIN_MIN = min(min(g) for g in COMMA_PEDAL_PROFILE_GAINS.values())
+_COMMA_PEDAL_ACCEL_GAIN_MAX = max(max(g) for g in COMMA_PEDAL_PROFILE_GAINS.values())
+
+def calc_cruise_accel_limits(v_ego, accel_gain=1.0):
     a_cruise_min = interp(v_ego, _A_CRUISE_MIN_BP, _A_CRUISE_MIN_V_FOLLOWING)
     a_cruise_max = interp(v_ego, _A_CRUISE_MAX_BP, _A_CRUISE_MAX_V_FOLLOWING)
-    return [a_cruise_min, a_cruise_max]
+    # Only the ceiling moves. The floor is the deceleration the planner may ask
+    # for, which this car cannot actuate anyway.
+    return [a_cruise_min, a_cruise_max * accel_gain]
 
 def limit_accel_in_turns(v_ego, angle_steers, a_target, CP):
     a_total_max = interp(v_ego, _A_TOTAL_MAX_BP, _A_TOTAL_MAX_V)
@@ -54,6 +69,7 @@ class Planner:
   def __init__(self, CP, init_v=0.0, init_a=0.0):
     self.CP = CP
     self.mpc = LongitudinalMpc()
+    self.comma_pedal_accel_gain = 1.0
     self.accel_limit_max = float(calc_cruise_accel_limits(init_v)[1])
 
     self.fcw = False
@@ -69,6 +85,23 @@ class Planner:
     self.a_desired_trajectory = np.zeros(CONTROL_N)
     self.j_desired_trajectory = np.zeros(CONTROL_N)
     self.solverExecutionTime = 0.0
+
+  def update_comma_pedal_accel_gain(self, sm):
+    """Return the driver's comma-pedal response profile as an acceleration gain.
+
+    controlsd owns the profile and its change slew, so the gain is taken from
+    controlsState rather than read from Params again here. Anything missing or
+    out of range holds the last good value; 'mid' is 1.0, so the default
+    profile leaves the limits exactly where they were.
+    """
+    if not self.CP.enableGasInterceptor:
+      return 1.0
+    if not sm.valid['controlsState']:
+      return self.comma_pedal_accel_gain
+    gain = float(sm['controlsState'].commaPedalProfileGain)
+    if not math.isfinite(gain) or gain <= 0.0:
+      return self.comma_pedal_accel_gain
+    return float(clip(gain, _COMMA_PEDAL_ACCEL_GAIN_MIN, _COMMA_PEDAL_ACCEL_GAIN_MAX))
 
   def update(self, sm):
     v_ego = sm['carState'].vEgo
@@ -114,7 +147,8 @@ class Planner:
 
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
 
-    accel_limits = calc_cruise_accel_limits(v_ego)
+    self.comma_pedal_accel_gain = self.update_comma_pedal_accel_gain(sm)
+    accel_limits = calc_cruise_accel_limits(v_ego, self.comma_pedal_accel_gain)
     self.accel_limit_max = float(accel_limits[1])
     accel_limits_turns = limit_accel_in_turns(v_ego, sm['carState'].steeringAngleDeg, accel_limits, self.CP)
     if force_slow_decel:
