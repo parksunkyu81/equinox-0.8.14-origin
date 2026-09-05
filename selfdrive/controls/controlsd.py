@@ -166,6 +166,20 @@ class Controls:
             if EON:
                 ignore_avg_freq += ['driverMonitoringState', 'lateralPlan',
                                     'dynamicFollowData']
+                # The vision chain -- camerad -> modeld -> locationd -> paramsd --
+                # runs off one clock, so every road-camera frame the model overruns
+                # is lost to all four at once. With the big supercombo the model
+                # takes 31.9 ms of the 50 ms frame budget (20.7 ms before it), so on
+                # 2026-09-05--01-13-56 3.2% of frames overran and the drop rate rose
+                # from 0.65% cold to 5.30% at 75 C. That is enough to pull the
+                # 100-sample average under 18 Hz and soft-disable on commIssue,
+                # while the guard actually built for this -- modeldLagging at
+                # frameDropPerc > 20 -- correctly reads the same drive as healthy.
+                # Drop the blunt average-rate gate for these four and keep the
+                # graded one. cameraMalfunction (all_alive on the camera packets)
+                # and the alive/valid checks are untouched.
+                ignore_avg_freq += ['modelV2', 'roadCameraState',
+                                    'liveLocationKalman', 'liveParameters']
             self.sm = messaging.SubMaster(
                 ['deviceState', 'pandaStates', 'peripheralState', 'modelV2', 'liveCalibration',
                  'driverMonitoringState', 'longitudinalPlan', 'lateralPlan', 'liveLocationKalman', 'dynamicFollowData',

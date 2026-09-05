@@ -71,6 +71,8 @@ def getprop(key: str) -> Union[str, None]:
 
 
 class Android(HardwareBase):
+  GPU_DEVFREQ_PATH = "/sys/class/kgsl/kgsl-3d0/devfreq"
+
   def get_os_version(self):
     with open("/VERSION") as f:
       return f.read().strip()
@@ -404,7 +406,38 @@ class Android(HardwareBase):
       return 0
 
   def set_power_save(self, powersave_enabled):
-    pass
+    # Hold the GPU at its top devfreq step while driving.
+    #
+    # The driving model runs on the GPU under the msm-adreno-tz governor, whose
+    # range on this board is 133-652.8 MHz -- a 5x spread. With the big
+    # supercombo the model needs 31.9 ms of a 50 ms frame budget at full clock
+    # (20.7 ms with the old one), so a single step down is enough to overrun the
+    # frame and make camerad drop it. On 2026-09-05--01-13-56 the median stayed
+    # flat at 31.9 ms all drive while the tail stretched (p99 59.8 -> 65.5 ms)
+    # and drops went 0.65% -> 5.30%, which is the signature of clock variance
+    # rather than a slower model.
+    #
+    # Only the floor is raised, and only onroad: offroad the governor is handed
+    # back its own minimum so a parked device does not sit at full clock. Every
+    # write is best-effort -- thermald calls this and must not die if the node
+    # is missing or read-only.
+    # thermald calls this every cycle; only touch sysfs when the state changes,
+    # so a device without the node logs once rather than twice a second.
+    if powersave_enabled == getattr(self, "_gpu_powersave", None):
+      return
+    self._gpu_powersave = powersave_enabled
+    try:
+      with open(f"{self.GPU_DEVFREQ_PATH}/available_frequencies") as f:
+        steps = sorted(int(x) for x in f.read().split())
+      if not steps:
+        return
+      with open(f"{self.GPU_DEVFREQ_PATH}/min_freq", "w") as f:
+        f.write(str(steps[0] if powersave_enabled else steps[-1]))
+    except Exception:
+      # selfdrive.swaglog imports selfdrive.hardware, so it cannot be imported
+      # at module scope here.
+      from selfdrive.swaglog import cloudlog
+      cloudlog.exception("failed to set GPU devfreq floor")
 
   def get_gpu_usage_percent(self):
     try:
