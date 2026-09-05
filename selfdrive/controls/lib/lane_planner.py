@@ -1547,8 +1547,34 @@ class LanePlanner:
       center_delta_ref,
       self._prev_center_delta_m - max_step,
       self._prev_center_delta_m + max_step))
-    if abs(center_delta_ref) > 1e-6 and limited_ref != center_delta_ref:
-      center_delta = center_delta * (limited_ref / center_delta_ref)
+    # That rescale divided by this frame's raw 20 m sample, so its ratio diverged
+    # as the sample passed through zero -- which it does routinely, because the
+    # slew limiter bites on most frames and the raw correction alternates sign at
+    # 20 Hz. On 2026-09-05--09-24-53 at +378.43 s the ratio reached 5.3e4 and
+    # multiplied the already-clamped (<=1 m) profile into a 52.7 m path;
+    # np.interp then handed the lateral MPC a constant 52.7 m target at every
+    # horizon point, the MPC carried the resulting curvature into x0, and the
+    # demand ramped to 0.180 1/m (17.0 m/s^2 at 34 km/h) over the next second
+    # while the model path itself never left +/-0.5 m. laneCenterCorrectionM read
+    # a healthy +0.07 m throughout, which is why no drive log ever showed it.
+    # 35 such frames across the big-model drives, worst 192.8 m, against one per
+    # stock-model drive at a harmless 5.1 m.
+    #
+    # A slew limit may only shrink this frame's correction, never grow it, which
+    # is exactly the |limited| <= |raw| case: cap the ratio at 1. When the raw
+    # sample is numerically zero the ratio carries no information at all, so
+    # shift by the (max_step-bounded) difference instead of scaling by it. The
+    # magnitude clamp is then reapplied unconditionally, so nothing above
+    # LANE_CENTER_MAX_CORRECTION_M can leave this function by construction.
+    if abs(center_delta_ref) > 1e-3 and limited_ref != center_delta_ref:
+      center_delta = center_delta * float(
+        np.clip(limited_ref / center_delta_ref, -1.0, 1.0))
+    elif limited_ref != center_delta_ref:
+      center_delta = center_delta + (limited_ref - center_delta_ref)
+    center_delta = np.clip(center_delta, -center_max, center_max)
+    # Re-read the reference from what actually survived, so the next frame's
+    # slew limit is anchored on the correction that was applied.
+    limited_ref = float(np.interp(20.0, path_xyz[:, 0], center_delta))
     self._prev_center_delta_m = limited_ref
     lane_path_y_interp = path_xyz[:, 1] + center_delta
 

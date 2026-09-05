@@ -14,6 +14,27 @@ from selfdrive.controls.lib.model_data_validation import as_finite_vector, valid
 
 TRAJECTORY_SIZE = 33
 
+# How far the lane blend is allowed to move the path away from the model path.
+# Every correction ceiling inside lane_planner is at or below this: ordinary
+# blending 1.00 m, temporal hold 0.75 m, road edge 0.70 m (1.20 m readiness
+# trusted), model-path hold 0.45 m (0.90 m trusted). Anything past it is a bug
+# in the blend, not a wide correction, so the model path is used for that frame.
+MAX_LANE_BLEND_DEVIATION_M = 1.50
+
+# Geometric sanity envelope on the target handed to the MPC:
+#
+#   |y(t)| <= LATERAL_ENVELOPE_MARGIN_M + v_ego * t
+#
+# A point on the path cannot be further sideways than the distance travelled to
+# reach it, so this is a hard geometric bound rather than a tuning choice, and
+# it cannot reject a real plan: a first pass at 0.5 * v * t (a 30-degree heading
+# cap) clipped a genuine low-speed turn on 2026-09-05--09-24-53 at 8.9 m, so the
+# full arc length is used instead. The margin covers the path offset, the camera
+# offset, and the interpolation onto the horizon grid. What it does catch is a
+# path that is not a path: the 52.7 m target at +378.43 s is rejected on the
+# very first sample, where the envelope is only the margin.
+LATERAL_ENVELOPE_MARGIN_M = 1.50
+
 class LateralPlanner:
   def __init__(self, CP):
     self.LP = LanePlanner()
@@ -24,6 +45,9 @@ class LateralPlanner:
     self.factor2 = (CP.centerToFront * CP.mass) / (CP.wheelbase * CP.tireStiffnessRear)
     self.last_cloudlog_t = 0
     self.solution_invalid_cnt = 0
+    self.last_plan_cloudlog_t = 0
+    self.plan_implausible_cnt = 0
+    self.plan_implausible = False
 
     self.path_xyz = np.zeros((TRAJECTORY_SIZE, 3))
     self.path_xyz_stds = np.ones((TRAJECTORY_SIZE, 3))
@@ -40,9 +64,20 @@ class LateralPlanner:
     self.lat_mpc = LateralMpc()
     self.reset_mpc(np.zeros(4))
 
-  def reset_mpc(self, x0=np.zeros(4)):
-    self.x0 = x0
+  def reset_mpc(self, x0=None):
+    # Callers write into x0 straight after this (x0[3] = measured curvature), so
+    # a shared default array would carry the last reset's curvature into the
+    # next one instead of starting from zero. Build a fresh one every time.
+    self.x0 = np.zeros(4) if x0 is None else np.array(x0, dtype=float)
     self.lat_mpc.reset(x0=self.x0)
+
+  def _log_implausible_plan(self, detail):
+    """Rate-limited report of a lateral plan that was rejected or clipped."""
+    t = sec_since_boot()
+    if t > self.last_plan_cloudlog_t + 1.0:
+      self.last_plan_cloudlog_t = t
+      cloudlog.error("lateral plan implausible (%d so far): %s"
+                     % (self.plan_implausible_cnt + 1, detail))
 
   def update(self, sm):
     car_state = sm['carState']
@@ -122,12 +157,51 @@ class LateralPlanner:
 
     # Match the official planner: the current model/lane blend goes directly
     # to MPC. Do not retain or blend a previous path across real curve changes.
+    #
+    # Everything get_d_path may legitimately do to the model path is bounded by
+    # its own correction ceilings, the largest of which is 1.20 m. Check that
+    # here rather than trusting it: a planner bug on the far side of that call
+    # reaches the steering with nothing else in the way, and one did. On
+    # 2026-09-05--09-24-53 at +378.43 s the lane-centre slew rescale drove the
+    # blended path to 52.7 m while the model path stayed inside +/-0.5 m, and the
+    # MPC turned that single frame into a 17.0 m/s^2 demand that took a second to
+    # unwind because x0 carries the solution forward. Fall back to the model's
+    # own path for the frame instead; it is the input the blend started from.
+    self.plan_implausible = False
+    lane_deviation = float(np.max(np.abs(d_path_xyz[:, 1] - self.path_xyz[:, 1])))
+    if lane_deviation > MAX_LANE_BLEND_DEVIATION_M:
+      d_path_xyz = self.path_xyz.copy()
+      self.plan_implausible = True
+      self._log_implausible_plan(
+        "lane blend moved the path %.1f m from the model path (limit %.2f m)"
+        % (lane_deviation, MAX_LANE_BLEND_DEVIATION_M))
+
     d_path_distance = np.linalg.norm(d_path_xyz, axis=1)
     y_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], d_path_distance, d_path_xyz[:, 1])
     heading_pts = np.interp(
       v_ego * self.t_idxs[:LAT_MPC_N + 1],
       np.linalg.norm(self.path_xyz, axis=1), self.plan_yaw)
     curv_rate_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], np.linalg.norm(self.path_xyz, axis=1), self.plan_curv_rate)
+
+    # Second, independent check on the target the MPC actually receives, so a
+    # bad model path is caught too and not only a bad blend. The interp above
+    # can also read the far end of the path when d_path_distance is not
+    # monotonic, which it is not whenever the model's position.x starts negative.
+    # Clip rather than reject: the near samples of an otherwise sane path stay
+    # usable, and the shape is preserved wherever it is inside the envelope.
+    horizon_t = np.asarray(self.t_idxs[:LAT_MPC_N + 1], dtype=float)
+    y_envelope = LATERAL_ENVELOPE_MARGIN_M + max(v_ego, 0.0) * horizon_t
+    if np.any(np.abs(y_pts) > y_envelope):
+      worst = int(np.argmax(np.abs(y_pts) - y_envelope))
+      self.plan_implausible = True
+      self._log_implausible_plan(
+        "target %.1f m at %.2f s exceeds the achievable envelope %.1f m"
+        % (float(y_pts[worst]), float(horizon_t[worst]), float(y_envelope[worst])))
+      y_pts = np.clip(y_pts, -y_envelope, y_envelope)
+
+    if self.plan_implausible:
+      self.plan_implausible_cnt += 1
+
     self.y_pts = y_pts
 
     assert len(y_pts) == LAT_MPC_N + 1
@@ -155,6 +229,15 @@ class LateralPlanner:
       if t > self.last_cloudlog_t + 5.0:
         self.last_cloudlog_t = t
         cloudlog.warning("Lateral mpc - nan: True")
+
+    # x0 carries the solution into the next frame, so a frame built on a
+    # rejected plan would keep steering the car after the plan itself is sane
+    # again -- that carry-over, not the bad frame, is what turned +378.43 s of
+    # 2026-09-05--09-24-53 into a full second of rising demand. Re-seed from the
+    # curvature the car is actually holding instead.
+    if self.plan_implausible:
+      self.reset_mpc()
+      self.x0[3] = measured_curvature
 
     if self.lat_mpc.cost > 20000. or mpc_nans:
       self.solution_invalid_cnt += 1
