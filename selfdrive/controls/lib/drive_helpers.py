@@ -33,12 +33,27 @@ MAX_LATERAL_JERK = 5.0
 # car was tracking a nearly straight path, and the torque controller sat pinned at
 # full output for 0.73 s with no alert raised.
 #
-# Expressed as lateral acceleration so it scales with speed -- about a 20 m radius
-# at 28 km/h and a 257 m one at 100 km/h. Normal planning stays well below it: the
-# 99th percentile of |desired lateral accel| across logged drives is ~1.4 m/s^2,
-# and the highest value ever seen from the stock model was 2.1 m/s^2. This is a
-# guard against a broken plan, not a tuning knob for how the car corners.
-MAX_LATERAL_ACCEL = 3.0
+# Expressed as lateral acceleration so it scales with speed -- about a 26 m radius
+# at 28 km/h and a 350 m one at 100 km/h. This is a guard against a broken plan,
+# not a tuning knob for how the car corners.
+#
+# 3.0 -> 2.2. The old figure was set before 8f829051, when the lane-blend divide
+# bug and its 1.8 s of MPC ramp were still in the drives and inflated every
+# measurement of what a curve "needs". Re-measured with those frames and a 2.5 s
+# window around them excluded, over 3379 frames where the car was genuinely
+# turning (|measured curvature| >= 0.008 averaged over 3 s, which is derived from
+# steering angle and so is independent of the lane lines):
+#
+#   2026-09-05--09-24-53   p99 1.87   max 1.91     2026-09-05--06-16-06  p99 1.91  max 2.19
+#   2026-09-05--07-36-07   p99 1.82   max 1.83     2026-09-04--09-02-52  p99 2.05  max 2.06 (stock)
+#
+# So 2.2 clips none of the recorded cornering, and it cuts the worst case a
+# broken plan can deliver by 27%. It is deliberately tight: the headroom over the
+# 2.19 m/s^2 maximum is 0.5%, so a curve sharper than anything in these four
+# drives would be under-steered and run wide. If that shows up, 2.5 restores a
+# 14% margin and still improves on 3.0 -- this constant is the only thing to
+# change.
+MAX_LATERAL_ACCEL = 2.2
 
 # Backstop for the low-speed end, where the lateral-accel ceiling alone allows
 # curvatures tighter than the car can physically steer. ~5 m turning radius.
