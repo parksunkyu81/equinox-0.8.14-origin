@@ -9,6 +9,7 @@
 #include <QPainterPath>
 #include <QStringList>
 #include <algorithm>
+#include <deque>
 
 #include "selfdrive/common/timing.h"
 #include "selfdrive/ui/qt/util.h"
@@ -20,6 +21,53 @@
 namespace {
 constexpr float COMFORT_BRAKE = 2.5f;
 constexpr float STOP_DISTANCE = 5.5f;
+
+// Laying a string out is the expensive half of drawing it, and the HUD redraws
+// the same handful of strings frame after frame -- the repaint is driven by the
+// camera (cameraview.cc schedules it on every VisionIPC frame), so at 20 fps.
+// drawCenteredText below was paying for three layout passes per string: two
+// QFontMetrics::boundingRect calls to find the width, then the draw itself.
+//
+// Memoise only the measurement. The rectangle handed to QPainter is exactly the
+// one the same QFontMetrics call produced before, so nothing moves by a pixel;
+// the draw still lays the string out once. Painting happens only on the Qt GUI
+// thread, so plain statics need no locking.
+constexpr int TEXT_RECT_CACHE_MAX = 4096;
+
+struct FontTextRects {
+  QFont font;
+  QHash<QString, QRect> rects;
+};
+
+// Sub-tables are found by comparing QFont values -- a QFontDef field compare
+// that allocates nothing -- rather than by QFont::key(), which rebuilds a
+// joined string of every font field on each call and would cost more than it
+// saves. A HUD draws with on the order of ten distinct fonts, so the scan is
+// shorter than hashing one. std::deque keeps the returned reference valid as
+// the list grows.
+//
+// The caller owns the table as a deliberately leaked static: a QFont destroyed
+// after QApplication has torn down releases a font engine that no longer has a
+// backend, so these must outlive it rather than run at static-destruction time.
+QHash<QString, QRect> &textRectsFor(std::deque<FontTextRects> *tables, const QFont &font) {
+  for (FontTextRects &t : *tables) {
+    if (t.font == font) return t.rects;
+  }
+  tables->push_back({font, {}});
+  return tables->back().rects;
+}
+
+// A HUD cycles through a bounded set of strings. Should something unbounded
+// ever be drawn through here, drop the table rather than grow without limit.
+template <typename Measure>
+QRect cachedTextRect(QHash<QString, QRect> &rects, const QString &text, Measure measure) {
+  auto it = rects.find(text);
+  if (it == rects.end()) {
+    if (rects.size() >= TEXT_RECT_CACHE_MAX) rects.clear();
+    it = rects.insert(text, measure());
+  }
+  return it.value();
+}
 
 float desired_follow_distance(float v_ego, float v_lead, float t_follow) {
   float v_diff_offset = 0.0f;
@@ -564,9 +612,12 @@ void NvgWindow::showEvent(QShowEvent *event) {
 // float math instead removes the parity dependency, so every string lands
 // on the exact same subpixel point regardless of its own width.
 static void drawCenteredText(QPainter &p, int x, int y, const QString &text) {
-  QFontMetrics fm(p.font());
-  QRect init_rect = fm.boundingRect(text);
-  QRect real_rect = fm.boundingRect(init_rect, 0, text);
+  static auto *tables = new std::deque<FontTextRects>;
+  const QRect real_rect = cachedTextRect(textRectsFor(tables, p.font()), text, [&] {
+    QFontMetrics fm(p.font());
+    QRect init_rect = fm.boundingRect(text);
+    return fm.boundingRect(init_rect, 0, text);
+  });
   const qreal draw_x = x - real_rect.width() / 2.0;
   p.drawText(QPointF(draw_x, y), text);
 }
@@ -590,9 +641,13 @@ void NvgWindow::drawIcon(QPainter &p, int x, int y, QPixmap &img, QBrush bg, flo
 }
 
 void NvgWindow::drawText2(QPainter &p, int x, int y, int flags, const QString &text, const QColor& color) {
-  QFontMetrics fm(p.font());
-  QRect rect = fm.boundingRect(text);
-  rect.adjust(-1, -1, 1, 1);
+  static auto *tables = new std::deque<FontTextRects>;
+  const QRect rect = cachedTextRect(textRectsFor(tables, p.font()), text, [&] {
+    QFontMetrics fm(p.font());
+    QRect r = fm.boundingRect(text);
+    r.adjust(-1, -1, 1, 1);
+    return r;
+  });
   p.setPen(color);
   p.drawText(QRect(x, y, rect.width()+1, rect.height()), flags, text);
 }
@@ -698,16 +753,38 @@ void NvgWindow::drawHud(QPainter &p) {
     cpu_usage /= cpu_usage_list.size();
   }
 
-  QString infoText;
-  infoText.sprintf("CPU(%.0f%%) MEM(%d%%) (LatA:%.3f,Fri:%.3f) SR(%.2f) MIN_TR(%.1f) DF_MOD(%.1f)",
-                      cpu_usage,
-                      device_state.getMemoryUsagePercent(),
-                      controls_state.getLatAccelFactor(),
-                      controls_state.getFriction(),
-                      controls_state.getSteerRatio(),
-                      controls_state.getMinTR(),
-                      controls_state.getGlobalDfMod()
-                      );
+  // Nothing on this line moves at repaint rate: cpu and memory come from
+  // deviceState at 2 Hz, and the rest are tuning values that hold still for
+  // long stretches. Reformat only when one of them actually changes, keeping
+  // the last string otherwise. This does not avoid the layout pass in
+  // drawText -- that is unavoidable for a string drawn without measuring --
+  // so it saves the formatting alone.
+  const int mem_usage = device_state.getMemoryUsagePercent();
+  const float info_values[6] = {
+    controls_state.getLatAccelFactor(),
+    controls_state.getFriction(),
+    controls_state.getSteerRatio(),
+    controls_state.getMinTR(),
+    controls_state.getGlobalDfMod(),
+    cpu_usage,
+  };
+  static QString infoText;
+  static float last_values[6] = {};
+  static int last_mem_usage = -1;
+  if (infoText.isEmpty() || mem_usage != last_mem_usage ||
+      !std::equal(std::begin(info_values), std::end(info_values), std::begin(last_values))) {
+    std::copy(std::begin(info_values), std::end(info_values), std::begin(last_values));
+    last_mem_usage = mem_usage;
+    infoText.sprintf("CPU(%.0f%%) MEM(%d%%) (LatA:%.3f,Fri:%.3f) SR(%.2f) MIN_TR(%.1f) DF_MOD(%.1f)",
+                        cpu_usage,
+                        mem_usage,
+                        info_values[0],
+                        info_values[1],
+                        info_values[2],
+                        info_values[3],
+                        info_values[4]
+                        );
+  }
 
 
   // info

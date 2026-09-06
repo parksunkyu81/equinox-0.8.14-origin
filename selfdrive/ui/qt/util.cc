@@ -1,6 +1,8 @@
 #include "selfdrive/ui/qt/util.h"
 
 #include <QApplication>
+#include <QFont>
+#include <QHash>
 #include <QLayoutItem>
 #include <QStyleOption>
 
@@ -36,10 +38,26 @@ std::optional<QString> getDongleId() {
 }
 
 void configFont(QPainter &p, const QString &family, int size, const QString &style) {
-  QFont f(family);
-  f.setPixelSize(size);
-  f.setStyleName(style);
-  p.setFont(f);
+  // Constructing a QFont resolves the family by name and setStyleName forces a
+  // font-database match; onroad.cc alone calls this ~59 times per repaint, and
+  // the repaint runs at camera rate. The set of (family, size, style) triples a
+  // UI ever asks for is small and fixed, so build each one once. QFont is
+  // implicitly shared, so handing the cached value to setFont() copies nothing.
+  // Painting happens only on the Qt GUI thread, so the statics need no locking.
+  //
+  // Deliberately leaked: a QFont destroyed after QApplication has torn down
+  // releases a font engine that no longer has a backend, so the cache has to
+  // outlive it rather than run at static-destruction time.
+  static auto *cache = new QHash<QString, QHash<int, QHash<QString, QFont>>>;
+  QHash<QString, QFont> &by_style = (*cache)[family][size];
+  auto it = by_style.find(style);
+  if (it == by_style.end()) {
+    QFont f(family);
+    f.setPixelSize(size);
+    f.setStyleName(style);
+    it = by_style.insert(style, f);
+  }
+  p.setFont(it.value());
 }
 
 void clearLayout(QLayout* layout) {
