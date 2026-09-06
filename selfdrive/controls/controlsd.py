@@ -75,11 +75,30 @@ SOFT_DISABLE_TIME = 3  # seconds
 # Gate engagement until the final Panda safety configuration is stable. After engagement,
 # debounce only the short controlsAllowed message skew; safety configuration changes stay immediate.
 PANDA_SAFETY_MATCH_FRAMES = 10  # 100 ms at 100 Hz
-CONTROLS_ALLOWED_MISMATCH_FRAMES = 25  # 250 ms at 100 Hz
+# This debounce has to outlast the loop that re-arms controlsAllowed, not just message skew.
+# Panda clears controlsAllowed when boardd reports engaged=0 for three of its 1 Hz ticks
+# (main.c heartbeat_engaged_mismatches). boardd can only report engaged=1 again from
+# panda_state_thread, which runs at 2 Hz -- so after the driver re-engages, telling Panda
+# about it takes up to 500 ms. At 25 frames openpilot disengaged itself 250 ms in, before
+# that heartbeat could ever go out, and Panda re-cleared controlsAllowed on its next tick:
+# on 2026-09-06--09-46-21 at 849.4 s that livelocked for 6.0 s across repeated re-engagements
+# (boardd_safety_diagnostics controls_allowed_event_detail counted 3 then 4). Back to the
+# upstream 200 frames, which covers the 500 ms heartbeat and the 1 s Panda tick with margin.
+CONTROLS_ALLOWED_MISMATCH_FRAMES = 200  # 2 s at 100 Hz
 CONTROLS_MISMATCH_HISTORY_SECONDS = 5
 CONTROLS_MISMATCH_SAMPLE_FRAMES = max(1, int(0.05 / DT_CTRL))  # 20 Hz
 PROCESS_NOT_RUNNING_CONSECUTIVE_UPDATES = 3
 COMM_ISSUE_CONSECUTIVE_FRAMES = max(1, int(0.30 / DT_CTRL))
+# paramsd sets liveParameters.valid from its own SubMaster.all_checks(), so its 90%-of-nominal
+# average-rate gate on liveLocationKalman -- 55.6 ms against a measured 55.6-58.2 ms -- turns
+# every locationd hiccup into an invalid message. Every commIssue logged on the EON names this
+# one service and nothing else (invalid=["liveParameters"], not_alive=[], can_error=false),
+# and 0cdbe516 already relaxed the same gate one process downstream. What liveParameters
+# carries is steer ratio and angle offset: slowly-varying estimates that consumers hold the
+# last value of, and whose staleness is separately and correctly reported as
+# vehicleModelInvalid below. It still has to be alive; only its payload validity stops
+# raising commIssue.
+COMM_ISSUE_OPTIONAL_VALIDITY = ('liveParameters',)
 COMMA_PEDAL_PARAM_REFRESH_FRAMES = max(1, int(0.2 / DT_CTRL))
 
 # Warn while the lateral controller is still out of authority, instead of after
@@ -1115,7 +1134,8 @@ class Controls:
             # torqued is disabled (see process_config.py) -- its output was
             # never consumed, so there is no longer a liveTorqueParameters
             # service to special-case here.
-            communication_bad = not controlsd_communication_ok(self.sm)
+            communication_bad = not controlsd_communication_ok(
+                self.sm, optional_validity_services=COMM_ISSUE_OPTIONAL_VALIDITY)
             if panda_powering_down:
                 self.comm_issue_counter = 0
             elif communication_bad:
