@@ -126,10 +126,37 @@ PEDAL_FALL_HARD_DECEL = -0.50
 # This scores far lower than the rise limit on the same replay (1.5 s / 3.0 s
 # scored 5/37 for -7.4% on its own) but that metric only counts pedal height
 # before the *next* brake press, which is not what makes the immediate resume
-# unpleasant to sit behind. Kept at a moderate 1.0 s / 2.0 s: enough to stop
-# the car chasing the driver off the brake, small enough that the combined
-# cost stays near the knee (32% of events improved for -16.7% pedal total).
-POST_BRAKE_HOLD_S = 1.0
+# unpleasant to sit behind.
+#
+# The hold was 1.0 s, and at 1.0 s it was the single thing the driver felt most:
+# it is a flat rate of zero, so above LOW_SPEED_KPH the pedal is pinned at
+# exactly 0 for a full second no matter what the controller wants. Measured over
+# 2026-09-06--09-46-21, on the 34 brake releases above 8 km/h with no driver gas
+# override:
+#
+#   the controller asked for pedal at   median 0.00 s after release
+#   pedal was actually applied at       median 1.34 s
+#   delay this limiter added            median 1.31 s, p90 1.40
+#   pedal reached 0.10 at               median 1.98 s
+#
+# The per-event numbers cluster at 1.31 / 1.31 / 1.32 / 1.25 / 1.34, i.e. the
+# constant and nothing else -- 1.0 s of zero, then 0.3 s to cross 0.02 at the
+# halved 0.12/s rise that a close lead gives. Six of the 34 never got any pedal
+# inside 6 s at all.
+#
+# Against that, what the second is buying: the driver went back on the brake
+# within 1 s of releasing it in 1 of those 34 releases (3%), within 2 s in 2
+# (6%). So the hold is paying 1.3 s of dead pedal on every release to catch one
+# in thirty-four. 0.3 s keeps the beat that stops the pedal snapping back the
+# instant the brake lifts -- the behaviour this was added for, where it came
+# back within 0.3 s 72% of the time -- and gives the rest back.
+#
+# Gating the full second on why the driver braked (a closing lead, or the
+# planner still asking for deceleration) was measured too and does not help:
+# that one re-brake event falls in the *short*-hold group at every closing
+# threshold from -0.3 to -1.0 m/s, so the condition costs code and catches
+# nothing this drive can show. Revisit if re-braking gets worse from here.
+POST_BRAKE_HOLD_S = 0.3
 POST_BRAKE_RAMP_S = 2.0
 POST_BRAKE_RISE_SCALE = 0.5
 
