@@ -4,8 +4,33 @@ from common.conversions import Conversions as CV
 from common.numpy_fast import clip
 
 
-CURVE_PEDAL_MIN_SPEED_KPH = 40.0
-CURVE_ENTRY_DROP_KPH = 10.0
+# Two different floors, which used to be one number and contradicted the rest of
+# the feature because of it.
+#
+# CURVE_PEDAL_MIN_SPEED_KPH gates whether this coordinator runs at all: below it
+# there is not enough throttle in play for lifting off to mean anything. It was
+# 40, while the curve target the limiter asks for is MIN_CURVE_SPEED = 30 km/h --
+# so the half that computes a target aimed at 30 and the half that acts on it
+# refused to work below 40, and they could never meet. Measured on
+# 2026-09-06--09-46-21: the limiter confirmed a curve on 903 model frames, at a
+# speed of p10 9.0 / p50 21.1 / p90 27.3 km/h, and this gate rejected 100% of
+# them -- curvDriving was active for 0.00% of the drive. On
+# 2026-09-05--17-23-32 it rejected 98.6% and curvDriving ran 2.37%, which is the
+# sliver where a curve tight enough to need 30 km/h is still being approached
+# above 40. 20 km/h sits below the speeds curves are actually taken at here and
+# still well above the 10 km/h GM lateral-control floor.
+CURVE_PEDAL_MIN_SPEED_KPH = 20.0
+# CURVE_PLAN_MIN_SPEED_KPH floors the speed this coordinator will command. It has
+# to sit at or below MIN_CURVE_SPEED or the target gets clamped back up on its
+# way out -- the old code raised a 30 km/h request to 40 in three separate
+# places (the recommendation, the entry floor and the output clip), so even the
+# engagements that survived the gate above could not deliver what was asked.
+CURVE_PLAN_MIN_SPEED_KPH = 30.0
+# How far below the speed it entered at the car may be asked to slow. The limiter
+# now returns a graded target rather than a fixed 30 km/h, so a cap of 10 km/h
+# would silently truncate any real curve that needs more than that; it exists to
+# reject a pathological request, not to shape ordinary ones.
+CURVE_ENTRY_DROP_KPH = 25.0
 CURVE_PLAN_FALL_KPH_S = 5.0
 CURVE_PLAN_RISE_KPH_S = 10.0
 CURVE_EXIT_CONFIRM_S = 0.80
@@ -67,8 +92,8 @@ class CurvePedalCoordinator:
   def update_curve(self, detected, v_ego, cruise_speed_kph,
                    recommended_speed_ms, selected_time_s=None):
     v_kph = max(0.0, _finite(v_ego) * CV.MS_TO_KPH)
-    cruise_kph = max(CURVE_PEDAL_MIN_SPEED_KPH, _finite(cruise_speed_kph, v_kph))
-    recommended_kph = max(CURVE_PEDAL_MIN_SPEED_KPH,
+    cruise_kph = max(CURVE_PLAN_MIN_SPEED_KPH, _finite(cruise_speed_kph, v_kph))
+    recommended_kph = max(CURVE_PLAN_MIN_SPEED_KPH,
                           _finite(recommended_speed_ms, cruise_kph * CV.KPH_TO_MS) * CV.MS_TO_KPH)
     detected = bool(detected and v_kph >= CURVE_PEDAL_MIN_SPEED_KPH and recommended_kph < cruise_kph)
     selected_time = (None if selected_time_s is None else max(0.0, _finite(selected_time_s)))
@@ -79,12 +104,12 @@ class CurvePedalCoordinator:
     activate_curve = bool(detected and (self.curve_active or self.engaged or within_approach))
 
     if activate_curve:
-      # A short false-negative inside the exit hysteresis is the same curve,
-      # so preserve the original entry speed instead of subtracting 10 km/h
-      # again from a later, already-reduced speed.
+      # A short false-negative inside the exit hysteresis is the same curve, so
+      # preserve the original entry speed instead of subtracting
+      # CURVE_ENTRY_DROP_KPH again from a later, already-reduced speed.
       if not self.curve_active and self.exit_elapsed >= CURVE_EXIT_CONFIRM_S:
         self.entry_speed_kph = v_kph
-        self.plan_speed_kph = min(cruise_kph, max(v_kph, CURVE_PEDAL_MIN_SPEED_KPH))
+        self.plan_speed_kph = min(cruise_kph, max(v_kph, CURVE_PLAN_MIN_SPEED_KPH))
       self.curve_active = True
       self.exit_elapsed = 0.0
       self.recommended_speed_kph = recommended_kph
@@ -106,17 +131,17 @@ class CurvePedalCoordinator:
       return None
 
     if self.curve_active:
-      entry_floor = max(CURVE_PEDAL_MIN_SPEED_KPH, self.entry_speed_kph - CURVE_ENTRY_DROP_KPH)
+      entry_floor = max(CURVE_PLAN_MIN_SPEED_KPH, self.entry_speed_kph - CURVE_ENTRY_DROP_KPH)
       desired_plan = max(self.recommended_speed_kph, entry_floor)
     else:
       desired_plan = cruise_kph
 
     if self.plan_speed_kph <= 0.0:
-      self.plan_speed_kph = min(cruise_kph, max(v_kph, CURVE_PEDAL_MIN_SPEED_KPH))
+      self.plan_speed_kph = min(cruise_kph, max(v_kph, CURVE_PLAN_MIN_SPEED_KPH))
     self.plan_speed_kph = _rate_limit(
       self.plan_speed_kph, desired_plan,
       CURVE_PLAN_FALL_KPH_S, CURVE_PLAN_RISE_KPH_S, self.dt)
-    self.plan_speed_kph = clip(self.plan_speed_kph, CURVE_PEDAL_MIN_SPEED_KPH, cruise_kph)
+    self.plan_speed_kph = clip(self.plan_speed_kph, CURVE_PLAN_MIN_SPEED_KPH, cruise_kph)
 
     recovered = not self.engaged and abs(self.plan_speed_kph - cruise_kph) < 0.1
     if recovered:

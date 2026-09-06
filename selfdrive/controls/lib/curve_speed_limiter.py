@@ -10,9 +10,18 @@ CURVE_SPEED_DISABLED = 255.0
 # and output filters below continue to reject abrupt model changes.
 CURVE_DECEL_MPS2 = 0.8
 CURVE_ACTIVATION_MARGIN_MS = 0.5
-# Do not turn a modest cruise-speed reduction into the fixed 40 km/h curve
-# target. A curve must first be tight enough that its calculated traversal
-# speed is within about 5 km/h of the configured curve target.
+# This used to read "do not turn a modest cruise-speed reduction into the fixed
+# curve target", and with a fixed target that was the right instinct: any curve
+# that got past this skip was commanded all the way down to MIN_CURVE_SPEED, so
+# only genuinely tight ones could be allowed through. The target is no longer
+# fixed (see raw_speed at the end of calculate_curve_speed_details), so the
+# reason for rejecting ordinary bends is gone with it.
+#
+# The skip stays as a floor, not a ceiling: a point is worth considering when it
+# asks for less than the driver's own set speed. Whether that adds up to a real
+# reduction is already decided once, on the aggregate, by the
+# CURVE_ACTIVATION_MARGIN_MS check below -- this per-point test only has to stop
+# the loop doing arithmetic on points that cannot matter.
 CURVE_DEEP_SPEED_MARGIN_MS = 1.5
 # modelV2 is evaluated at 20 Hz, so this requires roughly 0.3 seconds of
 # consistent deep-curve evidence before CURV is allowed to engage.
@@ -366,7 +375,7 @@ def calculate_curve_speed_details(curvatures, v_ego, cruise_speed, min_curve_spe
   a_y_max = clip(2.975 - v_ego * 0.0375, 1.85, 2.975)
   smoothed_curvatures = _smoothed_abs_curvatures(values)
   diag["max_curvature"] = float(max(smoothed_curvatures, default=0.0))
-  deep_speed_threshold = min_curve_speed + CURVE_DEEP_SPEED_MARGIN_MS
+  deep_speed_threshold = max(min_curve_speed + CURVE_DEEP_SPEED_MARGIN_MS, cruise_speed)
   diag["deep_speed_threshold_ms"] = float(deep_speed_threshold)
 
   allowed_now = CURVE_SPEED_DISABLED
@@ -391,11 +400,20 @@ def calculate_curve_speed_details(curvatures, v_ego, cruise_speed, min_curve_spe
   if allowed_now >= cruise_speed - CURVE_ACTIVATION_MARGIN_MS:
     return CURVE_SPEED_DISABLED, True, diag
 
-  # This Equinox uses a gas interceptor without openpilot brake actuation.
-  # Once a real curve has crossed the slowdown threshold, command the fixed
-  # curve target so longitudinal control releases throttle early; the driver
-  # remains responsible for any braking needed to reach that speed.
-  raw_speed = min_curve_speed
+  # allowed_now is already the answer: the most limiting point's traversal speed
+  # carried back to here through CURVE_DECEL_MPS2, i.e. the speed that may be
+  # held now to arrive at that point at its safe speed. It used to be computed
+  # and then thrown away in favour of the fixed MIN_CURVE_SPEED, which is why
+  # every engagement in a drive log reported exactly 30.0 km/h whatever the
+  # bend: the output had no gradation at all, so the only curve worth acting on
+  # was one tight enough to justify 30, and everything else was skipped above.
+  #
+  # Command the graded speed instead. A gentle bend now asks for a gentle
+  # reduction; a tight one still bottoms out at min_curve_speed, which is what
+  # the floor is for. This Equinox drives a gas interceptor with no openpilot
+  # brake actuation, so a lower target only releases throttle earlier -- the
+  # driver still supplies any braking needed to reach it.
+  raw_speed = max(allowed_now, min_curve_speed)
   diag["raw_speed_ms"] = float(raw_speed)
   return float(raw_speed), True, diag
 
