@@ -35,8 +35,13 @@ The gesture is therefore: signal, off, signal again straight away -- and it does
 not matter how either signal was made. A drive-log replay of the gesture as the
 driver actually performs it found a 0.5-0.8 s flick followed by a 0.25-0.53 s
 gap and then a held signal, every time; an earlier rule that the first signal be
-held past 2.5 s rejected all of it. The second signal has to stay on, because
-the blinker going out is what ends the mode.
+held past 2.5 s rejected all of it.
+
+Once armed the blinker stops mattering. A tapped stalk switches itself off after
+a blink or two, so a mode that needed the signal to stay on could only be used
+by a driver holding the stalk latched by hand -- tap, tap died about two seconds
+into a corner that takes five or six. The corner ends on the wheel coming back,
+the driver's own torque, or the timeout.
 """
 
 from common.realtime import DT_CTRL
@@ -107,8 +112,8 @@ class TurnCommit:
   def reset(self):
     # Only mode state. The blinker edge state below it is the stalk's own
     # history and belongs to no particular corner -- wiping it here would stop
-    # a driver re-arming immediately after a release, which is exactly what a
-    # release on 'blinker off' invites them to do.
+    # a driver re-arming immediately after a release, which is what a corner
+    # that ended early invites them to do.
     self.active = False
     self.direction = ''
     self.elapsed = 0.0
@@ -149,13 +154,16 @@ class TurnCommit:
     self._prev_right = bool(right_blinker)
     return armed
 
-  def _release_reason(self, engaged, kph, blinker_on, steering_pressed, angle_deg):
+  def _release_reason(self, engaged, kph, steering_pressed, angle_deg):
+    # The blinker is deliberately not looked at here. It arms the mode and then
+    # stops mattering: the stalk's own tap switches itself off after a blink or
+    # two, so a mode that needed the signal to stay on could only be used by a
+    # driver holding the stalk latched by hand, and died about two seconds into
+    # a corner that takes five or six for anyone tapping it.
     if not engaged:
       return 'disengaged'
     if steering_pressed:
       return 'driver'
-    if not blinker_on:
-      return 'blinker off'
     if kph > MAX_SPEED_KPH:
       return 'over speed'
     if kph < MIN_SPEED_KPH:
@@ -183,9 +191,7 @@ class TurnCommit:
       if abs(angle_deg) >= TURN_STARTED_DEG:
         self.turn_started = True
 
-      blinker_on = (left_blinker if self.direction == 'left' else right_blinker)
-      reason = self._release_reason(engaged, kph, blinker_on,
-                                    steering_pressed, angle_deg)
+      reason = self._release_reason(engaged, kph, steering_pressed, angle_deg)
       if reason:
         self.release_reason = reason
         self.release_direction = self.direction

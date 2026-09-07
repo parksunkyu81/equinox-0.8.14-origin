@@ -129,10 +129,19 @@ class TestTurnCommit(unittest.TestCase):
     self.assertFalse(self.run_for(0.05, left=True, angle=60.0, pressed=True))
     self.assertEqual(self.tc.release_reason, 'driver')
 
-  def test_releases_on_blinker_off(self):
-    self.double_tap()
-    self.assertFalse(self.run_for(0.05, left=False, angle=60.0))
-    self.assertEqual(self.tc.release_reason, 'blinker off')
+  def test_tap_tap_survives_the_blinker_going_out(self):
+    # The gesture the driver actually uses: two taps, each of which switches
+    # itself off. If the blinker had to stay on this died two seconds into a
+    # corner that needs five or six.
+    self.double_tap(first_signal_s=0.54, gap_s=0.3)
+    self.assertTrue(self.tc.active)
+    self.assertTrue(self.run_for(2.0, left=False, right=False, angle=60.0))
+
+  def test_tap_tap_still_completes_and_times_out(self):
+    self.double_tap(first_signal_s=0.54, gap_s=0.3)
+    self.assertTrue(self.run_for(1.0, angle=70.0))
+    self.assertFalse(self.run_for(0.1, angle=TURN_STARTED_DEG - 5.0))
+    self.assertEqual(self.tc.release_reason, 'turn complete')
 
   def test_releases_over_speed(self):
     self.double_tap()
@@ -149,7 +158,7 @@ class TestTurnCommit(unittest.TestCase):
     self.double_tap()
     # Held past the timeout at an angle that never returns through the start
     # threshold, so only the clock can end it.
-    self.assertFalse(self.run_for(TIMEOUT_S + 0.5, left=True, angle=80.0))
+    self.assertFalse(self.run_for(TIMEOUT_S + 0.5, angle=80.0))
     self.assertEqual(self.tc.release_reason, 'timeout')
 
   def test_release_reports_direction_once(self):
