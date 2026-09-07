@@ -10,9 +10,8 @@ blinker as a double tap.
 import unittest
 
 from selfdrive.controls.lib.turn_commit import (TurnCommit, DOUBLE_TAP_GAP_S,
-                                                MAX_SPEED_KPH,
-                                                MIN_FIRST_SIGNAL_S, TIMEOUT_S,
-                                                TURN_STARTED_DEG)
+                                                MAX_SPEED_KPH, MIN_SPEED_KPH,
+                                                TIMEOUT_S, TURN_STARTED_DEG)
 
 DT = 0.01
 KPH = 1.0 / 3.6
@@ -35,7 +34,7 @@ class TestTurnCommit(unittest.TestCase):
     return self.tc.active
 
   def double_tap(self, kph=15.0, left=True, engaged=True, gap_s=0.4,
-                 first_signal_s=MIN_FIRST_SIGNAL_S + 0.5):
+                 first_signal_s=0.6):
     """Signal, off, signal again -- the gesture, ending with the stalk on."""
     right = not left
     self.run_for(first_signal_s, engaged=engaged, kph=kph, left=left, right=right)
@@ -57,18 +56,17 @@ class TestTurnCommit(unittest.TestCase):
     # One ordinary signal is one rising edge, however long it is held.
     self.assertFalse(self.run_for(6.0, left=True))
 
-  def test_light_tap_does_not_open_the_gesture(self):
-    # The stalk's lane-change tap ends itself at about 2.1 s. Repeating it must
-    # do nothing at all, or the tap a driver already uses to change lanes would
-    # commit a corner.
-    self.double_tap(first_signal_s=LIGHT_TAP_S)
-    self.assertFalse(self.tc.active)
+  def test_short_flick_opens_the_gesture(self):
+    # What the driver actually does, measured off the car: a 0.5-0.8 s flick,
+    # a gap of about a third of a second, then the signal held on.
+    self.double_tap(first_signal_s=0.54, gap_s=0.25)
+    self.assertTrue(self.tc.active)
 
-  def test_short_flick_does_not_open_the_gesture(self):
-    # Same rule from the other side: anything shorter than a held signal is not
-    # the driver signalling, so it cannot be the first half either.
-    self.double_tap(first_signal_s=0.3)
-    self.assertFalse(self.tc.active)
+  def test_light_tap_opens_the_gesture(self):
+    # The stalk's own three blinks end at about 2.1 s. That counts too -- only
+    # the gap decides, never how the signal was made.
+    self.double_tap(first_signal_s=LIGHT_TAP_S)
+    self.assertTrue(self.tc.active)
 
   def test_two_ordinary_signals_do_not_arm(self):
     # The shortest gap real signalling produced has to stay outside the rule,
@@ -87,9 +85,9 @@ class TestTurnCommit(unittest.TestCase):
     self.assertTrue(self.tc.active)
 
   def test_opposite_signals_do_not_pair(self):
-    # A held left signal followed straight away by a right one is a driver
-    # changing their mind, not the second half of a left gesture.
-    self.run_for(MIN_FIRST_SIGNAL_S + 0.5, left=True)
+    # A left signal followed straight away by a right one is a driver changing
+    # their mind, not the second half of a left gesture.
+    self.run_for(3.0, left=True)
     self.run_for(0.3)
     self.run_for(0.3, right=True)
     self.assertFalse(self.tc.active)
@@ -97,6 +95,18 @@ class TestTurnCommit(unittest.TestCase):
   def test_does_not_arm_above_speed(self):
     self.double_tap(kph=MAX_SPEED_KPH + 1.0)
     self.assertFalse(self.tc.active)
+
+  def test_does_not_arm_below_the_lkas_floor(self):
+    # An episode logged on the car armed at 5.6 kph and sat there: no steering
+    # command goes out under the floor, so there was nothing for it to do.
+    self.double_tap(kph=MIN_SPEED_KPH - 2.0)
+    self.assertFalse(self.tc.active)
+
+  def test_releases_under_the_lkas_floor(self):
+    self.double_tap()
+    self.assertFalse(self.run_for(0.05, left=True, angle=60.0,
+                                  kph=MIN_SPEED_KPH - 2.0))
+    self.assertEqual(self.tc.release_reason, 'under speed')
 
   def test_does_not_arm_disengaged(self):
     self.double_tap(engaged=False)
