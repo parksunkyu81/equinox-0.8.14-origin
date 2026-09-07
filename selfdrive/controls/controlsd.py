@@ -100,6 +100,10 @@ COMM_ISSUE_CONSECUTIVE_FRAMES = max(1, int(0.30 / DT_CTRL))
 # raising commIssue.
 COMM_ISSUE_OPTIONAL_VALIDITY = ('liveParameters',)
 COMMA_PEDAL_PARAM_REFRESH_FRAMES = max(1, int(0.2 / DT_CTRL))
+# Dynamic TR values are user settings echoed into controlsState for the UI, not
+# control inputs. Re-reading them off the filesystem every frame cost ~150 us at
+# 100 Hz, so they are cached and refreshed at 1 Hz.
+DYNAMIC_TR_PARAM_REFRESH_FRAMES = max(1, int(1.0 / DT_CTRL))
 
 # Warn while the lateral controller is still out of authority, instead of after
 # the car has already left the path. latcontrol's sat_count filter already
@@ -310,6 +314,13 @@ class Controls:
         self.roadLimitSpeedActive = 0
         self.roadLimitSpeed = 0
         self.roadLimitSpeedLeftDist = 0
+
+        # Seeded here so the first publish_logs frame has values without a
+        # filesystem read; manager guarantees these keys exist at every start.
+        self.dynamic_tr_min = 0.9
+        self.dynamic_tr_mode = 'auto'
+        self.dynamic_tr_global_df_mod = 1.0
+        self._refresh_dynamic_tr_params()
 
         self.slow_on_curves = Params().get_bool('SccSmootherSlowOnCurves')
         self.min_set_speed_clu = self.kph_to_clu(MIN_SET_SPEED_KPH)
@@ -554,6 +565,19 @@ class Controls:
             trigger=snapshot,
             history=list(self.controls_mismatch_history),
         )
+
+    def _refresh_dynamic_tr_params(self):
+        # Keep the last good value if a key goes missing rather than throwing
+        # inside the control loop.
+        min_tr = self.params.get("minTR", encoding="utf8")
+        if min_tr is not None:
+            self.dynamic_tr_min = float(min_tr)
+        mode = self.params.get("DynamicTRGap", encoding="utf8")
+        if mode is not None:
+            self.dynamic_tr_mode = mode
+        global_df_mod = self.params.get("globalDfMod", encoding="utf8")
+        if global_df_mod is not None:
+            self.dynamic_tr_global_df_mod = float(global_df_mod)
 
     def reset(self):
         self.max_speed_clu = 0.
@@ -1116,9 +1140,18 @@ class Controls:
             self.events.add(EventName.controlsMismatch)
             controls_mismatch_reasons.append("controls_allowed")
 
-        controls_mismatch_snapshot = self._controls_mismatch_snapshot(
-            panda_safety_matches, include_manager_processes=bool(controls_mismatch_reasons))
-        self._record_controls_mismatch_snapshot(controls_mismatch_snapshot)
+        # The snapshot is only consumed by the 20 Hz history sampler and by the
+        # first frame of a mismatch episode, so building one every 100 Hz frame
+        # threw four out of five away -- along with the ControlsReady param read
+        # inside it, which hits the filesystem.
+        need_sample = (self.sm.frame - self.controls_mismatch_last_sample_frame
+                       >= CONTROLS_MISMATCH_SAMPLE_FRAMES)
+        need_episode = bool(controls_mismatch_reasons) and not self.controls_mismatch_active
+        controls_mismatch_snapshot = None
+        if need_sample or need_episode:
+            controls_mismatch_snapshot = self._controls_mismatch_snapshot(
+                panda_safety_matches, include_manager_processes=bool(controls_mismatch_reasons))
+            self._record_controls_mismatch_snapshot(controls_mismatch_snapshot)
         self._record_controls_mismatch_episode(controls_mismatch_reasons, controls_mismatch_snapshot)
 
         # Check for HW or system issues
@@ -2055,11 +2088,13 @@ class Controls:
               dyn_torque['lowSpeedTorqueBoostSuppressed'])
 
         # Dynamic TR
+        if self.sm.frame % DYNAMIC_TR_PARAM_REFRESH_FRAMES == 0:
+            self._refresh_dynamic_tr_params()
         #controlsState.cruiseGap = int(Params().get("cruiseGap", encoding="utf8"))
-        controlsState.minTR = float(Params().get("minTR", encoding="utf8"))
+        controlsState.minTR = float(self.dynamic_tr_min)
         #controlsState.dynamicTRMode = int(self.sm['longitudinalPlan'].dynamicTRMode)
-        controlsState.dynamicTRMode = Params().get("DynamicTRGap", encoding="utf8")
-        controlsState.globalDfMod = float(Params().get("globalDfMod", encoding="utf8"))
+        controlsState.dynamicTRMode = self.dynamic_tr_mode
+        controlsState.globalDfMod = float(self.dynamic_tr_global_df_mod)
         controlsState.dynamicTRValue = float(self.sm['dynamicFollowData'].mpcTR)
         controlsState.followingDistanceRawTR = float(
           getattr(self.sm['dynamicFollowData'], 'rawTR', 1.3))
