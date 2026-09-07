@@ -452,7 +452,7 @@ class Controls:
 
         # controlsd is driven by can recv, expected at 100Hz
         self.rk = Ratekeeper(100, print_delay_threshold=None)
-        self.prof = Profiler(False)  # off by default
+        self.prof = Profiler(True)  # off by default
 
     @staticmethod
     def _diagnostic_enum_value(value):
