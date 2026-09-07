@@ -4,12 +4,17 @@ from typing import NoReturn
 
 import cereal.messaging as messaging
 from common.logging_extra import SwagLogFileFormatter
-from selfdrive.swaglog import get_file_handler
+from selfdrive.swaglog import get_file_handler, swaglog_to_disk_enabled
 
 
 def main() -> NoReturn:
-  log_handler = get_file_handler()
-  log_handler.setFormatter(SwagLogFileFormatter(None))
+  # Constructing the handler already opens a file, so it is not built at all
+  # when disk logging is off. Publishing below is untouched: loggerd and the UI
+  # keep receiving every message either way.
+  log_handler = None
+  if swaglog_to_disk_enabled():
+    log_handler = get_file_handler()
+    log_handler.setFormatter(SwagLogFileFormatter(None))
   log_level = 20  # logging.INFO
 
   ctx = zmq.Context().instance()
@@ -24,7 +29,7 @@ def main() -> NoReturn:
     dat = b''.join(sock.recv_multipart())
     level = dat[0]
     record = dat[1:].decode("utf-8")
-    if level >= log_level:
+    if level >= log_level and log_handler is not None:
       log_handler.emit(record)
 
     # then we publish them

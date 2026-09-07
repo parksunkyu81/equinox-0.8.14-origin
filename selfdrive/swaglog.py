@@ -93,11 +93,28 @@ class UnixDomainSocketHandler(logging.Handler):
       pass
 
 
+def swaglog_to_disk_enabled():
+  """Are swaglog files wanted on this device?
+
+  Off, because nothing here consumes them. They exist to be uploaded to comma's
+  servers by athenad, and this device does not run athenad -- its manager entry
+  is commented out -- so on disk they only accumulate: 2500 files and 83 MB had
+  built up, each one something a running athenad would have scanned on every
+  pass. Messages still go over IPC to logmessaged, which still publishes
+  logMessage and errorLogMessage, so loggerd and the UI see them as before.
+
+  Touch the file below and restart to get the files back for boot diagnostics.
+  """
+  return os.path.exists("/data/enable_swaglog")
+
+
 def add_file_handler(log):
   """
   Function to add the file log handler to swaglog.
   This can be used to store logs when logmessaged is not running.
   """
+  if not swaglog_to_disk_enabled():
+    return
   handler = get_file_handler()
   handler.setFormatter(SwagLogFileFormatter(log))
   log.addHandler(handler)
