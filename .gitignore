@@ -93,3 +93,8 @@ rednose/helpers/ekf_sym_pyx.cpp
 # recompiles it from the .dlc, and the result is specific to the GPU that
 # recorded it, so a tracked copy would sit permanently modified on the device.
 models/supercombo_big.thneed
+
+# Tests written while working on selfdrive/controls stay local: they are for
+# verifying a change before it is pushed, not part of what ships to the car.
+# Write them, run them on the device, leave them out of the history.
+selfdrive/controls/tests/test_*.py
