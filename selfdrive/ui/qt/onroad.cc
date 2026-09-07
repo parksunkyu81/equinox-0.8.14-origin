@@ -1511,16 +1511,25 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // The tiles no longer have to fit inside the temperature panel's 213 px
     // background; they only have to keep the panel's own 21 px margin off the
     // screen edge, so the block is right-aligned to the panel rather than
-    // centred on it and overhangs to the left. 116 matches the wheel's
-    // diameter, and the block then runs 1655..1899 -- 37 px clear of the
-    // confidence gauge, which it does not overlap vertically anyway.
+    // centred on it and overhangs to the left.
     //
-    // The tiles above the speed panel are unaffected: 2*116 + 12 = 244 still
-    // sits inside that panel's 290 px with 23 px either side.
-    constexpr int SD = 116;        // status circle diameter
-    constexpr int SGAP_X = 12;     // horizontal gap between the two columns
-    constexpr int SGAP_Y = 10;     // vertical gap between the two rows
-    constexpr int PANEL_GAP = 16;  // clearance above the temperature panel
+    // Every tile in this block is 20% over the size it was, gaps and the
+    // panel clearance included, so the group scales as one piece instead of
+    // growing discs inside the old spacing. The label and value sizes follow
+    // on their own: drawTileText fits both to the disc, and its two ceilings
+    // below are raised by the same fifth so the short strings that were
+    // already sitting on them grow too.
+    //
+    // The wheel is deliberately not part of this -- it is drawn from its own
+    // wheel_d above and keeps the size it has, which the discs now match.
+    //
+    // At 140 the right-hand block runs 1605..1899. That is 20 px into the
+    // confidence gauge's column, which it still does not overlap vertically:
+    // the block's bottom is 694 and the gauge starts at 730.
+    constexpr int SD = 140;        // status circle diameter (116 * 1.2)
+    constexpr int SGAP_X = 14;     // horizontal gap between the two columns
+    constexpr int SGAP_Y = 12;     // vertical gap between the two rows
+    constexpr int PANEL_GAP = 19;  // clearance above the temperature panel
 
     // Label over value, the pair centred on the disc by their actual ink.
     // Fixed baseline offsets scaled from the 116 px tiles do not survive the
@@ -1557,11 +1566,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
                             int usable_r, int label_alpha,
                             const QString &size_ref, float value_scale,
                             float label_lift = 0.0f, float label_scale = 1.0f) {
-      constexpr int TEXT_GAP = 7;   // between the label block and the value
+      constexpr int TEXT_GAP = 8;   // between the label block and the value
       constexpr int LINE_GAP = 2;   // between two label lines
       const QStringList label_lines = label.split('\n');
-      int label_pt = 28;
-      int value_pt = 42;
+      int label_pt = 34;   // ceiling, 28 * 1.2
+      int value_pt = 50;   // ceiling, 42 * 1.2
       int label_h = 0, value_h = 0, total_h = 0;
 
       // Shrinking a line changes the block's height, which changes the chord
@@ -1691,17 +1700,17 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       p.setBrush(QColor(55, 61, 74, 235));
       p.drawEllipse(cx_ - SD / 2, cy - SD / 2, SD, SD);
 
-      const QRectF ring(cx_ - SD / 2 + 6, cy - SD / 2 + 6, SD - 12, SD - 12);
+      const QRectF ring(cx_ - SD / 2 + 7, cy - SD / 2 + 7, SD - 14, SD - 14);
       p.setBrush(Qt::NoBrush);
-      p.setPen(QPen(QColor(118, 126, 139, 180), 7, Qt::SolidLine, Qt::FlatCap));
+      p.setPen(QPen(QColor(118, 126, 139, 180), 8, Qt::SolidLine, Qt::FlatCap));
       p.drawEllipse(ring);
-      p.setPen(QPen(QColor(255, 0, 0, 255), 7, Qt::SolidLine, Qt::FlatCap));
+      p.setPen(QPen(QColor(255, 0, 0, 255), 8, Qt::SolidLine, Qt::FlatCap));
       p.drawArc(ring, 90 * 16,
                 -static_cast<int>(std::clamp(ratio, 0.0f, 1.0f) * 360.0f * 16.0f));
 
       // Inside the ring, not just inside the disc: the ring's circle is inset
-      // 6 and stroked 7, so its inner edge is at SD / 2 - 9.5.
-      drawTileText(cx_, cy, label, value, QColor(255, 255, 255, 245), SD / 2 - 13, 230,
+      // 7 and stroked 8, so its inner edge is at SD / 2 - 11.
+      drawTileText(cx_, cy, label, value, QColor(255, 255, 255, 245), SD / 2 - 15, 230,
                    size_ref, 1.0f, label_lift, label_scale);
       p.setBrush(Qt::NoBrush);
       p.setPen(Qt::NoPen);
@@ -1750,31 +1759,42 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     if (nda_badge_top_ > 0) {
       const int speed_row = nda_badge_top_ - PANEL_GAP - SD / 2;
       const int speed_row_top = speed_row - SD - SGAP_Y;
-      const int scol_l = nda_badge_cx_ - (SD + SGAP_X) / 2;
-      const int scol_r = nda_badge_cx_ + (SD + SGAP_X) / 2;
+      // Centred on the badge, but pushed right if that would take the left
+      // column off the screen. The badge sits at x 30 with its centre at 135,
+      // so a pair of 116 px discs cleared the edge by 13 px and a pair of 140
+      // px ones does not -- centred, the left disc would start at -12. The
+      // group therefore holds the badge's centre until it cannot, then keeps
+      // the badge's own 30 px margin instead and overhangs to the right, the
+      // same trade the right-hand block makes against the screen edge.
+      constexpr int EDGE_MARGIN = 30;
+      const int group_w = SD * 2 + SGAP_X;
+      const int group_cx = std::max(nda_badge_cx_, EDGE_MARGIN + group_w / 2);
+      const int scol_l = group_cx - (SD + SGAP_X) / 2;
+      const int scol_r = group_cx + (SD + SGAP_X) / 2;
 
       QString pedal_max_str;
       pedal_max_str.sprintf("%.0f", comma_pedal * 100.0f);
       // 페달 신호 is matched to 페달 상태 the same way 페달 강도 is, so all
       // four tiles in this group carry one label size and one value size.
-      // The scale is again chosen for the rendered result, not copied: this
-      // tile fits inside the progress ring rather than the disc (usable_r 45
-      // against 55) and measures its value against a two-digit "88", so it
-      // settles at 17 px and needs 1.40 to reach 24. Its value already lands
-      // on 42 unscaled.
+      // The scale is chosen for the rendered result, not copied: this tile
+      // fits inside the progress ring rather than the disc, and measures its
+      // value against a two-digit "88", so its own fit lands well below the
+      // others and 1.40 is what brings it level with them. Every factor here
+      // multiplies that tile's own fitted size, so they ride the disc: the
+      // group scaled to SD 140 without one of them being retuned.
       statusRing(scol_l, speed_row_top, "페달 신호", pedal_max_str,
                  comma_pedal_ratio, "88", 0.10f, 1.40f);
       // 페달 강도 is matched to 페달 상태 below it, so the right-hand column
-      // reads as one pair: same Korean label (the fit lands both on 24 px),
-      // same tenth-of-a-block lift, same rendered 42 px value.
+      // reads as one pair: same Korean label, same tenth-of-a-block lift, and
+      // a value that renders at the same size.
       //
       // Matched on the rendered size, not on the 1.60 factor. The factor
       // multiplies each tile's own fitted size, and the fit depends on
-      // size_ref: 페달 상태 measures against 브레이크 and settles at 26, this
-      // tile measures against the much narrower HIGH and settles at 36. The
-      // same 1.60 would put this value at 58 px against the other's 42 --
-      // visibly mismatched, 23 px past its own disc, and 1 px off the PEDAL
-      // MAX disc beside it. 1.17 lands on 42, which clears that disc by 20.
+      // size_ref: 페달 상태 measures against the wide 브레이크 and settles
+      // small, this tile measures against the much narrower HIGH and settles
+      // high. The same 1.60 here would render visibly larger than its pair,
+      // spill well past its own disc and reach the PEDAL MAX disc beside it.
+      // 1.17 lands level with the pair and clears that disc.
       statusCircle(scol_r, speed_row_top, "페달 강도", ai_pedal_profile,
                    aiProfileColor, "HIGH", 1.17f, 0.10f);
 
@@ -1783,21 +1803,21 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       statusCircle(scol_r, speed_row,
                    // size_ref is the widest state this tile can ever show, and
                    // 브레이크 is 4 full-width glyphs against BOOST's ~3.4 em.
-                   // Sizing off BOOST instead let 브레이크 run 136 px wide --
-                   // 40 px past the disc, against BOOST's own 21.
+                   // Sizing off BOOST instead let 브레이크 run far past the
+                   // disc, which is why the fit measures 브레이크 itself.
                    //
                    // Raised from 1.33f to 1.60f on request, and the label
                    // lifted a tenth of the block to keep the two lines apart
                    // as the value grew into the gap.
                    //
                    // This is past the clearance the old value was chosen to
-                   // respect: the columns are 128 px apart with 116 px discs,
-                   // so a centred value has 70 px before it reaches the TR
-                   // disc's edge, and 브레이크 -- the widest state, and the only
-                   // one that gets near it -- now reaches roughly 6 px over
-                   // that edge. It overlaps the neighbouring disc's fill, not
-                   // its text, and only in that one state. Widen SGAP_X or
-                   // shorten the state word if that reads badly on the road.
+                   // respect: the widest state, 브레이크 -- the only one that
+                   // gets near it -- reaches a few px over the neighbouring TR
+                   // disc's edge. It overlaps that disc's fill, not its text,
+                   // and only in that one state. The move to SD 140 does not
+                   // change that: the value and the column pitch grew by the
+                   // same fifth. Widen SGAP_X or shorten the state word if it
+                   // reads badly on the road.
                    "페달 상태", pedal_status_str, pedalStatusColor, "브레이크",
                    1.60f, 0.10f);
     }
