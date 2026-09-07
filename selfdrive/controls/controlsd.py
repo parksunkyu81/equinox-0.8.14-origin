@@ -62,13 +62,6 @@ from selfdrive.controls.lib.comma_pedal_profile import (
   CommaPedalProfileController, comma_pedal_profile_rise_scale,
   normalize_comma_pedal_profile,
 )
-from selfdrive.controls.lib.pedal_force_recovery import (
-  PEDAL_FORCE_RECOVERY_PEDAL_FLOOR, RECOVERY_MODE_HARD_ZERO,
-  RECOVERY_MODE_LEAD_COAST_ASSIST, RECOVERY_MODE_LEAD_LOSS_CRUISE,
-  RECOVERY_MODE_MOVING_GAP_CATCHUP, RECOVERY_MODE_NONE, LeadCoastAssist,
-  LeadLossCruiseAssist, MovingGapCatchupAssist, PedalForceRecovery,
-  recovery_speed_demand,
-)
 from selfdrive.process_diagnostics import (append_controls_mismatch_diagnostic,
                                           append_process_diagnostic,
                                           append_turn_commit_diagnostic)
@@ -277,10 +270,6 @@ class Controls:
         self.events = Events()
 
         self.LoC = LongControl(self.CP)
-        self.pedal_force_recovery = PedalForceRecovery(DT_CTRL)
-        self.lead_coast_assist = LeadCoastAssist(DT_CTRL)
-        self.lead_loss_cruise_assist = LeadLossCruiseAssist(DT_CTRL)
-        self.moving_gap_catchup_assist = MovingGapCatchupAssist(DT_CTRL)
         self.VM = VehicleModel(self.CP)
 
         if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
@@ -667,10 +656,6 @@ class Controls:
         self._model_curve_control_enabled = False
         self.curve_pedal_coordinator.reset()
         self.predictive_coasting.reset()
-        self.pedal_force_recovery.reset()
-        self.lead_coast_assist.reset()
-        self.lead_loss_cruise_assist.reset()
-        self.moving_gap_catchup_assist.reset()
         self.predictive_coast_pedal_scale = 1.0
         self.speed_limit_coast_active = False
         self.speed_limit_coast_target_ms = 0.0
@@ -687,78 +672,6 @@ class Controls:
         if radar.leadOne.status:
             return radar.leadOne
         return None
-
-    def pedal_force_recovery_eligible(self, CS, long_plan, t_since_plan):
-        """True only when a zero accel request contradicts a fresh speed demand.
-
-        This gate intentionally permits both cruise and lead plan sources: the
-        planner's present and future speed trajectories must independently ask
-        for acceleration. Driver input and every explicit safety/curve state
-        cancel the recovery immediately in PedalForceRecovery.update().
-        """
-        speeds = long_plan.speeds
-        full_plan = len(speeds) == CONTROL_N
-        speed_error = float(self.LoC.v_pid - CS.vEgo)
-        future_speed_error = float(speeds[-1] - CS.vEgo) if full_plan else 0.0
-        driver_aware = float(self.sm['driverMonitoringState'].awarenessStatus) >= 0.0
-        plan_valid = bool(self.sm.valid['longitudinalPlan'])
-        can_valid = bool(getattr(CS, 'canValid', True))
-        speed_limit_decel = speed_limit_decel_requested(
-          bool(getattr(self, 'speed_limit_coast_active', False)),
-          float(getattr(self, 'speed_limit_coast_target_ms', 0.0)),
-          CS.vEgo)
-
-        return bool(
-          self.CP.enableGasInterceptor and self.active and self.state == State.enabled and
-          CS.adaptiveCruise and
-          self.LoC.long_control_state == car.CarControl.Actuators.LongControlState.pid and
-          not CS.brakePressed and not CS.gasPressed and not CS.standstill and
-          CS.vEgo > V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS and
-          driver_aware and not self.is_curv_driving and
-          not bool(getattr(getattr(self, 'curve_pedal_coordinator', None),
-                           'engaged', False)) and
-          not speed_limit_decel and
-          not long_plan.fcw and
-          can_valid and plan_valid and 0.0 <= t_since_plan <= 0.25 and full_plan and
-          recovery_speed_demand(speed_error, future_speed_error))
-
-    def lead_coast_assist_base_safe(self, CS, long_plan, t_since_plan, radar_valid):
-        """Common safety gate for low-demand lead-follow pedal assistance."""
-        speed_limit_decel = speed_limit_decel_requested(
-          self.speed_limit_coast_active, self.speed_limit_coast_target_ms,
-          CS.vEgo)
-        return bool(
-          self.CP.enableGasInterceptor and self.active and self.state == State.enabled and
-          CS.adaptiveCruise and
-          self.LoC.long_control_state == car.CarControl.Actuators.LongControlState.pid and
-          not CS.brakePressed and not CS.gasPressed and not CS.standstill and
-          CS.vEgo > V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS and
-          float(self.sm['driverMonitoringState'].awarenessStatus) >= 0.0 and
-          not self.is_curv_driving and not self.curve_pedal_coordinator.engaged and
-          not speed_limit_decel and not long_plan.fcw and
-          not self.stop_accel_boost_active and bool(getattr(CS, 'canValid', True)) and
-          radar_valid and self.sm.valid['longitudinalPlan'] and
-          0.0 <= t_since_plan <= 0.25 and len(long_plan.speeds) == CONTROL_N and
-          str(long_plan.longitudinalPlanSource) == 'lead0')
-
-    def lead_loss_cruise_assist_base_safe(self, CS, long_plan, t_since_plan,
-                                          radar_valid):
-        """Safety gate for a confirmed lead0 -> cruise transition ramp."""
-        speed_limit_decel = speed_limit_decel_requested(
-          self.speed_limit_coast_active, self.speed_limit_coast_target_ms,
-          CS.vEgo)
-        return bool(
-          self.CP.enableGasInterceptor and self.active and self.state == State.enabled and
-          CS.adaptiveCruise and
-          self.LoC.long_control_state == car.CarControl.Actuators.LongControlState.pid and
-          not CS.brakePressed and not CS.gasPressed and not CS.standstill and
-          CS.vEgo > V_CRUISE_ENABLE_MIN * CV.KPH_TO_MS and
-          float(self.sm['driverMonitoringState'].awarenessStatus) >= 0.0 and
-          not self.is_curv_driving and not self.curve_pedal_coordinator.engaged and
-          not speed_limit_decel and not long_plan.fcw and
-          bool(getattr(CS, 'canValid', True)) and radar_valid and
-          self.sm.valid['longitudinalPlan'] and 0.0 <= t_since_plan <= 0.25 and
-          len(long_plan.speeds) == CONTROL_N)
 
     def get_long_lead_safe_speed(self, sm, CS, vEgo):
         if CS.adaptiveCruise:
@@ -1716,64 +1629,9 @@ class Controls:
             radar_valid = bool(self.sm.valid['radarState'] and
                                len(self.sm['radarState'].radarErrors) == 0)
             effective_tr = (dynamic_follow.mpcTR if dynamic_follow_valid else 1.3)
-            speeds = long_plan.speeds
-            speed_error = float(self.LoC.v_pid - CS.vEgo)
-            future_speed_error = float(speeds[-1] - CS.vEgo) if len(speeds) == CONTROL_N else 0.0
-            cruise_speed_error = float(
-              min(self.v_cruise_kph, V_CRUISE_MAX) * CV.KPH_TO_MS - CS.vEgo)
-            lead_loss_base_safe = self.lead_loss_cruise_assist_base_safe(
-              CS, long_plan, t_since_plan, radar_valid)
-            lead_loss_accel = self.lead_loss_cruise_assist.update(
-              base_safe=lead_loss_base_safe,
-              lead_valid=bool(lead_one.status),
-              cruise_speed_error=cruise_speed_error,
-              requested_accel=raw_long_accel)
-            recovery_eligible = (
-              self.pedal_force_recovery_eligible(CS, long_plan, t_since_plan) and
-              not self.lead_loss_cruise_assist.active and
-              not self.lead_loss_cruise_assist.armed and
-              not self.lead_coast_assist.active and
-              not self.moving_gap_catchup_assist.active)
-            hard_recovery_accel = self.pedal_force_recovery.update(
-              recovery_eligible, raw_long_accel)
-            lead_assist_base_safe = self.lead_coast_assist_base_safe(
-              CS, long_plan, t_since_plan, radar_valid) and \
-              not self.pedal_force_recovery.active and \
-              not self.lead_loss_cruise_assist.active and \
-              not self.moving_gap_catchup_assist.active
-            lead_assist_accel = self.lead_coast_assist.update(
-              base_safe=lead_assist_base_safe,
-              lead_valid=bool(lead_one.status),
-              lead_v_rel=lead_one.vRel if lead_one.status else 0.0,
-              lead_distance=lead_one.dRel if lead_one.status else 0.0,
-              v_ego=CS.vEgo,
-              desired_tr=effective_tr,
-              speed_error=speed_error,
-              future_speed_error=future_speed_error,
-              a_ego=CS.aEgo,
-              requested_accel=raw_long_accel,
-              lead_measurement_updated=bool(self.sm.updated['radarState']))
-            moving_gap_base_safe = self.lead_coast_assist_base_safe(
-              CS, long_plan, t_since_plan, radar_valid) and \
-              not self.pedal_force_recovery.active and \
-              not self.lead_loss_cruise_assist.active and \
-              not self.lead_coast_assist.active and \
-              not self.stop_accel_boost_active
-            moving_gap_accel = self.moving_gap_catchup_assist.update(
-              base_safe=moving_gap_base_safe,
-              lead_valid=bool(lead_one.status),
-              lead_v_rel=lead_one.vRel if lead_one.status else 0.0,
-              lead_distance=lead_one.dRel if lead_one.status else 0.0,
-              lead_model_prob=lead_one.modelProb if lead_one.status else 0.0,
-              v_ego=CS.vEgo,
-              desired_tr=effective_tr,
-              cruise_speed_error=cruise_speed_error,
-              requested_accel=raw_long_accel,
-              lead_measurement_updated=bool(self.sm.updated['radarState']))
-            actuators.accel = (hard_recovery_accel if self.pedal_force_recovery.active
-                               else lead_loss_accel if self.lead_loss_cruise_assist.active
-                               else lead_assist_accel if self.lead_coast_assist.active
-                               else moving_gap_accel)
+            # The longitudinal controller's own output is the accel. Four pedal
+            # recovery assists used to be able to replace it here; they are gone.
+            actuators.accel = raw_long_accel
 
             # Lead picture for the interceptor's rise-rate limit. Published here
             # rather than read again in the CarController so both see the same
@@ -1834,14 +1692,8 @@ class Controls:
               natural_decel_ms2=self.natural_decel_status.decel_ms2,
               natural_decel_confidence=self.natural_decel_status.confidence,
               brake_alert_enabled=self.predictive_brake_alert_enabled,
-              lead_loss_recovery_active=self.lead_loss_cruise_assist.active,
               launch_boost_floor_active=bool(
                 boost_floor_context_safe and boost_floor_accel > 0.0),
-              positive_recovery_active=bool(
-                self.pedal_force_recovery.active or
-                self.lead_coast_assist.active or
-                self.lead_loss_cruise_assist.active or
-                self.moving_gap_catchup_assist.active),
               # Was a learned offset; the learner is gone, so predictive
               # coasting uses its own unshifted low-speed behaviour.
               learned_low_speed_coast_offset_s=0.0)
@@ -1908,16 +1760,6 @@ class Controls:
             # No longitudinal decision was made this frame, so nothing here has
             # established that easing off is what was meant.
             self.pedal_fall_hard_decel = True
-            self.pedal_force_recovery.update(False, actuators.accel)
-            self.lead_coast_assist.update(False, False, 0.0, 0.0, CS.vEgo, 1.3,
-                                          0.0, 0.0, CS.aEgo, actuators.accel)
-            self.lead_loss_cruise_assist.update(
-              False, False, 0.0, actuators.accel)
-            self.moving_gap_catchup_assist.update(
-              base_safe=False, lead_valid=False, lead_v_rel=0.0,
-              lead_distance=0.0, lead_model_prob=0.0, v_ego=CS.vEgo,
-              desired_tr=1.3, cruise_speed_error=0.0,
-              requested_accel=actuators.accel)
             self.predictive_coast_pedal_scale = 1.0
             lac_log = log.ControlsState.LateralDebugState.new_message()
             if self.sm.rcv_frame['testJoystick'] > 0 and self.active:
@@ -2251,64 +2093,6 @@ class Controls:
           self.stop_accel_boost_latch.floor_accel)
         controlsState.stopAccelBoostHillExtraAccel = float(
           self.stop_accel_boost_latch.hill_extra_accel)
-        recovery_mode = (RECOVERY_MODE_HARD_ZERO if self.pedal_force_recovery.active else
-                         RECOVERY_MODE_LEAD_LOSS_CRUISE if self.lead_loss_cruise_assist.active else
-                         RECOVERY_MODE_LEAD_COAST_ASSIST if self.lead_coast_assist.active else
-                         RECOVERY_MODE_MOVING_GAP_CATCHUP if self.moving_gap_catchup_assist.active else
-                         RECOVERY_MODE_NONE)
-        recovery = (self.pedal_force_recovery if self.pedal_force_recovery.active else
-                    self.lead_loss_cruise_assist if self.lead_loss_cruise_assist.active else
-                    self.lead_coast_assist if self.lead_coast_assist.active else
-                    self.moving_gap_catchup_assist)
-        controlsState.pedalForceRecoveryActive = recovery_mode != RECOVERY_MODE_NONE
-        controlsState.pedalForceRecoveryDuration = float(recovery.duration)
-        controlsState.pedalForceRecoveryCount = int(
-          self.pedal_force_recovery.activation_count +
-          self.lead_loss_cruise_assist.activation_count +
-          self.lead_coast_assist.activation_count +
-          self.moving_gap_catchup_assist.activation_count)
-        controlsState.pedalForceRecoveryRawAccel = float(recovery.raw_accel)
-        controlsState.pedalForceRecoveryAccel = float(recovery.forced_accel)
-        controlsState.pedalForceRecoveryPedalFloor = float(
-          PEDAL_FORCE_RECOVERY_PEDAL_FLOOR if self.pedal_force_recovery.active
-          else recovery.pedal_target)
-        controlsState.pedalForceRecoveryMode = int(recovery_mode)
-        controlsState.pedalLeadAssistActive = bool(self.lead_coast_assist.active)
-        controlsState.pedalLeadAssistCandidateDuration = float(self.lead_coast_assist.candidate_duration)
-        controlsState.pedalLeadAssistFilteredVRel = float(self.lead_coast_assist.filtered_v_rel)
-        controlsState.pedalLeadAssistActualTR = float(self.lead_coast_assist.actual_tr)
-        controlsState.pedalLeadAssistDesiredTR = float(self.lead_coast_assist.desired_tr)
-        controlsState.pedalLeadAssistTrMargin = float(self.lead_coast_assist.tr_margin)
-        controlsState.pedalLeadAssistCancelReason = int(self.lead_coast_assist.cancel_reason)
-        controlsState.pedalLeadAssistCount = int(self.lead_coast_assist.activation_count)
-        controlsState.pedalLeadAssistPedalTarget = float(self.lead_coast_assist.pedal_target)
-        controlsState.movingGapCatchupActive = bool(self.moving_gap_catchup_assist.active)
-        controlsState.movingGapCatchupCandidateDuration = float(
-          self.moving_gap_catchup_assist.candidate_duration)
-        controlsState.movingGapCatchupLeadStableDuration = float(
-          self.moving_gap_catchup_assist.lead_stable_duration)
-        controlsState.movingGapCatchupFilteredVRel = float(
-          self.moving_gap_catchup_assist.filtered_v_rel)
-        controlsState.movingGapCatchupDesiredGap = float(
-          self.moving_gap_catchup_assist.desired_gap_m)
-        controlsState.movingGapCatchupDistanceMargin = float(
-          self.moving_gap_catchup_assist.distance_margin_m)
-        controlsState.movingGapCatchupEnterMargin = float(
-          self.moving_gap_catchup_assist.enter_margin_m)
-        controlsState.movingGapCatchupExitMargin = float(
-          self.moving_gap_catchup_assist.exit_margin_m)
-        controlsState.movingGapCatchupTargetAccel = float(
-          self.moving_gap_catchup_assist.target_accel)
-        controlsState.movingGapCatchupFinalAccel = float(
-          self.moving_gap_catchup_assist.forced_accel)
-        controlsState.movingGapCatchupPedalTarget = float(
-          self.moving_gap_catchup_assist.pedal_target)
-        controlsState.movingGapCatchupCancelReason = int(
-          self.moving_gap_catchup_assist.cancel_reason)
-        controlsState.movingGapCatchupCount = int(
-          self.moving_gap_catchup_assist.activation_count)
-        controlsState.movingGapCatchupLeadJump = bool(
-          self.moving_gap_catchup_assist.lead_jump_detected)
         # drivingStyleAI* fields are left in the schema (removing capnp fields
         # would break replay of every log recorded before this) but nothing
         # writes them any more, so they read as their defaults.

@@ -11,7 +11,6 @@ from selfdrive.car.gm.values import DBC, NO_ASCM, CanBus, CarControllerParams
 from opendbc.can.packer import CANPacker
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_ENABLE_MIN
 from selfdrive.controls.lib.stop_accel_boost import pedal_command_allowed
-from selfdrive.controls.lib.pedal_force_recovery import PEDAL_FORCE_RECOVERY_PEDAL_FLOOR
 from selfdrive.controls.lib.comma_pedal_rise_limiter import (
   CommaPedalRiseLimiter, PEDAL_RISE_DEFAULT_TR_S)
 
@@ -137,30 +136,14 @@ class CarController():
         # only remove pedal; it can never create acceleration or override
         # brake/FCW/longitudinal zero requests.
         styled_pedal = raw_pedal
-        hard_recovery = getattr(controls, 'pedal_force_recovery', None)
-        lead_assist = getattr(controls, 'lead_coast_assist', None)
-        lead_loss_assist = getattr(controls, 'lead_loss_cruise_assist', None)
-        moving_gap_assist = getattr(controls, 'moving_gap_catchup_assist', None)
-        recovery = (hard_recovery if hard_recovery is not None and hard_recovery.active else
-                    lead_loss_assist if lead_loss_assist is not None and lead_loss_assist.active else
-                    lead_assist if lead_assist is not None and lead_assist.active else
-                    moving_gap_assist if moving_gap_assist is not None and moving_gap_assist.active else None)
-        if recovery is not None:
-          # The calibrated recovery floor is never scaled. Predictive coasting
-          # below remains the final authority.
-          raw_recovery_pedal = clip(acc_mult * recovery.raw_accel, 0.0, 0.85)
-          recovery_floor = (PEDAL_FORCE_RECOVERY_PEDAL_FLOOR if recovery is hard_recovery
-                            else recovery.pedal_target)
-          styled_pedal = clip(max(raw_recovery_pedal, recovery_floor), 0.0, 0.85)
         coast_scale = clip(float(getattr(controls, 'predictive_coast_pedal_scale', 1.0)), 0.0, 1.0)
         self.predictive_coast_styled_pedal = float(styled_pedal)
         self.predictive_coast_pedal_scale = float(coast_scale)
         pedal_target = float(styled_pedal * coast_scale)  # Actual comma-pedal command range: 0.00..0.85
-        # The launch boost and the recovery floors are separately gated, carry
-        # their own confirmation logic, and measured 0-3% of this driver's brake
-        # presses, so they keep owning the pedal outright.
-        pedal_bypass = bool(recovery is not None or
-                            getattr(controls, 'stop_accel_boost_active', False))
+        # The launch boost is separately gated, carries its own confirmation
+        # logic, and measured 0-3% of this driver's brake presses, so it keeps
+        # owning the pedal outright.
+        pedal_bypass = bool(getattr(controls, 'stop_accel_boost_active', False))
         controls.comma_pedal_raw_command = float(raw_pedal)
         controls.comma_pedal_styled_command = float(styled_pedal)
         # Automatic pedal output is allowed this frame, so easing off may be
@@ -178,7 +161,7 @@ class CarController():
         controls.comma_pedal_raw_command = 0.0
         controls.comma_pedal_styled_command = 0.0
 
-      # Applied last, after coasting and the recovery floors, so it is the final
+      # Applied last, after coasting, so it is the final
       # authority on how fast the command may grow. Runs on every frame -- brake
       # and gas frames included -- because the post-brake window is timed from
       # the driver's release.
