@@ -125,6 +125,13 @@ STEER_SAT_DEVIATION_M = 0.20
 # whole episode is written as one line when the corner ends -- never per frame,
 # which would put a file write in the 100 Hz loop.
 TURN_COMMIT_SAMPLE_FRAMES = max(1, int(0.05 / DT_CTRL))  # 20 Hz
+# Touch this file and restart to profile the control loop; remove it to stop.
+# A file rather than a Param because Params keys are registered in C++ and this
+# is a diagnostic that should cost nothing to carry.
+PROFILE_FLAG_PATH = "/data/controlsd_profile"
+# One diagnostic line per window. Ten seconds is long enough to average out a
+# single slow frame and rare enough that the write cannot matter.
+PROFILE_WINDOW_FRAMES = max(1, int(10.0 / DT_CTRL))
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
@@ -473,7 +480,12 @@ class Controls:
 
         # controlsd is driven by can recv, expected at 100Hz
         self.rk = Ratekeeper(100, print_delay_threshold=None)
-        self.prof = Profiler(True)  # off by default
+        # Opt-in, by touching the file below and restarting. Left on, the
+        # profiler sorts its checkpoints and prints six lines every iteration --
+        # 600 lines a second, into a stdout nothing reads. Checked once here so
+        # the loop never touches the filesystem to find out.
+        self.prof = Profiler(os.path.exists(PROFILE_FLAG_PATH))
+        self.prof_frames = 0
 
     @staticmethod
     def _diagnostic_enum_value(value):
@@ -2380,7 +2392,35 @@ class Controls:
         while True:
             self.step()
             self.rk.monitor_time()
-            self.prof.display()
+            self.record_profile()
+
+    def record_profile(self):
+        """Write one profile line per window, instead of printing every frame.
+
+        The checkpoints are cumulative, so the window is reset after each dump
+        and every figure is milliseconds per iteration inside that window --
+        which is what tells you where a 100 Hz loop's 10 ms went. One file write
+        every PROFILE_WINDOW_FRAMES keeps it out of the per-frame path.
+        """
+        if not self.prof.enabled:
+            return
+        self.prof_frames += 1
+        if self.prof_frames < PROFILE_WINDOW_FRAMES:
+            return
+
+        # The frame count is kept here rather than read off the profiler: its
+        # own iter counter is only advanced by display(), which is exactly the
+        # call this replaces.
+        iters = float(self.prof_frames)
+        append_process_diagnostic(
+            "controlsd_profile",
+            frames=self.prof_frames,
+            iter_ms=round(1000.0 * self.prof.tot / iters, 3),
+            steps_ms={name: round(1000.0 * secs / iters, 3)
+                      for name, secs in self.prof.cp.items()},
+        )
+        self.prof_frames = 0
+        self.prof.reset(True)
 
 
 def main(sm=None, pm=None, logcan=None):
