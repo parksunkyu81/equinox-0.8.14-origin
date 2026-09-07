@@ -46,6 +46,7 @@ from selfdrive.controls.lib.stop_accel_boost import (
 )
 from selfdrive.controls.lib.curve_speed_limiter import (
   CurveSpeedLimiter, CURVE_SPEED_DISABLED, build_v0813_model_curve_profile, calculate_curve_speed,
+  CornerAlert,
 )
 from selfdrive.controls.lib.curve_pedal_coordinator import CurvePedalCoordinator
 from selfdrive.controls.lib.predictive_coasting import PredictiveCoastingCoordinator
@@ -316,6 +317,9 @@ class Controls:
         self.curve_pedal_raw_accel = 0.0
         self.curve_pedal_final_accel = 0.0
         self.is_curv_driving = False
+        # Corner-entry prompt, driven from the model curve profile in
+        # cal_curve_speed and raised as an event in state_control.
+        self.corner_alert = CornerAlert()
         self.curv_speed = 0.0
         self.v_cruise_kph_limit = 0
         self.applyMaxSpeed = 0
@@ -785,6 +789,9 @@ class Controls:
     def cal_curve_speed(self, sm, v_ego, frame, measured_curvature):
         lateralPlan = sm['lateralPlan']
         if not self.slow_on_curves:
+            # No curve profile is built below, so the prompt has nothing to
+            # stand on and must not hold its last answer.
+            self.corner_alert.reset()
             self.curve_speed_limiter.reset()
             self._model_curve_control_enabled = False
             self.curve_pedal_coordinator.reset()
@@ -814,6 +821,18 @@ class Controls:
           model.position.x, model.position.y, model.position.z,
           measured_curvature, v_ego=v_ego,
           control_min_speed_kph=model_curve_control_min_kph)
+
+        # Corner-entry prompt, decided here on the model profile rather than on
+        # whether the curve slowdown engaged. The two are different questions:
+        # the slowdown engages on any bend it can shave speed for, while the
+        # prompt is for a corner the driver has to brake into themselves. Held
+        # on self because state_control raises the event, one loop below.
+        if model_profile_valid:
+            self.corner_alert.update(model_curvatures, v_ego,
+                                     distances=model_distances,
+                                     time_idxs=model_times)
+        else:
+            self.corner_alert.reset()
 
         # The Equinox torque/LKAS path starts at 10 km/h. Below that speed the
         # v0.8.13 adapter still runs for diagnostics, but it cannot acquire CURV
@@ -1843,7 +1862,7 @@ class Controls:
               pitch_fallback=self.natural_decel_pitch_fallback,
               dt=DT_CTRL)
 
-            if self.is_curv_driving:
+            if self.corner_alert.active:
                 self.events.add(EventName.curveEntry)
             elif self.predictive_coasting.brake_advisory:
                 self.events.add(EventName.predictiveBrakeNeeded)

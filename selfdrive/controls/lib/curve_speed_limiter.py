@@ -32,6 +32,47 @@ CURVE_RELEASE_RC = 1.50
 CURVATURE_FLOOR = 1e-4
 CURVE_PLAN_DT = 0.05
 
+# --- corner-entry prompt -----------------------------------------------------
+# The prompt used to ride on curvDriving, which says the curve slowdown engaged
+# and nothing about how hard the corner is. A drive-log audit of one 5-minute
+# route found it firing six times at 0.23 to 0.85 m/s^2 of lateral demand --
+# half of those with a blinker on, one of them at 0.0023 1/m, a 435 m radius --
+# so it was reporting lane changes and gentle bends as corners.
+#
+# Two gates, because either alone gets it wrong.
+#
+# Lateral acceleration says the corner is deep. Above 30 kph the plan's demand
+# sat at 0.22 m/s^2 median and 2.09 at the 99th percentile across 36 segments,
+# so 2.0 is the top one percent of corners -- an ordinary bend never reaches it
+# and every false trigger in the audit topped out at 0.85. Gating on this alone
+# still fired 48 times in 22 minutes, worse than what it replaced, because a
+# deep corner entered at a speed that already suits it demands nothing.
+CORNER_ALERT_LAT_ACCEL = 2.0
+# Required deceleration says the driver has to do something about it:
+#
+#     a_req = (v_ego^2 - v_curve^2) / (2 * distance)
+#
+# which is the braking needed to arrive at the corner's own speed. Over the
+# same two drives this reached 0.79 m/s^2 at most and 0.43 at the median of the
+# moments it was positive at all -- the driver was usually already slow enough
+# -- so 0.5 selects the approaches that genuinely needed the brake. Together
+# the two gates fire 8 times in 22 minutes against the old prompt's 31.
+CORNER_ALERT_REQ_DECEL = 0.5
+# Under this the car is not cornering fast enough for the prompt to be useful.
+CORNER_ALERT_MIN_SPEED_KPH = 30.0
+# How far ahead the corner may be and still be worth prompting about. The model
+# resolves a corner about 20-45 m out, which is 2-3 s at these speeds, so this
+# window fires as early as the horizon allows. It exists as a bound rather than
+# a target: without it the test latches on a corner a minute away and the
+# prompt sits on screen for the whole approach, which was measured at a 27 s
+# median hold when the window was removed.
+CORNER_ALERT_MAX_LEAD_S = 4.0
+# The raw test chatters -- replayed episodes were 0.1 s long -- because the
+# model profile moves under it frame to frame. Two model frames to raise it,
+# then hold it up long enough to read and to brake against.
+CORNER_ALERT_CONFIRM_FRAMES = 2
+CORNER_ALERT_HOLD_S = 2.5
+
 MODEL_TRAJECTORY_SIZE = 33
 MODEL_CURVE_MIN_TIME_S = 0.50
 MODEL_CURVE_MAX_TIME_S = 5.00
@@ -423,6 +464,119 @@ def calculate_curve_speed(curvatures, v_ego, cruise_speed, min_curve_speed,
   speed, valid, _ = calculate_curve_speed_details(
     curvatures, v_ego, cruise_speed, min_curve_speed, curvature_factor, time_idxs=time_idxs)
   return speed, valid
+
+
+def corner_alert_lookahead(curvatures, v_ego, distances=None, time_idxs=T_IDXS,
+                           min_lat_accel=CORNER_ALERT_LAT_ACCEL,
+                           min_req_decel=CORNER_ALERT_REQ_DECEL,
+                           min_speed_kph=CORNER_ALERT_MIN_SPEED_KPH,
+                           max_lead_s=CORNER_ALERT_MAX_LEAD_S):
+  """Is there a corner ahead the driver has to brake into?
+
+  Returns (fire, lat_accel, req_decel, lead_s) for the most demanding corner
+  inside the lead window: whether to prompt, how deep that corner is, the
+  braking it asks for, and how far ahead it is in seconds.
+
+  Curvatures are smoothed the same way the speed limiter smooths them, which is
+  what keeps a lane change out: the swerve into the next lane is a spatial spike
+  in the predicted path, and the despiking step above removes it before any of
+  this reads a corner into it.
+  """
+  none = (False, 0.0, 0.0, None)
+  try:
+    v_ego = float(v_ego)
+  except (TypeError, ValueError):
+    return none
+  if not math.isfinite(v_ego) or v_ego * 3.6 < float(min_speed_kph):
+    return none
+
+  values = _finite_sequence(curvatures)
+  times = _finite_sequence(time_idxs)
+  dists = None if distances is None else _finite_sequence(distances)
+  if not values or not times or len(times) < len(values):
+    return none
+  times = times[:len(values)]
+  if dists is not None and len(dists) < len(values):
+    dists = None
+
+  # Same cornering limit the speed target is built from, so the prompt and the
+  # slowdown agree about what a corner can be taken at.
+  a_y_max = clip(2.975 - v_ego * 0.0375, 1.85, 2.975)
+  smoothed = _smoothed_abs_curvatures(values)
+  best = none
+  for i, curvature in enumerate(smoothed):
+    curvature = max(float(curvature), 0.0)
+    if curvature < CURVATURE_FLOOR:
+      continue
+    # Distance is what the window is really about; time is only how it reads to
+    # a driver, so derive it from the distance the model gives where it can.
+    distance = (max(v_ego, 1.0) * max(float(times[i]), 0.0)
+                if dists is None else max(float(dists[i]), 0.0))
+    lead_s = distance / max(v_ego, 1.0)
+    if lead_s > float(max_lead_s) or distance <= 1.0:
+      continue
+
+    v_curve = math.sqrt(a_y_max / curvature)
+    if v_curve >= v_ego:
+      # Already slow enough for it; there is nothing to tell the driver.
+      continue
+    req_decel = (v_ego * v_ego - v_curve * v_curve) / (2.0 * distance)
+    if req_decel <= best[2]:
+      continue
+    lat_accel = v_ego * v_ego * curvature
+    best = (lat_accel >= float(min_lat_accel) and req_decel >= float(min_req_decel),
+            lat_accel, req_decel, lead_s)
+
+  return best
+
+
+class CornerAlert:
+  """Confirmation and hold around corner_alert_lookahead.
+
+  The raw test moves with the model profile and on its own produces episodes a
+  tenth of a second long. This makes it something a driver can act on: it has
+  to be true twice running to come up, and once up it stays for long enough to
+  read and brake against.
+  """
+
+  def __init__(self, dt=CURVE_PLAN_DT, confirm_frames=CORNER_ALERT_CONFIRM_FRAMES,
+               hold_s=CORNER_ALERT_HOLD_S):
+    self.dt = float(dt)
+    self.confirm_frames = max(1, int(confirm_frames))
+    self.hold_s = float(hold_s)
+    self.reset()
+
+  def reset(self):
+    self.active = False
+    self.lat_accel = 0.0
+    self.req_decel = 0.0
+    self.lead_s = None
+    self._frames = 0
+    self._held = 0.0
+
+  def update(self, curvatures, v_ego, distances=None, time_idxs=T_IDXS, dt=None):
+    dt = self.dt if dt is None else float(dt)
+    fire, lat, req, lead = corner_alert_lookahead(
+      curvatures, v_ego, distances=distances, time_idxs=time_idxs)
+
+    self._frames = self._frames + 1 if fire else 0
+    if fire:
+      self.lat_accel = lat
+      self.req_decel = req
+      self.lead_s = lead
+
+    if self._frames >= self.confirm_frames:
+      self.active = True
+      self._held = self.hold_s
+    elif self.active:
+      self._held -= dt
+      if self._held <= 0.0:
+        self.active = False
+        self.lat_accel = 0.0
+        self.req_decel = 0.0
+        self.lead_s = None
+
+    return self.active
 
 
 class CurveSpeedLimiter:
