@@ -6,7 +6,7 @@ from collections import deque
 from numbers import Number
 
 from cereal import car, log
-from common.numpy_fast import clip, interp, mean
+from common.numpy_fast import clip
 from common.realtime import sec_since_boot, config_realtime_process, Priority, Ratekeeper, DT_CTRL
 from common.profiler import Profiler
 from common.params import Params, put_nonblocking
@@ -36,13 +36,13 @@ from selfdrive.manager.process_config import managed_processes
 from selfdrive.ntune import ntune_common_get, ntune_common_enabled, ntune_scc_get, ntune_torque_get
 from selfdrive.road_speed_limiter import road_speed_limiter_get_max_speed, road_speed_limiter_get_active, \
   get_road_speed_limiter
-from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, V_CRUISE_ENABLE_MIN, CONTROL_N
+from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, CONTROL_N
 from selfdrive.car.gm.values import MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.stop_accel_boost import (
   StopAccelBoostLatch,
-  boost_floor_context_allowed, speed_limit_decel_requested,
+  boost_floor_context_allowed,
 )
 from selfdrive.controls.lib.curve_speed_limiter import (
   CurveSpeedLimiter, CURVE_SPEED_DISABLED, build_v0813_model_curve_profile, calculate_curve_speed,
@@ -69,7 +69,6 @@ from selfdrive.process_diagnostics import (append_controls_mismatch_diagnostic,
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
 
-SOFT_DISABLE_TIME = 3  # seconds
 # Gate engagement until the final Panda safety configuration is stable. After engagement,
 # debounce only the short controlsAllowed message skew; safety configuration changes stay immediate.
 PANDA_SAFETY_MATCH_FRAMES = 10  # 100 ms at 100 Hz
@@ -667,50 +666,6 @@ class Controls:
         self.slowing_down_alert = False
         self.slowing_down_sound_alert = False
 
-    def get_lead(self, sm):
-        radar = sm['radarState']
-        if radar.leadOne.status:
-            return radar.leadOne
-        return None
-
-    def get_long_lead_safe_speed(self, sm, CS, vEgo):
-        if CS.adaptiveCruise:
-            lead = self.get_lead(sm)
-            if lead is not None:
-                # d : 비전 거리
-                d = lead.dRel
-                if 0. < d < -lead.vRel * 20. and lead.vRel < -1.:
-                    t = d / lead.vRel
-                    accel = -(lead.vRel / t) * self.speed_conv_to_clu
-                    accel *= 1.2
-
-                    if accel < 0.:
-                        target_speed = vEgo + accel
-                        target_speed = max(target_speed, self.kph_to_clu(10))
-                        return target_speed
-
-                elif 0. < d < -lead.vRel * 25. and lead.vRel < -1.:
-                    t = d / lead.vRel
-                    accel = -(lead.vRel / t) * self.speed_conv_to_clu
-                    accel *= 1.2
-
-                    if accel < 0.:
-                        target_speed = vEgo + accel
-                        target_speed = max(target_speed, self.kph_to_clu(20))
-                        return target_speed
-
-                elif 0. < d < -lead.vRel * 30. and lead.vRel < -1.:
-                    t = d / lead.vRel
-                    accel = -(lead.vRel / t) * self.speed_conv_to_clu
-                    accel *= 1.2
-
-                    if accel < 0.:
-                        target_speed = vEgo + accel
-                        target_speed = max(target_speed, self.kph_to_clu(30))
-                        return target_speed
-
-        return 0
-
     def cal_curve_speed(self, sm, v_ego, frame, measured_curvature):
         lateralPlan = sm['lateralPlan']
         if not self.slow_on_curves:
@@ -958,16 +913,6 @@ class Controls:
             self.speed_limit_coast_active = False
             self.speed_limit_coast_target_ms = 0.0
             self.speed_limit_coast_distance_m = math.inf
-
-        '''lead_speed = self.get_long_lead_safe_speed(sm, CS, vEgo)
-        if self.safe_distance_speed and lead_speed >= self.min_set_speed_clu:
-            if lead_speed < max_speed_clu:
-                max_speed_clu = min(max_speed_clu, lead_speed)
-                if not self.limited_lead:
-                    self.max_speed_clu = vEgo + 3.
-                    self.limited_lead = True
-        else:
-          self.limited_lead = False'''
 
 
         self.update_max_speed(int(max_speed_clu + 0.5), CS,
