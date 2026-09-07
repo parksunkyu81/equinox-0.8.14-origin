@@ -25,6 +25,8 @@ class Priority:
   # CORE 2
   # - modeld = 55
   # - camerad = 54
+  # - radard = 51
+  # (EON: plannerd moved off this core to 0/1, see plannerd.py)
   CTRL_LOW = 51 # plannerd & radard
 
   # CORE 3

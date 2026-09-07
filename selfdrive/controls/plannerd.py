@@ -11,7 +11,11 @@ import cereal.messaging as messaging
 
 
 def plannerd_thread(sm=None, pm=None):
-  config_realtime_process(5 if TICI else 2, Priority.CTRL_LOW)
+  # EON: core 2 also carries modeld (prio 55) and camerad (54), and plannerd at
+  # 52% of a core made that the busiest of the four (82% vs 72-75% on 0/1).
+  # plannerd sits below both in priority, so a camerad spike delays the plan.
+  # All four cores run at the same 1.44 GHz here, so 0/1 costs nothing.
+  config_realtime_process(5 if TICI else [0, 1], Priority.CTRL_LOW)
 
   cloudlog.info("plannerd is waiting for CarParams")
   params = Params()
