@@ -24,6 +24,7 @@ from selfdrive.controls.lib.latcontrol_indi import LatControlINDI
 from selfdrive.controls.lib.latcontrol_lqr import LatControlLQR
 from selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from selfdrive.controls.lib.latcontrol_angle import LatControlAngle
+from selfdrive.controls.lib.turn_commit import TurnCommit
 from selfdrive.controls.lib.events import Events, ET
 from selfdrive.controls.lib.alertmanager import AlertManager, set_offroad_alert
 from selfdrive.controls.lib.control_activation import apply_control_activation
@@ -67,7 +68,9 @@ from selfdrive.controls.lib.pedal_force_recovery import (
   LeadLossCruiseAssist, MovingGapCatchupAssist, PedalForceRecovery,
   recovery_speed_demand,
 )
-from selfdrive.process_diagnostics import append_controls_mismatch_diagnostic, append_process_diagnostic
+from selfdrive.process_diagnostics import (append_controls_mismatch_diagnostic,
+                                          append_process_diagnostic,
+                                          append_turn_commit_diagnostic)
 
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
@@ -117,6 +120,10 @@ STEER_SAT_WARN_HOLD_S = 0.3
 STEER_SAT_CLEAR_S = 0.5
 # Path deviation that still warrants an immediate prompt with no extra hold.
 STEER_SAT_DEVIATION_M = 0.20
+# Turn-commit episodes are sampled at 20 Hz, matching the mismatch log, and the
+# whole episode is written as one line when the corner ends -- never per frame,
+# which would put a file write in the 100 Hz loop.
+TURN_COMMIT_SAMPLE_FRAMES = max(1, int(0.05 / DT_CTRL))  # 20 Hz
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
@@ -372,6 +379,13 @@ class Controls:
         self.steer_limited = False
         self.steer_sat_elapsed = 0.0
         self.steer_sat_clear_elapsed = 0.0
+
+        # Two blinker taps commit to one corner; see turn_commit.py. The mode
+        # changes no steering value, so the only state kept here is the episode
+        # sampler that measures what the corner actually did.
+        self.turn_commit = TurnCommit()
+        self.turn_commit_samples = []
+        self.turn_commit_sample_frame = 0
         self.desired_curvature = 0.0
         self.desired_curvature_rate = 0.0
 
@@ -567,6 +581,54 @@ class Controls:
             reasons=list(reasons),
             trigger=snapshot,
             history=list(self.controls_mismatch_history),
+        )
+
+    def _record_turn_commit(self, CS, actuators, lac_log, lat_plan):
+        """Sample a committed corner, and write the whole episode when it ends.
+
+        The 16-22 kph band has no measurements at all -- in 40 segments the
+        driver always took over there -- so what a corner actually does is the
+        one thing this feature has to report. Samples accumulate in memory at
+        20 Hz and the episode is written as a single line on release, which is
+        the same shape as the controls-mismatch log and keeps the file write
+        out of the control loop's per-frame path.
+        """
+        if self.turn_commit.active:
+            if self.sm.frame - self.turn_commit_sample_frame >= TURN_COMMIT_SAMPLE_FRAMES:
+                self.turn_commit_sample_frame = self.sm.frame
+                curvatures = lat_plan.curvatures
+                self.turn_commit_samples.append({
+                    "t": round(self.turn_commit.elapsed, 2),
+                    "kph": round(CS.vEgo * CV.MS_TO_KPH, 1),
+                    "angle_deg": round(CS.steeringAngleDeg, 1),
+                    # What the model asked for, alongside what the wheel did.
+                    # The gap between the two is the whole question.
+                    "desired_curvature": round(float(curvatures[0]), 5) if len(curvatures) else None,
+                    "cmd": round(float(actuators.steer), 3),
+                    "saturated": bool(lac_log.saturated),
+                })
+            return
+
+        if not self.turn_commit.just_released:
+            return
+
+        samples = self.turn_commit_samples
+        self.turn_commit_samples = []
+        if not samples:
+            return
+
+        angles = [abs(s["angle_deg"]) for s in samples]
+        n_sat = sum(1 for s in samples if s["saturated"])
+        append_turn_commit_diagnostic(
+            "turn_commit_episode",
+            direction=self.turn_commit.release_direction,
+            release_reason=self.turn_commit.release_reason,
+            duration_s=round(samples[-1]["t"], 2),
+            peak_angle_deg=round(max(angles), 1),
+            entry_kph=samples[0]["kph"],
+            min_kph=min(s["kph"] for s in samples),
+            saturated_fraction=round(n_sat / float(len(samples)), 3),
+            samples=samples,
         )
 
     def _refresh_dynamic_tr_params(self):
@@ -1533,6 +1595,14 @@ class Controls:
         if CS.leftBlinker or CS.rightBlinker:
             self.last_blinker_frame = self.sm.frame
 
+        # Two taps of the same stalk commit to one corner. Updated here, before
+        # lateral runs, so the flag is current for the saturation prompt below;
+        # it returns no steering value and nothing downstream steers differently
+        # because of it.
+        self.turn_commit.update(self.active, CS.vEgo, CS.leftBlinker,
+                                CS.rightBlinker, CS.steeringAngleDeg,
+                                CS.steeringPressed)
+
         # State specific actions
 
         if not self.active:
@@ -1865,8 +1935,17 @@ class Controls:
                 # TODO use desired vs actual curvature
                 deviating = ((actuators.steer > 0 and dpath_points[0] < -STEER_SAT_DEVIATION_M) or
                              (actuators.steer < 0 and dpath_points[0] > STEER_SAT_DEVIATION_M))
-            if deviating or self.steer_sat_elapsed >= STEER_SAT_WARN_HOLD_S:
+            # Suppressed while a corner is committed: saturation is the expected
+            # state there, not a surprise, and prompting every time is what
+            # makes the driver grab the wheel and end the turn. Only the prompt
+            # is suppressed -- the torque ceiling, the driver-torque cutback and
+            # the deviation check itself all still apply, and the elapsed timer
+            # keeps running so the prompt returns the moment the mode releases.
+            if (deviating or self.steer_sat_elapsed >= STEER_SAT_WARN_HOLD_S) \
+               and not self.turn_commit.active:
                 self.events.add(EventName.steerSaturated)
+
+        self._record_turn_commit(CS, actuators, lac_log, lat_plan)
 
         # Ensure no NaNs/Infs
         for p in ACTUATOR_FIELDS:
