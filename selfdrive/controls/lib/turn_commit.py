@@ -24,21 +24,32 @@ ones need 15-20 m and are not. There is no data at all between 16 and 22 kph --
 in 40 segments the driver always took over there -- which is the gap the
 episode log exists to fill.
 
-The trigger is safe against a normal signal because the blinker reads the stalk,
-not the lamp: measured on-runs are 2.07 s at the shortest, so one signal is one
-rising edge and can never look like two. The gesture is flick, then flick and
-leave it on -- the second edge arms the mode and the blinker staying on is what
-keeps it alive.
+The blinker reads the stalk, not the lamp -- measured on-runs run from 0.20 s to
+42 s with a cluster at 2.0-2.2 s where the stalk's own three blinks time out --
+so what the trigger watches is the gap between one signal ending and the next
+starting, not how long either lasted. That is the measurement that separates
+intent: across 60 segments the shortest gap a driver produced by ordinary
+signalling was 1.65 s, and the next shortest 11.57 s.
+
+The gesture is therefore "signal, off, signal again straight away", and it works
+whichever way the driver signals -- a light tap whose three blinks run out on
+their own, or a latched signal switched off and back on. The second signal has
+to stay on, because the blinker going out is what ends the mode.
 """
 
 from common.realtime import DT_CTRL
 
 
-# Two rising edges of the same stalk inside this window arm the mode. Measured
-# blinker on-runs never fall below 2 s and the off-gaps between two separate
-# signals never below 1.65 s, so nothing a driver does with one signal lands
-# two edges in here.
-DOUBLE_TAP_WINDOW_S = 1.5
+# How quickly the stalk has to come back on after going off. Measured from the
+# falling edge, deliberately, not between the two rising edges: a light tap of
+# a GM stalk runs its own three blinks and holds the signal on for about 2.1 s,
+# so an interval measured rising-to-rising cannot fit two light taps and the
+# gesture would only work if the driver latched the stalk by hand.
+#
+# The gap is what separates intent cleanly. Across 60 segments every gap
+# between one signal ending and the next starting was 1.65 s or longer, and the
+# next one up was 11.57 s, while a deliberate re-tap lands inside half a second.
+DOUBLE_TAP_GAP_S = 1.2
 
 # Above this the mode neither arms nor stays alive. Not a tuning knob for how
 # hard the car turns -- it is the band the measurements above cover, and the
@@ -83,50 +94,51 @@ class TurnCommit:
 
     self._prev_left = False
     self._prev_right = False
-    self._left_edge_t = None     # time of the most recent unmatched left edge
-    self._right_edge_t = None
+    # When each stalk last went off, so the next rising edge can measure the gap.
+    self._left_off_t = None
+    self._right_off_t = None
     self._now = 0.0
 
   def reset(self):
+    # Only mode state. The blinker edge state below it is the stalk's own
+    # history and belongs to no particular corner -- wiping it here would stop
+    # a driver re-arming immediately after a release, which is exactly what a
+    # release on 'blinker off' invites them to do.
     self.active = False
     self.direction = ''
     self.elapsed = 0.0
     self.turn_started = False
-    self._left_edge_t = None
-    self._right_edge_t = None
 
   def _double_tap(self, left_blinker, right_blinker):
-    """Return 'left'/'right' on the second rising edge inside the window."""
+    """Return 'left'/'right' when a stalk comes back on right after going off.
+
+    How long each signal stayed on does not matter, which is what lets the same
+    gesture work whether the driver taps the stalk lightly and lets its own
+    three blinks finish, or turns a latched signal off and straight back on.
+    """
     armed = ''
 
     if left_blinker and not self._prev_left:
-      if self._left_edge_t is not None and \
-         self._now - self._left_edge_t <= DOUBLE_TAP_WINDOW_S:
+      if self._left_off_t is not None and \
+         self._now - self._left_off_t <= DOUBLE_TAP_GAP_S:
         armed = 'left'
-        self._left_edge_t = None
-      else:
-        self._left_edge_t = self._now
-      # Tapping the other way is a different intention, not the second half of
-      # this one.
-      self._right_edge_t = None
+      # Either way this signal starts fresh: an unmatched gap must not stay
+      # available for the signal after this one.
+      self._left_off_t = None
+      # Signalling the other way is a different intention, not the second half
+      # of this one.
+      self._right_off_t = None
+    elif self._prev_left and not left_blinker:
+      self._left_off_t = self._now
 
     if right_blinker and not self._prev_right:
-      if self._right_edge_t is not None and \
-         self._now - self._right_edge_t <= DOUBLE_TAP_WINDOW_S:
+      if self._right_off_t is not None and \
+         self._now - self._right_off_t <= DOUBLE_TAP_GAP_S:
         armed = 'right'
-        self._right_edge_t = None
-      else:
-        self._right_edge_t = self._now
-      self._left_edge_t = None
-
-    # Let a stale first tap expire, so a tap now and another a minute later
-    # are not read as a pair.
-    if self._left_edge_t is not None and \
-       self._now - self._left_edge_t > DOUBLE_TAP_WINDOW_S:
-      self._left_edge_t = None
-    if self._right_edge_t is not None and \
-       self._now - self._right_edge_t > DOUBLE_TAP_WINDOW_S:
-      self._right_edge_t = None
+      self._right_off_t = None
+      self._left_off_t = None
+    elif self._prev_right and not right_blinker:
+      self._right_off_t = self._now
 
     self._prev_left = bool(left_blinker)
     self._prev_right = bool(right_blinker)

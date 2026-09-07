@@ -9,12 +9,17 @@ blinker as a double tap.
 """
 import unittest
 
-from selfdrive.controls.lib.turn_commit import (TurnCommit, DOUBLE_TAP_WINDOW_S,
+from selfdrive.controls.lib.turn_commit import (TurnCommit, DOUBLE_TAP_GAP_S,
                                                 MAX_SPEED_KPH, TIMEOUT_S,
                                                 TURN_STARTED_DEG)
 
 DT = 0.01
 KPH = 1.0 / 3.6
+# A GM stalk tapped lightly runs three blinks and gives up on its own; the
+# measured cluster of those is 2.0-2.2 s.
+LIGHT_TAP_S = 2.1
+# The shortest gap ordinary signalling produced across 60 segments.
+SHORTEST_REAL_GAP_S = 1.65
 
 
 class TestTurnCommit(unittest.TestCase):
@@ -28,10 +33,11 @@ class TestTurnCommit(unittest.TestCase):
       self.tc.update(engaged, kph * KPH, left, right, angle, pressed)
     return self.tc.active
 
-  def double_tap(self, kph=15.0, left=True, engaged=True, gap_s=0.4):
-    """flick, release, flick and hold -- the gesture the driver makes."""
+  def double_tap(self, kph=15.0, left=True, engaged=True, gap_s=0.4,
+                 first_signal_s=0.2):
+    """Signal, off, signal again -- the gesture, ending with the stalk on."""
     right = not left
-    self.run_for(0.2, engaged=engaged, kph=kph, left=left, right=right)
+    self.run_for(first_signal_s, engaged=engaged, kph=kph, left=left, right=right)
     self.run_for(gap_s, engaged=engaged, kph=kph)
     # The second rising edge arms it, and the stalk stays on from here.
     self.tc.update(engaged, kph * KPH, left, right, 0.0, False)
@@ -50,9 +56,28 @@ class TestTurnCommit(unittest.TestCase):
     # One ordinary signal is one rising edge, however long it is held.
     self.assertFalse(self.run_for(6.0, left=True))
 
-  def test_taps_too_far_apart_do_not_arm(self):
-    self.double_tap(gap_s=DOUBLE_TAP_WINDOW_S + 0.5)
+  def test_light_tap_then_signal_arms(self):
+    # The gesture that made the gap rule necessary: a light tap holds the
+    # signal on for its own three blinks, which is longer than any sensible
+    # interval measured between the two rising edges.
+    self.double_tap(first_signal_s=LIGHT_TAP_S)
+    self.assertTrue(self.tc.active)
+
+  def test_two_ordinary_signals_do_not_arm(self):
+    # The shortest gap real signalling produced has to stay outside the rule,
+    # or a driver cancelling and re-signalling would commit a corner by
+    # accident.
+    self.double_tap(first_signal_s=LIGHT_TAP_S, gap_s=SHORTEST_REAL_GAP_S)
     self.assertFalse(self.tc.active)
+
+  def test_gap_too_long_does_not_arm(self):
+    self.double_tap(gap_s=DOUBLE_TAP_GAP_S + 0.3)
+    self.assertFalse(self.tc.active)
+
+  def test_gap_is_measured_from_the_signal_going_off(self):
+    # However long the first signal was held, only the gap after it counts.
+    self.double_tap(first_signal_s=12.0, gap_s=0.3)
+    self.assertTrue(self.tc.active)
 
   def test_opposite_taps_do_not_pair(self):
     self.run_for(0.2, left=True)
