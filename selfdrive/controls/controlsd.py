@@ -966,7 +966,11 @@ class Controls:
         self.cal_curve_speed(sm, vEgo, frame, measured_curvature)
         cruise_speed_ms = self.v_cruise_kph * CV.KPH_TO_MS
         if self.CP.enableGasInterceptor:
-            curve_diag = dict(getattr(self.curve_speed_limiter, "last_diag", {}) or {})
+            # Read, not copied: last_diag is only rebuilt inside cal_curve_speed,
+            # which returns early unless the model or the lateral plan updated,
+            # so this dict changes 20 times a second and was being duplicated
+            # 100. Nothing here mutates it.
+            curve_diag = self.curve_speed_limiter.last_diag
             try:
                 raw_curve_speed_ms = float(curve_diag.get("raw_speed_ms", CURVE_SPEED_DISABLED))
             except (TypeError, ValueError):
@@ -1604,7 +1608,11 @@ class Controls:
 
         lat_plan = self.sm['lateralPlan']
         long_plan = self.sm['longitudinalPlan']
-        if hasattr(self.LaC, 'set_path_stability'):
+        # Only when the plan itself is new. These three come off lateralPlan at
+        # 20 Hz, so re-reading and re-casting them every frame handed the
+        # controller the same numbers five times over. The setter stores them,
+        # so they stay in effect between plans.
+        if self.sm.updated['lateralPlan'] and hasattr(self.LaC, 'set_path_stability'):
             self.LaC.set_path_stability(
               bool(getattr(lat_plan, 'pathStabilityActive', False)),
               float(getattr(lat_plan, 'pathWobbleRangeM', 0.0)),
@@ -1796,7 +1804,7 @@ class Controls:
             # interceptor alone, which is what that gate evaluated to while the
             # learner was on.
             predictive_enabled = bool(self.CP.enableGasInterceptor)
-            curve_diag = dict(getattr(self.curve_speed_limiter, "last_diag", {}) or {})
+            curve_diag = self.curve_speed_limiter.last_diag
             curve_target_ms = (self.curve_pedal_coordinator.plan_speed_kph * CV.KPH_TO_MS
                                if self.curve_pedal_coordinator.plan_speed_kph > 0.0 else CS.vEgo)
             self.predictive_coast_pedal_scale = self.predictive_coasting.update(
