@@ -1469,6 +1469,30 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     p.setBrush(QColor(255, 59, 59, 255));
     p.drawEllipse(QPointF(0, -wheel_d * 0.42), 4.5, 4.5);
     p.restore();
+
+    // Angle readout, centred under the wheel. The icon shows direction and
+    // magnitude at a glance but never the number, so the exact angle goes
+    // below it in the same badge as the lead-distance readout on the road --
+    // green on a translucent black rounded rect -- so both live numbers read
+    // as one kind of thing rather than two unrelated styles.
+    //
+    // The badge is sized from the widest string the tile can ever show
+    // ("-888") rather than from the live text, so a changing angle never
+    // resizes the box or shifts it sideways under the wheel.
+    const QString angle_text = QString("%1°").arg(static_cast<int>(std::lround(steer_angle_deg)));
+
+    configFont(p, "Open Sans", 43, "Bold");
+    QFontMetrics angle_fm(p.font());
+    const int angle_w = angle_fm.horizontalAdvance("-888°") + 38;
+    const int angle_h = angle_fm.height() + 24;
+    QRect angle_rect(x - angle_w / 2, wheel_cy + wheel_d / 2 + 10, angle_w, angle_h);
+
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(0, 0, 0, 160));
+    p.drawRoundedRect(angle_rect, 10, 10);
+    p.setPen(QColor(0, 255, 0, 255));
+    p.drawText(angle_rect, Qt::AlignCenter, angle_text);
+    p.setPen(Qt::NoPen);
   }
 
   // 8. Right-hand status block, sitting above the temperature panel and
