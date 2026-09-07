@@ -126,15 +126,17 @@ class CarController():
                           )
 
         # 연비 향상을 위해 클리핑
-        # The user's CommaPedalResistance profile is the whole response. Keep
-        # a controller-side clamp and the existing absolute comma-pedal ceiling.
-        response_gain = clip(float(getattr(
-          controls, 'comma_pedal_effective_gain', 1.0)), 0.82, 1.22)
+        # The CommaPedalResistance profile is NOT applied here. Scaling the
+        # pedal command sits inside the speed PID loop that produced
+        # actuators.accel, so the loop cancels it: more pedal reaches the
+        # planned speed sooner, the error shrinks sooner, and the PID asks for
+        # less accel. The profile acts where it survives instead -- on the
+        # planner's acceleration ceiling and on the rise limiter's rate below.
         raw_pedal = clip(acc_mult * actuators.accel, 0.0, 0.85)
-        # Apply the combined response first, then predictive coasting as the final
-        # positive-pedal ceiling. Coasting can only remove pedal; it can never
-        # create acceleration or override brake/FCW/longitudinal zero requests.
-        styled_pedal = clip(acc_mult * actuators.accel * response_gain, 0.0, 0.85)
+        # Predictive coasting is the final positive-pedal ceiling. Coasting can
+        # only remove pedal; it can never create acceleration or override
+        # brake/FCW/longitudinal zero requests.
+        styled_pedal = raw_pedal
         hard_recovery = getattr(controls, 'pedal_force_recovery', None)
         lead_assist = getattr(controls, 'lead_coast_assist', None)
         lead_loss_assist = getattr(controls, 'lead_loss_cruise_assist', None)
@@ -144,10 +146,9 @@ class CarController():
                     lead_assist if lead_assist is not None and lead_assist.active else
                     moving_gap_assist if moving_gap_assist is not None and moving_gap_assist.active else None)
         if recovery is not None:
-          # Let the response profile shape raw recovery, but never scale the
-          # calibrated recovery floor itself. Predictive coasting below remains
-          # the final authority.
-          raw_recovery_pedal = clip(acc_mult * recovery.raw_accel * response_gain, 0.0, 0.85)
+          # The calibrated recovery floor is never scaled. Predictive coasting
+          # below remains the final authority.
+          raw_recovery_pedal = clip(acc_mult * recovery.raw_accel, 0.0, 0.85)
           recovery_floor = (PEDAL_FORCE_RECOVERY_PEDAL_FLOOR if recovery is hard_recovery
                             else recovery.pedal_target)
           styled_pedal = clip(max(raw_recovery_pedal, recovery_floor), 0.0, 0.85)
@@ -195,7 +196,8 @@ class CarController():
         desired_tr=float(getattr(controls, 'pedal_rise_desired_tr',
                                  PEDAL_RISE_DEFAULT_TR_S)),
         fall_limit_ok=pedal_fall_limit_ok,
-        hard_decel=bool(getattr(controls, 'pedal_fall_hard_decel', True))))
+        hard_decel=bool(getattr(controls, 'pedal_fall_hard_decel', True)),
+        rise_scale=float(getattr(controls, 'comma_pedal_rise_scale', 1.0))))
       controls.comma_pedal_final_command = float(self.comma_pedal)
     else:
       self.comma_pedal = 0.0

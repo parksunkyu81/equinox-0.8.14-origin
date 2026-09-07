@@ -164,6 +164,11 @@ POST_BRAKE_RISE_SCALE = 0.5
 LOW_SPEED_KPH = 8.0
 LOW_SPEED_POST_BRAKE_HOLD_S = 0.2
 
+# The user's CommaPedalResistance profile scales the rise rate. Bounded here so
+# a bad param cannot hand the interceptor an arbitrary ramp.
+PEDAL_RISE_SCALE_MIN = 0.5
+PEDAL_RISE_SCALE_MAX = 1.5
+
 
 def _finite(value, default=0.0):
   try:
@@ -243,7 +248,7 @@ class CommaPedalRiseLimiter:
   def update(self, target, v_ego=0.0, brake_pressed=False, gas_pressed=False,
              bypass=False, lead_valid=False, lead_distance=0.0,
              lead_rel_speed=0.0, desired_tr=PEDAL_RISE_DEFAULT_TR_S,
-             fall_limit_ok=False, hard_decel=False):
+             fall_limit_ok=False, hard_decel=False, rise_scale=1.0):
     """Return the pedal command to send.
 
     target         the pedal the controller wants, already 0.0 whenever the
@@ -260,12 +265,17 @@ class CommaPedalRiseLimiter:
                    old instant drop
     hard_decel     the planner wants real deceleration rather than just less
                    gas; the interceptor cannot tell these apart on its own
+    rise_scale     the driver's CommaPedalResistance profile as a multiplier on
+                   the rise rate. Only the rise: easing off and the post-brake
+                   hold are safety timings, not a response preference
     """
     target = max(0.0, _finite(target, 0.0))
     v_ego_kph = max(0.0, _finite(v_ego, 0.0)) * 3.6
     brake_pressed = bool(brake_pressed)
     gas_pressed = bool(gas_pressed)
-    self.base_rise_rate = pedal_rise_rate(
+    rise_scale = min(PEDAL_RISE_SCALE_MAX,
+                     max(PEDAL_RISE_SCALE_MIN, _finite(rise_scale, 1.0)))
+    self.base_rise_rate = rise_scale * pedal_rise_rate(
       v_ego=v_ego, lead_valid=lead_valid, lead_distance=lead_distance,
       lead_rel_speed=lead_rel_speed, desired_tr=desired_tr)
 

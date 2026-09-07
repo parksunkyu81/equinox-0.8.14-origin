@@ -57,7 +57,8 @@ from selfdrive.controls.lib.process_health import (
 from selfdrive.controls.lib.comma_pedal_rise_limiter import (
   PEDAL_FALL_HARD_DECEL, PEDAL_RISE_DEFAULT_TR_S)
 from selfdrive.controls.lib.comma_pedal_profile import (
-  CommaPedalProfileController, normalize_comma_pedal_profile,
+  CommaPedalProfileController, comma_pedal_profile_rise_scale,
+  normalize_comma_pedal_profile,
 )
 from selfdrive.controls.lib.pedal_force_recovery import (
   PEDAL_FORCE_RECOVERY_PEDAL_FLOOR, RECOVERY_MODE_HARD_ZERO,
@@ -408,6 +409,8 @@ class Controls:
           self.comma_pedal_profile)
         self.comma_pedal_profile_gain = 1.0
         self.comma_pedal_effective_gain = 1.0
+        self.comma_pedal_rise_scale = comma_pedal_profile_rise_scale(
+          self.comma_pedal_profile)
         self.comma_pedal_profile_changing = False
         self.comma_pedal_raw_command = 0.0
         self.comma_pedal_styled_command = 0.0
@@ -1827,11 +1830,18 @@ class Controls:
         self.comma_pedal_profile_changing = bool(
           self.comma_pedal_profile_controller.changing)
 
-        # The user's profile is the whole response now. The dedicated 40%
-        # lead-launch boost still owns the pedal outright while it is active,
-        # so the profile does not compound with it.
-        self.comma_pedal_effective_gain = (
-          1.0 if self.stop_accel_boost_active else float(self.comma_pedal_profile_gain))
+        # The profile used to be applied twice -- once on the planner's cruise
+        # acceleration ceiling and again as a multiplier on the pedal command --
+        # so its authority swung between 0%, 18% and 39% depending on which of
+        # the two happened to bind. The pedal-command copy is gone: it sat
+        # inside the speed PID loop, which absorbed it (a higher pedal makes the
+        # car reach the planned speed sooner, so the PID simply asks for less).
+        # What is left is the ceiling, which sets how much acceleration may be
+        # planned, and the rise scale below, which sets how fast the pedal is
+        # allowed to get there.
+        self.comma_pedal_effective_gain = float(self.comma_pedal_profile_gain)
+        self.comma_pedal_rise_scale = comma_pedal_profile_rise_scale(
+          self.comma_pedal_profile)
 
         # Steering-authority prompt (조향 제어 초과).
         # A tight city corner saturates the steering command for seconds before
@@ -2187,6 +2197,7 @@ class Controls:
         controlsState.commaPedalRawCommand = float(self.comma_pedal_raw_command)
         controlsState.commaPedalStyledCommand = float(self.comma_pedal_styled_command)
         controlsState.commaPedalFinalCommand = float(self.comma_pedal_final_command)
+        controlsState.commaPedalRiseScale = float(self.comma_pedal_rise_scale)
 
         controlsState.totalCameraOffset = totalCameraOffset
 

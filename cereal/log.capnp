@@ -772,6 +772,7 @@ struct ControlsState @0x97ff69c53601abf1 {
   commaPedalRawCommand @214 :Float32;
   commaPedalStyledCommand @215 :Float32;
   commaPedalFinalCommand @216 :Float32;
+  commaPedalRiseScale @217 :Float32;
 
 
 

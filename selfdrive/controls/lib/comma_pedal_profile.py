@@ -12,6 +12,17 @@ COMMA_PEDAL_PROFILE_GAINS = {
 }
 COMMA_PEDAL_PROFILE_SLEW_PER_S = 0.16
 
+# How fast the pedal command may grow, relative to the rise limiter's measured
+# rates. The gains above only move where the pedal ends up; the driver feels the
+# ramp getting there, and that ramp is owned by the rise limiter. Without this
+# the profile changes the plateau by 18% and leaves the onset identical, which
+# is why the setting read as doing nothing.
+COMMA_PEDAL_PROFILE_RISE_SCALE = {
+  'low': 0.80,
+  'mid': 1.00,
+  'high': 1.25,
+}
+
 
 def _finite_float(value, default):
   try:
@@ -46,6 +57,10 @@ def comma_pedal_profile_gain(profile, v_ego):
       ratio = (speed_kph - lower_speed) / (upper_speed - lower_speed)
       return gains[index - 1] + ratio * (gains[index] - gains[index - 1])
   return gains[-1]
+
+
+def comma_pedal_profile_rise_scale(profile):
+  return COMMA_PEDAL_PROFILE_RISE_SCALE[normalize_comma_pedal_profile(profile)]
 
 
 class CommaPedalProfileController:
