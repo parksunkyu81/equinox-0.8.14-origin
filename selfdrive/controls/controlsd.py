@@ -1599,9 +1599,14 @@ class Controls:
         # lateral runs, so the flag is current for the saturation prompt below;
         # it returns no steering value and nothing downstream steers differently
         # because of it.
-        self.turn_commit.update(self.active, CS.vEgo, CS.leftBlinker,
-                                CS.rightBlinker, CS.steeringAngleDeg,
-                                CS.steeringPressed)
+        if self.turn_commit.update(self.active, CS.vEgo, CS.leftBlinker,
+                                   CS.rightBlinker, CS.steeringAngleDeg,
+                                   CS.steeringPressed):
+            # Re-added every frame the mode is live, so the alert appears when
+            # the gesture takes and clears itself when the corner ends. It is
+            # the only outward sign the mode exists -- everything else it does
+            # is the absence of a prompt.
+            self.events.add(EventName.turnCommitActive)
 
         # State specific actions
 

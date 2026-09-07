@@ -1064,6 +1064,20 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
       Priority.HIGH, VisualAlert.none, AudibleAlert.cornerEntry, .4),
   },
 
+  # Shown for as long as a corner is committed, and gone the moment it is not.
+  # Without it the mode is invisible: it suppresses the saturation prompt and
+  # changes nothing else, so the only way to tell it engaged at all would be
+  # the absence of a warning. Silent and small on purpose -- this is a status
+  # line during a turn the driver is already busy watching, not something they
+  # need to react to. The short duration is what makes it clear itself: the
+  # event is re-added every frame the mode is live, so it lapses on release.
+  EventName.turnCommitActive: {
+    ET.PERMANENT: Alert(
+      "회전 유지 중", "",
+      AlertStatus.normal, AlertSize.small,
+      Priority.LOW, VisualAlert.none, AudibleAlert.none, .2),
+  },
+
   EventName.slowingDownSpeed: {
     #ET.PERMANENT: Alert("Slowing down","", AlertStatus.normal, AlertSize.small,
     ET.PERMANENT: Alert("속도를 줄이고 있습니다","", AlertStatus.normal, AlertSize.small,

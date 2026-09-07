@@ -141,6 +141,7 @@ struct CarEvent @0x9b1657f34caf3ad3 {
     predictiveBrakeNeeded @117;
     curveEntry @118;
     laneConfidenceLow @119;
+    turnCommitActive @120;
   }
 }
 
