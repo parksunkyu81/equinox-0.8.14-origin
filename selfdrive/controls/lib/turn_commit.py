@@ -31,10 +31,12 @@ starting, not how long either lasted. That is the measurement that separates
 intent: across 60 segments the shortest gap a driver produced by ordinary
 signalling was 1.65 s, and the next shortest 11.57 s.
 
-The gesture is therefore "signal, off, signal again straight away", and it works
-whichever way the driver signals -- a light tap whose three blinks run out on
-their own, or a latched signal switched off and back on. The second signal has
-to stay on, because the blinker going out is what ends the mode.
+The gesture is therefore: signal the turn normally, then switch it off and
+straight back on. Deliberately only that one. A light tap cannot start it --
+the stalk's own three blinks end at about 2.1 s and a signal has to outlast
+that to count -- so the tap the driver already uses for lane changes stays what
+it was and cannot commit a corner by being repeated. The second signal has to
+stay on, because the blinker going out is what ends the mode.
 """
 
 from common.realtime import DT_CTRL
@@ -50,6 +52,14 @@ from common.realtime import DT_CTRL
 # between one signal ending and the next starting was 1.65 s or longer, and the
 # next one up was 11.57 s, while a deliberate re-tap lands inside half a second.
 DOUBLE_TAP_GAP_S = 1.2
+
+# The first signal has to have been held past the point a light tap gives up,
+# so the stalk's own lane-change tap cannot start the gesture. Measured taps
+# cluster at 2.0-2.2 s, and ordinary latched signals run 2.55 s to 42 s, so the
+# threshold sits above the cluster and below every real signal in the logs.
+# The cost is that a quick flick on and off does not open the gesture either;
+# the only way in is a signal held like a signal.
+MIN_FIRST_SIGNAL_S = 2.5
 
 # Above this the mode neither arms nor stays alive. Not a tuning knob for how
 # hard the car turns -- it is the band the measurements above cover, and the
@@ -94,9 +104,13 @@ class TurnCommit:
 
     self._prev_left = False
     self._prev_right = False
-    # When each stalk last went off, so the next rising edge can measure the gap.
+    # When each stalk last went off, so the next rising edge can measure the
+    # gap -- left None for a signal too short to open the gesture. The on times
+    # beside them are what that length is measured from.
     self._left_off_t = None
     self._right_off_t = None
+    self._left_on_t = None
+    self._right_on_t = None
     self._now = 0.0
 
   def reset(self):
@@ -109,12 +123,24 @@ class TurnCommit:
     self.elapsed = 0.0
     self.turn_started = False
 
-  def _double_tap(self, left_blinker, right_blinker):
-    """Return 'left'/'right' when a stalk comes back on right after going off.
+  def _qualifying_off(self, on_since):
+    """Timestamp to remember for a signal that just ended, or None to ignore it.
 
-    How long each signal stayed on does not matter, which is what lets the same
-    gesture work whether the driver taps the stalk lightly and lets its own
-    three blinks finish, or turns a latched signal off and straight back on.
+    A signal only opens the gesture if it was held past MIN_FIRST_SIGNAL_S,
+    which is what keeps the stalk's own lane-change tap out: that tap always
+    ends itself around 2.1 s, so it never qualifies and tapping twice does
+    nothing. on_since is None when the signal was already on before this object
+    started watching, which cannot be measured and so does not qualify either.
+    """
+    if on_since is None or self._now - on_since < MIN_FIRST_SIGNAL_S:
+      return None
+    return self._now
+
+  def _double_tap(self, left_blinker, right_blinker):
+    """Return 'left'/'right' when a held signal comes straight back on.
+
+    Two edges make the gesture: a signal held like a signal, then switched off
+    and on again inside DOUBLE_TAP_GAP_S.
     """
     armed = ''
 
@@ -125,20 +151,24 @@ class TurnCommit:
       # Either way this signal starts fresh: an unmatched gap must not stay
       # available for the signal after this one.
       self._left_off_t = None
+      self._left_on_t = self._now
       # Signalling the other way is a different intention, not the second half
       # of this one.
       self._right_off_t = None
     elif self._prev_left and not left_blinker:
-      self._left_off_t = self._now
+      self._left_off_t = self._qualifying_off(self._left_on_t)
+      self._left_on_t = None
 
     if right_blinker and not self._prev_right:
       if self._right_off_t is not None and \
          self._now - self._right_off_t <= DOUBLE_TAP_GAP_S:
         armed = 'right'
       self._right_off_t = None
+      self._right_on_t = self._now
       self._left_off_t = None
     elif self._prev_right and not right_blinker:
-      self._right_off_t = self._now
+      self._right_off_t = self._qualifying_off(self._right_on_t)
+      self._right_on_t = None
 
     self._prev_left = bool(left_blinker)
     self._prev_right = bool(right_blinker)

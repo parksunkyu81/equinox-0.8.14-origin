@@ -10,7 +10,8 @@ blinker as a double tap.
 import unittest
 
 from selfdrive.controls.lib.turn_commit import (TurnCommit, DOUBLE_TAP_GAP_S,
-                                                MAX_SPEED_KPH, TIMEOUT_S,
+                                                MAX_SPEED_KPH,
+                                                MIN_FIRST_SIGNAL_S, TIMEOUT_S,
                                                 TURN_STARTED_DEG)
 
 DT = 0.01
@@ -34,7 +35,7 @@ class TestTurnCommit(unittest.TestCase):
     return self.tc.active
 
   def double_tap(self, kph=15.0, left=True, engaged=True, gap_s=0.4,
-                 first_signal_s=0.2):
+                 first_signal_s=MIN_FIRST_SIGNAL_S + 0.5):
     """Signal, off, signal again -- the gesture, ending with the stalk on."""
     right = not left
     self.run_for(first_signal_s, engaged=engaged, kph=kph, left=left, right=right)
@@ -56,18 +57,24 @@ class TestTurnCommit(unittest.TestCase):
     # One ordinary signal is one rising edge, however long it is held.
     self.assertFalse(self.run_for(6.0, left=True))
 
-  def test_light_tap_then_signal_arms(self):
-    # The gesture that made the gap rule necessary: a light tap holds the
-    # signal on for its own three blinks, which is longer than any sensible
-    # interval measured between the two rising edges.
+  def test_light_tap_does_not_open_the_gesture(self):
+    # The stalk's lane-change tap ends itself at about 2.1 s. Repeating it must
+    # do nothing at all, or the tap a driver already uses to change lanes would
+    # commit a corner.
     self.double_tap(first_signal_s=LIGHT_TAP_S)
-    self.assertTrue(self.tc.active)
+    self.assertFalse(self.tc.active)
+
+  def test_short_flick_does_not_open_the_gesture(self):
+    # Same rule from the other side: anything shorter than a held signal is not
+    # the driver signalling, so it cannot be the first half either.
+    self.double_tap(first_signal_s=0.3)
+    self.assertFalse(self.tc.active)
 
   def test_two_ordinary_signals_do_not_arm(self):
     # The shortest gap real signalling produced has to stay outside the rule,
     # or a driver cancelling and re-signalling would commit a corner by
     # accident.
-    self.double_tap(first_signal_s=LIGHT_TAP_S, gap_s=SHORTEST_REAL_GAP_S)
+    self.double_tap(gap_s=SHORTEST_REAL_GAP_S)
     self.assertFalse(self.tc.active)
 
   def test_gap_too_long_does_not_arm(self):
@@ -79,10 +86,12 @@ class TestTurnCommit(unittest.TestCase):
     self.double_tap(first_signal_s=12.0, gap_s=0.3)
     self.assertTrue(self.tc.active)
 
-  def test_opposite_taps_do_not_pair(self):
-    self.run_for(0.2, left=True)
-    self.run_for(0.2)
-    self.run_for(0.2, right=True)
+  def test_opposite_signals_do_not_pair(self):
+    # A held left signal followed straight away by a right one is a driver
+    # changing their mind, not the second half of a left gesture.
+    self.run_for(MIN_FIRST_SIGNAL_S + 0.5, left=True)
+    self.run_for(0.3)
+    self.run_for(0.3, right=True)
     self.assertFalse(self.tc.active)
 
   def test_does_not_arm_above_speed(self):
