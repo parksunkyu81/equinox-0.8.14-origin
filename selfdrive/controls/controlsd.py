@@ -133,6 +133,10 @@ CONTROL_LOOP_MIN_HZ = 99.0
 # is what makes the log readable afterwards.
 CONTROL_CORE_CHECK_FRAMES = max(1, int(1.0 / DT_CTRL))
 CONTROL_CORE_DIAG_PERIOD_S = 10.0
+# Curve slowdown commands this fraction of the speed the curve was entered at.
+# The curvature profile still decides whether a bend is worth acting on; it no
+# longer decides how much speed comes off.
+CURVE_ENTRY_SPEED_FACTOR = 0.9
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
@@ -307,6 +311,8 @@ class Controls:
         self.max_speed_clu = 0.
         self.curve_speed_ms = 0.
         self.curve_speed_limiter = CurveSpeedLimiter()
+        # Speed the current curve was entered at, or None between curves.
+        self._curve_entry_speed_ms = None
         # (modelV2 rcv_frame, speed tuning band, built profile). See
         # _model_curve_profile() for why those two keys are sufficient.
         self._curve_profile_cache = None
@@ -662,6 +668,7 @@ class Controls:
     def reset(self):
         self.max_speed_clu = 0.
         self.curve_speed_ms = 0.
+        self._curve_entry_speed_ms = None
         self.curve_speed_limiter.reset()
         self._model_curve_control_enabled = False
         self.curve_pedal_coordinator.reset()
@@ -855,6 +862,25 @@ class Controls:
         })
         self.curve_speed_limiter.last_diag.update(model_profile_diag)
 
+    def _curve_entry_target(self, curve_detected, v_ego, physics_target_ms):
+        """Curve target as a fixed fraction of the speed the curve was entered at.
+
+        Latched on the first detected frame. Taking CURVE_ENTRY_SPEED_FACTOR of
+        the live speed every frame instead would ratchet: each new target is
+        below the speed it was derived from, so the car would keep slowing for
+        as long as the curve lasted rather than settling.
+
+        MIN_CURVE_SPEED still floors the result, so entering below about
+        33 km/h asks for no reduction at all -- the floor is already at or
+        above 90% of that entry speed.
+        """
+        if not curve_detected:
+            self._curve_entry_speed_ms = None
+            return physics_target_ms
+        if self._curve_entry_speed_ms is None:
+            self._curve_entry_speed_ms = float(v_ego)
+        return max(self._curve_entry_speed_ms * CURVE_ENTRY_SPEED_FACTOR, MIN_CURVE_SPEED)
+
     # [크루즈 MAX 속도 설정] #
     def cal_max_speed(self, frame: int, vEgo, sm, CS, measured_curvature):
 
@@ -893,12 +919,14 @@ class Controls:
               curve_detected,
               vEgo,
               self.v_cruise_kph,
-              raw_curve_speed_ms,
+              self._curve_entry_target(curve_detected, vEgo, raw_curve_speed_ms),
               selected_time_s=curve_diag.get("selected_time_s", None))
             self.curve_plan_speed_ms = (CURVE_SPEED_DISABLED if curve_plan_speed_ms is None
                                         else float(curve_plan_speed_ms))
         else:
-            self.curve_plan_speed_ms = self.curve_speed_ms
+            self.curve_plan_speed_ms = self._curve_entry_target(
+              MIN_CURVE_SPEED <= self.curve_speed_ms < CURVE_SPEED_DISABLED,
+              vEgo, self.curve_speed_ms)
 
         if (self.slow_on_curves and MIN_CURVE_SPEED <= self.curve_plan_speed_ms <
                 min(CURVE_SPEED_DISABLED, cruise_speed_ms)):
@@ -912,9 +940,10 @@ class Controls:
         curve_state_engaged = (self.curve_pedal_coordinator.engaged
                                if self.CP.enableGasInterceptor else curv_limit > 0)
         self.is_curv_driving = bool(curve_state_engaged and curv_limit > 0 and CS.cruiseState.enabled)
-        # The configured curve target is fixed at MIN_CURVE_SPEED. The applied
-        # speed still approaches it through the safety filters above.
-        self.curv_speed = (float(MIN_CURVE_SPEED) * CV.MS_TO_KPH
+        # Show the target actually being commanded. It used to report
+        # MIN_CURVE_SPEED unconditionally, so the indicator read 30.0 km/h for
+        # every bend however gentle; the target now varies with entry speed.
+        self.curv_speed = (float(self.curve_plan_speed_ms) * CV.MS_TO_KPH
                            if self.is_curv_driving else 0.0)
 
         if road_speed_limiter.roadLimitSpeed is not None:
