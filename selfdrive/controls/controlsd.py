@@ -140,9 +140,16 @@ CURVE_ENTRY_SPEED_FACTOR = 0.9
 # Speed the curve slowdown engages from. Deliberately not CP.minSteerSpeed:
 # that gates LKAS torque at 10 km/h, and a curve slowdown that engages there
 # spent 37% of its active time under 30 km/h on the 2026-09-08--05-34-00 drive,
-# where a 10% reduction is both under the MIN_CURVE_SPEED floor and not what
-# the feature is for.
-CURVE_SLOWDOWN_MIN_SPEED_KPH = 30.0
+# doing nothing.
+#
+# Derived rather than written down, because the only speeds worth engaging at
+# are the ones where the target clears the floor: below MIN_CURVE_SPEED /
+# CURVE_ENTRY_SPEED_FACTOR the entry-speed target lands under MIN_CURVE_SPEED
+# and is clamped back up to it, so the slowdown engages and then asks for no
+# reduction at all. At the current 30 km/h floor and 0.9 factor that is
+# 33.3 km/h; keeping it derived means changing either one cannot reopen that
+# dead band.
+CURVE_SLOWDOWN_MIN_SPEED_KPH = MIN_CURVE_SPEED * CV.MS_TO_KPH / CURVE_ENTRY_SPEED_FACTOR
 # Confirmation state survives to here, so speed noise at the gate cannot keep
 # resetting it while the car sits just below.
 CURVE_SLOWDOWN_RELEASE_KPH = CURVE_SLOWDOWN_MIN_SPEED_KPH - 1.0
