@@ -27,6 +27,7 @@ signals:
   void closeSettings();
   void reviewTrainingGuide();
   void showDriverView();
+  void showRoadView();
 
 private:
   QPushButton *sidebar_alert_widget;
@@ -160,6 +161,9 @@ signals:
 
 class CommunityPanel : public QWidget {
   Q_OBJECT
+
+signals:
+  void showRoadView();
 
 private:
   QStackedLayout* main_layout = nullptr;

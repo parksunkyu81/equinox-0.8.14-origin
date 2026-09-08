@@ -59,6 +59,7 @@ qt_env.Program("qt/spinner", ["qt/spinner.cc"], LIBS=qt_libs)
 qt_src = ["main.cc", "ui.cc", "qt/sidebar.cc", "qt/onroad.cc", "qt/body.cc",
         "qt/window.cc", "qt/home.cc", "qt/offroad/settings.cc",
         "qt/offroad/onboarding.cc", "qt/offroad/driverview.cc",
+        "qt/offroad/roadview.cc",
         "qt/screenrecorder/screenrecorder.cc",
         'qt/screenrecorder/omx_encoder.cc',]
 

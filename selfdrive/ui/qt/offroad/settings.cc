@@ -469,12 +469,15 @@ SettingsWindow::SettingsWindow(QWidget *parent) : QFrame(parent) {
   QObject::connect(device, &DevicePanel::showDriverView, this, &SettingsWindow::showDriverView);
   QObject::connect(device, &DevicePanel::closeSettings, this, &SettingsWindow::closeSettings);
 
+  CommunityPanel *community = new CommunityPanel(this);
+  QObject::connect(community, &CommunityPanel::showRoadView, this, &SettingsWindow::showRoadView);
+
   QList<QPair<QString, QWidget *>> panels = {
     {"Device", device},
     {"Network", network_panel(this)},
     {"Toggles", new TogglesPanel(this)},
     {"Software", new SoftwarePanel(this)},
-    {"Community", new CommunityPanel(this)},
+    {"Community", community},
   };
 
 #ifdef ENABLE_MAPS
@@ -914,6 +917,14 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
     }
     toggleLayout->addWidget(toggle);
   }
+
+  // Not a ParamControl, so it goes in by hand rather than through the list
+  // above: this one opens a view instead of flipping a stored setting.
+  auto roadCamBtn = new ButtonControl("Test camera", "PREVIEW",
+                                      "Live view from the forward camera, with a button to save the frame to /data/media/0. Use it to check the mount angle and whether anything is reflecting into the lens. (vehicle must be off)");
+  connect(roadCamBtn, &ButtonControl::clicked, [=]() { emit showRoadView(); });
+  toggleLayout->addWidget(horizontal_line());
+  toggleLayout->addWidget(roadCamBtn);
 
   toggleLayout->addWidget(horizontal_line());
   toggleLayout->addLayout(layoutBtn_5);
