@@ -63,9 +63,7 @@ class LatControlTorque(LatControl):
       'friction': float(clip(
         CP.lateralTuning.torque.friction,
         FRICTION_MIN, FRICTION_MAX)),
-      'totalBucketPoints': 0,
     }
-    self.live_torque_params = dict(self.fixed_torque_params)
     self._last_requested_steer = 0.0
     self._last_applied_steer = 0.0
 
@@ -75,22 +73,12 @@ class LatControlTorque(LatControl):
     self._last_requested_steer = 0.0
     self._last_applied_steer = 0.0
 
-  def update_live_torque_params(self, latAccelFactor, latAccelOffset,
-                                friction, totalBucketPoints=0):
-    # The live learner does not override the ntune-controlled torque settings.
-    del latAccelFactor, latAccelOffset, friction, totalBucketPoints
-    self.live_torque_params = dict(self.fixed_torque_params)
-
   def update_ntune_torque_params(self, latAccelFactor, friction):
     """Apply the current ntune request to the parameters used for torque control."""
     self.fixed_torque_params['latAccelFactor'] = float(clip(
       float(latAccelFactor), LAT_ACCEL_FACTOR_MIN, LAT_ACCEL_FACTOR_MAX))
     self.fixed_torque_params['friction'] = float(clip(
       float(friction), FRICTION_MIN, FRICTION_MAX))
-    self.live_torque_params = dict(self.fixed_torque_params)
-
-  def get_fixed_torque_params(self):
-    return dict(self.fixed_torque_params)
 
   def set_path_stability(self, active, range_m=0.0, flips=0):
     # Compatibility hook. Official-style torque control is not modified by a

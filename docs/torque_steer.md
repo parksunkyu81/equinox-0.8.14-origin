@@ -60,6 +60,13 @@ Panda의 최종 안전 상한은 `12/20`이며, 실제 CarController는 속도�
 
 ## 5. Live Torque 튜닝
 
+> **현재 비활성입니다.** `torqued`는 `process_config.py`에서 `enabled=False`이고,
+> `controlsd`는 `liveTorqueParameters`를 구독하지 않으며, `latcontrol_torque.py`에는
+> 학습값을 받는 경로가 남아 있지 않습니다. 실제 조향에 쓰이는 `latAccelFactor`와
+> `friction`은 ntune 고정값(`update_ntune_torque_params`)입니다.
+> 아래 내용은 `torqued`를 다시 켤 때를 위한 참고 자료로 남겨 둔 것이며,
+> 지금 코드의 동작 설명이 아닙니다.
+
 ### 역할
 
 Live Torque는 실제 주행에서 조향 토크와 횡가속도의 관계를 학습해 다음 세 값을 보정합니다.
@@ -87,7 +94,7 @@ Live Torque는 실제 주행에서 조향 토크와 횡가속도의 관계를 �
 
 동적 권한은 학습 포인트가 없어도 최대값의 35%부터 시작하고, 500 포인트에서 60%, 2,500 포인트에서 100%까지 점진적으로 열립니다. 강한 토크 추종 오차가 감지되면 권한을 즉시 줄이며, 운전자 개입과 최종 GM 토크 제한은 항상 우선합니다.
 
-`controlsd.py`는 `totalBucketPoints`를 토크 제어기까지 전달합니다. 이 연결이 없으면 제어기 내부 포인트 수가 항상 `0`으로 남아 학습 신뢰도에 따른 권한 확장이 적용되지 않습니다.
+`torqued`를 다시 켠다면 `totalBucketPoints`를 토크 제어기까지 전달하는 연결을 복원해야 합니다. 이 연결이 없으면 제어기 내부 포인트 수가 항상 `0`으로 남아 학습 신뢰도에 따른 권한 확장이 적용되지 않습니다. (현재 `controlsd.py`에는 이 경로가 없습니다.)
 
 ### 학습과 저장
 
@@ -180,8 +187,10 @@ Live Torque 로그 `/data/openpilot/ltp_logs`에서 다음 항목을 확인합�
 
 조향 변경 후에는 다음 항목을 함께 확인합니다.
 
-- 토크 파라미터: `latAccelFactor`, `latAccelOffset`, `friction`, `totalBucketPoints`
-- Live Torque 학습: `liveValid`, 필터링값, 좌우 버킷 분포, freeze 사유, base 값과 dynamic effective 값
+- 토크 파라미터: `dynamicTorqueLatAccelFactor`, `dynamicTorqueFriction`
+  (`controlsState`의 `latAccelFactor`/`latAccelOffset`/`friction`/`totalBucketPoints`는
+  Live Torque 보고용이었고 지금은 기록되지 않습니다)
+- Live Torque 학습: `torqued`를 다시 켠 경우에만 — `liveValid`, 필터링값, 좌우 버킷 분포, freeze 사유, base 값과 dynamic effective 값
 - 명령 전송: `gmSteerCommandSent`, `gmSteerCommandGapMs`, `gmSteerCommandDeadlineLagMs`
 - 전송 이상: `gmSteerCommandGapFault`, loopback counter
 - 토크 제한: `gmSteerCommandTorque`, `gmSteerRequestedTorque`, `gmSteerTorqueLimited`

@@ -30,10 +30,9 @@ procs = [
   # Disabled: its live-learned torque params are never consumed. Actual torque
   # control reads fixed latAccelFactor/friction from ntune
   # (selfdrive/ntune.py) via controlsd's update_ntune_torque_params, and
-  # LatControlTorque.update_live_torque_params() explicitly discards whatever
-  # this would have fed it. Measured ~16% of a CPU core wasted on a real
-  # drive for zero effect on steering. See controlsd.py's SubMaster/
-  # communication_ok changes removing liveTorqueParameters accordingly.
+  # nothing in LatControlTorque takes a live parameter any more. Measured ~16%
+  # of a CPU core wasted on a real drive for zero effect on steering.
+  # controlsd no longer subscribes to liveTorqueParameters either.
   PythonProcess("torqued", "selfdrive.locationd.torqued", enabled=False),
   PythonProcess("controlsd", "selfdrive.controls.controlsd"),
   PythonProcess("deleter", "selfdrive.loggerd.deleter", persistent=True),
