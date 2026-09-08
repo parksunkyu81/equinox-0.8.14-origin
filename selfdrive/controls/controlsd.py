@@ -137,6 +137,15 @@ CONTROL_CORE_DIAG_PERIOD_S = 10.0
 # The curvature profile still decides whether a bend is worth acting on; it no
 # longer decides how much speed comes off.
 CURVE_ENTRY_SPEED_FACTOR = 0.9
+# Speed the curve slowdown engages from. Deliberately not CP.minSteerSpeed:
+# that gates LKAS torque at 10 km/h, and a curve slowdown that engages there
+# spent 37% of its active time under 30 km/h on the 2026-09-08--05-34-00 drive,
+# where a 10% reduction is both under the MIN_CURVE_SPEED floor and not what
+# the feature is for.
+CURVE_SLOWDOWN_MIN_SPEED_KPH = 30.0
+# Confirmation state survives to here, so speed noise at the gate cannot keep
+# resetting it while the car sits just below.
+CURVE_SLOWDOWN_RELEASE_KPH = CURVE_SLOWDOWN_MIN_SPEED_KPH - 1.0
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
@@ -316,7 +325,6 @@ class Controls:
         # (modelV2 rcv_frame, speed tuning band, built profile). See
         # _model_curve_profile() for why those two keys are sufficient.
         self._curve_profile_cache = None
-        self._model_curve_control_enabled = False
         self.curve_pedal_coordinator = CurvePedalCoordinator(DT_CTRL)
         self.predictive_coasting = PredictiveCoastingCoordinator(DT_CTRL)
         self.predictive_coast_pedal_scale = 1.0
@@ -670,7 +678,6 @@ class Controls:
         self.curve_speed_ms = 0.
         self._curve_entry_speed_ms = None
         self.curve_speed_limiter.reset()
-        self._model_curve_control_enabled = False
         self.curve_pedal_coordinator.reset()
         self.predictive_coasting.reset()
         self.predictive_coast_pedal_scale = 1.0
@@ -726,7 +733,6 @@ class Controls:
             # stand on and must not hold its last answer.
             self.corner_alert.reset()
             self.curve_speed_limiter.reset()
-            self._model_curve_control_enabled = False
             self.curve_pedal_coordinator.reset()
             self.curve_speed_ms = CURVE_SPEED_DISABLED
             self.curve_plan_speed_ms = CURVE_SPEED_DISABLED
@@ -745,11 +751,12 @@ class Controls:
         cruise_speed_ms = self.v_cruise_kph * CV.KPH_TO_MS
         curvature_factor = 0.85 * ntune_scc_get("sccCurvatureFactor")
 
-        model_curve_control_min_kph = float(self.CP.minSteerSpeed) * CV.MS_TO_KPH
-        model_curve_control_release_kph = max(0.0, model_curve_control_min_kph - 1.0)
+        # CP.minSteerSpeed is the LKAS torque gate. It reaches the profile only
+        # as the model_profile_control_allowed diagnostic; what gates the
+        # slowdown itself is CURVE_SLOWDOWN_MIN_SPEED_KPH, below.
         (model_curvatures, model_times, model_distances,
          model_profile_valid, model_profile_diag) = self._model_curve_profile(
-          sm, v_ego, measured_curvature, model_curve_control_min_kph)
+          sm, v_ego, measured_curvature, float(self.CP.minSteerSpeed) * CV.MS_TO_KPH)
 
         # Corner-entry prompt, decided here on the model profile rather than on
         # whether the curve slowdown engaged. The two are different questions:
@@ -763,18 +770,17 @@ class Controls:
         else:
             self.corner_alert.reset()
 
-        # The Equinox torque/LKAS path starts at 10 km/h. Below that speed the
-        # v0.8.13 adapter still runs for diagnostics, but it cannot acquire CURV
-        # authority. Retain state down to 9 km/h on deceleration so speed noise
-        # around the hardware gate does not repeatedly reset confirmation.
+        # Coming off the throttle for a bend is a different question from
+        # whether LKAS can steer, so this gate is its own number rather than
+        # CP.minSteerSpeed's 10 km/h. Below CURVE_SLOWDOWN_MIN_SPEED_KPH the
+        # adapter still runs for diagnostics but commands nothing. Confirmation
+        # state is retained down to the release speed, so noise at the gate
+        # cannot keep wiping it.
         v_ego_kph = float(v_ego) * CV.MS_TO_KPH
-        if v_ego_kph >= model_curve_control_min_kph:
-            self._model_curve_control_enabled = True
-        elif v_ego_kph < model_curve_control_release_kph:
-            self._model_curve_control_enabled = False
+        if v_ego_kph < CURVE_SLOWDOWN_RELEASE_KPH:
             self.curve_speed_limiter.reset()
 
-        if v_ego_kph < model_curve_control_min_kph:
+        if v_ego_kph < CURVE_SLOWDOWN_MIN_SPEED_KPH:
             self.curve_speed_ms = CURVE_SPEED_DISABLED
             shadow_diag = {
               "source": "modelV2_v0813_shadow",
