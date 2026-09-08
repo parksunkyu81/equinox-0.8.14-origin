@@ -31,7 +31,16 @@ CURVE_PLAN_MIN_SPEED_KPH = 30.0
 # would silently truncate any real curve that needs more than that; it exists to
 # reject a pathological request, not to shape ordinary ones.
 CURVE_ENTRY_DROP_KPH = 25.0
-CURVE_PLAN_FALL_KPH_S = 5.0
+# How fast the commanded target may move, not how far it may go: the depth is
+# the entry-speed fraction in controlsd, and the plan stops the moment it gets
+# there. At 5.0 a curve had to hold detection for 0.1 x entry / 5 seconds
+# before the full reduction arrived -- 0.9 s at 45 km/h -- and short bends were
+# still on the way down when they ended. Raising it to the rise rate leaves the
+# seven longer curves on the 2026-09-08--09-03-54 drive untouched, since they
+# already reached the target, and lets one more of the brief ones get there.
+# Safe to accelerate on this car: with a gas interceptor and no openpilot brake
+# actuation, a faster target drop releases throttle sooner and nothing more.
+CURVE_PLAN_FALL_KPH_S = 10.0
 CURVE_PLAN_RISE_KPH_S = 10.0
 CURVE_EXIT_CONFIRM_S = 0.80
 CURVE_APPROACH_START_S = 2.50
