@@ -72,10 +72,14 @@ class Ratekeeper:
     return self._remaining
 
   @property
+  def avg_dt(self) -> float:
+    """Mean loop period over the last 100 frames, in seconds."""
+    return sum(self._dts) / len(self._dts)
+
+  @property
   def lagging(self) -> bool:
-    avg_dt = sum(self._dts) / len(self._dts)
     expected_dt = self._interval * (1 / 0.9)
-    return avg_dt > expected_dt
+    return self.avg_dt > expected_dt
 
   # Maintain loop rate by calling this at the end of each loop
   def keep_time(self) -> bool:

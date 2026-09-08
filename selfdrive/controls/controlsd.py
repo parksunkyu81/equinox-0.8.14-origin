@@ -124,6 +124,15 @@ PROFILE_FLAG_PATH = "/data/controlsd_profile"
 # One diagnostic line per window. Ten seconds is long enough to average out a
 # single slow frame and rare enough that the write cannot matter.
 PROFILE_WINDOW_FRAMES = max(1, int(10.0 / DT_CTRL))
+# The control loop targets 100 Hz. Ratekeeper.lagging only trips below 90 Hz,
+# which is far past the point where the loop has started shedding rate -- a
+# drive that averaged 96.1 Hz never tripped it. Log below this instead.
+CONTROL_LOOP_MIN_HZ = 99.0
+# The control core is only sampled at 1 Hz and a line is written at most this
+# often: when the loop is off-rate it stays off-rate, and one line per episode
+# is what makes the log readable afterwards.
+CONTROL_CORE_CHECK_FRAMES = max(1, int(1.0 / DT_CTRL))
+CONTROL_CORE_DIAG_PERIOD_S = 10.0
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
@@ -469,6 +478,7 @@ class Controls:
 
         # controlsd is driven by can recv, expected at 100Hz
         self.rk = Ratekeeper(100, print_delay_threshold=None)
+        self._control_core_diag_t = 0.0
         # Opt-in, by touching the file below and restarting. Left on, the
         # profiler sorts its checkpoints and prints six lines every iteration --
         # 600 lines a second, into a stdout nothing reads. Checked once here so
@@ -1025,9 +1035,16 @@ class Controls:
             self.events.add(EventName.lowMemory)
 
         # TODO: enable this once loggerd CPU usage is more reasonable
-        cpus = list(self.sm['deviceState'].cpuUsagePercent)[:(-1 if EON else None)]
-        if max(cpus, default=0) > 95 and not SIMULATION:
+        cpus = list(self.sm['deviceState'].cpuUsagePercent)
+        # The last core is left out of the driver alert on EON: controlsd is
+        # pinned there with RT priority, so it reads 100% for a whole healthy
+        # drive and including it would latch the alert on permanently. That
+        # core is watched by _record_control_core_load() instead.
+        if max(cpus[:(-1 if EON else None)], default=0) > 95 and not SIMULATION:
           self.events.add(EventName.highCpuUsage)
+        # REPLAY runs the loop off the wall clock, so its rate says nothing.
+        if EON and not SIMULATION and not REPLAY:
+            self._record_control_core_load(cpus)
 
         # Alert if fan isn't spinning for 5 seconds
         if self.sm['peripheralState'].pandaType in (PandaType.uno, PandaType.dos):
@@ -1324,6 +1341,34 @@ class Controls:
         #  self.events.add(EventName.noTarget)
 
         self.df_manager.update()
+
+    def _record_control_core_load(self, cpus):
+        """Record the control core when the 100 Hz loop stops making its rate.
+
+        highCpuUsage deliberately ignores this core, so until now nothing
+        watched the one core that decides whether control runs on time. Usage
+        alone is not a fault there -- an RT-pinned loop is supposed to own its
+        core -- so this fires only once the loop has actually lost rate, which
+        is the symptom that matters and the one that shows up as a growing
+        cumLagMs.
+        """
+        if self.sm.frame % CONTROL_CORE_CHECK_FRAMES:
+            return
+        avg_dt = self.rk.avg_dt
+        if avg_dt <= 0.0 or 1.0 / avg_dt >= CONTROL_LOOP_MIN_HZ:
+            return
+        now = sec_since_boot()
+        if now - self._control_core_diag_t < CONTROL_CORE_DIAG_PERIOD_S:
+            return
+        self._control_core_diag_t = now
+        append_process_diagnostic(
+            "controlsd_loop_lagging",
+            loop_hz=round(1.0 / avg_dt, 2),
+            avg_frame_ms=round(avg_dt * 1000.0, 3),
+            cum_lag_ms=round(-self.rk.remaining * 1000.0, 1),
+            control_core_pct=float(cpus[-1]) if cpus else 0.0,
+            cpu_pct=[float(c) for c in cpus],
+        )
 
     def data_sample(self):
         """Receive data from sockets and update carState"""
