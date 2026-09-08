@@ -13,12 +13,6 @@ PROCESS_DIAGNOSTICS_PATH = os.getenv(
 CONTROLS_MISMATCH_DIAGNOSTICS_PATH = os.getenv(
   "CONTROLS_MISMATCH_DIAGNOSTICS_PATH", "/data/log/controls_mismatch_diagnostics.jsonl"
 )
-# One line per committed corner, carrying the whole episode's samples. Kept out
-# of process_diagnostics.jsonl for the same reason the mismatch log is: this one
-# is a time series, that one should stay compact.
-TURN_COMMIT_DIAGNOSTICS_PATH = os.getenv(
-  "TURN_COMMIT_DIAGNOSTICS_PATH", "/data/log/turn_commit_diagnostics.jsonl"
-)
 ABORT_PROCESS_LOG_DIR = os.getenv("ABORT_PROCESS_LOG_DIR", "/data/log")
 KST = datetime.timezone(datetime.timedelta(hours=9), name="KST")
 
@@ -137,8 +131,3 @@ def append_process_diagnostic(event_type, **fields):
 def append_controls_mismatch_diagnostic(event_type, **fields):
   """Persist a controls-mismatch episode without relying on logmessaged."""
   return _append_json_diagnostic(CONTROLS_MISMATCH_DIAGNOSTICS_PATH, event_type, **fields)
-
-
-def append_turn_commit_diagnostic(event_type, **fields):
-  """Persist one committed corner as a single JSON line."""
-  return _append_json_diagnostic(TURN_COMMIT_DIAGNOSTICS_PATH, event_type, **fields)
