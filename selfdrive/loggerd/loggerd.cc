@@ -221,6 +221,16 @@ void loggerd_thread() {
   logger_rotate(&s);
   Params().put("CurrentRoute", s.logger.route_name);
 
+  // rlog can be switched off from the Community toggles. Compressing it costs
+  // 9.1 CPU-seconds per 60 s segment at bz2 level 9 -- 15% of a core, running
+  // the whole drive. Nothing on the device reads it back, but every offline
+  // diagnostic does, so it defaults on and the segments keep rotating either
+  // way: the video, and the directory the video lands in, are unaffected.
+  const bool record_rlog = Params().getBool("RecordRLog");
+  if (!record_rlog) {
+    LOGW("rlog disabled by RecordRLog; segments will hold video only");
+  }
+
   // init encoders
   s.last_camera_seen_tms = millis_since_boot();
   std::vector<std::thread> encoder_threads;
@@ -244,7 +254,9 @@ void loggerd_thread() {
       Message *msg = nullptr;
       while (!do_exit && (msg = sock->receive(true))) {
         const bool in_qlog = qs.freq != -1 && (qs.counter++ % qs.freq == 0);
-        logger_log(&s.logger, (uint8_t *)msg->getData(), msg->getSize(), in_qlog);
+        if (record_rlog) {
+          logger_log(&s.logger, (uint8_t *)msg->getData(), msg->getSize(), in_qlog);
+        }
         bytes_count += msg->getSize();
         delete msg;
 

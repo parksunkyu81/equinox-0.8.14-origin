@@ -53,6 +53,8 @@ def manager_init() -> None:
     ("LaneChangeEnabled", "1"),
     ("AutoLaneChangeEnabled", "1"),
 
+    ("RecordRLog", "1"),
+
     ("SccSmootherSlowOnCurves", "1"),
     ("SccSmootherSyncGasPressed", "0"),
     ("StockNaviDecelEnabled", "0"),

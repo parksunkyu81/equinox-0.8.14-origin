@@ -827,6 +827,12 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                             "../assets/offroad/icon_road.png",
                                             this));
 
+  toggles.append(new ParamControl("RecordRLog",
+                                            "Record rlog",
+                                            "Writes the driving log every segment. Compressing it costs about 15% of a CPU core for the whole drive. Turning it off frees that, and leaves nothing to analyse a drive from afterwards -- the video still records.",
+                                            "../assets/offroad/icon_shell.png",
+                                            this));
+
   /*toggles.append(new ParamControl("SccSmootherSyncGasPressed",
                                             "Sync set speed on gas pressed",
                                             "",
