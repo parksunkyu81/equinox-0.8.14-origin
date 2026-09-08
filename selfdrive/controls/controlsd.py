@@ -239,9 +239,6 @@ class Controls:
 
 
         # read params
-        # Use fixed CarParams torque tuning. The live learner may continue to
-        # publish diagnostics, but it must not modify steering authority.
-        self.is_live_torque = False
         self.is_metric = params.get_bool("IsMetric")
         self.is_ldw_enabled = params.get_bool("IsLdwEnabled")
         openpilot_enabled_toggle = params.get_bool("OpenpilotEnabledToggle")
@@ -439,12 +436,6 @@ class Controls:
 
         # TODO: no longer necessary, aside from process replay
         self.sm['liveParameters'].valid = True
-
-        # Live torque
-        self.torque_latAccelFactor = 0.
-        self.torque_latAccelOffset = 0.
-        self.torque_friction = 0.
-        self.totalBucketPoints = 0.
 
         self.startup_event = get_startup_event(car_recognized, controller_available, len(self.CP.carFw) > 0)
 
@@ -1485,18 +1476,6 @@ class Controls:
                     # temporarily unavailable or contains an invalid value.
                     pass
 
-            if hasattr(self.LaC, 'get_fixed_torque_params'):
-                fixed_torque = self.LaC.get_fixed_torque_params()
-                self.torque_latAccelFactor = fixed_torque['latAccelFactor']
-                self.torque_friction = fixed_torque['friction']
-                self.torque_latAccelOffset = fixed_torque['latAccelOffset']
-                self.totalBucketPoints = 0
-            else:
-                self.torque_latAccelFactor = ntune_torque_get('latAccelFactor')
-                self.torque_friction = ntune_torque_get('friction')
-                self.torque_latAccelOffset = 0.0
-                self.totalBucketPoints = 0
-
 
         lat_plan = self.sm['lateralPlan']
         long_plan = self.sm['longitudinalPlan']
@@ -1989,11 +1968,12 @@ class Controls:
         controlsState.curvDriving = bool(self.is_curv_driving)
         controlsState.curvSpeed = float(self.curv_speed)
 
-        # Live Torque
-        controlsState.latAccelFactor = self.torque_latAccelFactor
-        controlsState.latAccelOffset = self.torque_latAccelOffset
-        controlsState.friction = self.torque_friction
-        controlsState.totalBucketPoints = self.totalBucketPoints
+        # latAccelFactor, latAccelOffset, friction and totalBucketPoints were
+        # the live torque learner's report. torqued is disabled and the tuning
+        # in force is the fixed ntune one, already published below as
+        # dynamicTorqueLatAccelFactor/dynamicTorqueFriction. The fields are left
+        # in the schema (removing capnp fields would break replay of every log
+        # recorded before this) but nothing writes them any more.
         if hasattr(self.LaC, 'get_dynamic_debug_torque_params'):
             dyn_torque = self.LaC.get_dynamic_debug_torque_params()
             controlsState.dynamicTorqueActive = bool(dyn_torque['active'])
