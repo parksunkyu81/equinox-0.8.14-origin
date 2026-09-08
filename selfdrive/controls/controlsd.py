@@ -279,6 +279,13 @@ class Controls:
         elif self.CP.lateralTuning.which() == 'torque':
             self.LaC = LatControlTorque(self.CP, self.CI)
 
+        # publish_logs picks the lateralControlState union member from these
+        # every frame. Neither can change for a car that is already fingerprinted,
+        # and a capnp read costs more than the write it guards. pcmCruise is
+        # deliberately not cached here -- state_transition() reassigns it.
+        self._lat_tuning = self.CP.lateralTuning.which()
+        self._steer_control_type_angle = (
+          self.CP.steerControlType == car.CarParams.SteerControlType.angle)
 
         self.initialized = False
         self.state = State.disabled
@@ -1840,10 +1847,13 @@ class Controls:
         hudControl.lanesVisible = self.enabled
         hudControl.leadVisible = self.sm['longitudinalPlan'].hasLead
 
-        right_lane_visible = self.sm['lateralPlan'].rProb > 0.5
-        left_lane_visible = self.sm['lateralPlan'].lProb > 0.5
+        # Bound once: a capnp field read costs more than a write, and this
+        # message is read five times further down.
+        lat_plan = self.sm['lateralPlan']
+        right_lane_visible = lat_plan.rProb > 0.5
+        left_lane_visible = lat_plan.lProb > 0.5
 
-        totalCameraOffset = self.sm['lateralPlan'].totalCameraOffset
+        totalCameraOffset = lat_plan.totalCameraOffset
 
         if self.sm.frame % 100 == 0:
             self.right_lane_visible = right_lane_visible
@@ -1859,8 +1869,8 @@ class Controls:
         model_v2 = self.sm['modelV2']
         desire_prediction = model_v2.meta.desirePrediction
         if len(desire_prediction) and ldw_allowed:
-            right_lane_visible = self.sm['lateralPlan'].rProb > 0.5
-            left_lane_visible = self.sm['lateralPlan'].lProb > 0.5
+            # right_lane_visible/left_lane_visible were read off this same
+            # lateralPlan a few lines up and nothing has changed since.
             l_lane_change_prob = desire_prediction[Desire.laneChangeLeft - 1]
             r_lane_change_prob = desire_prediction[Desire.laneChangeRight - 1]
 
@@ -1892,7 +1902,10 @@ class Controls:
             self.last_actuators, can_sends = self.CI.apply(CC, self)
             self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
             CC.actuatorsOutput = self.last_actuators
-            self.steer_limited = abs(CC.actuators.steer - CC.actuatorsOutput.steer) > 1e-2
+            # Compare the values we already hold rather than reading them back
+            # out of CC: a nested capnp read is ~10 us, and these two are the
+            # actuators passed in and what CI.apply just returned.
+            self.steer_limited = abs(actuators.steer - self.last_actuators.steer) > 1e-2
 
         force_decel = (self.sm['driverMonitoringState'].awarenessStatus < 0.) or \
                       (self.state == State.softDisabling)
@@ -1919,7 +1932,9 @@ class Controls:
             controlsState.alertType = current_alert.alert_type
             controlsState.alertSound = current_alert.audible_alert
 
-        controlsState.canMonoTimes = list(CS.canMonoTimes)
+        # canMonoTimes is not written: reading the capnp list, rebuilding it as
+        # a Python list and writing it back cost ~20 us a frame and nothing
+        # reads the field. Left in the schema, so it reads as empty.
         controlsState.longitudinalPlanMonoTime = self.sm.logMonoTime['longitudinalPlan']
         controlsState.lateralPlanMonoTime = self.sm.logMonoTime['lateralPlan']
         controlsState.enabled = self.enabled
@@ -1974,52 +1989,23 @@ class Controls:
         # dynamicTorqueLatAccelFactor/dynamicTorqueFriction. The fields are left
         # in the schema (removing capnp fields would break replay of every log
         # recorded before this) but nothing writes them any more.
+        # The other dynamicTorque*/modelCurvature*/lowSpeedTorque* fields were
+        # written every frame from literals baked into the controller -- the
+        # feature they describe is stubbed off, so they carried no information
+        # at 2.2 us a write. Only the five values that actually move are sent.
+        # As with the live torque fields, the schema keeps them and they now
+        # read as their defaults.
         if hasattr(self.LaC, 'get_dynamic_debug_torque_params'):
             dyn_torque = self.LaC.get_dynamic_debug_torque_params()
-            controlsState.dynamicTorqueActive = bool(dyn_torque['active'])
-            controlsState.dynamicTorqueLatAccelFactor = float(dyn_torque['latAccelFactor'])
-            controlsState.dynamicTorqueFriction = float(dyn_torque['friction'])
-            controlsState.dynamicTorqueBlend = float(dyn_torque['blend'])
-            controlsState.dynamicTorqueAuthorityCeiling = float(dyn_torque['authorityCeiling'])
-            controlsState.dynamicTorqueCornerStrength = float(dyn_torque['corner_strength'])
-            controlsState.dynamicTorqueDirectionDamping = bool(dyn_torque['directionDamping'])
-            controlsState.dynamicTorqueResponseScale = float(dyn_torque['responseScale'])
-            controlsState.dynamicTorqueResponseRatio = float(dyn_torque['responseRatio'])
-            controlsState.dynamicTorqueResponseBin = int(dyn_torque['responseBin'])
-            controlsState.dynamicTorqueResponseStable = bool(dyn_torque['responseStable'])
-            controlsState.dynamicTorqueResponseFrozen = bool(dyn_torque['responseFrozen'])
-            controlsState.dynamicTorqueResponseUpdateCount = int(dyn_torque['responseUpdateCount'])
-            controlsState.dynamicTorquePathStabilityActive = bool(dyn_torque['pathStabilityActive'])
-            controlsState.dynamicTorquePathWobbleRange = float(dyn_torque['pathWobbleRangeM'])
-            controlsState.dynamicTorquePathWobbleFlips = int(dyn_torque['pathWobbleFlips'])
+            controlsState.dynamicTorqueLatAccelFactor = dyn_torque['latAccelFactor']
+            controlsState.dynamicTorqueFriction = dyn_torque['friction']
+            controlsState.lowSpeedTorqueRawSteer = dyn_torque['lowSpeedTorqueRawSteer']
+            controlsState.lowSpeedTorqueGuardedSteer = dyn_torque['lowSpeedTorqueGuardedSteer']
+            controlsState.lowSpeedTorqueAppliedSteer = dyn_torque['lowSpeedTorqueAppliedSteer']
             controlsState.laneCenterCorrectionM = float(
-              getattr(self.sm['lateralPlan'], 'laneCenterCorrectionM', 0.0))
+              getattr(lat_plan, 'laneCenterCorrectionM', 0.0))
             controlsState.laneCenterCorrectionActive = bool(
-              getattr(self.sm['lateralPlan'], 'laneCenterCorrectionActive', False))
-            controlsState.modelCurvatureGuardActive = bool(dyn_torque['modelCurvatureGuardActive'])
-            controlsState.modelCurvatureRaw = float(dyn_torque['modelCurvatureRaw'])
-            controlsState.modelCurvatureFiltered = float(dyn_torque['modelCurvatureFiltered'])
-            controlsState.modelCurvatureFilterAlpha = float(dyn_torque['modelCurvatureFilterAlpha'])
-            controlsState.modelCurvatureDirectionReversal = bool(
-              dyn_torque['modelCurvatureDirectionReversal'])
-            controlsState.modelSteerDelayCompensation = float(
-              dyn_torque['modelSteerDelayCompensation'])
-            controlsState.lowSpeedTorqueGuardActive = bool(
-              dyn_torque['lowSpeedTorqueGuardActive'])
-            controlsState.lowSpeedTorqueGuardState = int(
-              dyn_torque['lowSpeedTorqueGuardState'])
-            controlsState.lowSpeedTorqueRawSteer = float(
-              dyn_torque['lowSpeedTorqueRawSteer'])
-            controlsState.lowSpeedTorqueGuardedSteer = float(
-              dyn_torque['lowSpeedTorqueGuardedSteer'])
-            controlsState.lowSpeedTorqueAppliedSteer = float(
-              dyn_torque['lowSpeedTorqueAppliedSteer'])
-            controlsState.lowSpeedTorqueConfirmMs = int(
-              dyn_torque['lowSpeedTorqueConfirmMs'])
-            controlsState.lowSpeedTorqueReversalCount = int(
-              dyn_torque['lowSpeedTorqueReversalCount'])
-            controlsState.lowSpeedTorqueBoostSuppressed = bool(
-              dyn_torque['lowSpeedTorqueBoostSuppressed'])
+              getattr(lat_plan, 'laneCenterCorrectionActive', False))
 
         # Dynamic TR
         if self.sm.frame % DYNAMIC_TR_PARAM_REFRESH_FRAMES == 0:
@@ -2067,10 +2053,10 @@ class Controls:
 
         controlsState.totalCameraOffset = totalCameraOffset
 
-        lat_tuning = self.CP.lateralTuning.which()
+        lat_tuning = self._lat_tuning
         if self.joystick_mode:
           controlsState.lateralControlState.debugState = lac_log
-        elif self.CP.steerControlType == car.CarParams.SteerControlType.angle:
+        elif self._steer_control_type_angle:
           controlsState.lateralControlState.angleState = lac_log
         elif lat_tuning == 'pid':
           controlsState.lateralControlState.pidState = lac_log

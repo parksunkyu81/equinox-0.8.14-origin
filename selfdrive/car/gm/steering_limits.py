@@ -18,22 +18,14 @@ STEER_DELTA_UP_SAFE = 7.0
 STEER_DELTA_DOWN_SAFE = 17.0
 
 
-def _interp(value, breakpoints, values):
-  if value <= breakpoints[0]:
-    return float(values[0])
-  if value >= breakpoints[-1]:
-    return float(values[-1])
-
-  for i in range(1, len(breakpoints)):
-    if value <= breakpoints[i]:
-      x0, x1 = float(breakpoints[i - 1]), float(breakpoints[i])
-      y0, y1 = float(values[i - 1]), float(values[i])
-      return y0 + (value - x0) * (y1 - y0) / max(x1 - x0, 1e-6)
-  return float(values[-1])
-
-
 def steer_delta_limits_kph(v_kph):
-  """Return speed-dependent GM torque deltas for the 50 Hz steering command."""
+  """Return speed-dependent GM torque deltas for the 50 Hz steering command.
+
+  Both curves share one breakpoint table, so the segment is found once and
+  used twice. The tables already hold floats, so the float() call the old
+  helper made on all four endpoints of every comparison was pure overhead.
+  The interpolation expression is unchanged, down to the operator order.
+  """
   try:
     speed = float(v_kph)
   except (TypeError, ValueError):
@@ -43,8 +35,22 @@ def steer_delta_limits_kph(v_kph):
     return STEER_DELTA_UP_SAFE, STEER_DELTA_DOWN_SAFE
 
   speed = max(0.0, speed)
-  delta_up = _interp(speed, STEER_DELTA_BP_KPH, STEER_DELTA_UP_V)
-  delta_down = _interp(speed, STEER_DELTA_BP_KPH, STEER_DELTA_DOWN_V)
+
+  bp = STEER_DELTA_BP_KPH
+  if speed <= bp[0]:
+    delta_up, delta_down = STEER_DELTA_UP_V[0], STEER_DELTA_DOWN_V[0]
+  elif speed >= bp[-1]:
+    delta_up, delta_down = STEER_DELTA_UP_V[-1], STEER_DELTA_DOWN_V[-1]
+  else:
+    i = 1
+    while speed > bp[i]:
+      i += 1
+    x0 = bp[i - 1]
+    span = max(bp[i] - x0, 1e-6)
+    up0, down0 = STEER_DELTA_UP_V[i - 1], STEER_DELTA_DOWN_V[i - 1]
+    delta_up = up0 + (speed - x0) * (STEER_DELTA_UP_V[i] - up0) / span
+    delta_down = down0 + (speed - x0) * (STEER_DELTA_DOWN_V[i] - down0) / span
+
   return min(delta_up, STEER_DELTA_UP_MAX), min(delta_down, STEER_DELTA_DOWN_MAX)
 
 

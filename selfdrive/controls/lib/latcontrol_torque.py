@@ -86,38 +86,21 @@ class LatControlTorque(LatControl):
     del active, range_m, flips
 
   def get_dynamic_debug_torque_params(self):
+    """The torque values that actually move, for controlsState.
+
+    This used to return thirty entries, twenty-five of them literals describing
+    a dynamic-authority feature that is not implemented here. controlsd wrote
+    every one of them into a 100 Hz message that nothing reads back, so only
+    the five live values are returned now.
+    """
     params = self.fixed_torque_params
+    requested = float(self._last_requested_steer)
     return {
-      'active': False,
       'latAccelFactor': float(params['latAccelFactor']),
       'friction': float(params['friction']),
-      'blend': 0.0,
-      'authorityCeiling': 0.0,
-      'corner_strength': 0.0,
-      'directionDamping': False,
-      'responseScale': 1.0,
-      'responseRatio': 1.0,
-      'responseBin': 0,
-      'responseStable': False,
-      'responseFrozen': True,
-      'responseUpdateCount': 0,
-      'pathStabilityActive': False,
-      'pathWobbleRangeM': 0.0,
-      'pathWobbleFlips': 0,
-      'modelCurvatureGuardActive': False,
-      'modelCurvatureRaw': 0.0,
-      'modelCurvatureFiltered': 0.0,
-      'modelCurvatureFilterAlpha': 1.0,
-      'modelCurvatureDirectionReversal': False,
-      'modelSteerDelayCompensation': 0.0,
-      'lowSpeedTorqueGuardActive': False,
-      'lowSpeedTorqueGuardState': 0,
-      'lowSpeedTorqueRawSteer': float(self._last_requested_steer),
-      'lowSpeedTorqueGuardedSteer': float(self._last_requested_steer),
+      'lowSpeedTorqueRawSteer': requested,
+      'lowSpeedTorqueGuardedSteer': requested,
       'lowSpeedTorqueAppliedSteer': float(self._last_applied_steer),
-      'lowSpeedTorqueConfirmMs': 0,
-      'lowSpeedTorqueReversalCount': 0,
-      'lowSpeedTorqueBoostSuppressed': False,
     }
 
   def update(self, active, CS, VM, params, last_actuators, steer_limited,
