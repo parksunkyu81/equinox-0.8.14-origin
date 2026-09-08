@@ -12,14 +12,12 @@
 
 class HardwareEon : public HardwareNone {
 public:
-  // Back to what upstream shipped. The 0.9/0.45 these replace came in with a
-  // master-ci merge, and at 0.9 the Korean voice alerts tear -- the files are
-  // not the problem, they peak at -3 to -7 dBFS with no sample pinned at full
-  // scale, so the distortion is this device's speaker being driven past what it
-  // can hold. soundd scales volume with speed (MIN at 40 kph up to MAX at 72),
-  // which is why it got worse the faster the car was going.
-  static constexpr float MAX_VOLUME = 0.7;
-  static constexpr float MIN_VOLUME = 0.4;
+  // 0.7/0.4 was tried to stop the Korean voice alerts tearing and did not:
+  // the tearing came back at the lower ceiling, so the ceiling was never what
+  // caused it. Back to 0.9/0.45, which is audible over road noise. soundd
+  // scales between the two with speed, MIN at 40 kph up to MAX at 72.
+  static constexpr float MAX_VOLUME = 0.9;
+  static constexpr float MIN_VOLUME = 0.45;
 
   static bool EON() { return true; }
   static std::string get_os_version() {

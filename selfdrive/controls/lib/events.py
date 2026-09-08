@@ -189,9 +189,12 @@ class NormalPermanentAlert(Alert):
 
 class StartupAlert(Alert):
   def __init__(self, alert_text_1: str, alert_text_2: str = "항상 핸들을 잡고 도로를 주시하세요", alert_status=AlertStatus.normal):
+    # Chimes once when openpilot comes onroad. The startup banner was silent,
+    # so there was no way to tell from the driver's seat that sound works at
+    # all until the first real alert fired somewhere mid-drive.
     super().__init__(alert_text_1, alert_text_2,
                      alert_status, AlertSize.mid,
-                     Priority.LOWER, VisualAlert.none, AudibleAlert.none, 5.),
+                     Priority.LOWER, VisualAlert.none, AudibleAlert.engage, 5.),
 
 
 # ********** helper functions **********
