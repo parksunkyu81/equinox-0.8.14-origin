@@ -46,7 +46,7 @@ from selfdrive.controls.lib.stop_accel_boost import (
 )
 from selfdrive.controls.lib.curve_speed_limiter import (
   CurveSpeedLimiter, CURVE_SPEED_DISABLED, build_v0813_model_curve_profile, calculate_curve_speed,
-  CornerAlert,
+  CornerAlert, model_curve_tuning_band,
 )
 from selfdrive.controls.lib.curve_pedal_coordinator import CurvePedalCoordinator
 from selfdrive.controls.lib.predictive_coasting import PredictiveCoastingCoordinator
@@ -294,6 +294,9 @@ class Controls:
         self.max_speed_clu = 0.
         self.curve_speed_ms = 0.
         self.curve_speed_limiter = CurveSpeedLimiter()
+        # (modelV2 rcv_frame, speed tuning band, built profile). See
+        # _model_curve_profile() for why those two keys are sufficient.
+        self._curve_profile_cache = None
         self._model_curve_control_enabled = False
         self.curve_pedal_coordinator = CurvePedalCoordinator(DT_CTRL)
         self.predictive_coasting = PredictiveCoastingCoordinator(DT_CTRL)
@@ -666,6 +669,41 @@ class Controls:
         self.slowing_down_alert = False
         self.slowing_down_sound_alert = False
 
+    def _model_curve_profile(self, sm, v_ego, measured_curvature, control_min_speed_kph):
+        """Build the model curve profile at most once per modelV2 frame.
+
+        modelV2 and the lateralPlan derived from it land on different control
+        ticks, so this used to run at 40 Hz and throw the second copy away.
+        Everything in the profile is fixed by the model frame except two live
+        inputs: the measured curvature, which occupies index 0 and nothing else,
+        and v_ego, which acts only through the speed tuning band.
+        """
+        rcv_frame = sm.rcv_frame['modelV2']
+        band = model_curve_tuning_band(v_ego)
+        cache = self._curve_profile_cache
+
+        if cache is not None and cache[0] == rcv_frame and cache[1] == band:
+            curvatures, times, distances, valid, diag = cache[2]
+            if curvatures:
+                measured = abs(float(measured_curvature)) if np.isfinite(measured_curvature) else 0.0
+                curvatures = [measured] + curvatures[1:]
+            # Diagnostic only -- the real speed gate is applied by the caller --
+            # but it reads off the live speed, not the band.
+            diag["model_profile_control_allowed"] = bool(
+              float(v_ego) * CV.MS_TO_KPH >= float(control_min_speed_kph))
+            return curvatures, times, distances, valid, diag
+
+        model = sm['modelV2']
+        result = build_v0813_model_curve_profile(
+          model.position.t,
+          model.orientationRate.z,
+          model.velocity.x, model.velocity.y, model.velocity.z,
+          model.position.x, model.position.y, model.position.z,
+          measured_curvature, v_ego=v_ego,
+          control_min_speed_kph=control_min_speed_kph)
+        self._curve_profile_cache = (rcv_frame, band, result)
+        return result
+
     def cal_curve_speed(self, sm, v_ego, frame, measured_curvature):
         lateralPlan = sm['lateralPlan']
         if not self.slow_on_curves:
@@ -680,8 +718,10 @@ class Controls:
             return
 
         # modelV2 and lateralPlan are produced at 20 Hz while controlsd runs at
-        # 100 Hz. Prefer each fresh model frame and do not count the same model
-        # again when its derived lateralPlan arrives on a later control tick.
+        # 100 Hz, and they land on different control ticks, so this runs at
+        # 40 Hz. The profile itself is built once per model frame regardless --
+        # see _model_curve_profile() -- and the confirmation below still counts
+        # only fresh model evidence.
         model_updated = bool(sm.updated['modelV2'])
         lateral_plan_updated = bool(sm.updated['lateralPlan'])
         if not (model_updated or lateral_plan_updated):
@@ -690,17 +730,11 @@ class Controls:
         cruise_speed_ms = self.v_cruise_kph * CV.KPH_TO_MS
         curvature_factor = 0.85 * ntune_scc_get("sccCurvatureFactor")
 
-        model = sm['modelV2']
         model_curve_control_min_kph = float(self.CP.minSteerSpeed) * CV.MS_TO_KPH
         model_curve_control_release_kph = max(0.0, model_curve_control_min_kph - 1.0)
         (model_curvatures, model_times, model_distances,
-         model_profile_valid, model_profile_diag) = build_v0813_model_curve_profile(
-          model.position.t,
-          model.orientationRate.z,
-          model.velocity.x, model.velocity.y, model.velocity.z,
-          model.position.x, model.position.y, model.position.z,
-          measured_curvature, v_ego=v_ego,
-          control_min_speed_kph=model_curve_control_min_kph)
+         model_profile_valid, model_profile_diag) = self._model_curve_profile(
+          sm, v_ego, measured_curvature, model_curve_control_min_kph)
 
         # Corner-entry prompt, decided here on the model profile rather than on
         # whether the curve slowdown engaged. The two are different questions:

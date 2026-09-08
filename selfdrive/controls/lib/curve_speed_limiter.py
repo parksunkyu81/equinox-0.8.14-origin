@@ -109,7 +109,10 @@ def _finite_sequence(values):
     converted = [float(v) for v in values]
   except (TypeError, ValueError):
     return None
-  return converted if all(math.isfinite(v) for v in converted) else None
+  # map() keeps the check in C instead of stepping a generator once per model
+  # point. This runs eight times per profile build on 33-point model heads, so
+  # it is a measurable part of a 100 Hz loop.
+  return converted if all(map(math.isfinite, converted)) else None
 
 
 def _smoothed_abs_curvatures(curvatures):
@@ -152,6 +155,22 @@ def _model_curve_tuning(v_ego, control_min_speed_kph=MODEL_CURVE_CONTROL_MIN_SPE
         "control_allowed": speed_kph >= float(control_min_speed_kph),
       }
   raise RuntimeError("unreachable model curve speed tuning")
+
+
+def model_curve_tuning_band(v_ego):
+  """Index of the tuning row _model_curve_tuning() would pick for this speed.
+
+  The built profile depends on v_ego only through this row, so a profile stays
+  reusable for as long as the band holds. Callers cache on it.
+  """
+  try:
+    speed_kph = max(0.0, float(v_ego) * 3.6)
+  except (TypeError, ValueError):
+    speed_kph = 0.0
+  for i, row in enumerate(MODEL_CURVE_SPEED_TUNING):
+    if speed_kph < row[0]:
+      return i
+  return len(MODEL_CURVE_SPEED_TUNING) - 1
 
 
 def _path_arc_distances(position_x, position_y, position_z):
@@ -270,66 +289,96 @@ def build_v0813_model_curve_profile(position_t, orientation_rate_z,
   distances = [0.0]
   arc_distances = _path_arc_distances(pxs, pys, pzs)
 
+  # The per-point tallies are kept in locals and written into diag once below.
+  # This loop is the hot part of a 100 Hz path, and a dict read plus a max()
+  # call per counter per point is most of what it costs.
+  leg_distance_m = tuning["leg_distance_m"]
+  max_curvature = tuning["max_curvature"]
+  span_max = 0
+  short_horizon_points = 0
+  short_chord_points = 0
+  curvature_cap_points = 0
+  geometry_points = 0
+  geometry_max = 0.0
+  yaw_points = 0
+  yaw_max = 0.0
+  agree_points = 0
+  disagree_points = 0
+  sign_mismatch_points = 0
+  geometry_only_points = 0
+
   for i, t in enumerate(times):
     if t < MODEL_CURVE_MIN_TIME_S or t > MODEL_CURVE_MAX_TIME_S:
       continue
 
     distance = arc_distances[i]
     geometry_curvature, reject_reason, adaptive_span = _path_geometry_curvature(
-      pxs, pys, arc_distances, i, tuning["leg_distance_m"], tuning["max_curvature"])
-    diag["model_adaptive_span_max"] = max(diag["model_adaptive_span_max"], adaptive_span)
+      pxs, pys, arc_distances, i, leg_distance_m, max_curvature)
+    if adaptive_span > span_max:
+      span_max = adaptive_span
     if geometry_curvature is None:
-      reject_key = {
-        "short_horizon": "model_short_horizon_points",
-        "short_chord": "model_short_chord_points",
-        "curvature_cap": "model_curvature_cap_points",
-      }.get(reject_reason)
-      if reject_key is not None:
-        diag[reject_key] += 1
+      if reject_reason == "short_horizon":
+        short_horizon_points += 1
+      elif reject_reason == "short_chord":
+        short_chord_points += 1
+      elif reject_reason == "curvature_cap":
+        curvature_cap_points += 1
       continue
 
     geometry_abs = abs(geometry_curvature)
-    diag["model_geometry_points"] += 1
-    diag["model_geometry_max_curvature"] = max(
-      diag["model_geometry_max_curvature"], geometry_abs)
+    geometry_points += 1
+    if geometry_abs > geometry_max:
+      geometry_max = geometry_abs
 
     horizontal_speed = math.hypot(vxs[i], vys[i])
     yaw_curvature = yaw_rates[i] / max(horizontal_speed, 1.0)
-    yaw_valid = math.isfinite(yaw_curvature) and abs(yaw_curvature) <= tuning["max_curvature"]
+    yaw_valid = math.isfinite(yaw_curvature) and abs(yaw_curvature) <= max_curvature
     if yaw_valid:
       yaw_abs = abs(yaw_curvature)
-      diag["model_yaw_points"] += 1
-      diag["model_yaw_max_curvature"] = max(diag["model_yaw_max_curvature"], yaw_abs)
+      yaw_points += 1
+      if yaw_abs > yaw_max:
+        yaw_max = yaw_abs
       smaller = min(geometry_abs, yaw_abs)
       agreement_limit = max(MODEL_CURVE_AGREEMENT_ABS,
                             smaller * (MODEL_CURVE_AGREEMENT_RATIO - 1.0))
-      direction_reliable = min(geometry_abs, yaw_abs) > MODEL_CURVE_AGREEMENT_ABS
+      direction_reliable = smaller > MODEL_CURVE_AGREEMENT_ABS
       same_direction = not direction_reliable or geometry_curvature * yaw_curvature >= 0.0
       agrees = same_direction and abs(geometry_abs - yaw_abs) <= agreement_limit
       if agrees:
         curvature = (MODEL_CURVE_GEOMETRY_WEIGHT * geometry_abs +
                      (1.0 - MODEL_CURVE_GEOMETRY_WEIGHT) * yaw_abs)
-        diag["model_agree_points"] += 1
+        agree_points += 1
       else:
         # A disagreement is kept at the weaker prediction plus a small noise
         # allowance. Persistent real bends agree in both model heads; isolated
         # path or yaw-rate spikes therefore cannot request a deep-curve target.
-        curvature = min(geometry_abs, yaw_abs) + MODEL_CURVE_AGREEMENT_ABS
+        curvature = smaller + MODEL_CURVE_AGREEMENT_ABS
         curvature = min(curvature, max(geometry_abs, yaw_abs))
-        diag["model_disagree_points"] += 1
+        disagree_points += 1
         if not same_direction:
-          diag["model_sign_mismatch_points"] += 1
+          sign_mismatch_points += 1
     else:
       # Geometry remains usable when the velocity head briefly degenerates,
       # but reduce its authority until yaw-rate corroboration returns.
       curvature = MODEL_CURVE_GEOMETRY_WEIGHT * geometry_abs
-      diag["model_geometry_only_points"] += 1
+      geometry_only_points += 1
 
     curvatures.append(float(curvature))
     profile_times.append(float(t))
     distances.append(max(0.0, float(distance)))
 
-  geometry_points = diag["model_geometry_points"]
+  diag["model_adaptive_span_max"] = span_max
+  diag["model_short_horizon_points"] = short_horizon_points
+  diag["model_short_chord_points"] = short_chord_points
+  diag["model_curvature_cap_points"] = curvature_cap_points
+  diag["model_geometry_points"] = geometry_points
+  diag["model_geometry_max_curvature"] = geometry_max
+  diag["model_yaw_points"] = yaw_points
+  diag["model_yaw_max_curvature"] = yaw_max
+  diag["model_agree_points"] = agree_points
+  diag["model_disagree_points"] = disagree_points
+  diag["model_sign_mismatch_points"] = sign_mismatch_points
+  diag["model_geometry_only_points"] = geometry_only_points
   evidence_points = max(1, geometry_points)
   horizon_m = max(distances, default=0.0)
   agreement_score = (
