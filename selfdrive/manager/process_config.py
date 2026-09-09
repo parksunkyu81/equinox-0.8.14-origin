@@ -20,8 +20,12 @@ procs = [
   NativeProcess("proclogd", "selfdrive/proclogd", ["./proclogd"]),
   NativeProcess("sensord", "selfdrive/sensord", ["./sensord"],
                 enabled=(not EQUINOX_SIMULATOR and not PC), persistent=EON, sigkill=EON),
-  NativeProcess("ubloxd", "selfdrive/locationd", ["./ubloxd"],
-                enabled=(not EQUINOX_SIMULATOR and (not PC or WEBCAM))),
+  # Disabled with the GPS itself: no uBlox is fitted to this car's panda, so
+  # boardd does not start pigeon_thread (PANDA_HAS_GPS in boardd.cc) and
+  # nothing publishes ubloxRaw. ubloxd would spend the drive blocked on a
+  # socket that never delivers. Re-enable both together if GPS hardware
+  # arrives; restore enabled=(not EQUINOX_SIMULATOR and (not PC or WEBCAM)).
+  NativeProcess("ubloxd", "selfdrive/locationd", ["./ubloxd"], enabled=False),
   NativeProcess("ui", "selfdrive/ui", ["./ui"], persistent=True, watchdog_max_dt=(5 if TICI else None)),
   NativeProcess("soundd", "selfdrive/ui/soundd", ["./soundd"], persistent=True),
   NativeProcess("locationd", "selfdrive/locationd", ["./locationd"], enabled=not EQUINOX_SIMULATOR),

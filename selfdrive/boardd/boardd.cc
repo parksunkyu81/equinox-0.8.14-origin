@@ -69,6 +69,20 @@ using namespace std::chrono_literals;
 std::atomic<bool> ignition(false);
 std::atomic<bool> pigeon_active(false);
 
+// No uBlox is fitted to this car's panda. pigeon_thread has nothing to talk to
+// there, and running it anyway is not free: it polls the GPS UART over USB at
+// 100 Hz for as long as the car sits offroad, and at the first ignition it
+// tries ten times to bring a receiver up that is not there -- each attempt at
+// least 700 ms of sleeps plus a burst of USB writes -- before giving up and
+// returning for good. That burst shares the USB bus with CAN, at the start of
+// a drive. The thread also inherits boardd's core 3 and FIFO 54 from main(),
+// one step above controlsd.
+//
+// Flip this back to true if a panda with GPS is ever fitted, and re-enable
+// ubloxd in selfdrive/manager/process_config.py with it -- ubloxRaw has no
+// other publisher, so the two go together.
+constexpr bool PANDA_HAS_GPS = false;
+
 ExitHandler do_exit;
 
 // This file is intentionally independent from swaglog: the EON configuration can
@@ -832,7 +846,9 @@ void boardd_main_thread(std::vector<std::string> serials) {
 
     threads.emplace_back(panda_state_thread, &pm, pandas, getenv("STARTED") != nullptr);
     threads.emplace_back(peripheral_control_thread, peripheral_panda);
-    threads.emplace_back(pigeon_thread, peripheral_panda);
+    if (PANDA_HAS_GPS) {
+      threads.emplace_back(pigeon_thread, peripheral_panda);
+    }
 
     threads.emplace_back(can_send_thread, pandas, getenv("FAKESEND") != nullptr);
     threads.emplace_back(can_recv_thread, pandas);
