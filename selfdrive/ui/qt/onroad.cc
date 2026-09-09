@@ -743,54 +743,96 @@ void NvgWindow::drawHud(QPainter &p) {
 
   //QColor orangeColor = QColor(52, 197, 66, 255);
 
-  float cpu_usage = 0.0f;
+  // Per core, not an average. One mean number is a value no core actually
+  // has here: rtshield spins on the last core at FIFO 1 purely to keep it out
+  // of idle, so it reads 100% for every healthy drive while the others sit
+  // well below -- and averaging the four hid exactly the imbalance this line
+  // is being read for. Cores are numbered from 1 to match how they read on
+  // screen. Memory usage is gone with the average; it was never the number
+  // anyone came to this line for.
   const auto cpu_usage_list = device_state.getCpuUsagePercent();
-
-  if (cpu_usage_list.size() > 0) {
-    for (const auto usage : cpu_usage_list) {
-      cpu_usage += usage;
-    }
-    cpu_usage /= cpu_usage_list.size();
+  constexpr int MAX_CPUS = 8;
+  int cpus[MAX_CPUS] = {};
+  const int n_cpus = std::min((int)cpu_usage_list.size(), MAX_CPUS);
+  for (int i = 0; i < n_cpus; i++) {
+    cpus[i] = cpu_usage_list[i];
   }
 
-  // Nothing on this line moves at repaint rate: cpu and memory come from
+  // Nothing on this line moves at repaint rate: the core usages come from
   // deviceState at 2 Hz, and the rest are tuning values that hold still for
   // long stretches. Reformat only when one of them actually changes, keeping
   // the last string otherwise. This does not avoid the layout pass in
   // drawText -- that is unavoidable for a string drawn without measuring --
   // so it saves the formatting alone.
-  const int mem_usage = device_state.getMemoryUsagePercent();
-  const float info_values[6] = {
+  const float info_values[5] = {
     controls_state.getLatAccelFactor(),
     controls_state.getFriction(),
     controls_state.getSteerRatio(),
     controls_state.getMinTR(),
     controls_state.getGlobalDfMod(),
-    cpu_usage,
   };
+  // The size this line has always been drawn at, and the floor below which it
+  // stops being readable at arm's length.
+  constexpr int INFO_FONT_MAX = 43;
+  constexpr int INFO_FONT_MIN = 24;
+  constexpr int INFO_MARGIN = 20;
   static QString infoText;
-  static float last_values[6] = {};
-  static int last_mem_usage = -1;
-  if (infoText.isEmpty() || mem_usage != last_mem_usage ||
+  static int infoFontSize = INFO_FONT_MAX;
+  static float last_values[5] = {};
+  static int last_cpus[MAX_CPUS] = {};
+  static int last_n_cpus = -1;
+  if (infoText.isEmpty() || n_cpus != last_n_cpus ||
+      !std::equal(cpus, cpus + n_cpus, last_cpus) ||
       !std::equal(std::begin(info_values), std::end(info_values), std::begin(last_values))) {
     std::copy(std::begin(info_values), std::end(info_values), std::begin(last_values));
-    last_mem_usage = mem_usage;
-    infoText.sprintf("CPU(%.0f%%) MEM(%d%%) (LatA:%.3f,Fri:%.3f) SR(%.2f) MIN_TR(%.1f) DF_MOD(%.1f)",
-                        cpu_usage,
-                        mem_usage,
-                        info_values[0],
-                        info_values[1],
-                        info_values[2],
-                        info_values[3],
-                        info_values[4]
-                        );
+    std::copy(cpus, cpus + n_cpus, last_cpus);
+    last_n_cpus = n_cpus;
+
+    infoText.clear();
+    QString part;
+    for (int i = 0; i < n_cpus; i++) {
+      part.sprintf("CPU%d(%d%%) ", i + 1, cpus[i]);
+      infoText += part;
+    }
+    part.sprintf("(LatA:%.3f,Fri:%.3f) SR(%.2f) MIN_TR(%.1f) DF_MOD(%.1f)",
+                    info_values[0],
+                    info_values[1],
+                    info_values[2],
+                    info_values[3],
+                    info_values[4]
+                    );
+    infoText += part;
+
+    // Four cores spelled out is a far longer line than the single average it
+    // replaces -- long enough to run off the right edge at INFO_FONT_MAX -- so
+    // the size is fitted to the width rather than fixed. Text advance is close
+    // enough to linear in pixel size that one measurement at the maximum gives
+    // the answer directly, and integer division rounds toward fitting. Done
+    // here rather than per repaint: it is only worth measuring when the string
+    // it measures has changed.
+    configFont(p, "Open Sans", INFO_FONT_MAX, "Regular");
+    const int avail = rect().width() - 2 * INFO_MARGIN;
+    const int full_w = QFontMetrics(p.font()).horizontalAdvance(infoText);
+    infoFontSize = (full_w > avail && full_w > 0)
+                     ? std::max(INFO_FONT_MIN, INFO_FONT_MAX * avail / full_w)
+                     : INFO_FONT_MAX;
+    // The estimate treats advance as linear in pixel size, which is close but
+    // not exact -- hinting and integer metrics move it a pixel or two either
+    // way, and with three-digit percentages on every core the fit lands within
+    // a few pixels of the edge. Confirm it, and step down if it does not fit,
+    // which from a linear estimate is one step at most.
+    while (infoFontSize > INFO_FONT_MIN) {
+      configFont(p, "Open Sans", infoFontSize, "Regular");
+      if (QFontMetrics(p.font()).horizontalAdvance(infoText) <= avail) break;
+      infoFontSize--;
+    }
   }
 
 
   // info
-  configFont(p, "Open Sans", 43, "Regular");
+  configFont(p, "Open Sans", infoFontSize, "Regular");
   p.setPen(QColor(0, 255, 0, 255));
-  p.drawText(rect().left() + 20, rect().height() - 15, infoText);
+  p.drawText(rect().left() + INFO_MARGIN, rect().height() - 15, infoText);
 
 
   drawBottomIcons(p);
