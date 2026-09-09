@@ -224,6 +224,12 @@ class Controls:
     # The step's phases in the order it runs them, so the emitted dicts read
     # the way the loop does.
     STEP_NAMES = ("wait", "events", "transition", "control", "publish", "buttons")
+    # publish_logs is the largest phase of the step, so it carries a breakdown
+    # of its own: the CarControl and HUD fill, the CI.apply that puts the
+    # frame on CAN, the 75-field controlsState build, its send, and the
+    # remaining message copies -- carState above all, which deep-copies the
+    # whole struct into a fresh message every frame.
+    PUBLISH_NAMES = ("cc", "apply", "cs_fill", "cs_send", "msgs")
 
     def kph_to_clu(self, kph):
         speed_conv_to_clu = CV.MS_TO_KPH if self.is_metric else CV.MS_TO_MPH
@@ -531,6 +537,8 @@ class Controls:
         self._step_max = [0.0] * len(self.STEP_NAMES)
         self._step_frames = 0
         self._step_window_t = sec_since_boot()
+        self._pub_acc = [0.0] * len(self.PUBLISH_NAMES)
+        self._pub_max = [0.0] * len(self.PUBLISH_NAMES)
 
     @staticmethod
     def _diagnostic_enum_value(value):
@@ -1914,6 +1922,8 @@ class Controls:
     def publish_logs(self, CS, start_time, actuators, lac_log):
         """Send actuators and hud commands to the car, send controlsstate and MPC logging"""
 
+        p0 = sec_since_boot()
+
         CC = car.CarControl.new_message()
         CC.enabled = self.enabled
         CC.active = self.active
@@ -1988,6 +1998,7 @@ class Controls:
         if current_alert:
             hudControl.visualAlert = current_alert.visual_alert
 
+        p1 = sec_since_boot()
         if not self.read_only and self.initialized:
             # send car controls over can
             self.last_actuators, can_sends = self.CI.apply(CC, self)
@@ -1997,6 +2008,7 @@ class Controls:
             # out of CC: a nested capnp read is ~10 us, and these two are the
             # actuators passed in and what CI.apply just returned.
             self.steer_limited = abs(actuators.steer - self.last_actuators.steer) > 1e-2
+        p2 = sec_since_boot()
 
         force_decel = (self.sm['driverMonitoringState'].awarenessStatus < 0.) or \
                       (self.state == State.softDisabling)
@@ -2158,8 +2170,10 @@ class Controls:
         elif lat_tuning == 'torque':
           controlsState.lateralControlState.torqueState = lac_log
 
+        p3 = sec_since_boot()
         self.pm.send('controlsState', dat)
 
+        p4 = sec_since_boot()
         # carState
         car_events = self.events.to_msg()
         cs_send = messaging.new_message('carState')
@@ -2189,6 +2203,7 @@ class Controls:
 
         # copy CarControl to pass to CarInterface on the next iteration
         self.CC = CC
+        self._record_publish_timing(p0, p1, p2, p3, p4, sec_since_boot())
 
     def step(self):
         start_time = sec_since_boot()
@@ -2231,8 +2246,9 @@ class Controls:
         not the running total those checkpoints are divided against, so the
         figure grew window over window -- 51 ms then 64 ms, on a loop whose
         frames were 12.9 ms. Its per-step numbers were sound; only the total
-        was wrong. Measuring the same thing directly costs 13 us a frame,
-        0.13% of the budget, which is cheap enough not to need a flag.
+        was wrong. Measuring the same thing directly, with the publish_logs
+        breakdown alongside it, costs 26 us a frame measured on the EON,
+        0.26% of the budget, which is cheap enough not to need a flag.
 
         "wait" is data_sample, which blocks in drain_sock_raw until boardd
         publishes the next CAN frame. It is the loop's slack, not work.
@@ -2276,6 +2292,10 @@ class Controls:
             work_ms=round(1000.0 * (total - acc[0]) / n, 3),
             mean_ms={name: round(1000.0 * acc[i] / n, 3) for i, name in enumerate(names)},
             max_ms={name: round(1000.0 * mx[i], 3) for i, name in enumerate(names)},
+            publish_mean_ms={name: round(1000.0 * self._pub_acc[i] / n, 3)
+                             for i, name in enumerate(self.PUBLISH_NAMES)},
+            publish_max_ms={name: round(1000.0 * self._pub_max[i], 3)
+                            for i, name in enumerate(self.PUBLISH_NAMES)},
         )
         # The write itself lands after t6, so it is outside every delta above.
         # It shows up as one longer loop period in a thousand and nowhere else.
@@ -2283,6 +2303,39 @@ class Controls:
         self._step_max = [0.0] * len(names)
         self._step_frames = 0
         self._step_window_t = t6
+        self._pub_acc = [0.0] * len(self.PUBLISH_NAMES)
+        self._pub_max = [0.0] * len(self.PUBLISH_NAMES)
+
+    def _record_publish_timing(self, p0, p1, p2, p3, p4, p5):
+        """Accumulate the publish_logs breakdown for the current step window.
+
+        Emitted by _record_step_timing rather than separately: one line a
+        window is easier to read than two that have to be matched up, and the
+        two are counted over exactly the same frames.
+
+        Worth breaking out because 850 profiler windows on 2026-09-08 put
+        publish_logs at 4.52 ms a frame, the largest of the four checkpoints
+        in 764 of them, against 2.37 for the control maths and 1.62 for the
+        state transition. It is 278 lines long, so knowing it is the expensive
+        phase is not yet knowing what to change.
+        """
+        acc = self._pub_acc
+        mx = self._pub_max
+        d0 = p1 - p0
+        d1 = p2 - p1
+        d2 = p3 - p2
+        d3 = p4 - p3
+        d4 = p5 - p4
+        acc[0] += d0
+        acc[1] += d1
+        acc[2] += d2
+        acc[3] += d3
+        acc[4] += d4
+        if d0 > mx[0]: mx[0] = d0
+        if d1 > mx[1]: mx[1] = d1
+        if d2 > mx[2]: mx[2] = d2
+        if d3 > mx[3]: mx[3] = d3
+        if d4 > mx[4]: mx[4] = d4
 
 
 def main(sm=None, pm=None, logcan=None):
