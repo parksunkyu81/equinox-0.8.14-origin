@@ -127,6 +127,12 @@ CONTROL_LOOP_MIN_HZ = 99.0
 # is what makes the log readable afterwards.
 CONTROL_CORE_CHECK_FRAMES = max(1, int(1.0 / DT_CTRL))
 CONTROL_CORE_DIAG_PERIOD_S = 10.0
+# Ticks per second behind /proc/self/stat's utime and stime. 100 here, so a
+# one second window resolves this process's own CPU share to 1%.
+try:
+    CLK_TCK = os.sysconf("SC_CLK_TCK") or 100
+except (ValueError, OSError, AttributeError):
+    CLK_TCK = 100
 # Curve slowdown commands this fraction of the speed the curve was entered at.
 # The curvature profile still decides whether a bend is worth acting on; it no
 # longer decides how much speed comes off.
@@ -184,6 +190,39 @@ SafetyModel = car.CarParams.SafetyModel
 
 IGNORED_SAFETY_MODES = [SafetyModel.silent, SafetyModel.noOutput]
 CSID_MAP = {"0": EventName.roadCameraError, "1": EventName.wideRoadCameraError, "2": EventName.driverCameraError}
+
+
+def _read_own_cpu_seconds():
+    """utime + stime for this process, in seconds, or None if /proc will not read.
+
+    Costs about 87us on the EON, which is why it is affordable once a second
+    inside the control loop.
+    """
+    try:
+        with open("/proc/self/stat", "rb") as f:
+            # Everything after the ")" that closes comm is positional, so the
+            # process name cannot shift the fields no matter what it contains.
+            fields = f.read().rsplit(b")", 1)[1].split()
+        return (int(fields[11]) + int(fields[12])) / CLK_TCK
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _read_own_preemptions():
+    """Involuntary context switches for this process, or None if unreadable.
+
+    Only /proc/self/status carries this, and it costs about 220us against the
+    87us of /proc/self/stat, with spikes past 4ms -- the kernel formats some
+    fifty lines to answer. Read it sparingly.
+    """
+    try:
+        with open("/proc/self/status", "rb") as f:
+            for line in f:
+                if line.startswith(b"nonvoluntary_ctxt_switches:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
 
 
 class Controls:
@@ -488,6 +527,8 @@ class Controls:
         # controlsd is driven by can recv, expected at 100Hz
         self.rk = Ratekeeper(100, print_delay_threshold=None)
         self._control_core_diag_t = 0.0
+        self._own_cpu_prev = None
+        self._preempt_prev = None
         # Opt-in, by touching the file below and restarting. Left on, the
         # profiler sorts its checkpoints and prints six lines every iteration --
         # 600 lines a second, into a stdout nothing reads. Checked once here so
@@ -1333,16 +1374,31 @@ class Controls:
         core -- so this fires only once the loop has actually lost rate, which
         is the symptom that matters and the one that shows up as a growing
         cumLagMs.
+
+        cpu_pct cannot say why the rate was lost. The control core reads a flat
+        100.0% for every drive whatever controlsd does, because rtshield spins
+        there at FIFO 1 for the sole purpose of keeping the core out of idle.
+        own_cpu_pct and preempted_per_s split the two explanations: a loop that
+        is off-rate at close to 100% of its own is doing more work than fits in
+        a frame, while one that is off-rate well under that is not being given
+        the core -- and on this device the thing that can take it is boardd,
+        same core 3, FIFO 54 against this process's 53.
         """
         if self.sm.frame % CONTROL_CORE_CHECK_FRAMES:
             return
+        now = sec_since_boot()
+        # Sampled before the rate check so the window is always the ~1 s since
+        # the last check, never the arbitrary gap since the last line written.
+        own_cpu_pct = self._sample_own_cpu(now)
         avg_dt = self.rk.avg_dt
         if avg_dt <= 0.0 or 1.0 / avg_dt >= CONTROL_LOOP_MIN_HZ:
             return
-        now = sec_since_boot()
         if now - self._control_core_diag_t < CONTROL_CORE_DIAG_PERIOD_S:
             return
         self._control_core_diag_t = now
+        extra = self._sample_preemptions(now)
+        if own_cpu_pct is not None:
+            extra["own_cpu_pct"] = own_cpu_pct
         append_process_diagnostic(
             "controlsd_loop_lagging",
             loop_hz=round(1.0 / avg_dt, 2),
@@ -1350,7 +1406,41 @@ class Controls:
             cum_lag_ms=round(-self.rk.remaining * 1000.0, 1),
             control_core_pct=float(cpus[-1]) if cpus else 0.0,
             cpu_pct=[float(c) for c in cpus],
+            **extra,
         )
+
+    def _sample_own_cpu(self, now):
+        """This process's own CPU share since the last check, in percent."""
+        cpu_s = _read_own_cpu_seconds()
+        prev = self._own_cpu_prev
+        self._own_cpu_prev = (now, cpu_s)
+        if cpu_s is None or prev is None or prev[1] is None:
+            return None
+        dt = now - prev[0]
+        if dt <= 0.0:
+            return None
+        return round(100.0 * (cpu_s - prev[1]) / dt, 1)
+
+    def _sample_preemptions(self, now):
+        """Involuntary context switches per second since the last line written.
+
+        Read here rather than every check because /proc/self/status is the
+        expensive half of the pair, and this frame is already paying for a
+        file append. Voluntary switches are left out: the loop sleeps once a
+        frame by design, so only the involuntary ones say anything.
+        """
+        count = _read_own_preemptions()
+        prev = self._preempt_prev
+        self._preempt_prev = (now, count)
+        if count is None or prev is None or prev[1] is None:
+            return {}
+        dt = now - prev[0]
+        if dt <= 0.0:
+            return {}
+        # The window spans whatever ran between two lines, including stretches
+        # where the loop was healthy, so it is reported alongside the rate.
+        return {"preempted_per_s": round((count - prev[1]) / dt, 1),
+                "preempt_window_s": round(dt, 1)}
 
     def data_sample(self):
         """Receive data from sockets and update carState"""
