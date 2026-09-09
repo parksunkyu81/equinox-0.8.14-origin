@@ -64,6 +64,8 @@
 // time to observe that the ignition is actually on.
 constexpr uint64_t USB_POWER_MODE_STARTUP_GRACE_NS = 5ULL * 1000ULL * 1000ULL * 1000ULL;
 constexpr const char *BOARDD_SAFETY_DIAGNOSTICS_PATH = "/data/log/boardd_safety_diagnostics.jsonl";
+constexpr const char *BOARDD_CAN_DIAGNOSTICS_PATH = "/data/log/boardd_can_diagnostics.jsonl";
+constexpr uint64_t CAN_RECV_DIAG_PERIOD_NS = 10ULL * 1000ULL * 1000ULL * 1000ULL;
 using namespace std::chrono_literals;
 
 std::atomic<bool> ignition(false);
@@ -87,11 +89,12 @@ ExitHandler do_exit;
 
 // This file is intentionally independent from swaglog: the EON configuration can
 // run without logmessaged, but post-reboot safety failures still need evidence.
-static void append_boardd_safety_diagnostic(const char *event_type, const std::string &fields = "") {
+static void append_boardd_diagnostic(const char *path, const char *event_type,
+                                     const std::string &fields, bool sync) {
   const std::string line =
     "{\"mono_time_ns\":" + std::to_string(nanos_since_boot()) +
     ",\"event_type\":\"" + event_type + "\"" + fields + "}\n";
-  const int fd = open(BOARDD_SAFETY_DIAGNOSTICS_PATH, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+  const int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
   if (fd < 0) return;
 
   const char *data = line.data();
@@ -102,9 +105,76 @@ static void append_boardd_safety_diagnostic(const char *event_type, const std::s
     data += written;
     remaining -= written;
   }
-  fsync(fd);
+  if (sync) fsync(fd);
   close(fd);
 }
+
+static void append_boardd_safety_diagnostic(const char *event_type, const std::string &fields = "") {
+  append_boardd_diagnostic(BOARDD_SAFETY_DIAGNOSTICS_PATH, event_type, fields, true);
+}
+
+// Timing for the CAN receive loop, which is the loop that sets the control
+// rate. controlsd blocks in drain_sock_raw waiting for the messages published
+// here, and its Ratekeeper only measures -- monitor_time never sleeps -- so
+// controlsd runs at exactly the rate this thread reaches and no faster. Two
+// drives measured controlsd at 98.8 Hz while its own CPU share was anywhere
+// from 78% to 93%, which is the signature of a rate set somewhere other than
+// controlsd. This says whether that somewhere is here, and if so whether the
+// time goes into the USB read or into building and publishing the message.
+//
+// Written without fsync, unlike the safety diagnostics above: this runs inside
+// the 100 Hz loop at FIFO 54, where an fsync can block on flash for long
+// enough to cause the very missed cycle it is trying to measure. Losing the
+// tail of the file to a hard power cut is the cheaper trade.
+struct CanRecvTiming {
+  uint64_t window_start = 0;
+  uint64_t prev_start = 0;
+  uint32_t frames = 0;
+  uint32_t overruns = 0;
+  uint64_t period_sum = 0, period_max = 0;
+  uint64_t recv_sum = 0, recv_max = 0;
+  uint64_t send_sum = 0, send_max = 0;
+
+  void sample(uint64_t t_start, uint64_t t_recv, uint64_t t_sent, bool overran) {
+    if (window_start == 0) {
+      // Baseline frame. It has no predecessor to measure a period against, and
+      // after an emit it is also the frame that paid for the file write, so
+      // leaving it out keeps the write out of its own statistics.
+      window_start = prev_start = t_start;
+      return;
+    }
+
+    const uint64_t period = t_start - prev_start;
+    prev_start = t_start;
+    frames++;
+    if (overran) overruns++;
+    period_sum += period;
+    period_max = std::max(period_max, period);
+    const uint64_t recv = t_recv - t_start;
+    recv_sum += recv;
+    recv_max = std::max(recv_max, recv);
+    const uint64_t sent = t_sent - t_recv;
+    send_sum += sent;
+    send_max = std::max(send_max, sent);
+
+    if (t_start - window_start < CAN_RECV_DIAG_PERIOD_NS || frames == 0) return;
+
+    const double window_s = (t_start - window_start) / 1e9;
+    char fields[512];
+    std::snprintf(fields, sizeof(fields),
+                  ",\"window_s\":%.2f,\"frames\":%u,\"hz\":%.2f,\"overruns\":%u"
+                  ",\"period_ms\":%.3f,\"period_max_ms\":%.3f"
+                  ",\"recv_ms\":%.3f,\"recv_max_ms\":%.3f"
+                  ",\"send_ms\":%.3f,\"send_max_ms\":%.3f",
+                  window_s, frames, window_s > 0.0 ? frames / window_s : 0.0, overruns,
+                  period_sum / (double)frames / 1e6, period_max / 1e6,
+                  recv_sum / (double)frames / 1e6, recv_max / 1e6,
+                  send_sum / (double)frames / 1e6, send_max / 1e6);
+    append_boardd_diagnostic(BOARDD_CAN_DIAGNOSTICS_PATH, "boardd_can_recv_rate", fields, false);
+
+    *this = CanRecvTiming();
+  }
+};
 
 static const char *controls_allowed_reason_name(uint8_t reason) {
   switch (reason) {
@@ -365,13 +435,19 @@ void can_recv_thread(std::vector<Panda *> pandas) {
   const uint64_t dt = 10000000ULL;
   uint64_t next_frame_time = nanos_since_boot() + dt;
   std::vector<can_frame> raw_can_data;
+  CanRecvTiming timing;
 
   while (!do_exit && check_all_connected(pandas)) {
+    const uint64_t t_start = nanos_since_boot();
     bool comms_healthy = true;
     raw_can_data.clear();
     for (const auto& panda : pandas) {
       comms_healthy &= panda->can_receive(raw_can_data);
     }
+    // Split here: everything above is the USB read, holding the per-panda
+    // usb_lock that can_send and the housekeeping threads also queue for.
+    // Everything below is capnp and zmq, which contends with nothing.
+    const uint64_t t_recv = nanos_since_boot();
 
     MessageBuilder msg;
     auto evt = msg.initEvent();
@@ -387,6 +463,7 @@ void can_recv_thread(std::vector<Panda *> pandas) {
 
     uint64_t cur_time = nanos_since_boot();
     int64_t remaining = next_frame_time - cur_time;
+    const bool overran = remaining <= 0;
     if (remaining > 0) {
       std::this_thread::sleep_for(std::chrono::nanoseconds(remaining));
     } else {
@@ -397,6 +474,14 @@ void can_recv_thread(std::vector<Panda *> pandas) {
     }
 
     next_frame_time += dt;
+
+    // Offroad the rate does not matter and nothing reads it, so the window is
+    // dropped rather than logged: the file then holds drives only.
+    if (ignition) {
+      timing.sample(t_start, t_recv, cur_time, overran);
+    } else {
+      timing = CanRecvTiming();
+    }
   }
 }
 
