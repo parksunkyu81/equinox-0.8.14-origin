@@ -19,8 +19,6 @@
 #endif
 
 namespace {
-constexpr float COMFORT_BRAKE = 2.5f;
-constexpr float STOP_DISTANCE = 5.5f;
 
 // Laying a string out is the expensive half of drawing it, and the HUD redraws
 // the same handful of strings frame after frame -- the repaint is driven by the
@@ -67,20 +65,6 @@ QRect cachedTextRect(QHash<QString, QRect> &rects, const QString &text, Measure 
     it = rects.insert(text, measure());
   }
   return it.value();
-}
-
-float desired_follow_distance(float v_ego, float v_lead, float t_follow) {
-  float v_diff_offset = 0.0f;
-  if (v_lead > v_ego) {
-    v_diff_offset = std::clamp(v_lead - v_ego, 0.0f, STOP_DISTANCE / 2.0f);
-    v_diff_offset = std::max(v_diff_offset * ((10.0f - v_ego) / 10.0f), 0.0f);
-  }
-
-  const float safe_obstacle_distance =
-    (v_ego * v_ego) / (2.0f * COMFORT_BRAKE) + t_follow * v_ego + STOP_DISTANCE;
-  const float stopped_equivalence_distance =
-    (v_lead * v_lead) / (2.0f * COMFORT_BRAKE) + v_diff_offset;
-  return std::max(safe_obstacle_distance - stopped_equivalence_distance, 0.0f);
 }
 }
 
@@ -706,15 +690,13 @@ void NvgWindow::drawHud(QPainter &p) {
     const float v_ego = std::max(car_state.getVEgo(), 0.0f);
     const float d_rel = std::max(lead_one.getDRel(), 0.0f);
     const float v_lead = std::max(lead_one.getVLead(), 0.0f);
-    const float desired_distance = desired_follow_distance(v_ego, v_lead,
-                                                           controls_state.getDynamicTRValue());
     if (v_ego > 1.0f) {
       const float time_gap = d_rel / v_ego;
-      lead_info.sprintf("%.0f meters (Desired:%.0f) | %.0f km/h | %.2f s",
-                        d_rel, desired_distance, v_lead * MS_TO_KPH, time_gap);
+      lead_info.sprintf("%.0f meters | %.0f km/h | %.2f s",
+                        d_rel, v_lead * MS_TO_KPH, time_gap);
     } else {
-      lead_info.sprintf("%.0f meters (Desired:%.0f) | %.0f km/h | -- s",
-                        d_rel, desired_distance, v_lead * MS_TO_KPH);
+      lead_info.sprintf("%.0f meters | %.0f km/h | -- s",
+                        d_rel, v_lead * MS_TO_KPH);
     }
   }
   if (leads[0].getProb() > .5) {
