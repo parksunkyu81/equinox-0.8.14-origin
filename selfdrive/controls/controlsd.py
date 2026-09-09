@@ -8,7 +8,6 @@ from numbers import Number
 from cereal import car, log
 from common.numpy_fast import clip
 from common.realtime import sec_since_boot, config_realtime_process, Priority, Ratekeeper, DT_CTRL
-from common.profiler import Profiler
 from common.params import Params, put_nonblocking
 import cereal.messaging as messaging
 from common.conversions import Conversions as CV
@@ -111,13 +110,9 @@ STEER_SAT_WARN_HOLD_S = 0.3
 STEER_SAT_CLEAR_S = 0.5
 # Path deviation that still warrants an immediate prompt with no extra hold.
 STEER_SAT_DEVIATION_M = 0.20
-# Touch this file and restart to profile the control loop; remove it to stop.
-# A file rather than a Param because Params keys are registered in C++ and this
-# is a diagnostic that should cost nothing to carry.
-PROFILE_FLAG_PATH = "/data/controlsd_profile"
-# One diagnostic line per window. Ten seconds is long enough to average out a
+# One step-timing line per window. Ten seconds is long enough to average out a
 # single slow frame and rare enough that the write cannot matter.
-PROFILE_WINDOW_FRAMES = max(1, int(10.0 / DT_CTRL))
+STEP_TIMING_WINDOW_FRAMES = max(1, int(10.0 / DT_CTRL))
 # The control loop targets 100 Hz. Ratekeeper.lagging only trips below 90 Hz,
 # which is far past the point where the loop has started shedding rate -- a
 # drive that averaged 96.1 Hz never tripped it. Log below this instead.
@@ -226,6 +221,9 @@ def _read_own_preemptions():
 
 
 class Controls:
+    # The step's phases in the order it runs them, so the emitted dicts read
+    # the way the loop does.
+    STEP_NAMES = ("wait", "events", "transition", "control", "publish", "buttons")
 
     def kph_to_clu(self, kph):
         speed_conv_to_clu = CV.MS_TO_KPH if self.is_metric else CV.MS_TO_MPH
@@ -529,12 +527,10 @@ class Controls:
         self._control_core_diag_t = 0.0
         self._own_cpu_prev = None
         self._preempt_prev = None
-        # Opt-in, by touching the file below and restarting. Left on, the
-        # profiler sorts its checkpoints and prints six lines every iteration --
-        # 600 lines a second, into a stdout nothing reads. Checked once here so
-        # the loop never touches the filesystem to find out.
-        self.prof = Profiler(os.path.exists(PROFILE_FLAG_PATH))
-        self.prof_frames = 0
+        self._step_acc = [0.0] * len(self.STEP_NAMES)
+        self._step_max = [0.0] * len(self.STEP_NAMES)
+        self._step_frames = 0
+        self._step_window_t = sec_since_boot()
 
     @staticmethod
     def _diagnostic_enum_value(value):
@@ -2196,63 +2192,97 @@ class Controls:
 
     def step(self):
         start_time = sec_since_boot()
-        self.prof.checkpoint("Ratekeeper", ignore=True)
 
         # Sample data from sockets and get a carState
         CS = self.data_sample()
-        self.prof.checkpoint("Sample")
+        t_sample = sec_since_boot()
 
         self.update_events(CS)
+        t_events = sec_since_boot()
 
         if not self.read_only and self.initialized:
             # Update control state
             self.state_transition(CS)
-            self.prof.checkpoint("State transition")
+        t_transition = sec_since_boot()
 
         # Compute actuators (runs PID loops and lateral MPC)
         actuators, lac_log = self.state_control(CS)
-
-        self.prof.checkpoint("State Control")
+        t_control = sec_since_boot()
 
         # Publish data
         self.publish_logs(CS, start_time, actuators, lac_log)
-        self.prof.checkpoint("Sent")
+        t_publish = sec_since_boot()
 
         self.update_button_timers(CS.buttonEvents)
+        self._record_step_timing(start_time, t_sample, t_events, t_transition,
+                                 t_control, t_publish, sec_since_boot())
 
     def controlsd_thread(self):
         while True:
             self.step()
             self.rk.monitor_time()
-            self.record_profile()
 
-    def record_profile(self):
-        """Write one profile line per window, instead of printing every frame.
+    def _record_step_timing(self, t0, t1, t2, t3, t4, t5, t6):
+        """Where the control loop's 10 ms actually goes, averaged over a window.
 
-        The checkpoints are cumulative, so the window is reset after each dump
-        and every figure is milliseconds per iteration inside that window --
-        which is what tells you where a 100 Hz loop's 10 ms went. One file write
-        every PROFILE_WINDOW_FRAMES keeps it out of the per-frame path.
+        Always on, unlike the Profiler this replaces. That one had to be turned
+        on for a drive before it said anything, and its iter_ms was not usable
+        even then: Profiler.reset() clears the per-checkpoint dictionary but
+        not the running total those checkpoints are divided against, so the
+        figure grew window over window -- 51 ms then 64 ms, on a loop whose
+        frames were 12.9 ms. Its per-step numbers were sound; only the total
+        was wrong. Measuring the same thing directly costs 13 us a frame,
+        0.13% of the budget, which is cheap enough not to need a flag.
+
+        "wait" is data_sample, which blocks in drain_sock_raw until boardd
+        publishes the next CAN frame. It is the loop's slack, not work.
+        Everything after it is work, and their sum is what own_cpu_pct sees.
         """
-        if not self.prof.enabled:
-            return
-        self.prof_frames += 1
-        if self.prof_frames < PROFILE_WINDOW_FRAMES:
+        acc = self._step_acc
+        mx = self._step_max
+        d0 = t1 - t0
+        d1 = t2 - t1
+        d2 = t3 - t2
+        d3 = t4 - t3
+        d4 = t5 - t4
+        d5 = t6 - t5
+        acc[0] += d0
+        acc[1] += d1
+        acc[2] += d2
+        acc[3] += d3
+        acc[4] += d4
+        acc[5] += d5
+        # Straight-line rather than a loop over the pairs: at 100 Hz the range()
+        # and its indexing cost more than the six comparisons they would save.
+        if d0 > mx[0]: mx[0] = d0
+        if d1 > mx[1]: mx[1] = d1
+        if d2 > mx[2]: mx[2] = d2
+        if d3 > mx[3]: mx[3] = d3
+        if d4 > mx[4]: mx[4] = d4
+        if d5 > mx[5]: mx[5] = d5
+
+        self._step_frames += 1
+        if self._step_frames < STEP_TIMING_WINDOW_FRAMES:
             return
 
-        # The frame count is kept here rather than read off the profiler: its
-        # own iter counter is only advanced by display(), which is exactly the
-        # call this replaces.
-        iters = float(self.prof_frames)
+        n = float(self._step_frames)
+        total = sum(acc)
+        names = self.STEP_NAMES
         append_process_diagnostic(
-            "controlsd_profile",
-            frames=self.prof_frames,
-            iter_ms=round(1000.0 * self.prof.tot / iters, 3),
-            steps_ms={name: round(1000.0 * secs / iters, 3)
-                      for name, secs in self.prof.cp.items()},
+            "controlsd_step_timing",
+            frames=self._step_frames,
+            window_s=round(t6 - self._step_window_t, 3),
+            step_ms=round(1000.0 * total / n, 3),
+            work_ms=round(1000.0 * (total - acc[0]) / n, 3),
+            mean_ms={name: round(1000.0 * acc[i] / n, 3) for i, name in enumerate(names)},
+            max_ms={name: round(1000.0 * mx[i], 3) for i, name in enumerate(names)},
         )
-        self.prof_frames = 0
-        self.prof.reset(True)
+        # The write itself lands after t6, so it is outside every delta above.
+        # It shows up as one longer loop period in a thousand and nowhere else.
+        self._step_acc = [0.0] * len(names)
+        self._step_max = [0.0] * len(names)
+        self._step_frames = 0
+        self._step_window_t = t6
 
 
 def main(sm=None, pm=None, logcan=None):
