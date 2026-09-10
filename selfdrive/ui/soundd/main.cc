@@ -26,8 +26,15 @@ int main(int argc, char **argv) {
   // Priority 5 matches locationd and paramsd: above the FIFO-1 tier, far below
   // control at 51-54, so it cannot delay a control frame. Both calls sit ahead
   // of QApplication so the Qt audio threads inherit the policy and the mask.
+  //
+  // Cores 0-1, not 0-2: core 2 is modeld's, at FIFO 54, and this device runs
+  // the big supercombo -- 48 MB against the stock 29 MB, with a second image
+  // tensor. That is the heaviest periodic job on the machine sitting at the
+  // second-highest priority on the machine, and it is what changed when the
+  // voice alerts started tearing. Cores 0-1 hold only plannerd at FIFO 51,
+  // which is 20 Hz and short.
   if (Hardware::EON()) {
-    util::set_core_affinity({0, 1, 2});
+    util::set_core_affinity({0, 1});
     util::set_realtime_priority(5);
   }
   setpriority(PRIO_PROCESS, 0, -20);
