@@ -32,7 +32,7 @@ from selfdrive.hardware import HARDWARE, TICI, EON
 from selfdrive.manager.process_config import managed_processes
 
 from selfdrive.ntune import ntune_common_get, ntune_common_enabled, ntune_scc_get, ntune_torque_get
-from selfdrive.road_speed_limiter import road_speed_limiter_get_max_speed, road_speed_limiter_get_active, \
+from selfdrive.road_speed_limiter import road_speed_limiter_get_max_speed, \
   get_road_speed_limiter
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, CONTROL_N
 from selfdrive.car.gm.values import MIN_CURVE_SPEED
@@ -230,6 +230,15 @@ class Controls:
     # remaining message copies -- carState above all, which deep-copies the
     # whole struct into a fresh message every frame.
     PUBLISH_NAMES = ("cc", "apply", "cs_fill", "cs_send", "msgs")
+
+    # update_events, split the same way. It is 1.39 ms and 20% of the loop's
+    # work, and the only phase that does not move with contention, so what
+    # comes out of here is real. setup is the clear and the two add_from_msg
+    # calls; device is deviceState, calibration and the lane-change checks;
+    # mismatch is the panda safety block and its episode recorder; health is
+    # the HW/system checks, liveParameters, the lane-confidence watchdog and
+    # locationd; rest is FCW onward, including df_manager.
+    EVENT_NAMES = ("setup", "device", "mismatch", "health", "rest")
 
     def kph_to_clu(self, kph):
         speed_conv_to_clu = CV.MS_TO_KPH if self.is_metric else CV.MS_TO_MPH
@@ -539,6 +548,8 @@ class Controls:
         self._step_window_t = sec_since_boot()
         self._pub_acc = [0.0] * len(self.PUBLISH_NAMES)
         self._pub_max = [0.0] * len(self.PUBLISH_NAMES)
+        self._ev_acc = [0.0] * len(self.EVENT_NAMES)
+        self._ev_max = [0.0] * len(self.EVENT_NAMES)
 
     @staticmethod
     def _diagnostic_enum_value(value):
@@ -1000,6 +1011,7 @@ class Controls:
 
     def update_events(self, CS):
         """Compute carEvents from carState"""
+        e0 = sec_since_boot()
 
         self.events.clear()
 
@@ -1011,6 +1023,11 @@ class Controls:
         # Don't add any more events if not initialized
         if not self.initialized:
             self.events.add(EventName.controlsInitializing)
+            # Still recorded, so the five phases keep tiling every frame the
+            # step timer counts. Everything past setup is empty on this path,
+            # which only runs for the first few seconds of a drive.
+            e = sec_since_boot()
+            self._record_events_timing(e0, e, e, e, e, e)
             return
 
         panda_states_valid = self.sm.valid["pandaStates"]
@@ -1042,6 +1059,7 @@ class Controls:
 
         self.events.add_from_msg(CS.events)
         self.events.add_from_msg(self.sm['driverMonitoringState'].events)
+        e1 = sec_since_boot()
 
         # Create events for battery, temperature, disk space, and memory
         #if EON and (self.sm['peripheralState'].pandaType != PandaType.uno) and \
@@ -1108,6 +1126,7 @@ class Controls:
 
         #if not CS.canValid:
         #    self.events.add(EventName.canError)
+        e2 = sec_since_boot()
 
         # Panda safety 설정 불일치는 즉시 controlsMismatch로 처리한다.
         # 단, pandaStates 자체가 invalid/stale이면 아래 usbError/commIssue 경로에서 처리한다.
@@ -1187,6 +1206,7 @@ class Controls:
                 panda_safety_matches, include_manager_processes=bool(controls_mismatch_reasons))
             self._record_controls_mismatch_snapshot(controls_mismatch_snapshot)
         self._record_controls_mismatch_episode(controls_mismatch_reasons, controls_mismatch_snapshot)
+        e3 = sec_since_boot()
 
         # Check for HW or system issues
         panda_powering_down = panda_power_down_in_progress(
@@ -1282,6 +1302,8 @@ class Controls:
             if self.cruise_mismatch_counter > int(3. / DT_CTRL):
                 self.events.add(EventName.cruiseMismatch)
 
+        e4 = sec_since_boot()
+
         # Check for FCW (브레이크! 추돌위험)
         stock_long_is_braking = self.enabled and not self.CP.openpilotLongitudinalControl and CS.aEgo < -1.25
         model_fcw = self.sm['modelV2'].meta.hardBrakePredicted and not CS.brakePressed and not stock_long_is_braking
@@ -1368,6 +1390,39 @@ class Controls:
         #  self.events.add(EventName.noTarget)
 
         self.df_manager.update()
+        self._record_events_timing(e0, e1, e2, e3, e4, sec_since_boot())
+
+    def _record_events_timing(self, e0, e1, e2, e3, e4, e5):
+        """Where update_events' 1.4 ms goes, over the same window as the steps.
+
+        Worth splitting because of what the 2026-09-10 drive showed. Every
+        other phase moves with contention -- corr(preempted_per_s, publish) is
+        +0.93, control +0.92 -- and this one does not: +0.02 over 103 windows.
+        It is the only phase whose cost is its own work rather than the core
+        being taken away, which makes it the one place where anything cut is
+        certain to come back.
+
+        The five phases tile the whole method, including the not-initialized
+        early return, so they sum to the "events" step from _record_step_timing
+        and can be checked against it.
+        """
+        acc = self._ev_acc
+        mx = self._ev_max
+        d0 = e1 - e0
+        d1 = e2 - e1
+        d2 = e3 - e2
+        d3 = e4 - e3
+        d4 = e5 - e4
+        acc[0] += d0
+        acc[1] += d1
+        acc[2] += d2
+        acc[3] += d3
+        acc[4] += d4
+        if d0 > mx[0]: mx[0] = d0
+        if d1 > mx[1]: mx[1] = d1
+        if d2 > mx[2]: mx[2] = d2
+        if d3 > mx[3]: mx[3] = d3
+        if d4 > mx[4]: mx[4] = d4
 
     def _record_control_core_load(self, cpus):
         """Record the control core when the 100 Hz loop stops making its rate.
@@ -2018,8 +2073,10 @@ class Controls:
 
         steer_angle_without_offset = math.radians(CS.steeringAngleDeg - params.angleOffsetDeg)
         curvature = -self.VM.calc_curvature(steer_angle_without_offset, CS.vEgo, params.roll)
-        # NDA Add.. (PSK)
-        road_limit_speed, left_dist, max_speed_log = self.cal_max_speed(
+        # NDA Add.. (PSK). Only road_limit_speed is still published; left_dist
+        # and max_speed_log are consumed inside cal_max_speed itself, so they
+        # are unpacked and dropped rather than named.
+        road_limit_speed, _, _ = self.cal_max_speed(
             self.sm.frame, CS.vEgo, self.sm, CS, curvature)
 
         # controlsState
@@ -2044,7 +2101,10 @@ class Controls:
         controlsState.active = self.active
         controlsState.curvature = curvature
         controlsState.state = self.state
-        controlsState.engageable = not self.events.any(ET.NO_ENTRY)
+        # engageable is not written: nothing reads it, and the events.any() it
+        # needed measures 11.3 us on the EON -- the most expensive of the
+        # thirty dead writes removed here, because it was the only one that
+        # had to compute its value first.
         controlsState.longControlState = self.LoC.long_control_state
         controlsState.vPid = float(self.LoC.v_pid)
 
@@ -2065,22 +2125,22 @@ class Controls:
         controlsState.cumLagMs = -self.rk.remaining * 1000.
         controlsState.startMonoTime = int(start_time * 1e9)
         controlsState.forceDecel = bool(force_decel)
-        controlsState.canErrorCounter = self.can_rcv_error_counter
-        controlsState.angleSteers = steer_angle_without_offset * CV.RAD_TO_DEG
 
-        # NDA
-        controlsState.roadLimitSpeedActive = road_speed_limiter_get_active()
+        # NDA. roadLimitSpeedActive and roadLimitSpeedLeftDist are not written:
+        # nothing reads either, and get_active() does a socket recv (6.7 us)
+        # purely to fill one of them. left_dist still comes back from
+        # cal_max_speed, which computes it for its own use.
         controlsState.roadLimitSpeed = road_limit_speed
-        controlsState.roadLimitSpeedLeftDist = left_dist
 
         controlsState.steerRatio = self.VM.sR
         # Report the effective CarParams value after the GM minimum clamp, not
         # the raw ntune request. v0.8.13's additional 0.2 s is logged below.
         controlsState.steerActuatorDelay = float(self.CP.steerActuatorDelay)
 
-        controlsState.sccGasFactor = ntune_scc_get('sccGasFactor')
-        controlsState.sccBrakeFactor = ntune_scc_get('sccBrakeFactor')
-        controlsState.sccCurvatureFactor = ntune_scc_get('sccCurvatureFactor')
+        # sccGasFactor, sccBrakeFactor and sccCurvatureFactor are not written:
+        # nothing reads them, and the three ntune_scc_get calls they needed are
+        # 9.7 us together. The tuning they report still applies -- it is read
+        # where it is used, not here.
 
         # Curve slowdown state consumed by the onroad CURV indicator.
         controlsState.curvDriving = bool(self.is_curv_driving)
@@ -2098,17 +2158,15 @@ class Controls:
         # at 2.2 us a write. Only the five values that actually move are sent.
         # As with the live torque fields, the schema keeps them and they now
         # read as their defaults.
-        if hasattr(self.LaC, 'get_dynamic_debug_torque_params'):
-            dyn_torque = self.LaC.get_dynamic_debug_torque_params()
-            controlsState.dynamicTorqueLatAccelFactor = dyn_torque['latAccelFactor']
-            controlsState.dynamicTorqueFriction = dyn_torque['friction']
-            controlsState.lowSpeedTorqueRawSteer = dyn_torque['lowSpeedTorqueRawSteer']
-            controlsState.lowSpeedTorqueGuardedSteer = dyn_torque['lowSpeedTorqueGuardedSteer']
-            controlsState.lowSpeedTorqueAppliedSteer = dyn_torque['lowSpeedTorqueAppliedSteer']
-            controlsState.laneCenterCorrectionM = float(
-              getattr(lat_plan, 'laneCenterCorrectionM', 0.0))
-            controlsState.laneCenterCorrectionActive = bool(
-              getattr(lat_plan, 'laneCenterCorrectionActive', False))
+        # The five dynamicTorque*/lowSpeedTorque* writes are gone with the rest
+        # of the dead set, and get_dynamic_debug_torque_params() goes with them:
+        # it existed only to fill those five. The two laneCenterCorrection
+        # fields do have a reader and come off lat_plan, not off that call, so
+        # they no longer sit behind a guard that was never about them.
+        controlsState.laneCenterCorrectionM = float(
+          getattr(lat_plan, 'laneCenterCorrectionM', 0.0))
+        controlsState.laneCenterCorrectionActive = bool(
+          getattr(lat_plan, 'laneCenterCorrectionActive', False))
 
         # Dynamic TR
         if self.sm.frame % DYNAMIC_TR_PARAM_REFRESH_FRAMES == 0:
@@ -2119,40 +2177,27 @@ class Controls:
         controlsState.dynamicTRMode = self.dynamic_tr_mode
         controlsState.globalDfMod = float(self.dynamic_tr_global_df_mod)
         controlsState.dynamicTRValue = float(self.sm['dynamicFollowData'].mpcTR)
-        controlsState.followingDistanceRawTR = float(
-          getattr(self.sm['dynamicFollowData'], 'rawTR', 1.3))
-        controlsState.followingDistanceLearnedTROffset = float(
-          getattr(self.sm['dynamicFollowData'], 'learnedTROffset', 0.0))
+        # followingDistanceRawTR and followingDistanceLearnedTROffset are not
+        # written: nothing reads either, and each was a nested capnp read
+        # (~8.7 us) on top of the write.
 
         # Stop-and-go launch diagnostics. These report the controller-accepted
         # request and whether it actually raised the acceleration command.
+        # Only stopAccelBoostActive survives here. The other nine of this group
+        # -- Applied, RawAccel, FinalAccel, Factor, FloorAccel, HillExtraAccel
+        # and both driverLaunchHandoff fields -- were written every frame and
+        # read nowhere. The state they describe still exists on self.LoC and
+        # self.stop_accel_boost_latch for whoever wants to look at it.
         controlsState.stopAccelBoostActive = bool(self.stop_accel_boost_active)
-        controlsState.stopAccelBoostApplied = bool(self.LoC.stop_accel_boost_applied)
-        controlsState.stopAccelBoostRawAccel = float(self.LoC.stop_accel_boost_raw_accel)
-        controlsState.stopAccelBoostFinalAccel = float(self.LoC.stop_accel_boost_final_accel)
-        # The live lead-tapered multiplier, not the fixed ceiling it replaced.
-        controlsState.stopAccelBoostFactor = float(
-          self.stop_accel_boost_latch.boost_factor)
-        controlsState.driverLaunchHandoffActive = bool(
-          self.LoC.driver_launch_handoff_active)
-        controlsState.driverLaunchHandoffShadowAccel = float(
-          self.LoC.driver_launch_handoff_shadow_accel)
-        controlsState.stopAccelBoostFloorAccel = float(
-          self.stop_accel_boost_latch.floor_accel)
-        controlsState.stopAccelBoostHillExtraAccel = float(
-          self.stop_accel_boost_latch.hill_extra_accel)
         # drivingStyleAI* fields are left in the schema (removing capnp fields
         # would break replay of every log recorded before this) but nothing
         # writes them any more, so they read as their defaults.
-        controlsState.commaPedalResistanceProfile = str(self.comma_pedal_profile)
+        # commaPedalResistanceProfile went with them, and it was the expensive
+        # one: a capnp Text write is 9.9 us against 2.0 for a scalar.
         controlsState.commaPedalProfileGain = float(self.comma_pedal_profile_gain)
         # commaPedalLearnedGain is no longer written -- nothing learns a gain.
-        controlsState.commaPedalEffectiveGain = float(self.comma_pedal_effective_gain)
-        controlsState.commaPedalProfileChanging = bool(self.comma_pedal_profile_changing)
-        controlsState.commaPedalRawCommand = float(self.comma_pedal_raw_command)
-        controlsState.commaPedalStyledCommand = float(self.comma_pedal_styled_command)
-        controlsState.commaPedalFinalCommand = float(self.comma_pedal_final_command)
-        controlsState.commaPedalRiseScale = float(self.comma_pedal_rise_scale)
+        # Nor are EffectiveGain, ProfileChanging, RawCommand, StyledCommand,
+        # FinalCommand or RiseScale: same story, no reader.
 
         controlsState.totalCameraOffset = totalCameraOffset
 
@@ -2296,6 +2341,10 @@ class Controls:
                              for i, name in enumerate(self.PUBLISH_NAMES)},
             publish_max_ms={name: round(1000.0 * self._pub_max[i], 3)
                             for i, name in enumerate(self.PUBLISH_NAMES)},
+            events_mean_ms={name: round(1000.0 * self._ev_acc[i] / n, 3)
+                            for i, name in enumerate(self.EVENT_NAMES)},
+            events_max_ms={name: round(1000.0 * self._ev_max[i], 3)
+                           for i, name in enumerate(self.EVENT_NAMES)},
         )
         # The write itself lands after t6, so it is outside every delta above.
         # It shows up as one longer loop period in a thousand and nowhere else.
@@ -2305,6 +2354,8 @@ class Controls:
         self._step_window_t = t6
         self._pub_acc = [0.0] * len(self.PUBLISH_NAMES)
         self._pub_max = [0.0] * len(self.PUBLISH_NAMES)
+        self._ev_acc = [0.0] * len(self.EVENT_NAMES)
+        self._ev_max = [0.0] * len(self.EVENT_NAMES)
 
     def _record_publish_timing(self, p0, p1, p2, p3, p4, p5):
         """Accumulate the publish_logs breakdown for the current step window.
