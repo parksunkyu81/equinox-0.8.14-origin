@@ -52,8 +52,27 @@ void Sound::update() {
     float volume = util::map_val(sm["carState"].getCarState().getVEgo(), 11.f, 20.f, 0.f, 1.0f);
     volume = QAudio::convertVolume(volume, QAudio::LogarithmicVolumeScale, QAudio::LinearVolumeScale);
     volume = util::map_val(volume, 0.f, 1.f, Hardware::MIN_VOLUME, Hardware::MAX_VOLUME);
-    for (auto &[s, loops] : sounds) {
-      s->setVolume(std::round(100 * volume) / 100);
+    volume = std::round(100 * volume) / 100;
+
+    // Writing a volume is an operation on the audio device, and this ran
+    // unconditionally over all 13 effects on every carState update: 260 a
+    // second at UI_FREQ, the clip currently playing included. A 1.5 s voice
+    // line sat through up to 30 of them mid-playback. That is the one
+    // software path 771633b5 and e1e37a0a did not rule out -- both looked at
+    // the level and at when clips start, neither at what is written to a
+    // stream while it is running.
+    //
+    // Only write when the value actually moves, and never into a playing
+    // clip: setAlert gives each sound the current volume as it starts it, so
+    // a line keeps one level for its whole length and nothing writes to the
+    // device in between.
+    if (volume != current_volume) {
+      current_volume = volume;
+      for (auto &[s, loops] : sounds) {
+        if (!s->isPlaying()) {
+          s->setVolume(volume);
+        }
+      }
     }
   }
 
@@ -74,6 +93,10 @@ void Sound::setAlert(const Alert &alert) {
     // play sound
     if (alert.sound != AudibleAlert::NONE) {
       auto &[s, loops] = sounds[alert.sound];
+      // The volume update skips whatever is playing, so a clip that was live
+      // through a speed change still carries the old level. Set it here, where
+      // the write lands before the stream starts rather than into it.
+      s->setVolume(current_volume);
       s->setLoopCount(loops);
       s->play();
     }

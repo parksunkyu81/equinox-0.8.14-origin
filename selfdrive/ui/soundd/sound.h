@@ -36,6 +36,9 @@ protected:
   void setAlert(const Alert &alert);
 
   Alert current_alert = {};
+  // What the effects were last set to, so the volume is only written when it
+  // moves. Starts at the value the constructor gives them.
+  float current_volume = Hardware::MIN_VOLUME;
   QMap<AudibleAlert, QPair<QSoundEffect *, int>> sounds;
   SubMaster sm;
   uint64_t started_frame;
