@@ -280,8 +280,7 @@ class Controls:
             # relaxed to avoid false "device process" alerts.
             ignore_avg_freq = ['radarState', 'longitudinalPlan']
             if EON:
-                ignore_avg_freq += ['driverMonitoringState', 'lateralPlan',
-                                    'dynamicFollowData']
+                ignore_avg_freq += ['lateralPlan', 'dynamicFollowData']
                 # The vision chain -- camerad -> modeld -> locationd -> paramsd --
                 # runs off one clock, so every road-camera frame the model overruns
                 # is lost to all four at once. With the big supercombo the model
@@ -296,9 +295,12 @@ class Controls:
                 # and the alive/valid checks are untouched.
                 ignore_avg_freq += ['modelV2', 'roadCameraState',
                                     'liveLocationKalman', 'liveParameters']
+            # No driverMonitoringState: dmonitoringmodeld and dmonitoringd are
+            # disabled in process_config, and a subscription with no publisher
+            # would fail the alive check and block engagement on commIssue.
             self.sm = messaging.SubMaster(
                 ['deviceState', 'pandaStates', 'peripheralState', 'modelV2', 'liveCalibration',
-                 'driverMonitoringState', 'longitudinalPlan', 'lateralPlan', 'liveLocationKalman', 'dynamicFollowData',
+                 'longitudinalPlan', 'lateralPlan', 'liveLocationKalman', 'dynamicFollowData',
                  'managerState', 'liveParameters', 'radarState'] + self.camera_packets + joystick_packet,
                 ignore_alive=ignore, ignore_avg_freq=ignore_avg_freq)
 
@@ -1067,7 +1069,6 @@ class Controls:
                 self.events.add(EventName.controlsInitializing)
 
         self.events.add_from_msg(CS.events)
-        self.events.add_from_msg(self.sm['driverMonitoringState'].events)
         e1 = sec_since_boot()
 
         # Create events for battery, temperature, disk space, and memory
@@ -1771,8 +1772,8 @@ class Controls:
               can_valid=CS.canValid,
               radar_valid=self.sm.valid['radarState'],
               radar_error=len(self.sm['radarState'].radarErrors) > 0,
-              driver_aware=(
-                float(self.sm['driverMonitoringState'].awarenessStatus) >= 0.0),
+              # Driver monitoring is off, so there is no awareness to lose.
+              driver_aware=True,
               curv_driving=self.is_curv_driving,
               curve_active=(
                 self.curve_pedal_coordinator.engaged or
@@ -2111,8 +2112,9 @@ class Controls:
             self.steer_limited = abs(actuators.steer - self.last_actuators.steer) > 1e-2
         p2 = sec_since_boot()
 
-        force_decel = (self.sm['driverMonitoringState'].awarenessStatus < 0.) or \
-                      (self.state == State.softDisabling)
+        # Only soft-disable forces decel now: the other trigger was driver
+        # monitoring's awareness running out, and monitoring is off.
+        force_decel = self.state == State.softDisabling
 
         # Curvature & Steering angle
         params = self.sm['liveParameters']

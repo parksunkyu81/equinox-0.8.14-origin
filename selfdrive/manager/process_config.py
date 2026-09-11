@@ -11,8 +11,11 @@ procs = [
   # due to qualcomm kernel bugs SIGKILLing camerad sometimes causes page table corruption
   NativeProcess("camerad", "selfdrive/camerad", ["./camerad"], unkillable=True, driverview=True),
   NativeProcess("clocksd", "selfdrive/clocksd", ["./clocksd"]),
+  # Driver monitoring is switched off on this car: the owner does not use the
+  # driver camera. Both halves go together -- dmonitoringd has nothing to read
+  # without the model, and controlsd no longer subscribes to what it publishes.
   NativeProcess("dmonitoringmodeld", "selfdrive/modeld", ["./dmonitoringmodeld"],
-                enabled=(not EQUINOX_SIMULATOR and (not PC or WEBCAM)), driverview=True),
+                enabled=False, driverview=True),
   #NativeProcess("logcatd", "selfdrive/logcatd", ["./logcatd"]),
   NativeProcess("loggerd", "selfdrive/loggerd", ["./loggerd"]),
   NativeProcess("modeld", "selfdrive/modeld", ["./modeld"], enabled=not EQUINOX_SIMULATOR),
@@ -41,7 +44,7 @@ procs = [
   PythonProcess("controlsd", "selfdrive.controls.controlsd"),
   PythonProcess("deleter", "selfdrive.loggerd.deleter", persistent=True),
   PythonProcess("dmonitoringd", "selfdrive.monitoring.dmonitoringd",
-                enabled=(not EQUINOX_SIMULATOR and (not PC or WEBCAM)), driverview=True),
+                enabled=False, driverview=True),
   PythonProcess("logmessaged", "selfdrive.logmessaged", persistent=True),
   PythonProcess("pandad", "selfdrive.boardd.pandad", persistent=True),
   PythonProcess("paramsd", "selfdrive.locationd.paramsd", enabled=not EQUINOX_SIMULATOR),
