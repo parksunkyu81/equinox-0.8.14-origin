@@ -37,7 +37,6 @@ from selfdrive.road_speed_limiter import road_speed_limiter_get_max_speed, \
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, CONTROL_N
 from selfdrive.car.gm.values import MIN_CURVE_SPEED
 #from decimal import Decimal
-from selfdrive.controls.lib.dynamic_follow.df_manager import dfManager
 from selfdrive.controls.lib.stop_accel_boost import (
   StopAccelBoostLatch,
   boost_floor_context_allowed,
@@ -237,7 +236,7 @@ class Controls:
     # calls; device is deviceState, calibration and the lane-change checks;
     # mismatch is the panda safety block and its episode recorder; health is
     # the HW/system checks, liveParameters, the lane-confidence watchdog and
-    # locationd; rest is FCW onward, including df_manager.
+    # locationd; rest is FCW onward.
     EVENT_NAMES = ("setup", "device", "mismatch", "health", "rest")
 
     def kph_to_clu(self, kph):
@@ -292,8 +291,6 @@ class Controls:
                  'driverMonitoringState', 'longitudinalPlan', 'lateralPlan', 'liveLocationKalman', 'dynamicFollowData',
                  'managerState', 'liveParameters', 'radarState'] + self.camera_packets + joystick_packet,
                 ignore_alive=ignore, ignore_avg_freq=ignore_avg_freq)
-
-        self.df_manager = dfManager()
 
         self.can_sock = can_sock
         if can_sock is None:
@@ -1389,7 +1386,9 @@ class Controls:
         #  and self.CP.openpilotLongitudinalControl and CS.vEgo < 0.3:
         #  self.events.add(EventName.noTarget)
 
-        self.df_manager.update()
+        # df_manager.update() is not called: its result was discarded, and it
+        # cost 144 us a frame on core 3 -- a Params file read plus a SubMaster
+        # poll of its own. The planner keeps its own dfManager and uses that.
         self._record_events_timing(e0, e1, e2, e3, e4, sec_since_boot())
 
     def _record_events_timing(self, e0, e1, e2, e3, e4, e5):
