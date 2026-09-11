@@ -239,6 +239,16 @@ class Controls:
     # locationd; rest is FCW onward.
     EVENT_NAMES = ("setup", "device", "mismatch", "health", "rest")
 
+    # state_control, split the same way. At 2.3 ms it is the largest phase of
+    # the loop, and the 2026-09-11 drive had it 81 us a frame slower than
+    # 2026-09-10 at equal preemption with no change to its code. setup is the
+    # vehicle model, ntune torque, CarControl and the stop-accel latch; long is
+    # the accel PID loop and the lead picture; coast is predictive coasting and
+    # the natural-decel learner; lat is the lag-adjusted curvature and
+    # LaC.update; rest is the pedal profile, the saturation prompt and the NaN
+    # guard.
+    CONTROL_NAMES = ("setup", "long", "coast", "lat", "rest")
+
     def kph_to_clu(self, kph):
         speed_conv_to_clu = CV.MS_TO_KPH if self.is_metric else CV.MS_TO_MPH
         return int(kph * CV.KPH_TO_MS * speed_conv_to_clu)
@@ -547,6 +557,8 @@ class Controls:
         self._pub_max = [0.0] * len(self.PUBLISH_NAMES)
         self._ev_acc = [0.0] * len(self.EVENT_NAMES)
         self._ev_max = [0.0] * len(self.EVENT_NAMES)
+        self._ctl_acc = [0.0] * len(self.CONTROL_NAMES)
+        self._ctl_max = [0.0] * len(self.CONTROL_NAMES)
 
     @staticmethod
     def _diagnostic_enum_value(value):
@@ -1423,6 +1435,33 @@ class Controls:
         if d3 > mx[3]: mx[3] = d3
         if d4 > mx[4]: mx[4] = d4
 
+    def _record_control_timing(self, c0, c1, c2, c3, c4, c5):
+        """Where state_control's 2.3 ms goes, over the same window as the steps.
+
+        The 2026-09-11 drive put control 81 us a frame above 2026-09-10 at
+        equal preemption, which cancelled the 117 us that publish gave back,
+        and nothing inside state_control was measured, so it could only be
+        called situational. The five phases tile the whole method, joystick
+        mode included, so they sum to the "control" step.
+        """
+        acc = self._ctl_acc
+        mx = self._ctl_max
+        d0 = c1 - c0
+        d1 = c2 - c1
+        d2 = c3 - c2
+        d3 = c4 - c3
+        d4 = c5 - c4
+        acc[0] += d0
+        acc[1] += d1
+        acc[2] += d2
+        acc[3] += d3
+        acc[4] += d4
+        if d0 > mx[0]: mx[0] = d0
+        if d1 > mx[1]: mx[1] = d1
+        if d2 > mx[2]: mx[2] = d2
+        if d3 > mx[3]: mx[3] = d3
+        if d4 > mx[4]: mx[4] = d4
+
     def _record_control_core_load(self, cpus):
         """Record the control core when the 100 Hz loop stops making its rate.
 
@@ -1634,6 +1673,7 @@ class Controls:
     def state_control(self, CS):
         """Given the state, this function returns an actuators packet"""
 
+        c0 = sec_since_boot()
         # Update VehicleModel
         params = self.sm['liveParameters']
         x = max(params.stiffnessFactor, 0.1)
@@ -1720,6 +1760,7 @@ class Controls:
           lead_relative_speed=dynamic_follow.leadRelativeSpeed if dynamic_follow_valid else 0.0,
           lead_distance=dynamic_follow.leadDistance if dynamic_follow_valid else 0.0)
 
+        c1 = sec_since_boot()
         if not self.joystick_mode:
             # accel PID loop
             pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, CS.vEgo, self.v_cruise_kph * CV.KPH_TO_MS)
@@ -1781,6 +1822,7 @@ class Controls:
             # curve, and speed-limit pedal lift are arbitrated once below so
             # independent smoothers cannot multiply each other.
             self.curve_pedal_final_accel = float(actuators.accel)
+            c2 = sec_since_boot()
 
             # Predictive coasting supplies a final 0..1 pedal ceiling so the
             # profile response cannot add back pedal while a lead is consuming
@@ -1865,6 +1907,7 @@ class Controls:
                 self.events.add(EventName.curveEntry)
             elif self.predictive_coasting.brake_advisory:
                 self.events.add(EventName.predictiveBrakeNeeded)
+            c3 = sec_since_boot()
 
             # Steering PID loop and lateral MPC
             # lat_active = self.active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
@@ -1882,7 +1925,10 @@ class Controls:
                                                                                    self.desired_curvature,
                                                                                    self.desired_curvature_rate,
                                                                                    self.sm['liveLocationKalman'])
+            c4 = sec_since_boot()
         else:
+            # Joystick mode is not split: all of it lands in rest.
+            c2 = c3 = c4 = c1
             self.predictive_coasting.reset()
             # No longitudinal decision was made this frame, so nothing here has
             # established that easing off is what was meant.
@@ -1961,6 +2007,7 @@ class Controls:
                 cloudlog.error(f"actuators.{p} not finite {actuators.to_dict()}")
                 setattr(actuators, p, 0.0)
 
+        self._record_control_timing(c0, c1, c2, c3, c4, sec_since_boot())
         return actuators, lac_log
 
     def update_button_timers(self, buttonEvents):
@@ -2344,6 +2391,10 @@ class Controls:
                             for i, name in enumerate(self.EVENT_NAMES)},
             events_max_ms={name: round(1000.0 * self._ev_max[i], 3)
                            for i, name in enumerate(self.EVENT_NAMES)},
+            control_mean_ms={name: round(1000.0 * self._ctl_acc[i] / n, 3)
+                             for i, name in enumerate(self.CONTROL_NAMES)},
+            control_max_ms={name: round(1000.0 * self._ctl_max[i], 3)
+                            for i, name in enumerate(self.CONTROL_NAMES)},
         )
         # The write itself lands after t6, so it is outside every delta above.
         # It shows up as one longer loop period in a thousand and nowhere else.
@@ -2355,6 +2406,8 @@ class Controls:
         self._pub_max = [0.0] * len(self.PUBLISH_NAMES)
         self._ev_acc = [0.0] * len(self.EVENT_NAMES)
         self._ev_max = [0.0] * len(self.EVENT_NAMES)
+        self._ctl_acc = [0.0] * len(self.CONTROL_NAMES)
+        self._ctl_max = [0.0] * len(self.CONTROL_NAMES)
 
     def _record_publish_timing(self, p0, p1, p2, p3, p4, p5):
         """Accumulate the publish_logs breakdown for the current step window.
