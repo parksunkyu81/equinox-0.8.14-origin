@@ -85,7 +85,15 @@ const LogCameraInfo cameras_logged[] = {
     .downscale = false,
     .has_qcamera = false,
     .trigger_rotate = Hardware::TICI(),
-    .enable = true,
+    // Encoded only when it is going to be written. dcamera.hevc needs
+    // RecordFront, and nothing on the device subscribes to driverEncodeIdx,
+    // yet the encoder ran regardless: a full OMX session converting 600 frames
+    // a minute for a file that was never opened. Measured on the EON with
+    // camerad running, three alternating rounds: 3.0% of a core system-wide,
+    // 1.7 of it in loggerd's own encoder threads and the rest in the kernel.
+    // dmonitoringmodeld takes the driver frames straight from camerad and
+    // does not go through here.
+    .enable = Hardware::TICI() || Params().getBool("RecordFront"),
     .record = Params().getBool("RecordFront"),
   },
   {
