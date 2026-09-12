@@ -21,55 +21,77 @@ class Service:
 
 DCAM_FREQ = 10. if not TICI else 20.
 
+# should_log picks what lands in rlog. Only two questions are asked of these
+# logs, so only what answers them is recorded:
+#
+#   steering quality -- carState (measured angle, torque, EPS torque, faults),
+#   carControl (the steer request and the applied actuatorsOutput), and
+#   controlsState (the lateral controller's error/output/saturated, curvature,
+#   and the latAccelFactor/friction actually in force). carEvents says which
+#   events fired, carParams the static tuning they ran against, and
+#   liveParameters the angle offset, roll and stiffness the curvature maths
+#   needs.
+#
+#   curve fallback -- modelV2 is the profile source and lateralPlan is what
+#   cal_curve_speed falls back to when the model profile is invalid, so both
+#   are needed to say which one was driving and why.
+#
+# errorLogMessage stays because it costs nothing until something breaks.
+#
+# Everything else is off. That includes `can` and `sendcan`, which were the two
+# largest by a wide margin and whose content reaches carState/carControl
+# decoded anyway -- note this is what makes these logs unusable for
+# process_replay of controlsd, which feeds on `can`.
+
 services = {
   # service: (should_log, frequency, qlog decimation (optional))
   # note: the "EncodeIdx" packets will still be in the log
-  "sensorEvents": (True, 100., 100),
-  "gpsNMEA": (True, 9.),
-  "deviceState": (True, 2., 1),
-  "can": (True, 100.),
+  "sensorEvents": (False, 100., 100),
+  "gpsNMEA": (False, 9.),
+  "deviceState": (False, 2., 1),
+  "can": (False, 100.),
   "controlsState": (True, 100., 10),
-  "pandaStates": (True, 2., 1),
-  "peripheralState": (True, 2., 1),
-  "radarState": (True, 20., 5),
+  "pandaStates": (False, 2., 1),
+  "peripheralState": (False, 2., 1),
+  "radarState": (False, 20., 5),
   "roadEncodeIdx": (False, 20., 1),
-  "liveTracks": (True, 20.),
-  "sendcan": (True, 100., 139),
-  "logMessage": (True, 0.),
+  "liveTracks": (False, 20.),
+  "sendcan": (False, 100., 139),
+  "logMessage": (False, 0.),
   "errorLogMessage": (True, 0., 1),
-  "liveCalibration": (True, 4., 4),
-  "androidLog": (True, 0.),
+  "liveCalibration": (False, 4., 4),
+  "androidLog": (False, 0.),
   "carState": (True, 100., 10),
   "carControl": (True, 100., 10),
-  "longitudinalPlan": (True, 20., 5),
-  "procLog": (True, 0.5),
-  "gpsLocationExternal": (True, 10., 10),
-  "ubloxGnss": (True, 10.),
-  "qcomGnss": (True, 2.),
-  "clocks": (True, 1., 1),
-  "ubloxRaw": (True, 20.),
-  "liveLocationKalman": (True, 20., 5),
+  "longitudinalPlan": (False, 20., 5),
+  "procLog": (False, 0.5),
+  "gpsLocationExternal": (False, 10., 10),
+  "ubloxGnss": (False, 10.),
+  "qcomGnss": (False, 2.),
+  "clocks": (False, 1., 1),
+  "ubloxRaw": (False, 20.),
+  "liveLocationKalman": (False, 20., 5),
   "liveParameters": (True, 20., 5),
-  "cameraOdometry": (True, 20., 5),
+  "cameraOdometry": (False, 20., 5),
   "lateralPlan": (True, 20., 5),
-  "thumbnail": (True, 0.2, 1),
+  "thumbnail": (False, 0.2, 1),
   "carEvents": (True, 1., 1),
   "carParams": (True, 0.02, 1),
-  "roadCameraState": (True, 20., 20),
-  "driverCameraState": (True, DCAM_FREQ, DCAM_FREQ),
+  "roadCameraState": (False, 20., 20),
+  "driverCameraState": (False, DCAM_FREQ, DCAM_FREQ),
   "driverEncodeIdx": (False, DCAM_FREQ, 1),
-  "driverState": (True, DCAM_FREQ, DCAM_FREQ / 2),
-  "driverMonitoringState": (True, DCAM_FREQ, DCAM_FREQ / 2),
+  "driverState": (False, DCAM_FREQ, DCAM_FREQ / 2),
+  "driverMonitoringState": (False, DCAM_FREQ, DCAM_FREQ / 2),
   "wideRoadEncodeIdx": (False, 20., 1),
-  "wideRoadCameraState": (True, 20., 20),
+  "wideRoadCameraState": (False, 20., 20),
   "modelV2": (True, 20., 40),
-  "managerState": (True, 2., 1),
-  "uploaderState": (True, 0., 1),
-  "navInstruction": (True, 0., 10),
-  "navRoute": (True, 0.),
-  "navThumbnail": (True, 0.),
+  "managerState": (False, 2., 1),
+  "uploaderState": (False, 0., 1),
+  "navInstruction": (False, 0., 10),
+  "navRoute": (False, 0.),
+  "navThumbnail": (False, 0.),
   "roadLimitSpeed": (False, 0.),
-  "liveTorqueParameters": (True, 4., 1),
+  "liveTorqueParameters": (False, 4., 1),
   # shane
   "dynamicFollowData": (False, 20.),
 
