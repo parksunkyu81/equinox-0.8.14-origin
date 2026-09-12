@@ -150,18 +150,6 @@ CURVE_SLOWDOWN_RELEASE_KPH = CURVE_SLOWDOWN_MIN_SPEED_KPH - 1.0
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
 
-# Lane-confidence watchdog (EventName.laneConfidenceLow). Tuned on
-# 2026-08-26--12-34-51, 11.5 min engaged, 48 driver interventions:
-#   dProb < 0.25, 8 s sustained, 30 s cooldown -> 2 alerts, both immediately
-#   before the driver took over. Loosening the sustain is what makes it noisy,
-#   not the threshold: at 3 s the same 0.25 fires 24 times (~37/hour) because
-#   brief dropouts are normal -- 33 of 72 last under 0.5 s, median 0.99 s.
-# Sample is one night city route, so expect to retune on daytime/highway data.
-LANE_CONF_DPROB = 0.25
-LANE_CONF_SUSTAIN_S = 8.0
-LANE_CONF_COOLDOWN_S = 30.0
-LANE_CONF_MIN_SPEED = 5 * CV.KPH_TO_MS
-
 REPLAY = "REPLAY" in os.environ
 SIMULATION = "SIMULATION" in os.environ
 NOSENSOR = "NOSENSOR" in os.environ
@@ -235,8 +223,7 @@ class Controls:
     # comes out of here is real. setup is the clear and the two add_from_msg
     # calls; device is deviceState, calibration and the lane-change checks;
     # mismatch is the panda safety block and its episode recorder; health is
-    # the HW/system checks, liveParameters, the lane-confidence watchdog and
-    # locationd; rest is FCW onward.
+    # the HW/system checks, liveParameters and locationd; rest is FCW onward.
     EVENT_NAMES = ("setup", "device", "mismatch", "health", "rest")
 
     # state_control, split the same way. At 2.3 ms it is the largest phase of
@@ -436,9 +423,6 @@ class Controls:
         # until the first frame gets there.
         self.torque_lat_accel_factor = 0.0
         self.torque_friction = 0.0
-        # Lane-confidence watchdog, see EventName.laneConfidenceLow.
-        self.lane_conf_low_s = 0.0
-        self.lane_conf_alert_t = -LANE_CONF_COOLDOWN_S
         self.active_cam = False
         self.over_speed_limit = False
 
@@ -1273,22 +1257,14 @@ class Controls:
         if not self.sm['lateralPlan'].mpcSolutionValid and not (EventName.turningIndicatorOn in self.events.names):
             self.events.add(EventName.plannerError)
 
-        # Lane-confidence watchdog. Thresholds measured on 2026-08-26--12-34-51
-        # (11.5 min, 48 driver interventions): dProb < 0.25 sustained 8 s with a
-        # 30 s cooldown fired twice, both immediately before the driver had to
-        # take over. Shorter sustains do not get rarer as the threshold drops --
-        # brief dropouts are normal and frequent, so duration is what separates
-        # trouble from noise. Re-check these against a daytime/highway route.
-        if (self.active and CS.vEgo > LANE_CONF_MIN_SPEED and
-                self.sm['lateralPlan'].dProb < LANE_CONF_DPROB):
-            self.lane_conf_low_s += DT_CTRL
-        else:
-            self.lane_conf_low_s = 0.0
-        if self.lane_conf_low_s >= LANE_CONF_SUSTAIN_S:
-            now = sec_since_boot()
-            if now - self.lane_conf_alert_t >= LANE_CONF_COOLDOWN_S:
-                self.events.add(EventName.laneConfidenceLow)
-                self.lane_conf_alert_t = now
+        # The lane-confidence watchdog that raised EventName.laneConfidenceLow
+        # is gone: it is not wanted on this car. It sustained a dProb < 0.25
+        # count and alerted after 8 s with a 30 s cooldown -- tuned on
+        # 2026-08-26--12-34-51 to fire only twice in 11.5 min, since brief
+        # dropouts are normal (33 of 72 under 0.5 s, median 0.99 s) and a
+        # shorter sustain reached ~37/hour. The EventName stays in car.capnp,
+        # where removing a field would break replay of older logs, but nothing
+        # adds it now and the alert is gone from events.py.
         if not self.sm['liveLocationKalman'].sensorsOK and not NOSENSOR:
             if self.sm.frame > 5 / DT_CTRL:  # Give locationd some time to receive all the inputs
                 self.events.add(EventName.sensorDataInvalid)

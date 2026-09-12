@@ -650,19 +650,12 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
     ET.NO_ENTRY: NoEntryAlert("어뎁티브크루즈를 활성화하세요"),
   },
 
-  # Lane confidence has been on the floor long enough that the car is running
-  # on the model path alone. Sized from 2026-08-26--12-34-51: dProb spends 26%
-  # of engaged driving below the fallback threshold and the driver grabs the
-  # wheel 5.3x more often there, but almost all of it is brief -- 33 of 72
-  # dropouts last under 0.5 s, median 0.99 s. Alerting on those would fire ~37
-  # times an hour and be tuned out. Only the long ones are worth a sound.
-  EventName.laneConfidenceLow: {
-    ET.WARNING: Alert(
-      "핸들을 잡아주세요",
-      "차선 인식 불량",
-      AlertStatus.userPrompt, AlertSize.mid,
-      Priority.LOW, VisualAlert.steerRequired, AudibleAlert.laneLost, 3.),
-  },
+  # EventName.laneConfidenceLow has no entry: the watchdog in controlsd that
+  # raised it is gone, so nothing can reach this alert. The EventName itself
+  # stays in car.capnp -- removing a field would break replay of older logs --
+  # and is now unused like most of that enum. Note that create_alerts indexes
+  # EVENTS without a default, so anything that starts adding it again has to
+  # bring an entry back with it.
 
   EventName.steerTempUnavailable: {
     #ET.SOFT_DISABLE: soft_disable_alert("Steering Temporarily Unavailable"),
