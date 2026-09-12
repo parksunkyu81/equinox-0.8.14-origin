@@ -47,7 +47,6 @@ from selfdrive.controls.lib.curve_speed_limiter import (
 )
 from selfdrive.controls.lib.curve_pedal_coordinator import CurvePedalCoordinator
 from selfdrive.controls.lib.predictive_coasting import PredictiveCoastingCoordinator
-from selfdrive.controls.lib.natural_decel_learner import NaturalDecelLearner, select_road_pitch
 from selfdrive.controls.lib.panda_safety import panda_safety_config_matches, update_panda_safety_readiness
 from selfdrive.controls.lib.process_health import (
   controlsd_communication_ok, expected_not_running_processes,
@@ -377,12 +376,6 @@ class Controls:
         self.curve_pedal_coordinator = CurvePedalCoordinator(DT_CTRL)
         self.predictive_coasting = PredictiveCoastingCoordinator(DT_CTRL)
         self.predictive_coast_pedal_scale = 1.0
-        self.natural_decel_learner = NaturalDecelLearner(params=params)
-        self.natural_decel_status = self.natural_decel_learner.status(0.0)
-        self.natural_decel_pitch_deg = 0.0
-        self.natural_decel_pitch_valid = False
-        self.natural_decel_pitch_fallback = False
-        self.natural_decel_pitch_source = "invalid"
         self.speed_limit_coast_active = False
         self.speed_limit_coast_target_ms = 0.0
         self.speed_limit_coast_distance_m = math.inf
@@ -1872,41 +1865,12 @@ class Controls:
               # coasting uses its own unshifted low-speed behaviour.
               learned_low_speed_coast_offset_s=0.0)
 
-            coast_lane_change = lat_plan.laneChangeState != LaneChangeState.off
-            coast_orientation = self.sm['liveLocationKalman'].calibratedOrientationNED
-            coast_orientation_values = coast_orientation.value
-            coast_pitch_rad = (float(coast_orientation_values[1])
-                               if len(coast_orientation_values) > 1 else math.nan)
-            llk = self.sm['liveLocationKalman']
-            calibration_ok = bool(
-              self.sm.valid['liveCalibration'] and
-              self.sm['liveCalibration'].calStatus == Calibration.CALIBRATED)
-            (self.natural_decel_pitch_deg,
-             self.natural_decel_pitch_valid,
-             self.natural_decel_pitch_fallback,
-             self.natural_decel_pitch_source) = select_road_pitch(
-               coast_pitch_rad,
-               llk_valid=self.sm.valid['liveLocationKalman'],
-               orientation_valid=coast_orientation.valid,
-               inputs_ok=llk.inputsOK,
-               sensors_ok=llk.sensorsOK,
-               calibration_ok=calibration_ok)
-            natural_context_ok = bool(
-              predictive_enabled and self.active and
-              not self.curve_pedal_coordinator.engaged and
-              not CS.leftBlinker and not CS.rightBlinker and not coast_lane_change and
-              CS.canValid)
-            self.natural_decel_status = self.natural_decel_learner.update(
-              v_ego=CS.vEgo,
-              a_ego=CS.aEgo,
-              pedal_output=self.last_actuators.gas,
-              brake_pressed=CS.brakePressed,
-              gas_pressed=CS.gasPressed,
-              context_ok=natural_context_ok,
-              pitch_deg=self.natural_decel_pitch_deg,
-              pitch_valid=self.natural_decel_pitch_valid,
-              pitch_fallback=self.natural_decel_pitch_fallback,
-              dt=DT_CTRL)
+            # NaturalDecelLearner ran here at 94 us a frame, measured on the
+            # device, learning how hard this car slows on its own. Its only
+            # reader was the BRAKE prompt's shadow, so it went with the prompt,
+            # and the road pitch it needed -- calibratedOrientationNED, the
+            # liveCalibration status and the blinker/lane-change context that
+            # decided when a sample counted -- went with it.
 
             if self.corner_alert.active:
                 self.events.add(EventName.curveEntry)

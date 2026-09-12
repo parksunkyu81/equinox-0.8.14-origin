@@ -223,7 +223,6 @@ std::unordered_map<std::string, uint32_t> keys = {
 
     {"closeToRoadEdge", PERSISTENT},
     {"ActiveStopAccelBoost", PERSISTENT},
-    {"NaturalDecelState", PERSISTENT},
     {"AutoShutdown", PERSISTENT},
     {"E2ELong", PERSISTENT},
 
