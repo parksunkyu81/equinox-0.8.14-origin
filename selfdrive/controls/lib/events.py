@@ -1050,12 +1050,16 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
     ET.WARNING: auto_lane_change_alert,
   },
 
-  EventName.predictiveBrakeNeeded: {
-    ET.WARNING: Alert(
-      "BRAKE 준비", "탄력주행만으로 감속이 부족합니다",
-      AlertStatus.userPrompt, AlertSize.mid,
-      Priority.HIGH, VisualAlert.none, AudibleAlert.brakeReady, .4),
-  },
+  # EventName.predictiveBrakeNeeded has no entry: nothing raises it any more.
+  # It told the driver to brake when coasting alone would not make the gap, and
+  # that is the normal state of stopped traffic -- it spoke a 1.5 s line over
+  # and over on a congested road, which is worse than silence because a prompt
+  # heard that often stops being heard at all. There is no threshold that fixes
+  # it either: the car has no brake actuator, so every time coasting is short
+  # of what is needed the statement is true and the driver is already braking.
+  # The EventName stays in car.capnp -- removing a field would break replay of
+  # older logs. Note that create_alerts indexes EVENTS without a default, so
+  # anything that starts adding it again has to bring an entry back with it.
 
   EventName.curveEntry: {
     ET.WARNING: Alert(

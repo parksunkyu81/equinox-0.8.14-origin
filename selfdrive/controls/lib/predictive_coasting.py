@@ -50,12 +50,10 @@ CURVE_FULL_LIFT_S = 0.80
 SOURCE_SPEED_GAP_FULL_LIFT_KPH = 10.0
 SPEED_LIMIT_APPROACH_START_S = 6.0
 SPEED_LIMIT_FULL_LIFT_S = 2.0
-BRAKE_SHADOW_MIN_CONFIDENCE = 0.65
-BRAKE_SHADOW_DECEL_MARGIN_MS2 = 0.20
-BRAKE_BOOTSTRAP_MIN_PRESSURE = 0.55
-BRAKE_BOOTSTRAP_DECEL_MARGIN_MS2 = 0.35
-BRAKE_SHADOW_CONFIRM_S = 0.30
-BRAKE_SHADOW_CLEAR_S = 0.80
+# The BRAKE_SHADOW_*/BRAKE_BOOTSTRAP_* thresholds went with
+# EventName.predictiveBrakeNeeded. They sized a prompt that told the driver to
+# brake, which in stopped traffic is most of the drive -- see the note in
+# events.py. Nothing downstream read the shadow for control.
 
 
 def _finite(value, default=0.0):
@@ -104,23 +102,6 @@ def _positive_or_inf(value):
   return value if value > 0.0 else math.inf
 
 
-def _required_accel_for_speed(v_ego, target_speed, distance=math.inf,
-                              time_s=math.inf):
-  v_ego = max(0.0, _finite(v_ego))
-  target = max(0.0, _finite(target_speed, v_ego))
-  if target >= v_ego:
-    return 0.0
-  distance = _positive_or_inf(distance)
-  time_s = _positive_or_inf(time_s)
-  if math.isfinite(distance):
-    required = (target * target - v_ego * v_ego) / (2.0 * max(distance, 1.0))
-  elif math.isfinite(time_s):
-    required = (target - v_ego) / max(time_s, 0.5)
-  else:
-    return 0.0
-  return float(clip(required, -4.0, 0.0))
-
-
 class PredictiveCoastingCoordinator:
   """Final positive-pedal limiter for learned GM gas-interceptor response.
 
@@ -131,9 +112,6 @@ class PredictiveCoastingCoordinator:
 
   def __init__(self, dt=0.01):
     self.dt = max(1e-3, float(dt))
-    self.brake_shadow_events = 0
-    self.brake_shadow_brake_responses = 0
-    self.brake_shadow_no_brake_resolutions = 0
     self.reset()
 
   def reset(self):
@@ -157,16 +135,6 @@ class PredictiveCoastingCoordinator:
     self.last_pressure = 0.0
     self.source_pressures = {"lead": 0.0, "curve": 0.0, "speed_limit": 0.0}
     self.dominant_source = "none"
-    self.required_decel_ms2 = 0.0
-    self.natural_decel_ms2 = 0.0
-    self.natural_decel_confidence = 0.0
-    self.brake_needed_shadow = False
-    self.brake_advisory = False
-    self.brake_bootstrap = True
-    self.brake_min_pressure = BRAKE_BOOTSTRAP_MIN_PRESSURE
-    self.brake_decel_margin_ms2 = BRAKE_BOOTSTRAP_DECEL_MARGIN_MS2
-    self.brake_shadow_elapsed = 0.0
-    self.brake_shadow_clear_elapsed = BRAKE_SHADOW_CLEAR_S
     self.driver_brake_pressed = False
     self.quick_release_active = False
     self.opening_release_active = False
@@ -206,26 +174,6 @@ class PredictiveCoastingCoordinator:
       self.intervening = True
     return self.pedal_scale
 
-  def _update_brake_shadow(self, candidate, alert_enabled):
-    was_active = self.brake_needed_shadow
-    if candidate:
-      self.brake_shadow_elapsed = min(BRAKE_SHADOW_CONFIRM_S,
-                                      self.brake_shadow_elapsed + self.dt)
-      self.brake_shadow_clear_elapsed = 0.0
-      if self.brake_shadow_elapsed >= BRAKE_SHADOW_CONFIRM_S - 1e-9:
-        self.brake_needed_shadow = True
-    else:
-      self.brake_shadow_elapsed = 0.0
-      self.brake_shadow_clear_elapsed = min(
-        BRAKE_SHADOW_CLEAR_S, self.brake_shadow_clear_elapsed + self.dt)
-      if self.brake_shadow_clear_elapsed >= BRAKE_SHADOW_CLEAR_S - 1e-9:
-        self.brake_needed_shadow = False
-    if self.brake_needed_shadow and not was_active:
-      self.brake_shadow_events += 1
-    elif was_active and not self.brake_needed_shadow:
-      self.brake_shadow_no_brake_resolutions += 1
-    self.brake_advisory = bool(alert_enabled and self.brake_needed_shadow)
-
   def update(self, *, enabled, control_active, requested_accel, v_ego, a_ego,
              brake_pressed, gas_pressed, lead_valid, lead_distance,
              lead_rel_speed, lead_accel, lead_model_prob, effective_tr,
@@ -233,8 +181,7 @@ class PredictiveCoastingCoordinator:
              curve_active=False, curve_target_speed=0.0,
              curve_time_s=math.inf, curve_distance_m=math.inf,
              speed_limit_active=False, speed_limit_target=0.0,
-             speed_limit_distance_m=math.inf, natural_decel_ms2=0.0,
-             natural_decel_confidence=0.0, brake_alert_enabled=False,
+             speed_limit_distance_m=math.inf,
              lead_loss_recovery_active=False,
              launch_boost_floor_active=False,
              positive_recovery_active=False,
@@ -268,19 +215,12 @@ class PredictiveCoastingCoordinator:
       self.recovery_floor_release_active = False
       self.brake_release_active = False
       self.risk_elapsed = 0.0
-      if self.brake_needed_shadow:
-        self.brake_shadow_brake_responses += 1
-      self.brake_needed_shadow = False
-      self.brake_advisory = False
-      self.brake_shadow_elapsed = 0.0
-      self.brake_shadow_clear_elapsed = BRAKE_SHADOW_CLEAR_S
       return self.pedal_scale
 
     plausible_lead = bool(
       radar_valid and lead_valid and
       0.0 < _finite(lead_distance) <= PREDICTIVE_COAST_MAX_LEAD_DISTANCE_M)
     lead_pressure = 0.0
-    lead_required_accel = 0.0
     v_rel = 0.0
     if plausible_lead:
       d_rel = max(0.0, _finite(lead_distance))
@@ -316,12 +256,6 @@ class PredictiveCoastingCoordinator:
           (PREDICTIVE_COAST_ENTER_TTG_S - self.time_to_gap_s) /
           (PREDICTIVE_COAST_ENTER_TTG_S - PREDICTIVE_COAST_FULL_LIFT_TTG_S),
           0.0, 1.0))
-      if lead_pressure > 0.0:
-        horizon = float(clip(self.time_to_gap_s, 1.0,
-                             PREDICTIVE_COAST_ENTER_TTG_S))
-        lead_required_accel = float(clip(
-          a_lead + 2.0 * (self.distance_margin_m + v_rel * horizon) /
-          (horizon * horizon), -4.0, 0.0))
     else:
       self.desired_gap_m = 0.0
       self.distance_margin_m = 0.0
@@ -340,7 +274,6 @@ class PredictiveCoastingCoordinator:
     curve_time = _positive_or_inf(curve_time_s)
     curve_distance = _positive_or_inf(curve_distance_m)
     curve_pressure = 0.0
-    curve_required_accel = 0.0
     if curve_active and curve_target < v_ego:
       speed_ratio = float(clip(
         (v_ego - curve_target) * 3.6 / SOURCE_SPEED_GAP_FULL_LIFT_KPH,
@@ -349,13 +282,10 @@ class PredictiveCoastingCoordinator:
         (CURVE_APPROACH_START_S - curve_time) /
         (CURVE_APPROACH_START_S - CURVE_FULL_LIFT_S), 0.0, 1.0)))
       curve_pressure = speed_ratio * time_ratio
-      curve_required_accel = _required_accel_for_speed(
-        v_ego, curve_target, curve_distance, curve_time)
 
     speed_target = max(0.0, _finite(speed_limit_target, v_ego))
     speed_distance = _positive_or_inf(speed_limit_distance_m)
     speed_pressure = 0.0
-    speed_required_accel = 0.0
     if speed_limit_active and speed_target < v_ego:
       time_to_limit = (speed_distance / max(v_ego, 0.1)
                        if math.isfinite(speed_distance) else 0.0)
@@ -366,8 +296,6 @@ class PredictiveCoastingCoordinator:
         (SPEED_LIMIT_APPROACH_START_S - time_to_limit) /
         (SPEED_LIMIT_APPROACH_START_S - SPEED_LIMIT_FULL_LIFT_S), 0.0, 1.0)))
       speed_pressure = speed_ratio * time_ratio
-      speed_required_accel = _required_accel_for_speed(
-        v_ego, speed_target, speed_distance, time_to_limit)
 
     self.source_pressures = {
       "lead": float(lead_pressure),
@@ -378,33 +306,9 @@ class PredictiveCoastingCoordinator:
     pressure = self.source_pressures[self.dominant_source]
     if pressure <= 0.0:
       self.dominant_source = "none"
-    required_values = [value for value, source_pressure in (
-      (lead_required_accel, lead_pressure),
-      (curve_required_accel, curve_pressure),
-      (speed_required_accel, speed_pressure),
-    ) if source_pressure > 0.0]
-    self.required_decel_ms2 = min(required_values) if required_values else 0.0
-    self.natural_decel_ms2 = max(0.0, _finite(natural_decel_ms2))
-    self.natural_decel_confidence = float(clip(
-      _finite(natural_decel_confidence), 0.0, 1.0))
-    # Do not suppress the BRAKE advisory entirely while the vehicle model is
-    # still learning. Start with conservative thresholds, then blend toward
-    # the normal thresholds as confidence reaches the trusted level.
-    confidence_ratio = float(clip(
-      self.natural_decel_confidence / BRAKE_SHADOW_MIN_CONFIDENCE, 0.0, 1.0))
-    self.brake_bootstrap = bool(
-      self.natural_decel_confidence < BRAKE_SHADOW_MIN_CONFIDENCE)
-    self.brake_min_pressure = (
-      BRAKE_BOOTSTRAP_MIN_PRESSURE + confidence_ratio *
-      (0.20 - BRAKE_BOOTSTRAP_MIN_PRESSURE))
-    self.brake_decel_margin_ms2 = (
-      BRAKE_BOOTSTRAP_DECEL_MARGIN_MS2 + confidence_ratio *
-      (BRAKE_SHADOW_DECEL_MARGIN_MS2 - BRAKE_BOOTSTRAP_DECEL_MARGIN_MS2))
-    shadow_candidate = bool(
-      not fcw and pressure >= self.brake_min_pressure and
-      self.required_decel_ms2 <
-      -self.natural_decel_ms2 - self.brake_decel_margin_ms2)
-    self._update_brake_shadow(shadow_candidate, brake_alert_enabled)
+    # The three *_required_accel values that were reduced into
+    # required_decel_ms2 here are gone with the BRAKE prompt: they were
+    # computed every frame and read only by the shadow that raised it.
     self.last_pressure = pressure
 
     # Never declare an urgent lead hazard from the filtered acceleration alone.

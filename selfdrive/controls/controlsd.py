@@ -383,7 +383,6 @@ class Controls:
         self.natural_decel_pitch_valid = False
         self.natural_decel_pitch_fallback = False
         self.natural_decel_pitch_source = "invalid"
-        self.predictive_brake_alert_enabled = params.get_bool("PredictiveBrakeAlert")
         self.speed_limit_coast_active = False
         self.speed_limit_coast_target_ms = 0.0
         self.speed_limit_coast_distance_m = math.inf
@@ -1867,9 +1866,6 @@ class Controls:
               speed_limit_active=self.speed_limit_coast_active,
               speed_limit_target=self.speed_limit_coast_target_ms,
               speed_limit_distance_m=self.speed_limit_coast_distance_m,
-              natural_decel_ms2=self.natural_decel_status.decel_ms2,
-              natural_decel_confidence=self.natural_decel_status.confidence,
-              brake_alert_enabled=self.predictive_brake_alert_enabled,
               launch_boost_floor_active=bool(
                 boost_floor_context_safe and boost_floor_accel > 0.0),
               # Was a learned offset; the learner is gone, so predictive
@@ -1914,8 +1910,6 @@ class Controls:
 
             if self.corner_alert.active:
                 self.events.add(EventName.curveEntry)
-            elif self.predictive_coasting.brake_advisory:
-                self.events.add(EventName.predictiveBrakeNeeded)
             c3 = sec_since_boot()
 
             # Steering PID loop and lateral MPC

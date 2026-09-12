@@ -65,7 +65,6 @@ def manager_init() -> None:
     ("NewRadarInterface", "0"),
     ("closeToRoadEdge", "0"),
     ("ActiveStopAccelBoost", "0"),
-    ("PredictiveBrakeAlert", "1"),
     ("AutoShutdown", "1"),
     ("E2ELong", "0"),
 
