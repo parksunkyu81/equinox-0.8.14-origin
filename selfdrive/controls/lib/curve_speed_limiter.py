@@ -516,6 +516,7 @@ def calculate_curve_speed(curvatures, v_ego, cruise_speed, min_curve_speed,
 
 
 def corner_alert_lookahead(curvatures, v_ego, distances=None, time_idxs=T_IDXS,
+                           curvature_factor=1.0,
                            min_lat_accel=CORNER_ALERT_LAT_ACCEL,
                            min_req_decel=CORNER_ALERT_REQ_DECEL,
                            min_speed_kph=CORNER_ALERT_MIN_SPEED_KPH,
@@ -549,8 +550,19 @@ def corner_alert_lookahead(curvatures, v_ego, distances=None, time_idxs=T_IDXS,
     dists = None
 
   # Same cornering limit the speed target is built from, so the prompt and the
-  # slowdown agree about what a corner can be taken at.
+  # slowdown agree about what a corner can be taken at -- curvature_factor
+  # included. It used to be dropped here, and that alone made the prompt
+  # unreachable on the corners the car actually slows for: the speed target
+  # aims at 0.85 * sccCurvatureFactor of the physics limit, 0.74 on this car,
+  # so a bend the limiter had already committed to could still look, to the
+  # test below, like one the driver was comfortably slow enough for.
   a_y_max = clip(2.975 - v_ego * 0.0375, 1.85, 2.975)
+  try:
+    factor = float(curvature_factor)
+  except (TypeError, ValueError):
+    factor = 1.0
+  if not math.isfinite(factor) or factor <= 0.0:
+    factor = 1.0
   smoothed = _smoothed_abs_curvatures(values)
   best = none
   for i, curvature in enumerate(smoothed):
@@ -565,16 +577,20 @@ def corner_alert_lookahead(curvatures, v_ego, distances=None, time_idxs=T_IDXS,
     if lead_s > float(max_lead_s) or distance <= 1.0:
       continue
 
-    v_curve = math.sqrt(a_y_max / curvature)
+    v_curve = math.sqrt(a_y_max / curvature) * factor
     if v_curve >= v_ego:
       # Already slow enough for it; there is nothing to tell the driver.
       continue
     req_decel = (v_ego * v_ego - v_curve * v_curve) / (2.0 * distance)
-    if req_decel <= best[2]:
-      continue
     lat_accel = v_ego * v_ego * curvature
-    best = (lat_accel >= float(min_lat_accel) and req_decel >= float(min_req_decel),
-            lat_accel, req_decel, lead_s)
+    fire = lat_accel >= float(min_lat_accel) and req_decel >= float(min_req_decel)
+    # A point that clears both gates outranks any point that does not, however
+    # hard that other point brakes. Ranking on req_decel alone let a near,
+    # shallow point -- one asking for a lot of braking but not deep enough to
+    # be worth a prompt -- evict the corner that had already qualified.
+    if (fire, req_decel) <= (best[0], best[2]):
+      continue
+    best = (fire, lat_accel, req_decel, lead_s)
 
   return best
 
@@ -603,10 +619,32 @@ class CornerAlert:
     self._frames = 0
     self._held = 0.0
 
-  def update(self, curvatures, v_ego, distances=None, time_idxs=T_IDXS, dt=None):
+  def hold(self, dt=None):
+    """Age the hold without new evidence.
+
+    An invalid model frame is an absence of evidence, not evidence that the
+    corner has gone. Resetting on it dropped the prompt the instant the
+    profile dipped under its confidence floor, which is exactly when a corner
+    is filling the camera; the speed limiter rides the same dropouts out on
+    its own invalid-hold count. Bounded by hold_s either way.
+    """
+    dt = self.dt if dt is None else float(dt)
+    self._frames = 0
+    if self.active:
+      self._held -= dt
+      if self._held <= 0.0:
+        self.active = False
+        self.lat_accel = 0.0
+        self.req_decel = 0.0
+        self.lead_s = None
+    return self.active
+
+  def update(self, curvatures, v_ego, distances=None, time_idxs=T_IDXS, dt=None,
+             curvature_factor=1.0):
     dt = self.dt if dt is None else float(dt)
     fire, lat, req, lead = corner_alert_lookahead(
-      curvatures, v_ego, distances=distances, time_idxs=time_idxs)
+      curvatures, v_ego, distances=distances, time_idxs=time_idxs,
+      curvature_factor=curvature_factor)
 
     self._frames = self._frames + 1 if fire else 0
     if fire:

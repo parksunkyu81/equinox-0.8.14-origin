@@ -769,9 +769,11 @@ class Controls:
         if model_profile_valid:
             self.corner_alert.update(model_curvatures, v_ego,
                                      distances=model_distances,
-                                     time_idxs=model_times)
+                                     time_idxs=model_times,
+                                     curvature_factor=curvature_factor)
         else:
-            self.corner_alert.reset()
+            # Momentary model dropout, not a straight road -- let the hold run out.
+            self.corner_alert.hold()
 
         # Coming off the throttle for a bend is a different question from
         # whether LKAS can steer, so this gate is its own number rather than
