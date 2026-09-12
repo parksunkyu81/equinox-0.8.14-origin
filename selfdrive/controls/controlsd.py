@@ -43,7 +43,7 @@ from selfdrive.controls.lib.stop_accel_boost import (
 )
 from selfdrive.controls.lib.curve_speed_limiter import (
   CurveSpeedLimiter, CURVE_SPEED_DISABLED, build_v0813_model_curve_profile, calculate_curve_speed,
-  CornerAlert, model_curve_tuning_band,
+  CornerAlert, model_curve_tuning_band, prepare_profile, CORNER_ALERT_MIN_SPEED_KPH,
 )
 from selfdrive.controls.lib.curve_pedal_coordinator import CurvePedalCoordinator
 from selfdrive.controls.lib.predictive_coasting import PredictiveCoastingCoordinator
@@ -761,6 +761,18 @@ class Controls:
          model_profile_valid, model_profile_diag) = self._model_curve_profile(
           sm, v_ego, measured_curvature, float(self.CP.minSteerSpeed) * CV.MS_TO_KPH)
 
+        # The prompt and the speed limiter read the same profile and each used
+        # to validate and smooth it for itself. Do it once here and hand both
+        # the result. Only worth it above the lower of their two speed gates --
+        # below that neither gets as far as looking at it, and preparing it
+        # would be new work on the frames that had none.
+        profile_prepared = None
+        if (model_profile_valid and
+                float(v_ego) * CV.MS_TO_KPH >= CORNER_ALERT_MIN_SPEED_KPH):
+            profile_prepared = prepare_profile(
+              model_curvatures, time_idxs=model_times, distances=model_distances,
+              trusted=True)
+
         # Corner-entry prompt, decided here on the model profile rather than on
         # whether the curve slowdown engaged. The two are different questions:
         # the slowdown engages on any bend it can shave speed for, while the
@@ -770,7 +782,8 @@ class Controls:
             self.corner_alert.update(model_curvatures, v_ego,
                                      distances=model_distances,
                                      time_idxs=model_times,
-                                     curvature_factor=curvature_factor)
+                                     curvature_factor=curvature_factor,
+                                     prepared=profile_prepared)
         else:
             # Momentary model dropout, not a straight road -- let the hold run out.
             self.corner_alert.hold()
@@ -855,6 +868,9 @@ class Controls:
           "plan_valid": input_valid,
           "distances": distances,
           "source": source,
+          # The fallbacks below hand over lateralPlan curvatures or a single
+          # measured one, which are not what was prepared above.
+          "prepared": profile_prepared if source.startswith("modelV2") else None,
         }
         if time_idxs is not None:
             update_kwargs["time_idxs"] = time_idxs
