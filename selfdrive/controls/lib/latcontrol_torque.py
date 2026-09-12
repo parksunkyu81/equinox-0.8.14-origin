@@ -53,6 +53,9 @@ class LatControlTorque(LatControl):
     self.torque_from_lateral_accel = CI.torque_from_lateral_accel()
     self.use_steering_angle = CP.lateralTuning.torque.useSteeringAngle
     self.steering_angle_deadzone_deg = CP.lateralTuning.torque.steeringAngleDeadzoneDeg
+    # Fixed for the life of the controller, and the deadzone curvature below
+    # needs it in radians on every frame.
+    self.steering_angle_deadzone_rad = math.radians(self.steering_angle_deadzone_deg)
     self.fixed_torque_params = {
       'latAccelFactor': float(clip(
         CP.lateralTuning.torque.latAccelFactor,
@@ -119,9 +122,11 @@ class LatControlTorque(LatControl):
         actual_curvature = -VM.calc_curvature(
           math.radians(CS.steeringAngleDeg - params.angleOffsetDeg),
           CS.vEgo, params.roll)
-        curvature_deadzone = abs(VM.calc_curvature(
-          math.radians(self.steering_angle_deadzone_deg),
-          CS.vEgo, 0.0))
+        # calc_curvature() with roll=0 is curvature_factor(u) * sa / sR plus a
+        # roll compensation of exactly zero, so call the half that does the
+        # work. Same value, one fewer slip-factor-dependent term per frame.
+        curvature_deadzone = abs(
+          VM.curvature_factor(CS.vEgo) * self.steering_angle_deadzone_rad / VM.sR)
       else:
         actual_curvature_vm = -VM.calc_curvature(
           math.radians(CS.steeringAngleDeg - params.angleOffsetDeg),

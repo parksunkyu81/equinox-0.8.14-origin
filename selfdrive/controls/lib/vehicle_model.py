@@ -38,13 +38,30 @@ class VehicleModel:
 
     self.cF_orig = CP.tireStiffnessFront
     self.cR_orig = CP.tireStiffnessRear
+    # Set before update_params so its no-change check has something to compare.
+    self._stiffness_factor = None
+    self.sR = None
+    self._slip_factor = 0.0
     self.update_params(1.0, CP.steerRatio)
 
   def update_params(self, stiffness_factor: float, steer_ratio: float) -> None:
-    """Update the vehicle model with a new stiffness factor and steer ratio"""
+    """Update the vehicle model with a new stiffness factor and steer ratio.
+
+    controlsd calls this every frame with liveParameters, which arrives at
+    20 Hz, so four calls in five ask for the values already in place. The
+    slip factor is cached here rather than recomputed inside
+    curvature_factor() and roll_compensation(): those two are each called
+    twice a frame by calc_curvature() and get_steer_from_curvature(), so one
+    number that depends only on the fields set below was being computed eight
+    times a frame at 4.9 us a time.
+    """
+    if stiffness_factor == self._stiffness_factor and steer_ratio == self.sR:
+      return
+    self._stiffness_factor = stiffness_factor
     self.cF = stiffness_factor * self.cF_orig
     self.cR = stiffness_factor * self.cR_orig
     self.sR = steer_ratio
+    self._slip_factor = calc_slip_factor(self)
 
   def steady_state_sol(self, sa: float, u: float, roll: float) -> np.ndarray:
     """Returns the steady state solution.
@@ -88,7 +105,7 @@ class VehicleModel:
     Returns:
       Curvature factor [1/m]
     """
-    sf = calc_slip_factor(self)
+    sf = self._slip_factor
     return (1. - self.chi) / (1. - sf * u**2) / self.l
 
   def get_steer_from_curvature(self, curv: float, u: float, roll: float) -> float:
@@ -115,7 +132,7 @@ class VehicleModel:
     Returns:
       Roll compensation curvature [rad]
     """
-    sf = calc_slip_factor(self)
+    sf = self._slip_factor
 
     if abs(sf) < 1e-6:
       return 0

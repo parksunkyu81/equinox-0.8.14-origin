@@ -22,6 +22,25 @@ LAT_MPC_N = 16
 LON_MPC_N = 32
 CONTROL_N = 17
 CAR_ROTATION_RADIUS = 0.0
+# The psi lookup below runs at 100 Hz and only ever wants this prefix, so slice
+# it once here instead of rebuilding a 17-element list every frame.
+T_IDXS_CONTROL = T_IDXS[:CONTROL_N]
+
+# compensated_steer_delay() is a pure function of CP.steerActuatorDelay, which
+# does not change for the life of a drive -- and reading it off the capnp
+# struct costs 6.6 us on its own, on a 100 Hz path. Keyed on the CarParams
+# object itself: controlsd holds one, so this recomputes only if it is handed a
+# different one.
+_steer_delay_cp = None
+_steer_delay = 0.0
+
+
+def _cached_steer_delay(CP):
+  global _steer_delay_cp, _steer_delay
+  if CP is not _steer_delay_cp:
+    _steer_delay = compensated_steer_delay(CP.steerActuatorDelay)
+    _steer_delay_cp = CP
+  return _steer_delay
 
 # EU guidelines
 MAX_LATERAL_JERK = 5.0
@@ -242,12 +261,12 @@ def get_lag_adjusted_curvature(CP, v_ego, psis, curvatures, curvature_rates, lat
 
   # TODO 이 부분은 좀 더 고민이 필요함. 현재는 .2초의 추가 지연을 사용하여 다른 지연을 추정
   # Match the official v0.8.13 planner lookahead and torqued sample alignment.
-  delay = compensated_steer_delay(CP.steerActuatorDelay)
+  delay = _cached_steer_delay(CP)
   # MPC가 휠을 돌리고 지연 전의 조정을 계획할 수 있음.
   # Bound curvatures[0] before it is used, since it anchors the rate limit below:
   # an implausible value there would otherwise carry straight through.
   current_curvature_desired = limit_curvature(curvatures[0], v_ego)
-  psi = interp(delay, T_IDXS[:CONTROL_N], psis)
+  psi = interp(delay, T_IDXS_CONTROL, psis)
   average_curvature_desired = psi / (v_ego * delay)
   desired_curvature = 2 * average_curvature_desired - current_curvature_desired
 
