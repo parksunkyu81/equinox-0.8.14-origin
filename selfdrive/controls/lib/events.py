@@ -552,7 +552,14 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
       "핸들을 잡아주세요",
       "조향제어 제한을 초과함",
       AlertStatus.userPrompt, AlertSize.mid,
-      Priority.LOW, VisualAlert.steerRequired, AudibleAlert.steerRequired, 1.),
+      # Silent on purpose. The EPS caps torque at 300 and will not take more,
+      # so on this car saturation is the normal state of any tight corner
+      # rather than a fault -- it fires several times a minute on ordinary
+      # roads. A 1.45 s spoken line at that rate is noise the driver learns to
+      # tune out, which costs the alerts that do need hearing. The banner and
+      # the steering-wheel icon still come up, and steerTempUnavailable keeps
+      # its voice because that one is rare and means the assist actually quit.
+      Priority.LOW, VisualAlert.steerRequired, AudibleAlert.none, 1.),
   },
 
   # Thrown when the fan is driven at >50% but is not rotating
