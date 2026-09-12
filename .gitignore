@@ -98,3 +98,8 @@ models/supercombo_big.thneed
 # verifying a change before it is pushed, not part of what ships to the car.
 # Write them, run them on the device, leave them out of the history.
 selfdrive/controls/tests/test_*.py
+
+# The .thneed is a scons output, like the big model's above: compiled from the
+# tracked .dlc and specific to the GPU that recorded it, so a tracked copy sits
+# permanently modified on the device and stands in the way of every git pull.
+models/supercombo.thneed

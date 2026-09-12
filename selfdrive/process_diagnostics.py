@@ -34,7 +34,13 @@ SIGNAL_REASON_KO = {
   6: "프로세스가 내부 오류를 감지해 abort를 호출했습니다.",
   7: "잘못된 메모리 정렬 또는 접근으로 버스 오류가 발생했습니다.",
   8: "0으로 나누기 등 잘못된 산술 연산이 발생했습니다.",
-  9: "강제 종료되었습니다. 메모리 부족(OOM), watchdog 또는 외부 kill 가능성이 있습니다.",
+  # Do not lead with OOM. On this device every recorded signal 9 has been the
+  # shutdown path killing the processes that hold /data/media open -- loggerd
+  # and, until shutdownd's pattern was fixed, deleter with it -- while the
+  # other nineteen processes were still running and memory was not short.
+  9: "SIGKILL로 즉시 종료되었습니다. 종료/재부팅 중 시스템이 보낸 신호일 가능성이 가장 높습니다. "
+     "메모리 부족(OOM)이나 watchdog도 가능하므로, 같은 시각 다른 프로세스도 함께 죽었는지와 "
+     "당시 여유 메모리를 확인하세요.",
   11: "잘못된 메모리 주소에 접근해 세그멘테이션 오류가 발생했습니다.",
   13: "닫힌 파이프 또는 소켓에 쓰기를 시도했습니다.",
   15: "SIGTERM 종료 요청을 받았습니다.",
