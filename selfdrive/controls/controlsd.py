@@ -431,6 +431,11 @@ class Controls:
         self.slowing_down = False
         self.slowing_down_alert = False
         self.slowing_down_sound_alert = False
+        # The torque tuning actually in force, for the onroad LatA/Fri readout.
+        # Refreshed off the controller in state_control; these are what shows
+        # until the first frame gets there.
+        self.torque_lat_accel_factor = 0.0
+        self.torque_friction = 0.0
         # Lane-confidence watchdog, see EventName.laneConfidenceLow.
         self.lane_conf_low_s = 0.0
         self.lane_conf_alert_t = -LANE_CONF_COOLDOWN_S
@@ -1699,6 +1704,15 @@ class Controls:
                     # temporarily unavailable or contains an invalid value.
                     pass
 
+            # What the onroad LatA/Fri readout shows. Read back off the
+            # controller rather than off ntune so it is the clipped value that
+            # is actually steering the car, and cached here so publish_logs
+            # stays two float writes.
+            fixed = getattr(self.LaC, 'fixed_torque_params', None)
+            if fixed is not None:
+                self.torque_lat_accel_factor = fixed['latAccelFactor']
+                self.torque_friction = fixed['friction']
+
 
         lat_plan = self.sm['lateralPlan']
         long_plan = self.sm['longitudinalPlan']
@@ -2194,23 +2208,25 @@ class Controls:
         controlsState.curvDriving = bool(self.is_curv_driving)
         controlsState.curvSpeed = float(self.curv_speed)
 
-        # latAccelFactor, latAccelOffset, friction and totalBucketPoints were
-        # the live torque learner's report. torqued is disabled and the tuning
-        # in force is the fixed ntune one, already published below as
-        # dynamicTorqueLatAccelFactor/dynamicTorqueFriction. The fields are left
-        # in the schema (removing capnp fields would break replay of every log
-        # recorded before this) but nothing writes them any more.
-        # The other dynamicTorque*/modelCurvature*/lowSpeedTorque* fields were
+        # latAccelFactor and friction are the onroad LatA/Fri readout. They
+        # were the live torque learner's report originally; torqued is
+        # disabled, so what they carry now is the fixed ntune tuning that is
+        # actually steering the car, cached in state_control off the
+        # controller. latAccelOffset and totalBucketPoints stay unwritten --
+        # the learner fed those and nothing reads them. The fields are left in
+        # the schema either way (removing capnp fields would break replay of
+        # every log recorded before this).
+        controlsState.latAccelFactor = float(self.torque_lat_accel_factor)
+        controlsState.friction = float(self.torque_friction)
+        # The dynamicTorque*/modelCurvature*/lowSpeedTorque* fields were
         # written every frame from literals baked into the controller -- the
         # feature they describe is stubbed off, so they carried no information
-        # at 2.2 us a write. Only the five values that actually move are sent.
-        # As with the live torque fields, the schema keeps them and they now
-        # read as their defaults.
-        # The five dynamicTorque*/lowSpeedTorque* writes are gone with the rest
-        # of the dead set, and get_dynamic_debug_torque_params() goes with them:
-        # it existed only to fill those five. The two laneCenterCorrection
-        # fields do have a reader and come off lat_plan, not off that call, so
-        # they no longer sit behind a guard that was never about them.
+        # at 2.2 us a write. They are gone, and with them the
+        # get_dynamic_debug_torque_params() call that existed only to fill the
+        # five of them that moved; the schema keeps the fields and they now
+        # read as their defaults. The two laneCenterCorrection fields do have a
+        # reader and come off lat_plan, not off that call, so they no longer
+        # sit behind a guard that was never about them.
         controlsState.laneCenterCorrectionM = float(
           getattr(lat_plan, 'laneCenterCorrectionM', 0.0))
         controlsState.laneCenterCorrectionActive = bool(
