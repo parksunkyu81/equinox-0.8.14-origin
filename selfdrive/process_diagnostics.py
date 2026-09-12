@@ -66,7 +66,28 @@ def describe_process_exit(exit_code):
   )
 
 
-def _append_bytes(path, payload):
+def _append_bytes(path, payload, durable=False):
+  """Append one record. `durable` costs an fsync, so only crash paths ask for it.
+
+  The fsync used to be unconditional, and on the EON's eMMC it blocks for as
+  long as the flash wants. controlsd writes controlsd_loop_lagging from inside
+  update_events, so the flush landed in the 100 Hz loop. Over 5.1 h of the
+  2026-09-12 drives the worst frame in the "device" slice was 691 us median
+  across the 303 windows that wrote nothing, against 3430 us median, 21 ms at
+  the 95th percentile and 1.09 s at worst across the 1537 that wrote a line.
+  The slice's own work is the 691; everything above it was this call.
+
+  It was also self-feeding: that record is only written once the loop has
+  already lost rate, so the flush that followed cost it more rate. 1310 of them
+  in 5.1 h, one every 14 s.
+
+  Without the fsync the bytes sit in the page cache and reach flash on the
+  kernel's own schedule. A power cut can drop the last few seconds, which for
+  periodic telemetry is a fair price for a loop that keeps its frames. Anything
+  written because something has already gone wrong -- a crash, a traceback, a
+  process that exited -- still passes durable=True: those are rare, written off
+  the control thread, and are exactly what a power cut would otherwise erase.
+  """
   os.makedirs(os.path.dirname(path), exist_ok=True)
   fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
   try:
@@ -76,7 +97,8 @@ def _append_bytes(path, payload):
       if written <= 0:
         raise OSError("failed to append process diagnostic")
       remaining = remaining[written:]
-    os.fsync(fd)
+    if durable:
+      os.fsync(fd)
   finally:
     os.close(fd)
 
@@ -100,13 +122,13 @@ def append_abort_process_log(process_name, pid, exit_code, reason=None,
   ).encode("utf-8")
 
   try:
-    _append_bytes(path, line)
+    _append_bytes(path, line, durable=True)
     return True
   except Exception:
     return False
 
 
-def _append_json_diagnostic(path, event_type, **fields):
+def _append_json_diagnostic(path, event_type, durable=False, **fields):
   """Persist one diagnostic as a single JSON line."""
   record = {
     "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -117,17 +139,28 @@ def _append_json_diagnostic(path, event_type, **fields):
 
   try:
     line = (json.dumps(record, ensure_ascii=False, separators=(",", ":"), default=str) + "\n").encode("utf-8")
-    _append_bytes(path, line)
+    _append_bytes(path, line, durable=durable)
     return True
   except Exception:
     return False
 
 
-def append_process_diagnostic(event_type, **fields):
-  """Persist one process/communication diagnostic as a single JSON line."""
-  return _append_json_diagnostic(PROCESS_DIAGNOSTICS_PATH, event_type, **fields)
+def append_process_diagnostic(event_type, durable=False, **fields):
+  """Persist one process/communication diagnostic as a single JSON line.
+
+  durable=True belongs only to a process that is not running a control loop --
+  manager and its supervisor -- where the record describes a failure that has
+  to survive the power going away. It is a named parameter rather than one of
+  **fields, so a diagnostic cannot carry a field called durable.
+  """
+  return _append_json_diagnostic(PROCESS_DIAGNOSTICS_PATH, event_type,
+                                 durable=durable, **fields)
 
 
 def append_controls_mismatch_diagnostic(event_type, **fields):
-  """Persist a controls-mismatch episode without relying on logmessaged."""
+  """Persist a controls-mismatch episode without relying on logmessaged.
+
+  Never durable: controlsd writes this from its own loop, and the worst flush
+  seen on 2026-09-12 was 54 ms, which is five missed frames.
+  """
   return _append_json_diagnostic(CONTROLS_MISMATCH_DIAGNOSTICS_PATH, event_type, **fields)

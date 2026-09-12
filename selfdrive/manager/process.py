@@ -50,6 +50,8 @@ def launcher(proc: str, name: str) -> None:
     traceback_text = traceback.format_exc()
     append_process_diagnostic(
       "python_process_exception",
+      # Last thing this process does before it dies, so flush it.
+      durable=True,
       process={"name": name, "module": proc, "pid": os.getpid()},
       exception_type=type(exc).__name__,
       exception_message=str(exc),

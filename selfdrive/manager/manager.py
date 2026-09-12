@@ -221,6 +221,9 @@ def manager_thread() -> None:
       name, pid, exit_code = dead_process
       append_process_diagnostic(
         "manager_process_exit",
+        # manager, not a control loop, and the process it names has already
+        # gone. Worth an fsync: a power cut right after is the likely case.
+        durable=True,
         started=bool(started),
         process={"name": name, "pid": pid, "exit_code": exit_code},
         manager_processes=process_states,
