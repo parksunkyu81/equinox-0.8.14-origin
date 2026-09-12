@@ -10,6 +10,25 @@ CURVE_SPEED_DISABLED = 255.0
 # and output filters below continue to reject abrupt model changes.
 CURVE_DECEL_MPS2 = 0.8
 CURVE_ACTIVATION_MARGIN_MS = 0.5
+# A bend has to be a corner before the car lifts for it. Without this the only
+# question asked was "does this point want less than the set speed", and with
+# curvature_factor at 0.85 * sccCurvatureFactor -- 0.74 on this car -- that is
+# nearly every bend on the road. Swept against constant-radius approaches, the
+# limiter was engaging from 1.3 m/s^2 of lateral demand upward: a 600 m sweeper
+# at 100 km/h, a 350 m one at 80, a 150 m one at 60. Each took the flat 10%
+# CURVE_ENTRY_SPEED_FACTOR cut off the set speed, which the car behind reads as
+# braking for nothing.
+#
+# 2.0 m/s^2 is roughly what a curve built to the road design minimum for its own
+# design speed demands -- R_min = V^2 / 26.7 works out to 2.06 m/s^2 at V, at
+# every speed. So this slows for corners at or past the sharpest one the road is
+# supposed to contain and leaves the rest alone, which is also the threshold the
+# corner-entry prompt already uses.
+CURVE_ENGAGE_LAT_ACCEL = 2.0
+# Engaging takes 10% off the speed, which takes 19% off the lateral demand, so a
+# corner that just cleared 2.0 would fall back through it and chatter. Release
+# below 0.81 * 2.0 = 1.62 so the engagement cannot undo its own condition.
+CURVE_ENGAGE_RELEASE_LAT_ACCEL = 1.5
 # This used to read "do not turn a modest cruise-speed reduction into the fixed
 # curve target", and with a fixed target that was the right instinct: any curve
 # that got past this skip was commanded all the way down to MIN_CURVE_SPEED, so
@@ -448,6 +467,7 @@ def calculate_curve_speed_details(curvatures, v_ego, cruise_speed, min_curve_spe
     "selected_time_s": None,
     "selected_distance_m": None,
     "selected_curvature": 0.0,
+    "selected_lat_accel": 0.0,
     "max_curvature": 0.0,
     "deep_curve_points": 0,
     "deep_speed_threshold_ms": None,
@@ -485,6 +505,7 @@ def calculate_curve_speed_details(curvatures, v_ego, cruise_speed, min_curve_spe
       diag["selected_time_s"] = float(t)
       diag["selected_distance_m"] = float(distance)
       diag["selected_curvature"] = float(curvature)
+      diag["selected_lat_accel"] = float(v_ego * v_ego * curvature)
 
   diag["values_valid"] = True
   if allowed_now >= cruise_speed - CURVE_ACTIVATION_MARGIN_MS:
@@ -676,6 +697,7 @@ class CurveSpeedLimiter:
     self.speed_ms = CURVE_SPEED_DISABLED
     self.curve_frames = 0
     self.invalid_frames = 0
+    self.lat_gate_open = False
     self.last_diag = {
       "source": "disabled",
       "values_valid": False,
@@ -710,6 +732,18 @@ class CurveSpeedLimiter:
       raw_speed = CURVE_SPEED_DISABLED
     else:
       self.invalid_frames = 0
+
+    # Is the point the target was built from a corner, or just a bend? Gentle
+    # ones are left to the driver: lifting for them is a slowdown the car
+    # behind cannot see a reason for. Hysteresis because the lift itself
+    # lowers the demand that justified it -- see the constants.
+    lat_accel = float(diag.get("selected_lat_accel", 0.0))
+    gate = CURVE_ENGAGE_RELEASE_LAT_ACCEL if self.lat_gate_open else CURVE_ENGAGE_LAT_ACCEL
+    self.lat_gate_open = bool(lat_accel >= gate)
+    diag["lat_gate_open"] = self.lat_gate_open
+    diag["lat_gate_threshold"] = float(gate)
+    if not self.lat_gate_open:
+      raw_speed = CURVE_SPEED_DISABLED
 
     curve_detected = raw_speed < CURVE_SPEED_DISABLED
     self.curve_frames = self.curve_frames + 1 if curve_detected else 0
