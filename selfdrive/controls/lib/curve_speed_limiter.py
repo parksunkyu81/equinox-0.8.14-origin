@@ -145,10 +145,22 @@ CORNER_ALERT_REQ_DECEL = 0.25
 # category -- tight corners taken in the twenties, which this route has and the
 # old threshold could not see at all.
 #
-# It also costs a little work: controlsd prepares the shared model profile above
-# the lower of the two speed gates, so prepare_profile() now runs in the 20-30
-# km/h band where it did not. That is ~91 us of smoothing at 40 Hz, 0.36% of a
-# core, and only while the car is in that band.
+# It costs work in the 20-30 km/h band, in two places rather than the one that
+# is obvious. controlsd prepares the shared model profile above the lower of the
+# two speed gates, so prepare_profile() now runs there -- but the larger half is
+# corner_alert_lookahead itself, which used to return at its own speed check and
+# now walks the profile. Measured on the device against a 16-point profile,
+# which is what build_v0813_model_curve_profile produces in 80% of frames:
+#
+#   prepare_profile(trusted=True)                82.6 us
+#   corner_alert_lookahead, loop walked         150.4 us
+#   corner_alert_lookahead, old early return      3.7 us
+#   added, at the 40 Hz cal_curve_speed rate    229.2 us -> 0.92% of a core
+#
+# That is 0.092 ms on a controlsd tick whose work was 5.325 ms of its 10 ms, so
+# 53.2% of a core becomes 54.1% while the car is in the band. Over a whole drive
+# it disappears: the band was 9.4% of route 2026-09-13--01-44-20, which puts the
+# average at 0.09% of a core.
 CORNER_ALERT_MIN_SPEED_KPH = 20.0
 # How far ahead the corner may be and still be worth prompting about. The model
 # resolves a corner about 20-45 m out, which is 2-3 s at these speeds, so this
