@@ -198,6 +198,29 @@ CORNER_ALERT_MAX_LEAD_S = 4.0
 # then hold it up long enough to read and to brake against.
 CORNER_ALERT_CONFIRM_FRAMES = 2
 CORNER_ALERT_HOLD_S = 2.5
+# One approach, one prompt. On route 2026-09-13--10-08-06 the prompt came up
+# fourteen times for eight corners: +1292 s and +1296 s were the same bend,
+# +1564, +1569 and +1574 s the same 3.81 m/s^2 corner, +2081 and +2087 s the
+# same one again. The hold above runs out while the car is still approaching,
+# the model profile re-crosses the gate a second or two later, and the driver
+# is told again about the corner they are already braking for. A prompt heard
+# three times for one corner is the same failure as a prompt heard on an easy
+# bend: it stops being read.
+#
+# A repeat is recognised by where the corner is rather than by how long ago the
+# last prompt was. While the car closes on the corner it was told about, every
+# re-detection sits at a shorter lead than the one that raised the prompt. So a
+# second prompt needs either a corner further away than the announced one was
+# when last seen -- which is what an unannounced corner looks like, since it
+# enters at the far edge of CORNER_ALERT_MAX_LEAD_S -- or one materially deeper
+# than what was announced, so a corner that reads worse on a second look still
+# gets through.
+#
+# Timing is deliberately not the test. A cooldown long enough to cover the
+# observed repeats (0.4 to 4.0 s of silence between them) would also cover the
+# second half of an S-bend at these speeds.
+CORNER_ALERT_REARM_LEAD_MARGIN_S = 0.5
+CORNER_ALERT_REARM_DEEPER = 1.25
 
 MODEL_TRAJECTORY_SIZE = 33
 MODEL_CURVE_MIN_TIME_S = 0.50
@@ -801,7 +824,8 @@ class CornerAlert:
   The raw test moves with the model profile and on its own produces episodes a
   tenth of a second long. This makes it something a driver can act on: it has
   to be true twice running to come up, and once up it stays for long enough to
-  read and brake against.
+  read and brake against. It also comes up once per corner rather than once
+  per re-detection -- see CORNER_ALERT_REARM_LEAD_MARGIN_S.
   """
 
   def __init__(self, dt=CURVE_PLAN_DT, confirm_frames=CORNER_ALERT_CONFIRM_FRAMES,
@@ -818,6 +842,8 @@ class CornerAlert:
     self.lead_s = None
     self._frames = 0
     self._held = 0.0
+    self._prompted_lead_s = None
+    self._prompted_lat = 0.0
 
   def hold(self, dt=None):
     """Age the hold without new evidence.
@@ -838,6 +864,19 @@ class CornerAlert:
         self.req_decel = 0.0
         self.lead_s = None
     return self.active
+  def _already_announced(self, lat, lead):
+    """Is this the corner the driver has just been told about?
+
+    See CORNER_ALERT_REARM_LEAD_MARGIN_S. Only asked while the prompt is down;
+    a corner that is still on screen cannot repeat itself.
+    """
+    if self._prompted_lead_s is None:
+      return False
+    if lat > self._prompted_lat * CORNER_ALERT_REARM_DEEPER:
+      return False
+    if lead is None:
+      return True
+    return lead <= self._prompted_lead_s + CORNER_ALERT_REARM_LEAD_MARGIN_S
 
   def update(self, curvatures, v_ego, distances=None, time_idxs=T_IDXS, dt=None,
              curvature_factor=1.0, prepared=None):
@@ -846,11 +885,24 @@ class CornerAlert:
       curvatures, v_ego, distances=distances, time_idxs=time_idxs,
       curvature_factor=curvature_factor, prepared=prepared)
 
+    if fire and not self.active and self._already_announced(lat, lead):
+      fire = False
+
     self._frames = self._frames + 1 if fire else 0
     if fire:
       self.lat_accel = lat
       self.req_decel = req
       self.lead_s = lead
+      if self.active:
+        # Keep the reference on the corner as last seen, so it tracks the
+        # approach rather than the moment it was first called.
+        self._prompted_lat = max(self._prompted_lat, lat)
+        if lead is not None:
+          self._prompted_lead_s = lead
+      elif self._frames >= self.confirm_frames:
+        # Newly announced: this is the corner the driver now knows about.
+        self._prompted_lat = lat
+        self._prompted_lead_s = lead
 
     if self._frames >= self.confirm_frames:
       self.active = True
