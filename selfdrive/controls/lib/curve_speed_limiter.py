@@ -29,6 +29,37 @@ CURVE_ENGAGE_LAT_ACCEL = 2.0
 # corner that just cleared 2.0 would fall back through it and chatter. Release
 # below 0.81 * 2.0 = 1.62 so the engagement cannot undo its own condition.
 CURVE_ENGAGE_RELEASE_LAT_ACCEL = 1.5
+
+
+# How much lateral acceleration a corner may be taken at. This sets the speed
+# target, and the corner-entry prompt below reuses it so the two agree about
+# what a corner can be taken at.
+#
+# The ceiling used to be 2.975, which is a comfort number. Steering runs out
+# first: feedforward is lat_accel / latAccelFactor, so at 1.6 the command is
+# already at full scale by 1.6 m/s^2 and anything past that has to come out of
+# P. Measured on route 2026-09-13--01-44-20, hands off the wheel: below 2.0
+# m/s^2 the command saturated 0.25% of the time and the car under-turned by
+# 0.09, while at 2.0 and above it saturated 35% of the time and under-turned by
+# 0.49. A target built around 2.975 therefore asks the car to hold a corner it
+# has no torque for.
+#
+# Cap it at the 2.0 the steering can carry -- the same number
+# CURVE_ENGAGE_LAT_ACCEL already uses to call a bend a corner. The
+# speed-dependent taper is untouched and still binds above 93 km/h, where
+# comfort becomes the tighter of the two.
+CURVE_A_Y_INTERCEPT = 2.975
+CURVE_A_Y_SPEED_SLOPE = 0.0375
+CURVE_A_Y_MIN = 1.85
+CURVE_A_Y_MAX = 2.0
+
+
+def curve_lat_accel_budget(v_ego):
+  """Lateral acceleration a corner may be taken at, at this speed."""
+  return clip(CURVE_A_Y_INTERCEPT - v_ego * CURVE_A_Y_SPEED_SLOPE,
+              CURVE_A_Y_MIN, CURVE_A_Y_MAX)
+
+
 # This used to read "do not turn a modest cruise-speed reduction into the fixed
 # curve target", and with a fixed target that was the right instinct: any curve
 # that got past this skip was commanded all the way down to MIN_CURVE_SPEED, so
@@ -511,7 +542,7 @@ def calculate_curve_speed_details(curvatures, v_ego, cruise_speed, min_curve_spe
       v_ego < 0.0 or cruise_speed <= 0.0 or min_curve_speed <= 0.0 or curvature_factor <= 0.0):
     return CURVE_SPEED_DISABLED, False, diag
 
-  a_y_max = clip(2.975 - v_ego * 0.0375, 1.85, 2.975)
+  a_y_max = curve_lat_accel_budget(v_ego)
   smoothed_curvatures = smoothed_shared
   diag["max_curvature"] = float(max(smoothed_curvatures, default=0.0))
   deep_speed_threshold = max(min_curve_speed + CURVE_DEEP_SPEED_MARGIN_MS, cruise_speed)
@@ -606,7 +637,7 @@ def corner_alert_lookahead(curvatures, v_ego, distances=None, time_idxs=T_IDXS,
   # aims at 0.85 * sccCurvatureFactor of the physics limit, 0.74 on this car,
   # so a bend the limiter had already committed to could still look, to the
   # test below, like one the driver was comfortably slow enough for.
-  a_y_max = clip(2.975 - v_ego * 0.0375, 1.85, 2.975)
+  a_y_max = curve_lat_accel_budget(v_ego)
   try:
     factor = float(curvature_factor)
   except (TypeError, ValueError):
