@@ -1,6 +1,6 @@
 import math
 
-from common.numpy_fast import clip
+from common.numpy_fast import clip, interp
 from selfdrive.modeld.constants import T_IDXS
 
 
@@ -35,29 +35,53 @@ CURVE_ENGAGE_RELEASE_LAT_ACCEL = 1.5
 # target, and the corner-entry prompt below reuses it so the two agree about
 # what a corner can be taken at.
 #
-# The ceiling used to be 2.975, which is a comfort number. Steering runs out
-# first: feedforward is lat_accel / latAccelFactor, so at 1.6 the command is
-# already at full scale by 1.6 m/s^2 and anything past that has to come out of
-# P. Measured on route 2026-09-13--01-44-20, hands off the wheel: below 2.0
-# m/s^2 the command saturated 0.25% of the time and the car under-turned by
-# 0.09, while at 2.0 and above it saturated 35% of the time and under-turned by
-# 0.49. A target built around 2.975 therefore asks the car to hold a corner it
-# has no torque for.
+# This used to be one number: 2.0 under 93 km/h, tapering to 1.85 above it. The
+# 2.0 came from where the steering command runs out -- feedforward is
+# lat_accel / latAccelFactor, so at 1.6 it is at full scale by 1.6 m/s^2 and
+# everything past that has to come out of P. That reasoning was right about the
+# mechanism and wrong to answer it with a constant, because how much a full
+# command is worth depends on speed.
 #
-# Cap it at the 2.0 the steering can carry -- the same number
-# CURVE_ENGAGE_LAT_ACCEL already uses to call a bend a corner. The
-# speed-dependent taper is untouched and still binds above 93 km/h, where
-# comfort becomes the tighter of the two.
-CURVE_A_Y_INTERCEPT = 2.975
-CURVE_A_Y_SPEED_SLOPE = 0.0375
-CURVE_A_Y_MIN = 1.85
-CURVE_A_Y_MAX = 2.0
+# Measured on route 2026-09-13--10-08-06 (41 engaged minutes), counting only
+# frames with the command at full scale, hands off the wheel, while the
+# controller was still asking for more -- so what the steering held, not what
+# the road happened to ask for:
+#
+#   speed        held, median   p75    plan demand p99
+#   10-20 kph    0.53           0.55   1.62
+#   20-30        1.58           1.65   1.93
+#   30-45        1.89           1.93   2.48
+#   45-60        2.98           3.65   3.12
+#   60-80        >= 2.12               1.67
+#
+# So a flat 2.0 promises three times the real authority at 15 km/h and gives
+# away a third of it at 50. Both errors showed up on that drive: five of its
+# fourteen corner prompts were 1.5-2.0 m/s^2 bends at 55-73 km/h that the car
+# held without effort, while its worst under-turn was a 20 km/h corner the
+# budget had called takeable.
+#
+# The table follows the measurement, one breakpoint per band midpoint, each
+# value cut back from the median for margin. Two limits of the data are written
+# into it rather than smoothed over:
+#
+#  - 60-80 is censored. Nothing on that drive demanded more than 1.67 there, so
+#    2.12 is a floor and not a ceiling. 70 km/h therefore stays near it instead
+#    of carrying the 45-60 peak across.
+#  - Above 93 km/h nothing was measured at all, so the old comfort taper is kept
+#    exactly: 2.00 at 93, 1.85 at 108 and above.
+#
+# latAccelFactor is not what to move to chase any of this. Fitted against the
+# road over real cornering only -- |lat accel| >= 0.8 with the command off the
+# cap -- it comes out 1.65 to 1.83 in every speed band against the 1.6 in use.
+# A whole-drive fit says 1.12, but that is the friction band around straight
+# running and it is not a cornering measurement.
+CURVE_A_Y_BP_KPH = (15.0, 25.0, 37.0, 52.0, 70.0, 93.0, 108.0)
+CURVE_A_Y_V = (0.60, 1.50, 1.80, 2.60, 2.20, 2.00, 1.85)
 
 
 def curve_lat_accel_budget(v_ego):
   """Lateral acceleration a corner may be taken at, at this speed."""
-  return clip(CURVE_A_Y_INTERCEPT - v_ego * CURVE_A_Y_SPEED_SLOPE,
-              CURVE_A_Y_MIN, CURVE_A_Y_MAX)
+  return interp(v_ego * 3.6, CURVE_A_Y_BP_KPH, CURVE_A_Y_V)
 
 
 # This used to read "do not turn a modest cruise-speed reduction into the fixed
