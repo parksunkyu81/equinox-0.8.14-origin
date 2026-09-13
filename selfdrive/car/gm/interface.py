@@ -20,6 +20,35 @@ GearShifter = car.CarState.GearShifter
 
 PEDAL_MAIN_ON_SIGNAL_SYNC_FRAMES = int(1.0 / DT_CTRL)
 
+# This car does not hold a straight line on its own. On route 2026-09-13--01-44-20,
+# over the 341 s of hands-off straight running (|desired lateral accel| < 0.15),
+# the wheel sat at about -2.3 deg and the integrator carried +0.071 of steering
+# command for 94% of that time -- 7% of the EPS torque range spent on going
+# straight, every frame, and ramped up from zero again on every engagement.
+#
+# Feedforward is the right place for a constant: FF = (lat_accel - offset) /
+# latAccelFactor, so the offset that makes FF supply the same +0.071 at zero
+# lateral demand is -0.071 * 1.6 = -0.114 m/s^2.
+#
+# Checked against the obvious alternative explanation -- that this is the route's
+# shape rather than the car's. It is not: the integrator sat at +0.069 through
+# left turns, +0.074 through right turns and +0.071 on straights, so it is not
+# tracking the direction of the bend. It does drift with the road (+0.025 to
+# +0.131 across sixths of the drive) and rise mildly with speed (+0.052 in the
+# 10-20 km/h band against +0.091 above 40), so this removes the steady part and
+# leaves the integrator the part that actually varies.
+#
+# What it buys: freeze_integrator stalls the correction whenever the driver
+# touches the wheel or the command saturates, which was 14.3% of engaged time,
+# and mean tracking error in those frames was 0.262 m/s^2 against 0.061
+# elsewhere. Feedforward does not freeze. The left/right asymmetry goes with it
+# -- left turns under-turned by 0.119 m/s^2 against 0.053 for right, and the
+# command sat at full scale for 31.4 s of left turns against 3.7 s of right.
+#
+# Re-measure after any alignment or tyre work: this is a property of the car,
+# not of the tune.
+EQUINOX_LAT_ACCEL_OFFSET = -0.114
+
 
 def get_steer_feedforward_sigmoid(desired_angle, v_ego, ANGLE, ANGLE_OFFSET, SIGMOID_SPEED, SIGMOID, SPEED):
     x = ANGLE * (desired_angle + ANGLE_OFFSET)
@@ -155,7 +184,8 @@ class CarInterface(CarInterfaceBase):
                     Decimal(params.get("TorqueMaxLatAccel", encoding="utf8")) * Decimal('0.1'))  # LAT_ACCEL_FACTOR
               torque_friction = float(
                     Decimal(params.get("TorqueFriction", encoding="utf8")) * Decimal('0.001'))  # FRICTION
-            CarInterfaceBase.configure_torque_tune(ret.lateralTuning, torque_lat_accel_factor, torque_friction)
+            CarInterfaceBase.configure_torque_tune(ret.lateralTuning, torque_lat_accel_factor, torque_friction,
+                                                   LAT_ACCEL_OFFSET=EQUINOX_LAT_ACCEL_OFFSET)
 
 
         # TODO: get actual value, for now starting with reasonable value for

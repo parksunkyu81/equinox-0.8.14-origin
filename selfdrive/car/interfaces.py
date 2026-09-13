@@ -132,7 +132,8 @@ class CarInterfaceBase(ABC):
     return ret
 
   @staticmethod
-  def configure_torque_tune(tune, LAT_ACCEL_FACTOR=2.4, FRICTION=0.175, steering_angle_deadzone_deg=0.03, use_steering_angle=True):
+  def configure_torque_tune(tune, LAT_ACCEL_FACTOR=2.4, FRICTION=0.175, steering_angle_deadzone_deg=0.03, use_steering_angle=True,
+                            LAT_ACCEL_OFFSET=0.0):
     tune.init('torque')
     tune.torque.useSteeringAngle = use_steering_angle
     tune.torque.kp = 1.0
@@ -140,7 +141,10 @@ class CarInterfaceBase(ABC):
     tune.torque.ki = 0.1
     tune.torque.friction = FRICTION
     tune.torque.latAccelFactor = LAT_ACCEL_FACTOR
-    tune.torque.latAccelOffset = 0.0
+    # The lateral acceleration the car produces at zero steering torque. Nonzero
+    # when the car does not track straight on its own, and the feedforward
+    # carries the correction instead of leaving it to the integrator.
+    tune.torque.latAccelOffset = LAT_ACCEL_OFFSET
     tune.torque.steeringAngleDeadzoneDeg = steering_angle_deadzone_deg
 
   @abstractmethod

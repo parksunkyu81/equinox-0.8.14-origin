@@ -38,7 +38,12 @@ LAT_ACCEL_FACTOR_MIN = 0.50
 LAT_ACCEL_FACTOR_MAX = 5.00
 FRICTION_MIN = 0.0
 FRICTION_MAX = 0.50
-LAT_ACCEL_OFFSET_MAX = 0.03
+# The offset is a constant steering command of offset / latAccelFactor, so this
+# bound is what fraction of the EPS range a straight-line correction may claim.
+# 0.03 allowed 1.9% and clipped the -0.114 the Equinox actually needs (see
+# EQUINOX_LAT_ACCEL_OFFSET); 0.25 allows 15.6%, which still leaves the bound
+# doing its job of rejecting a bad measurement.
+LAT_ACCEL_OFFSET_MAX = 0.25
 
 
 class LatControlTorque(LatControl):
