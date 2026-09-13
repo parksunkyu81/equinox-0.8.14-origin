@@ -41,9 +41,17 @@ PEDAL_MAIN_ON_SIGNAL_SYNC_FRAMES = int(1.0 / DT_CTRL)
 # What it buys: freeze_integrator stalls the correction whenever the driver
 # touches the wheel or the command saturates, which was 14.3% of engaged time,
 # and mean tracking error in those frames was 0.262 m/s^2 against 0.061
-# elsewhere. Feedforward does not freeze. The left/right asymmetry goes with it
-# -- left turns under-turned by 0.119 m/s^2 against 0.053 for right, and the
-# command sat at full scale for 31.4 s of left turns against 3.7 s of right.
+# elsewhere. Feedforward does not freeze.
+#
+# What it does not buy, despite what the commit that introduced it claimed, is
+# the left/right asymmetry in the aggregate numbers -- left turns under-turned
+# by 0.119 m/s^2 against 0.053 for right. That is the road, not the car.
+# Compared at matched corner strength the two sides are the same: 0.054 against
+# 0.059 in the 0.2-0.5 m/s^2 band, 0.071 against 0.071 in 0.5-1.0, 0.018
+# against 0.014 in 1.0-1.5. Tracking only falls apart past about 1.5, and only
+# left turns got there -- the route asked for more than 2.0 m/s^2 for 10.5 s to
+# the left against 2.4 s to the right, and more than 2.5 for 4.5 s against
+# 0.2 s. Nothing here is direction-specific; the aggregate split is the sample.
 #
 # Re-measure after any alignment or tyre work: this is a property of the car,
 # not of the tune.
