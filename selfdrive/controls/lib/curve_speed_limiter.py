@@ -213,16 +213,18 @@ MODEL_CURVE_GEOMETRY_WEIGHT = 0.75
 #   0.70    37 of 107 (34.6%)    0.46%
 #   1.00    40 of 107 (37.4%)    0.85%
 #
-# 0.40 buys half again as many corners for two and a half times a false-alarm
-# rate that is one in a thousand samples. Past 0.5 the trade turns: 0.70 adds
-# five corners for triple the false alarms.
+# 0.50 is the last point before the trade turns. It finds 60% more corners than
+# 0.00 for a false-alarm rate still under two samples in a thousand, and those
+# samples are a tenth of a second each against a prompt that needs two
+# consecutive frames and a braking gate on top. 0.70 is where it stops paying:
+# five more corners for triple the false alarms.
 #
 # This is a partial fix and should not be mistaken for a solved problem. Even
 # at 1.00 the profile finds only 37% of real corners and tops out at 0.65x of
 # true curvature, because the geometry head itself is short of truth. The rest
 # is the single-camera v0.8.13 model, not this rule. Re-sweep on a second drive
 # before moving this again -- one route decided it.
-MODEL_CURVE_DISAGREE_WEIGHT = 0.40
+MODEL_CURVE_DISAGREE_WEIGHT = 0.50
 
 # v0.8.13 predicts positions on a time grid. At low speed those points are much
 # closer together than in later models, so a fixed index span and 0.75 m chord
