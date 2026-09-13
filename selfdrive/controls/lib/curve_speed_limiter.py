@@ -102,14 +102,54 @@ CORNER_ALERT_LAT_ACCEL = 2.0
 #
 #     a_req = (v_ego^2 - v_curve^2) / (2 * distance)
 #
-# which is the braking needed to arrive at the corner's own speed. Over the
-# same two drives this reached 0.79 m/s^2 at most and 0.43 at the median of the
-# moments it was positive at all -- the driver was usually already slow enough
-# -- so 0.5 selects the approaches that genuinely needed the brake. Together
-# the two gates fire 8 times in 22 minutes against the old prompt's 31.
-CORNER_ALERT_REQ_DECEL = 0.5
+# which is the braking needed to arrive at the corner's own speed. This was 0.5,
+# picked from two drives where it reached 0.79 at most and 0.43 at the median of
+# the moments it was positive at all, on the reasoning that the driver was
+# usually already slow enough and 0.5 selects the approaches that genuinely
+# needed the brake.
+#
+# It fires late. req_decel grows as the car closes on a corner -- the same speed
+# gap over a shorter distance -- so a high threshold is not a filter on which
+# corners get a prompt so much as on how long the driver has to act.
+#
+# On route 2026-09-13--01-44-20 the demand passed 2.0 m/s^2 four times and the
+# steering lost all four: command pinned at full scale for 92% of those seconds,
+# under-turning by 0.49. Replaying the approaches against the gate, it held for
+# three of them and only 2.40 s, 2.63 s and 4.00 s ahead. At 0.25 the same three
+# come up 4.00 s, 3.28 s and 4.00 s ahead -- two of them a full second and a half
+# earlier -- and the fourth stops being silent.
+#
+# The braking these corners needed was 0.28, 0.31, 0.30 and 0.48, which reads
+# gentle because the speed gap is small: 2 to 6 km/h. But a small correction not
+# made is not a small problem, and this car cannot make it itself -- it drives a
+# gas interceptor with no openpilot braking, so the prompt is the whole
+# mechanism.
+#
+# The depth gate above is what holds the fire rate down, and it is the one to
+# watch: an offline replay of the twelve corners that peaked between 1.0 and
+# 2.0 m/s^2 -- all handled fine -- put three of them in range, though that
+# estimate reconstructs the corner from the demand actually reached rather than
+# from the model profile the real gate reads. Count the prompts on the next
+# drive before trusting either number.
+CORNER_ALERT_REQ_DECEL = 0.25
 # Under this the car is not cornering fast enough for the prompt to be useful.
-CORNER_ALERT_MIN_SPEED_KPH = 30.0
+# 30 was the assumption, and it is the reason the fourth corner above was
+# silent: entered at 22.6 km/h, demanding 2.83 m/s^2, command pinned. A slow
+# corner is still a corner. 20 km/h keeps the gate clear of the 10 km/h LKAS
+# threshold and the manoeuvring speeds below it, where a tight turn is the
+# driver's intent rather than a surprise.
+#
+# Do not expect much from that corner specifically: the car was accelerating
+# into it from 17 km/h, so even at 20 the gate opens 0.49 s before entry. The
+# approach itself was too short to warn about. What this gate buys is the
+# category -- tight corners taken in the twenties, which this route has and the
+# old threshold could not see at all.
+#
+# It also costs a little work: controlsd prepares the shared model profile above
+# the lower of the two speed gates, so prepare_profile() now runs in the 20-30
+# km/h band where it did not. That is ~91 us of smoothing at 40 Hz, 0.36% of a
+# core, and only while the car is in that band.
+CORNER_ALERT_MIN_SPEED_KPH = 20.0
 # How far ahead the corner may be and still be worth prompting about. The model
 # resolves a corner about 20-45 m out, which is 2-3 s at these speeds, so this
 # window fires as early as the horizon allows. It exists as a bound rather than
