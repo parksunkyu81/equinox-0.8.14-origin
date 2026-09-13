@@ -189,6 +189,40 @@ MODEL_CURVE_MAX_ABS = 0.20
 MODEL_CURVE_AGREEMENT_ABS = 0.0025
 MODEL_CURVE_AGREEMENT_RATIO = 2.5
 MODEL_CURVE_GEOMETRY_WEIGHT = 0.75
+# How far toward the stronger reading to move when the two heads disagree.
+# 0.0 keeps the weaker one, which is what this did before.
+#
+# The two heads are not equally wrong. Scored against what the car actually
+# drove on route 2026-09-13--01-44-20, the yaw head is 1.04x truth at the car
+# itself and collapses with lookahead -- 0.41x at 10 m, 0.28x at 20, 0.32x at
+# 30 -- while path geometry holds near truth ahead at 1.38x, 0.81x and 0.75x
+# but reads about 7x high on straight road (0.00425 against 0.00058). Keeping
+# the weaker reading is therefore right on a straight, where the weak one is
+# yaw and yaw is correct, and wrong in a corner, where the weak one is still
+# yaw and yaw has collapsed. The profile came out at 0.38x of truth at 20 m.
+#
+# Swept against the gate the consumers actually apply -- predicted lateral
+# acceleration past 2.0 m/s^2 at 20 m ahead -- over 107 real corner moments and
+# the drive's easy road:
+#
+#   weight  corners detected     easy road called a corner
+#   0.00    20 of 107 (18.7%)    0.04%
+#   0.25    26 of 107 (24.3%)    0.06%
+#   0.40    30 of 107 (28.0%)    0.10%
+#   0.50    32 of 107 (29.9%)    0.17%
+#   0.70    37 of 107 (34.6%)    0.46%
+#   1.00    40 of 107 (37.4%)    0.85%
+#
+# 0.40 buys half again as many corners for two and a half times a false-alarm
+# rate that is one in a thousand samples. Past 0.5 the trade turns: 0.70 adds
+# five corners for triple the false alarms.
+#
+# This is a partial fix and should not be mistaken for a solved problem. Even
+# at 1.00 the profile finds only 37% of real corners and tops out at 0.65x of
+# true curvature, because the geometry head itself is short of truth. The rest
+# is the single-camera v0.8.13 model, not this rule. Re-sweep on a second drive
+# before moving this again -- one route decided it.
+MODEL_CURVE_DISAGREE_WEIGHT = 0.40
 
 # v0.8.13 predicts positions on a time grid. At low speed those points are much
 # closer together than in later models, so a fixed index span and 0.75 m chord
@@ -451,10 +485,17 @@ def build_v0813_model_curve_profile(position_t, orientation_rate_z,
                      (1.0 - MODEL_CURVE_GEOMETRY_WEIGHT) * yaw_abs)
         agree_points += 1
       else:
-        # A disagreement is kept at the weaker prediction plus a small noise
-        # allowance. Persistent real bends agree in both model heads; isolated
-        # path or yaw-rate spikes therefore cannot request a deep-curve target.
-        curvature = smaller + MODEL_CURVE_AGREEMENT_ABS
+        # A disagreement moves part of the way to the stronger prediction, plus
+        # a small noise allowance. It used to stay at the weaker one outright,
+        # on the reasoning that persistent real bends agree in both heads and an
+        # isolated path or yaw-rate spike should not be able to request a
+        # deep-curve target. Real bends do not agree: the yaw head loses the
+        # corner with distance while geometry keeps it, so the rule was
+        # discarding the correct reading in exactly the corners it exists for.
+        # See MODEL_CURVE_DISAGREE_WEIGHT for the measurement and the sweep.
+        curvature = (smaller
+                     + MODEL_CURVE_DISAGREE_WEIGHT * (max(geometry_abs, yaw_abs) - smaller)
+                     + MODEL_CURVE_AGREEMENT_ABS)
         curvature = min(curvature, max(geometry_abs, yaw_abs))
         disagree_points += 1
         if not same_direction:
