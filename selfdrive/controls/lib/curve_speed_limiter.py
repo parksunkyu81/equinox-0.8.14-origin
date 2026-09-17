@@ -272,6 +272,32 @@ MODEL_CURVE_GEOMETRY_WEIGHT = 0.75
 # is the single-camera v0.8.13 model, not this rule. Re-sweep on a second drive
 # before moving this again -- one route decided it.
 MODEL_CURVE_DISAGREE_WEIGHT = 0.50
+# The weight above assumes the yaw head saw the corner and under-read it --
+# 0.56x to 0.80x of truth ahead on the twisty route. When yaw sees almost
+# nothing, geometry is not a corner the yaw head collapsed on; it is the path
+# hooking on its own, and moving halfway to it is half a phantom corner.
+#
+# Route set 2026-09-17 (three night drives, 38 min, town roads at 20-50 kph)
+# raised the corner prompt 16 times, 7 of them with no blinker on road the car
+# then drove straight -- 0.01 to 1.14 m/s^2 against 2.0 to 3.7 predicted. The
+# four inspected point by point all fired on the last two or three profile
+# points (12-46 m out, the 5 s horizon), with geometry peaking at 0.035-0.19
+# 1/m and yaw at 0.0007-0.005 -- yaw at 0.4% to 7% of geometry.
+#
+# Replayed over the same drives, below this share of the stronger reading the
+# disagreement keeps the weaker one, as it did before the weight existed:
+#
+#   rule          prompts  truth >= 2.0  1.0-2.0  < 1.0 (false)
+#   ships            16          3          5         8
+#   floor 0.10        4          1          2         1
+#   floor 0.20        5          1          2         2
+#   floor 0.30        3          1          2         0
+#
+# The two real prompts lost are blinker-on turns at junctions (26 and 39 kph),
+# where the driver had already announced the turn. What this could cost is the
+# twisty daytime road the weight was set on; its routes are no longer on the
+# device, so check the corner count there on the next such drive.
+MODEL_CURVE_DISAGREE_MIN_RATIO = 0.30
 
 # v0.8.13 predicts positions on a time grid. At low speed those points are much
 # closer together than in later models, so a fixed index span and 0.75 m chord
@@ -541,9 +567,13 @@ def build_v0813_model_curve_profile(position_t, orientation_rate_z,
         # deep-curve target. Real bends do not agree: the yaw head loses the
         # corner with distance while geometry keeps it, so the rule was
         # discarding the correct reading in exactly the corners it exists for.
-        # See MODEL_CURVE_DISAGREE_WEIGHT for the measurement and the sweep.
+        # See MODEL_CURVE_DISAGREE_WEIGHT for the measurement and the sweep,
+        # and MODEL_CURVE_DISAGREE_MIN_RATIO for when it does not apply.
+        stronger = max(geometry_abs, yaw_abs)
+        weight = (MODEL_CURVE_DISAGREE_WEIGHT
+                  if smaller >= MODEL_CURVE_DISAGREE_MIN_RATIO * stronger else 0.0)
         curvature = (smaller
-                     + MODEL_CURVE_DISAGREE_WEIGHT * (max(geometry_abs, yaw_abs) - smaller)
+                     + weight * (stronger - smaller)
                      + MODEL_CURVE_AGREEMENT_ABS)
         curvature = min(curvature, max(geometry_abs, yaw_abs))
         disagree_points += 1
