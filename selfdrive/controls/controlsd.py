@@ -108,6 +108,23 @@ STEER_SAT_WARN_HOLD_S = 0.3
 STEER_SAT_CLEAR_S = 0.5
 # Path deviation that still warrants an immediate prompt with no extra hold.
 STEER_SAT_DEVIATION_M = 0.20
+# While the steering is pinned at full command the pedal is taken off, so the
+# car does not add speed to a corner it is already under-turning. Speed raises
+# the demand (lat accel = v^2 * curvature) while the command has nothing left to
+# answer it with. On 2026-09-19--08-58-29 at +1263 s the steering sat at 86 deg
+# for 8 s under a 2.2-3.4 m/s^2 demand, and openpilot itself commanded +2.0 m/s^2
+# through it, taking the car from 28 to 35 km/h: the curve slowdown is off below
+# CURVE_SLOWDOWN_MIN_SPEED_KPH, so nothing else was holding the speed. Replaying
+# that corner with the pedal released for the saturated stretch cut the peak
+# under-turn from 0.50 to 0.28 m/s^2 (0.48 to 0.38 if full torque holds the same
+# curvature at every speed, 0.77 to 0.30 if it holds more at lower speed).
+#
+# This only removes pedal, the way predictive coasting does; it sets no target
+# speed and asks for no deceleration, which this car could not deliver anyway.
+# The saturation flag is latcontrol's own, so it already needs 0.4 s of full
+# command, hands off, above 10 km/h. The hold outlasts it by this long so a
+# corner that briefly unloads does not bring the pedal back and drop it again.
+STEER_SAT_ACCEL_HOLD_S = 1.5
 # One step-timing line per window. Ten seconds is long enough to average out a
 # single slow frame and rare enough that the write cannot matter.
 STEP_TIMING_WINDOW_FRAMES = max(1, int(10.0 / DT_CTRL))
@@ -451,6 +468,10 @@ class Controls:
         self.steer_limited = False
         self.steer_sat_elapsed = 0.0
         self.steer_sat_clear_elapsed = 0.0
+        # Time left on the pedal hold. Set at the end of one control step and read
+        # at the start of the next, since the steering result is not known yet
+        # when the pedal is decided.
+        self.steer_sat_accel_hold_s = 0.0
 
         self.desired_curvature = 0.0
         self.desired_curvature_rate = 0.0
@@ -676,6 +697,7 @@ class Controls:
         self.curve_pedal_coordinator.reset()
         self.predictive_coasting.reset()
         self.predictive_coast_pedal_scale = 1.0
+        self.steer_sat_accel_hold_s = 0.0
         self.speed_limit_coast_active = False
         self.speed_limit_coast_target_ms = 0.0
         self.speed_limit_coast_distance_m = math.inf
@@ -1865,6 +1887,11 @@ class Controls:
               # coasting uses its own unshifted low-speed behaviour.
               learned_low_speed_coast_offset_s=0.0)
 
+            # Steering pinned: take the pedal off. Multiplying by zero can only
+            # remove pedal, like every other term in the scale.
+            if predictive_enabled and self.steer_sat_accel_hold_s > 0.0:
+                self.predictive_coast_pedal_scale = 0.0
+
             # NaturalDecelLearner ran here at 94 us a frame, measured on the
             # device, learning how hard this car slows on its own. Its only
             # reader was the BRAKE prompt's shadow, so it went with the prompt,
@@ -1953,6 +1980,12 @@ class Controls:
             self.steer_sat_clear_elapsed += DT_CTRL
             if self.steer_sat_clear_elapsed >= STEER_SAT_CLEAR_S:
                 self.steer_sat_elapsed = 0.0
+
+        # lac_log.saturated already excludes hands-on and steer_limited frames.
+        if lac_log.active and lac_log.saturated:
+            self.steer_sat_accel_hold_s = STEER_SAT_ACCEL_HOLD_S
+        else:
+            self.steer_sat_accel_hold_s = max(0.0, self.steer_sat_accel_hold_s - DT_CTRL)
 
         if steer_saturated_now:
             dpath_points = lat_plan.dPathPoints
