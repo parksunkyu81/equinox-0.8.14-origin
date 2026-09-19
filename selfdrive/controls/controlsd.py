@@ -1888,8 +1888,10 @@ class Controls:
               learned_low_speed_coast_offset_s=0.0)
 
             # Steering pinned: take the pedal off. Multiplying by zero can only
-            # remove pedal, like every other term in the scale.
-            if predictive_enabled and self.steer_sat_accel_hold_s > 0.0:
+            # remove pedal, like every other term in the scale. The stopped-lead
+            # launch boost owns the pedal outright and is left alone.
+            if (predictive_enabled and self.steer_sat_accel_hold_s > 0.0 and
+                    not self.stop_accel_boost_active):
                 self.predictive_coast_pedal_scale = 0.0
 
             # NaturalDecelLearner ran here at 94 us a frame, measured on the
