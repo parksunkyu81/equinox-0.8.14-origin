@@ -108,6 +108,15 @@ STEER_SAT_WARN_HOLD_S = 0.3
 STEER_SAT_CLEAR_S = 0.5
 # Path deviation that still warrants an immediate prompt with no extra hold.
 STEER_SAT_DEVIATION_M = 0.20
+# The sustained-saturation prompt also needs the car to be turning less than
+# asked by this much (m/s^2). Full command is not lack of authority by itself:
+# when a driver starts a turn from a stop with the wheel at 130-360 deg, the
+# controller hits 100% unwinding it and tracks the plan within 0.03-0.13 m/s^2.
+# On 2026-09-19--08-58-29 six episodes met the hold rule; the three real corners
+# were 0.21, 0.27 and 0.30 m/s^2 short at the moment the prompt fired, the three
+# that were not (+791 s, +1273 s, +1447 s) were 0.13, 0.03 and 0.06. A measured
+# path deviation still raises the prompt without this.
+STEER_SAT_MIN_SHORTFALL = 0.15
 # While the steering is pinned at full command the pedal is taken off, so the
 # car does not add speed to a corner it is already under-turning. Speed raises
 # the demand (lat accel = v^2 * curvature) while the command has nothing left to
@@ -1996,7 +2005,15 @@ class Controls:
                 # TODO use desired vs actual curvature
                 deviating = ((actuators.steer > 0 and dpath_points[0] < -STEER_SAT_DEVIATION_M) or
                              (actuators.steer < 0 and dpath_points[0] > STEER_SAT_DEVIATION_M))
-            if deviating or self.steer_sat_elapsed >= STEER_SAT_WARN_HOLD_S:
+            # Under-turn: how much less lateral acceleration the car is making
+            # than the plan asks for, in the direction of the turn. Only the
+            # torque controller reports it; the others keep the plain hold.
+            falling_short = True
+            if hasattr(lac_log, 'desiredLateralAccel') and hasattr(lac_log, 'actualLateralAccel'):
+                desired_lat = float(lac_log.desiredLateralAccel)
+                falling_short = (math.copysign(1.0, desired_lat) *
+                                 (desired_lat - float(lac_log.actualLateralAccel)) >= STEER_SAT_MIN_SHORTFALL)
+            if deviating or (self.steer_sat_elapsed >= STEER_SAT_WARN_HOLD_S and falling_short):
                 self.events.add(EventName.steerSaturated)
 
         # Ensure no NaNs/Infs
