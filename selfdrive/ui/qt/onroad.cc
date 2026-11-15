@@ -1808,7 +1808,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       // group scaled to SD 140 without one of them being retuned.
       statusRing(scol_l, speed_row_top, "페달 신호", pedal_max_str,
                  comma_pedal_ratio, "88", 0.10f, 1.40f);
-      // 페달 강도 is matched to 페달 상태 below it, so the right-hand column
+      // 페달 강도 sits below 페달 상태 (swapped on request). It is matched to
+      // 페달 상태 above it, so the right-hand column
       // reads as one pair: same Korean label, same tenth-of-a-block lift, and
       // a value that renders at the same size.
       //
@@ -1819,12 +1820,12 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       // high. The same 1.60 here would render visibly larger than its pair,
       // spill well past its own disc and reach the PEDAL MAX disc beside it.
       // 1.17 lands level with the pair and clears that disc.
-      statusCircle(scol_r, speed_row_top, "페달 강도", ai_pedal_profile,
+      statusCircle(scol_r, speed_row, "페달 강도", ai_pedal_profile,
                    aiProfileColor, "HIGH", 1.17f, 0.10f);
 
       statusCircle(scol_l, speed_row,
                    tr_label, tr_str, QColor(120, 255, 120, 200), "8.88");
-      statusCircle(scol_r, speed_row,
+      statusCircle(scol_r, speed_row_top,
                    // size_ref is the widest state this tile can ever show, and
                    // 브레이크 is 4 full-width glyphs against BOOST's ~3.4 em.
                    // Sizing off BOOST instead let 브레이크 run far past the
@@ -1836,8 +1837,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
                    //
                    // This is past the clearance the old value was chosen to
                    // respect: the widest state, 브레이크 -- the only one that
-                   // gets near it -- reaches a few px over the neighbouring TR
-                   // disc's edge. It overlaps that disc's fill, not its text,
+                   // gets near it -- reaches a few px over the neighbouring
+                   // disc's edge (페달 신호 since the swap with 페달 강도). It overlaps that disc's fill, not its text,
                    // and only in that one state. The move to SD 140 does not
                    // change that: the value and the column pitch grew by the
                    // same fifth. Widen SGAP_X or shorten the state word if it
