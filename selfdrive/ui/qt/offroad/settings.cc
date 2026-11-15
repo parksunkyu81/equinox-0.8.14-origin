@@ -920,11 +920,9 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   toggleLayout->addWidget(horizontal_line());
   toggleLayout->addWidget(roadCamBtn);
 
-  toggleLayout->addWidget(horizontal_line());
-  toggleLayout->addLayout(layoutBtn_5);
-
-  // Keep the torque factor control at the bottom of Community. nTune watches
-  // its JSON file, so these changes apply without changing the control logic.
+  // The torque factor control sits right under the comma pedal row, at the top
+  // of this list (see the inserts at the end). nTune watches its JSON file, so
+  // these changes apply without changing the control logic.
   auto torqueLatAccelLabel = new QLabel(homeWidget);
   torqueLatAccelLabel->setObjectName("torqueLatAccelLabel");
   torqueLatAccelLabel->setWordWrap(true);
@@ -981,8 +979,13 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   torqueLatAccelLayout->addWidget(increaseTorqueLatAccelBtn);
   torqueLatAccelLayout->addWidget(cityTorqueLatAccelBtn);
   torqueLatAccelLayout->addWidget(expressTorqueLatAccelBtn);
-  toggleLayout->addWidget(horizontal_line());
-  toggleLayout->addLayout(torqueLatAccelLayout);
+
+  // Order right after the Dynamic Follow multiplier button: comma pedal
+  // resistance, then torque latAccelFactor, then the toggles. The toggle loop
+  // above already puts a line before the first toggle.
+  toggleLayout->insertLayout(0, layoutBtn_5);
+  toggleLayout->insertWidget(1, horizontal_line());
+  toggleLayout->insertLayout(2, torqueLatAccelLayout);
 
 }
 
