@@ -47,6 +47,7 @@ from selfdrive.controls.lib.curve_speed_limiter import (
 )
 from selfdrive.controls.lib.curve_pedal_coordinator import CurvePedalCoordinator
 from selfdrive.controls.lib.predictive_coasting import PredictiveCoastingCoordinator
+from selfdrive.controls.lib.pre_corner_coast import PreCornerCoast
 from selfdrive.controls.lib.panda_safety import panda_safety_config_matches, update_panda_safety_readiness
 from selfdrive.controls.lib.process_health import (
   controlsd_communication_ok, expected_not_running_processes,
@@ -402,6 +403,8 @@ class Controls:
         self.curve_pedal_coordinator = CurvePedalCoordinator(DT_CTRL)
         self.predictive_coasting = PredictiveCoastingCoordinator(DT_CTRL)
         self.predictive_coast_pedal_scale = 1.0
+        self.pre_corner_coast = PreCornerCoast()
+        self.pre_corner_lift_last = False
         self.speed_limit_coast_active = False
         self.speed_limit_coast_target_ms = 0.0
         self.speed_limit_coast_distance_m = math.inf
@@ -707,6 +710,7 @@ class Controls:
         self.predictive_coasting.reset()
         self.predictive_coast_pedal_scale = 1.0
         self.steer_sat_accel_hold_s = 0.0
+        self.pre_corner_coast.reset()
         self.speed_limit_coast_active = False
         self.speed_limit_coast_target_ms = 0.0
         self.speed_limit_coast_distance_m = math.inf
@@ -1903,6 +1907,32 @@ class Controls:
                     not self.stop_accel_boost_active):
                 self.predictive_coast_pedal_scale = 0.0
 
+            # Same lift, but BEFORE the corner: when the lateral plan predicts a
+            # demand the 300 LKA torque cannot hold (the EPS faults above it),
+            # coast into the corner so the same torque turns the car further.
+            # See pre_corner_coast.py for the guards that keep it from firing on
+            # straights, lifting too early, or holding after the corner.
+            lat_plan_curvatures = lat_plan.curvatures
+            pre_corner_lift = self.pre_corner_coast.update(
+              plan_updated=bool(self.sm.updated['lateralPlan']),
+              control_active=bool(self.active and CC.latActive),
+              v_ego=CS.vEgo,
+              curvatures=lat_plan_curvatures,
+              plan_valid=bool(self.sm.valid['lateralPlan'] and lat_plan.mpcSolutionValid and
+                              len(lat_plan_curvatures) == CONTROL_N),
+              lane_change_active=bool(
+                lat_plan.laneChangeState != log.LateralPlan.LaneChangeState.off),
+              gas_pressed=bool(CS.gasPressed),
+              brake_pressed=bool(CS.brakePressed),
+              dt=DT_CTRL)
+            if pre_corner_lift and not self.pre_corner_lift_last:
+                cloudlog.event('preCornerCoast', vEgo=float(CS.vEgo),
+                               peakLatAccel=float(self.pre_corner_coast.peak))
+            self.pre_corner_lift_last = bool(pre_corner_lift)
+            if (predictive_enabled and pre_corner_lift and
+                    not self.stop_accel_boost_active):
+                self.predictive_coast_pedal_scale = 0.0
+
             # NaturalDecelLearner ran here at 94 us a frame, measured on the
             # device, learning how hard this car slows on its own. Its only
             # reader was the BRAKE prompt's shadow, so it went with the prompt,
@@ -1935,6 +1965,7 @@ class Controls:
             # Joystick mode is not split: all of it lands in rest.
             c2 = c3 = c4 = c1
             self.predictive_coasting.reset()
+            self.pre_corner_coast.reset()
             # No longitudinal decision was made this frame, so nothing here has
             # established that easing off is what was meant.
             self.pedal_fall_hard_decel = True

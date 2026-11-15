@@ -254,14 +254,21 @@ FRESH_LANE_RECOVERY_FRAMES = 4  # ~0.20 s at 20 Hz before dropping fallback
 #   * stable: continuous frame-to-frame for LANE_JUMP_REACCEPT_FRAMES
 #     (LANE_JUMP_RETURN_FRAMES if it came back to where the trusted lane was), and
 #   * consistent with the model's own path: lane centre within
-#     LANE_JUMP_REACCEPT_GAP_M of the model path at LANE_JUMP_GAP_X_M ahead.
+#     LANE_JUMP_REACCEPT_GAP_M of the model path 5 m ahead
+#   (or it simply returned to where the trusted lane was).
+# The jump itself is measured relative to the model path at 5/10 m, so curves,
+# where lane and model path bend together, do not trigger it.
 # A new line that keeps disagreeing with where the model wants to drive is
 # never re-trusted, however confident it looks.
 LANE_JUMP_TRUSTED_DPROB = 0.35
 LANE_JUMP_REACCEPT_FRAMES = 20   # 1.0 s
 LANE_JUMP_RETURN_FRAMES = 6      # 0.3 s
 LANE_JUMP_REACCEPT_GAP_M = 0.40
-LANE_JUMP_GAP_X_M = 20.0
+# Near distances where the lane-vs-model offset is compared. A real line
+# cannot shift this much relative to the model path in 50 ms.
+LANE_JUMP_CHECK_X_M = (5.0, 10.0)
+LANE_JUMP_MAX_STEP_M = 0.35
+LANE_JUMP_CURVE_MAX_STEP_M = 0.55
 
 # Curve detection can use multiple independent visual sources. Lane geometry
 # remains the strongest visual cue; model-path and road-edge bend are slightly
@@ -1191,17 +1198,33 @@ class LanePlanner:
     self._lane_guard_good_refs = None
     self._lane_guard_stable_frames = 0
 
-  def _update_lane_jump_guard(self, lane_center_refs, path_xyz, lane_x,
-                              lane_path_y, raw_target_d_prob, curve_assist,
+  def _update_lane_jump_guard(self, path_xyz, lane_x, lane_left_y,
+                              lane_right_y, raw_target_d_prob, curve_assist,
                               lane_change_active):
     """Return True while the current lane lines must not be trusted.
 
-    See the LANE_JUMP_* constants for the reasoning.
+    The jump is measured on the lane centre RELATIVE to the model path, at the
+    near distances only (LANE_JUMP_CHECK_X_M). In a curve the lane and the model
+    path bend together, so this relative offset barely moves even in a tight
+    intersection turn, while the absolute 20 m point moves a lot -- measuring
+    the absolute position made the guard fire through ordinary tight curves
+    (R25 m at 25 km/h: lane ignored for 5 s, curve error doubled). A switch to
+    a different line moves the relative offset by a whole line spacing at once.
     """
-    refs = np.asarray(lane_center_refs, dtype=float)
+    check_x = np.asarray(LANE_JUMP_CHECK_X_M, dtype=float)
+    try:
+      model_near = np.interp(check_x, path_xyz[:, 0], path_xyz[:, 1])
+      lane_near = 0.5 * (np.interp(check_x, lane_x, lane_left_y) +
+                         np.interp(check_x, lane_x, lane_right_y))
+      rel = lane_near - model_near
+    except (TypeError, ValueError, IndexError):
+      return self.lane_jump_suspect
+    if not np.all(np.isfinite(rel)):
+      return self.lane_jump_suspect
+
     prev = self._lane_guard_prev_refs
     prev_trusted = self._lane_guard_prev_trusted
-    self._lane_guard_prev_refs = refs.copy()
+    self._lane_guard_prev_refs = rel.copy()
     self._lane_guard_prev_trusted = bool(
       raw_target_d_prob >= LANE_JUMP_TRUSTED_DPROB)
 
@@ -1210,11 +1233,11 @@ class LanePlanner:
       self._clear_lane_jump_guard()
       return False
 
-    continuity_limit = interp(
-      float(np.clip(curve_assist, 0.0, 1.0)), [0.0, 1.0],
-      [LANE_CENTER_CONTINUITY_MAX_M, CURVE_LANE_CENTER_CONTINUITY_MAX_M])
-    jumped = bool(prev is not None and
-                  np.max(np.abs(refs - prev)) > continuity_limit)
+    # Looser in a curve (0.55 m), still well under a line spacing (~2.4 m on
+    # this camera, 0.9 m+ for any real line switch seen so far).
+    max_step = interp(float(np.clip(curve_assist, 0.0, 1.0)), [0.0, 1.0],
+                      [LANE_JUMP_MAX_STEP_M, LANE_JUMP_CURVE_MAX_STEP_M])
+    jumped = bool(prev is not None and np.max(np.abs(rel - prev)) > max_step)
 
     if not self.lane_jump_suspect:
       if jumped and prev_trusted:
@@ -1222,20 +1245,18 @@ class LanePlanner:
         self._lane_guard_good_refs = prev.copy()
         self._lane_guard_stable_frames = 0
         cloudlog.warning("lane line jumped %.2f m in one frame; ignoring lane lines"
-                         % float(np.max(np.abs(refs - prev))))
+                         % float(np.max(np.abs(rel - prev))))
       return self.lane_jump_suspect
 
     self._lane_guard_stable_frames = 0 if jumped else self._lane_guard_stable_frames + 1
-    try:
-      model_y = float(np.interp(LANE_JUMP_GAP_X_M, path_xyz[:, 0], path_xyz[:, 1]))
-      lane_y = float(np.interp(LANE_JUMP_GAP_X_M, lane_x, lane_path_y))
-      agrees = abs(lane_y - model_y) <= LANE_JUMP_REACCEPT_GAP_M
-    except (TypeError, ValueError, IndexError):
-      agrees = False
+    # Back where the trusted lane was (relative to the model path): quick.
     returned = bool(self._lane_guard_good_refs is not None and
-                    np.max(np.abs(refs - self._lane_guard_good_refs)) <= continuity_limit)
-    needed = LANE_JUMP_RETURN_FRAMES if returned else LANE_JUMP_REACCEPT_FRAMES
-    if agrees and self._lane_guard_stable_frames >= needed:
+                    np.max(np.abs(rel - self._lane_guard_good_refs)) <= max_step)
+    # A new line is only taken if it agrees with the model path up close.
+    agrees = bool(abs(rel[0]) <= LANE_JUMP_REACCEPT_GAP_M)
+    if returned and self._lane_guard_stable_frames >= LANE_JUMP_RETURN_FRAMES:
+      self._clear_lane_jump_guard()
+    elif agrees and self._lane_guard_stable_frames >= LANE_JUMP_REACCEPT_FRAMES:
       self._clear_lane_jump_guard()
     return self.lane_jump_suspect
 
@@ -1498,7 +1519,7 @@ class LanePlanner:
 
     # Wrong-lane-line guard: never steer to a lane line that teleported.
     if self._update_lane_jump_guard(
-        lane_center_refs, path_xyz, lane_x, lane_path_y,
+        path_xyz, lane_x, lane_left_y, lane_right_y,
         raw_target_d_prob, curve_assist, lane_change_active):
       raw_target_d_prob = 0.0
       self.curve_raw_target_d_prob_diag = 0.0
