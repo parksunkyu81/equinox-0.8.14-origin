@@ -65,6 +65,12 @@ from selfdrive.process_diagnostics import (append_controls_mismatch_diagnostic,
 MIN_SET_SPEED_KPH = V_CRUISE_MIN
 MAX_SET_SPEED_KPH = V_CRUISE_MAX
 
+# The camera's hardBrakePredicted only raises FCW above ~18 km/h and after it has
+# held for 0.3 s, so slow traffic and single-frame model flickers stay quiet.
+# The planner's lead-car FCW (longitudinalPlan.fcw) is not gated.
+MODEL_FCW_MIN_SPEED = 18. * CV.KPH_TO_MS
+MODEL_FCW_HOLD_FRAMES = int(0.3 / DT_CTRL)  # 30 frames at 100 Hz
+
 # Gate engagement until the final Panda safety configuration is stable. After engagement,
 # debounce only the short controlsAllowed message skew; safety configuration changes stay immediate.
 PANDA_SAFETY_MATCH_FRAMES = 10  # 100 ms at 100 Hz
@@ -465,6 +471,7 @@ class Controls:
         self.process_not_running_active = False
         self.process_not_running_logged_names = ()
         self.cruise_mismatch_counter = 0
+        self.model_fcw_counter = 0
         self.can_rcv_error_counter = 0
         self.last_blinker_frame = 0
         self.distance_traveled = 0
@@ -1342,7 +1349,10 @@ class Controls:
 
         # Check for FCW (브레이크! 추돌위험)
         stock_long_is_braking = self.enabled and not self.CP.openpilotLongitudinalControl and CS.aEgo < -1.25
-        model_fcw = self.sm['modelV2'].meta.hardBrakePredicted and not CS.brakePressed and not stock_long_is_braking
+        model_fcw_raw = (self.sm['modelV2'].meta.hardBrakePredicted and not CS.brakePressed and
+                         not stock_long_is_braking and CS.vEgo >= MODEL_FCW_MIN_SPEED)
+        self.model_fcw_counter = self.model_fcw_counter + 1 if model_fcw_raw else 0
+        model_fcw = self.model_fcw_counter >= MODEL_FCW_HOLD_FRAMES
         planner_fcw = self.sm['longitudinalPlan'].fcw and self.enabled
         if not self.disable_op_fcw and (planner_fcw or model_fcw):
             self.events.add(EventName.fcw)
