@@ -691,6 +691,22 @@ void update_usb_power_mode(Panda *panda, bool charging_disabled, bool ignition_o
   panda->set_usb_power_mode(desired_mode);
 }
 
+// True when controlsd is running and has already published the car setup, so a
+// restarted boardd can put the panda back into the car's safety mode from the
+// params instead of waiting for a fingerprint that will not happen again.
+static bool controls_running_with_car_params(SubMaster &sm, Params &params) {
+  if (!params.getBool("ControlsReady") || params.get("CarVin").size() != 17 ||
+      params.get("CarParams").empty()) {
+    return false;
+  }
+  // controlsState is 100 Hz; give a just-started SubMaster up to 1 s to see one.
+  for (int i = 0; i < 10 && !do_exit; i++) {
+    sm.update(100);
+    if (sm.rcv_frame("controlsState") > 0) return true;
+  }
+  return false;
+}
+
 void panda_state_thread(PubMaster *pm, std::vector<Panda *> pandas, bool spoofing_started) {
   util::set_thread_name("boardd_panda_state");
 
@@ -699,6 +715,7 @@ void panda_state_thread(PubMaster *pm, std::vector<Panda *> pandas, bool spoofin
 
   Panda *peripheral_panda = pandas[0];
   bool ignition_last = false;
+  bool first_ignition_edge = true;
   std::future<bool> safety_future;
 
   LOGD("start panda state thread");
@@ -727,8 +744,24 @@ void panda_state_thread(PubMaster *pm, std::vector<Panda *> pandas, bool spoofin
 
     // clear ignition-based params and set new safety on car start
     if (ignition && !ignition_last) {
-      append_boardd_safety_diagnostic("boardd_ignition_edge", ",\"ignition\":true");
-      params.clearAll(CLEAR_ON_IGNITION_ON);
+      // A fresh boardd always sees ignition rise on its first panda read, so a
+      // mid-drive restart (the panda browns out and reboots, boardd loses it and
+      // is respawned) looks like a new drive. Clearing here wiped CarVin,
+      // ControlsReady and CarParams while controlsd kept running, and controlsd
+      // only writes them at startup, so safety_setter_thread waited for a VIN
+      // forever and the panda sat in ELM327: controlsInitializing for up to
+      // 400 s at a time (24 times in the EON's boardd_safety_diagnostics).
+      // Keep them only when this is boardd's first edge and the controlsd that
+      // wrote them is still publishing; a real ignition cycle is seen by a
+      // running boardd and still clears.
+      const bool reuse_car_params = first_ignition_edge && controls_running_with_car_params(sm, params);
+      first_ignition_edge = false;
+      append_boardd_safety_diagnostic("boardd_ignition_edge",
+                                      std::string(",\"ignition\":true,\"reuse_car_params\":") +
+                                      (reuse_car_params ? "true" : "false"));
+      if (!reuse_car_params) {
+        params.clearAll(CLEAR_ON_IGNITION_ON);
+      }
       if (!safety_future.valid() || safety_future.wait_for(0ms) == std::future_status::ready) {
         safety_future = std::async(std::launch::async, safety_setter_thread, pandas);
       } else {
