@@ -610,9 +610,9 @@ class DynamicFollow:
     #self.global_df_mod = self.op_params.get('global_df_mod')
     self.global_df_mod = float(params.get("globalDfMod", encoding="utf8"))
     if self.global_df_mod != 1.:
-      self.global_df_mod = clip(self.global_df_mod, 0.85, 2.5)
+      self.global_df_mod = clip(self.global_df_mod, 0.8, 2.5)
 
     #self.min_TR = self.op_params.get('min_TR')
     self.min_TR = float(params.get("minTR", encoding="utf8"))
     if self.min_TR != 1.:
-      self.min_TR = clip(self.min_TR, 0.85, 2.7)
+      self.min_TR = clip(self.min_TR, 0.8, 2.7)
