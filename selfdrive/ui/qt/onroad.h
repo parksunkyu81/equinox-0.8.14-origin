@@ -36,6 +36,14 @@ class NvgWindow : public CameraViewWidget {
 public:
   explicit NvgWindow(VisionStreamType type, QWidget* parent = 0);
 
+  // Following-distance (TR) tile: tapping it cycles DynamicTRGap. Returns true
+  // when pos (in this widget's coordinates) is inside the tile as it was last
+  // drawn, and that drawing is recent enough to still be on screen.
+  bool hitTRTile(const QPoint &pos) const;
+  // Show this profile name on the tile right away, until controlsState (which
+  // re-reads DynamicTRGap only once a second) catches up.
+  void showPendingTRMode(const QString &mode);
+
 protected:
   void paintGL() override;
   void initializeGL() override;
@@ -109,6 +117,13 @@ protected:
   // it keep their place on the roads where no limit is being shown at all.
   int nda_badge_top_ = 0;
   int nda_badge_cx_ = 0;
+
+  // Where the TR tile was last drawn, and when, for hitTRTile.
+  QRect tr_tile_rect_;
+  double tr_tile_drawn_t_ = 0;
+  // Profile name shown in place of controlsState's until pending_tr_until_.
+  QString pending_tr_mode_;
+  double pending_tr_until_ = 0;
   void drawSpeedLimit(QPainter &p);
   void drawSteer(QPainter &p);
   void drawRestArea(QPainter &p);

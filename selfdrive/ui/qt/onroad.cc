@@ -141,11 +141,54 @@ void OnroadWindow::updateState(const UIState &s) {
   }
 }
 
+bool NvgWindow::hitTRTile(const QPoint &pos) const {
+  // The tile is only drawn while the HUD is; a rect from a frame more than half
+  // a second old is no longer on screen.
+  return !tr_tile_rect_.isEmpty() && millis_since_boot() - tr_tile_drawn_t_ < 500.0 &&
+         tr_tile_rect_.contains(pos);
+}
+
+void NvgWindow::showPendingTRMode(const QString &mode) {
+  pending_tr_mode_ = mode;
+  // controlsd re-reads DynamicTRGap once a second; 1.5 s covers that and the
+  // message's way back.
+  pending_tr_until_ = millis_since_boot() + 1500.0;
+  update();
+}
+
+// Tapping the TR tile steps the following-distance profile in this order.
+// plannerd's dynamic follow reads DynamicTRGap on every update, so the new
+// profile takes effect without a restart.
+static const char *const TR_PROFILE_CYCLE[] = {"traffic", "stock", "roadtrip", "auto"};
+
+static QString nextTRProfile(const QString &cur) {
+  constexpr int n = sizeof(TR_PROFILE_CYCLE) / sizeof(TR_PROFILE_CYCLE[0]);
+  for (int i = 0; i < n; ++i) {
+    if (cur == TR_PROFILE_CYCLE[i]) {
+      return TR_PROFILE_CYCLE[(i + 1) % n];
+    }
+  }
+  // Empty or unknown: start the cycle over.
+  return TR_PROFILE_CYCLE[0];
+}
+
 void OnroadWindow::mouseReleaseEvent(QMouseEvent* e) {
 
   QPoint endPos = e->pos();
   int dx = endPos.x() - startPos.x();
   int dy = endPos.y() - startPos.y();
+
+  // A tap (not a swipe) on the TR tile changes the profile, and goes no further:
+  // it must not also open the sidebar or toggle the map.
+  if (std::abs(dx) < 40 && std::abs(dy) < 40 && nvg->isVisible() &&
+      nvg->hitTRTile(nvg->mapFrom(this, endPos))) {
+    Params params;
+    const QString next = nextTRProfile(
+      QString::fromStdString(params.get("DynamicTRGap")).trimmed());
+    params.put("DynamicTRGap", next.toStdString());
+    nvg->showPendingTRMode(next);
+    return;
+  }
   if(std::abs(dx) > 250 || std::abs(dy) > 200) {
 
     if(std::abs(dx) < std::abs(dy)) {
@@ -1296,6 +1339,13 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   const auto tr_mode = controls_state.getDynamicTRMode();
   //int cruise_gap = car_state.getCruiseGap();
   QString tr_label = QString::fromUtf8(tr_mode.cStr());
+  if (!pending_tr_mode_.isEmpty()) {
+    if (millis_since_boot() < pending_tr_until_ && tr_label != pending_tr_mode_) {
+      tr_label = pending_tr_mode_;
+    } else {
+      pending_tr_mode_.clear();
+    }
+  }
   QString tr_str;
   tr_str.sprintf("%.2f", tr_value);
 
@@ -1825,6 +1875,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
       statusCircle(scol_l, speed_row,
                    tr_label, tr_str, QColor(120, 255, 120, 200), "8.88");
+      tr_tile_rect_ = QRect(scol_l - SD / 2, speed_row - SD / 2, SD, SD);
+      tr_tile_drawn_t_ = millis_since_boot();
       statusCircle(scol_r, speed_row_top,
                    // size_ref is the widest state this tile can ever show, and
                    // 브레이크 is 4 full-width glyphs against BOOST's ~3.4 em.
