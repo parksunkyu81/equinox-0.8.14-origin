@@ -140,6 +140,15 @@ LANE_CENTER_MAX_CORRECTION_M = 1.00
 # motion untouched while capping a spike at 0.10 m per frame.
 LANE_CENTER_MAX_CORRECTION_RATE_MS = 2.0
 
+# Final output slew limit on how fast the planned path may move sideways
+# relative to the model path, applied after every blend/fallback stage (see
+# _limit_output_rate). 1.0 m/s = 5 cm per 20 Hz frame: a full 1 m correction
+# still completes in 1 s, but no single frame can jump the path 0.3-1 m any
+# more, which is what produced the sudden left/right swerves. Faster during a
+# lane change so the lane-line fade-out is not held back.
+OUTPUT_OFFSET_MAX_RATE_MS = 1.0
+OUTPUT_OFFSET_MAX_RATE_LC_MS = 2.0
+
 # Short temporal continuation for tight curves. Cache the last trustworthy
 # lane-path shape, compensate it for the car's short ego-motion, hold it
 # strongly for 0.10 s, then fade it out completely by 1.20 s. This narrow EON
@@ -233,6 +242,26 @@ ROAD_EDGE_TRUSTED_MAX_CORRECTION_NEAR_M = 0.35
 ROAD_EDGE_TRUSTED_MAX_CORRECTION_M = 1.20
 FRESH_LANE_RECOVERY_DPROB = 0.45
 FRESH_LANE_RECOVERY_FRAMES = 4  # ~0.20 s at 20 Hz before dropping fallback
+
+# Wrong-lane-line guard. Real lane lines cannot move sideways 0.35 m (0.55 m in
+# a curve) relative to the car in one 50 ms frame -- the car itself moves a few
+# cm per frame sideways at most. A jump that size means the model switched to a
+# different line (adjacent lane line, tar seam, worn paint, merge/exit marking,
+# road edge), and its probability usually stays high while it does, so the
+# confidence-based logic happily steered to it. Once a trusted lane jumps, lane
+# reliance is dropped to zero (pure model path, the stock laneless behaviour)
+# until the new lane geometry is both:
+#   * stable: continuous frame-to-frame for LANE_JUMP_REACCEPT_FRAMES
+#     (LANE_JUMP_RETURN_FRAMES if it came back to where the trusted lane was), and
+#   * consistent with the model's own path: lane centre within
+#     LANE_JUMP_REACCEPT_GAP_M of the model path at LANE_JUMP_GAP_X_M ahead.
+# A new line that keeps disagreeing with where the model wants to drive is
+# never re-trusted, however confident it looks.
+LANE_JUMP_TRUSTED_DPROB = 0.35
+LANE_JUMP_REACCEPT_FRAMES = 20   # 1.0 s
+LANE_JUMP_RETURN_FRAMES = 6      # 0.3 s
+LANE_JUMP_REACCEPT_GAP_M = 0.40
+LANE_JUMP_GAP_X_M = 20.0
 
 # Curve detection can use multiple independent visual sources. Lane geometry
 # remains the strongest visual cue; model-path and road-edge bend are slightly
@@ -361,6 +390,10 @@ class LanePlanner:
     # Kept in sync with the fallback paths so leaving a fallback does not look
     # like a step change to the rate limiter.
     self._prev_center_delta_m = 0.0
+    # Last applied (output - model) lateral offset profile, for the final
+    # output slew limiter.
+    self._prev_output_x = None
+    self._prev_output_delta = None
 
     # Diagnostic-only mirrors of the temporal-hold store gate inputs. They never
     # feed control; they exist so a drive log can show which condition blocks
@@ -373,6 +406,13 @@ class LanePlanner:
     self.curve_fallback_source_diag = 0
     self.lane_head_disagree = False
     self.lane_head_gap_m = 0.0
+
+    # Wrong-lane-line guard state (see _update_lane_jump_guard).
+    self.lane_jump_suspect = False
+    self._lane_guard_prev_refs = None
+    self._lane_guard_prev_trusted = False
+    self._lane_guard_good_refs = None
+    self._lane_guard_stable_frames = 0
 
     # Last trustworthy tight-curve lane path in the previous ego frame.
     self._curve_hold_x = None
@@ -1146,10 +1186,110 @@ class LanePlanner:
     lane_y = float(np.interp(LANE_PATH_DISAGREE_X_M, lx, ly))
     return abs(lane_y - model_y)
 
+  def _clear_lane_jump_guard(self):
+    self.lane_jump_suspect = False
+    self._lane_guard_good_refs = None
+    self._lane_guard_stable_frames = 0
+
+  def _update_lane_jump_guard(self, lane_center_refs, path_xyz, lane_x,
+                              lane_path_y, raw_target_d_prob, curve_assist,
+                              lane_change_active):
+    """Return True while the current lane lines must not be trusted.
+
+    See the LANE_JUMP_* constants for the reasoning.
+    """
+    refs = np.asarray(lane_center_refs, dtype=float)
+    prev = self._lane_guard_prev_refs
+    prev_trusted = self._lane_guard_prev_trusted
+    self._lane_guard_prev_refs = refs.copy()
+    self._lane_guard_prev_trusted = bool(
+      raw_target_d_prob >= LANE_JUMP_TRUSTED_DPROB)
+
+    if lane_change_active:
+      # A lane change moves the lines by a full lane on purpose.
+      self._clear_lane_jump_guard()
+      return False
+
+    continuity_limit = interp(
+      float(np.clip(curve_assist, 0.0, 1.0)), [0.0, 1.0],
+      [LANE_CENTER_CONTINUITY_MAX_M, CURVE_LANE_CENTER_CONTINUITY_MAX_M])
+    jumped = bool(prev is not None and
+                  np.max(np.abs(refs - prev)) > continuity_limit)
+
+    if not self.lane_jump_suspect:
+      if jumped and prev_trusted:
+        self.lane_jump_suspect = True
+        self._lane_guard_good_refs = prev.copy()
+        self._lane_guard_stable_frames = 0
+        cloudlog.warning("lane line jumped %.2f m in one frame; ignoring lane lines"
+                         % float(np.max(np.abs(refs - prev))))
+      return self.lane_jump_suspect
+
+    self._lane_guard_stable_frames = 0 if jumped else self._lane_guard_stable_frames + 1
+    try:
+      model_y = float(np.interp(LANE_JUMP_GAP_X_M, path_xyz[:, 0], path_xyz[:, 1]))
+      lane_y = float(np.interp(LANE_JUMP_GAP_X_M, lane_x, lane_path_y))
+      agrees = abs(lane_y - model_y) <= LANE_JUMP_REACCEPT_GAP_M
+    except (TypeError, ValueError, IndexError):
+      agrees = False
+    returned = bool(self._lane_guard_good_refs is not None and
+                    np.max(np.abs(refs - self._lane_guard_good_refs)) <= continuity_limit)
+    needed = LANE_JUMP_RETURN_FRAMES if returned else LANE_JUMP_REACCEPT_FRAMES
+    if agrees and self._lane_guard_stable_frames >= needed:
+      self._clear_lane_jump_guard()
+    return self.lane_jump_suspect
+
+  def reset_output_limiter(self):
+    """Forget the last applied offset (e.g. after the planner overrode the
+    blend with the raw model path), so the limiter ramps from what the car
+    was actually given."""
+    self._prev_output_x = None
+    self._prev_output_delta = None
+
+  def _limit_output_rate(self, path_x, delta, lane_change_active):
+    """Final per-point slew limit on (output path - model path).
+
+    Every stage above can still change this offset in one frame: d_prob drops
+    straight to target on a lane-centre discontinuity, fresh-lane recovery sets
+    d_prob directly, the curve fallbacks raise it with max(), and fallbacks
+    enter without passing through the ordinary slew limit. Each of those is a
+    step of up to ~1 m in the target path, which the MPC turns into a sudden
+    swerve. This is the single place all of them converge, so bound it here.
+    """
+    delta = np.asarray(delta, dtype=float)
+    rate = OUTPUT_OFFSET_MAX_RATE_LC_MS if lane_change_active else OUTPUT_OFFSET_MAX_RATE_MS
+    max_step = rate * DT_MDL
+    limited = delta
+    if self._prev_output_x is not None:
+      prev = np.interp(np.asarray(path_x, dtype=float),
+                       self._prev_output_x, self._prev_output_delta)
+      limited = prev + np.clip(delta - prev, -max_step, max_step)
+    limited = np.where(np.isfinite(limited), limited, 0.0)
+    sx, sd = self._finite_sorted_unique(path_x, limited)
+    if sx is not None:
+      self._prev_output_x, self._prev_output_delta = sx, sd
+    return limited
+
   def get_d_path(self, v_ego, path_t, path_xyz, measured_curvature=0.0,
                  lane_change_active=False, readiness_eligible=False,
                  readiness_quality=0.0, imu_curvature=None,
                  imu_curvature_valid=False):
+    model_y = path_xyz[:, 1] + self.path_offset
+    out = self._get_d_path_unlimited(
+      v_ego, path_t, path_xyz, measured_curvature=measured_curvature,
+      lane_change_active=lane_change_active,
+      readiness_eligible=readiness_eligible,
+      readiness_quality=readiness_quality, imu_curvature=imu_curvature,
+      imu_curvature_valid=imu_curvature_valid)
+    delta = self._limit_output_rate(out[:, 0], out[:, 1] - model_y,
+                                    lane_change_active)
+    out[:, 1] = model_y + delta
+    return out
+
+  def _get_d_path_unlimited(self, v_ego, path_t, path_xyz, measured_curvature=0.0,
+                            lane_change_active=False, readiness_eligible=False,
+                            readiness_quality=0.0, imu_curvature=None,
+                            imu_curvature_valid=False):
     del path_t
     path_xyz[:, 1] += self.path_offset
     self._readiness_eligible = bool(readiness_eligible)
@@ -1356,6 +1496,13 @@ class LanePlanner:
     # measuring the condition that governs caching.
     self.curve_geometry_plausible_diag = store_geometry_plausible
 
+    # Wrong-lane-line guard: never steer to a lane line that teleported.
+    if self._update_lane_jump_guard(
+        lane_center_refs, path_xyz, lane_x, lane_path_y,
+        raw_target_d_prob, curve_assist, lane_change_active):
+      raw_target_d_prob = 0.0
+      self.curve_raw_target_d_prob_diag = 0.0
+
     fallback_max_speed = interp(
       curve_assist, [0.0, 1.0],
       [LOW_SPEED_FALLBACK_MAX_MS, CURVE_FALLBACK_MAX_MS])
@@ -1364,6 +1511,7 @@ class LanePlanner:
       [SINGLE_LANE_DPROB_FLOOR, CURVE_SINGLE_LANE_DPROB_FLOOR])
     fallback_active = bool(
       not lane_change_active and v_ego <= fallback_max_speed and
+      not self.lane_jump_suspect and
       geometry_plausible and single_lane_usable and
       raw_target_d_prob < fallback_dprob_floor
     )
@@ -1566,10 +1714,14 @@ class LanePlanner:
     # shift by the (max_step-bounded) difference instead of scaling by it. The
     # magnitude clamp is then reapplied unconditionally, so nothing above
     # LANE_CENTER_MAX_CORRECTION_M can leave this function by construction.
-    if abs(center_delta_ref) > 1e-3 and limited_ref != center_delta_ref:
-      center_delta = center_delta * float(
-        np.clip(limited_ref / center_delta_ref, -1.0, 1.0))
-    elif limited_ref != center_delta_ref:
+    #
+    # 2026-11-15 fix: the ratio rescale above was only one-sided. Capping the
+    # ratio at 1 meant that whenever the raw correction SHRANK (|raw| < |prev|)
+    # or changed sign, the limiter let it through untouched -- e.g. prev 0.90 m,
+    # raw 0.05 m gave 0.05 m, a 0.85 m path jump in a single 50 ms frame, i.e.
+    # the car snapping sideways. Shift the profile by the bounded difference
+    # instead, which limits rises and falls alike and cannot diverge.
+    if limited_ref != center_delta_ref:
       center_delta = center_delta + (limited_ref - center_delta_ref)
     center_delta = np.clip(center_delta, -center_max, center_max)
     # Re-read the reference from what actually survived, so the next frame's

@@ -171,6 +171,9 @@ class LateralPlanner:
     lane_deviation = float(np.max(np.abs(d_path_xyz[:, 1] - self.path_xyz[:, 1])))
     if lane_deviation > MAX_LANE_BLEND_DEVIATION_M:
       d_path_xyz = self.path_xyz.copy()
+      # The car is given the model path this frame, so the lane planner's
+      # output limiter must ramp from zero offset, not from the rejected one.
+      self.LP.reset_output_limiter()
       self.plan_implausible = True
       self._log_implausible_plan(
         "lane blend moved the path %.1f m from the model path (limit %.2f m)"
