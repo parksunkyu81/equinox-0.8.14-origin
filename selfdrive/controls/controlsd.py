@@ -48,6 +48,7 @@ from selfdrive.controls.lib.curve_speed_limiter import (
 from selfdrive.controls.lib.curve_pedal_coordinator import CurvePedalCoordinator
 from selfdrive.controls.lib.predictive_coasting import PredictiveCoastingCoordinator
 from selfdrive.controls.lib.pre_corner_coast import PreCornerCoast
+from selfdrive.controls.lib.corner_lift_speed_hold import CornerLiftSpeedHold
 from selfdrive.controls.lib.panda_safety import panda_safety_config_matches, update_panda_safety_readiness
 from selfdrive.controls.lib.process_health import (
   controlsd_communication_ok, expected_not_running_processes,
@@ -411,6 +412,7 @@ class Controls:
         self.predictive_coast_pedal_scale = 1.0
         self.pre_corner_coast = PreCornerCoast()
         self.pre_corner_lift_last = False
+        self.corner_lift_speed_hold = CornerLiftSpeedHold()
         self.speed_limit_coast_active = False
         self.speed_limit_coast_target_ms = 0.0
         self.speed_limit_coast_distance_m = math.inf
@@ -718,6 +720,7 @@ class Controls:
         self.predictive_coast_pedal_scale = 1.0
         self.steer_sat_accel_hold_s = 0.0
         self.pre_corner_coast.reset()
+        self.corner_lift_speed_hold.reset()
         self.speed_limit_coast_active = False
         self.speed_limit_coast_target_ms = 0.0
         self.speed_limit_coast_distance_m = math.inf
@@ -1910,12 +1913,10 @@ class Controls:
               # coasting uses its own unshifted low-speed behaviour.
               learned_low_speed_coast_offset_s=0.0)
 
-            # Steering pinned: take the pedal off. Multiplying by zero can only
-            # remove pedal, like every other term in the scale. The stopped-lead
-            # launch boost owns the pedal outright and is left alone.
-            if (predictive_enabled and self.steer_sat_accel_hold_s > 0.0 and
-                    not self.stop_accel_boost_active):
-                self.predictive_coast_pedal_scale = 0.0
+            # Steering pinned: take the pedal off (applied below, together with
+            # the pre-corner lift). The stopped-lead launch boost owns the pedal
+            # outright and is left alone.
+            steer_sat_lift = bool(self.steer_sat_accel_hold_s > 0.0)
 
             # Same lift, but BEFORE the corner: when the lateral plan predicts a
             # demand the 300 LKA torque cannot hold (the EPS faults above it),
@@ -1939,9 +1940,17 @@ class Controls:
                 cloudlog.event('preCornerCoast', vEgo=float(CS.vEgo),
                                peakLatAccel=float(self.pre_corner_coast.peak))
             self.pre_corner_lift_last = bool(pre_corner_lift)
-            if (predictive_enabled and pre_corner_lift and
-                    not self.stop_accel_boost_active):
-                self.predictive_coast_pedal_scale = 0.0
+
+            # Both lifts used to set the scale to 0 outright, which uphill bled
+            # 3-4 km/h a second through the corner. The speed hold starts at 0
+            # and gives pedal back only while the car slows harder than a flat
+            # coast, so on a grade the car holds its speed instead of losing it.
+            # Taking the min keeps it from ever adding pedal.
+            corner_lift = bool(predictive_enabled and (steer_sat_lift or pre_corner_lift) and
+                               not self.stop_accel_boost_active)
+            corner_lift_scale = self.corner_lift_speed_hold.update(corner_lift, CS.aEgo, DT_CTRL)
+            self.predictive_coast_pedal_scale = min(self.predictive_coast_pedal_scale,
+                                                    corner_lift_scale)
 
             # NaturalDecelLearner ran here at 94 us a frame, measured on the
             # device, learning how hard this car slows on its own. Its only
@@ -1976,6 +1985,7 @@ class Controls:
             c2 = c3 = c4 = c1
             self.predictive_coasting.reset()
             self.pre_corner_coast.reset()
+            self.corner_lift_speed_hold.reset()
             # No longitudinal decision was made this frame, so nothing here has
             # established that easing off is what was meant.
             self.pedal_fall_hard_decel = True

@@ -46,7 +46,7 @@ RELEASE_CURV_FRACTION = 0.5
 LOOKAHEAD_S = 2.0
 CONFIRM_S = 0.30
 RELEASE_S = 0.20
-MAX_ACTIVE_S = 10.0          # backstop only; the curvature release ends normal corners
+MAX_ACTIVE_S = 5.0           # backstop only; the curvature release ends normal corners
 PLAN_DT = 0.05                # lateralPlan is 20 Hz
 
 
