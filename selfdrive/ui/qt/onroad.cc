@@ -148,6 +148,11 @@ bool NvgWindow::hitTRTile(const QPoint &pos) const {
          tr_tile_rect_.contains(pos);
 }
 
+bool NvgWindow::hitPedalTile(const QPoint &pos) const {
+  return !pedal_tile_rect_.isEmpty() && millis_since_boot() - pedal_tile_drawn_t_ < 500.0 &&
+         pedal_tile_rect_.contains(pos);
+}
+
 void NvgWindow::showPendingTRMode(const QString &mode) {
   pending_tr_mode_ = mode;
   // controlsd re-reads DynamicTRGap once a second; 1.5 s covers that and the
@@ -172,6 +177,20 @@ static QString nextTRProfile(const QString &cur) {
   return TR_PROFILE_CYCLE[0];
 }
 
+// Tapping the 페달 강도 tile steps CommaPedalResistance in the settings menu's
+// order. controlsd and the planner re-read it on their own, without a restart.
+static const char *const PEDAL_PROFILE_CYCLE[] = {"high", "mid", "low"};
+
+static QString nextPedalProfile(const QString &cur) {
+  constexpr int n = sizeof(PEDAL_PROFILE_CYCLE) / sizeof(PEDAL_PROFILE_CYCLE[0]);
+  for (int i = 0; i < n; ++i) {
+    if (cur == PEDAL_PROFILE_CYCLE[i]) {
+      return PEDAL_PROFILE_CYCLE[(i + 1) % n];
+    }
+  }
+  return PEDAL_PROFILE_CYCLE[0];
+}
+
 void OnroadWindow::mouseReleaseEvent(QMouseEvent* e) {
 
   QPoint endPos = e->pos();
@@ -187,6 +206,15 @@ void OnroadWindow::mouseReleaseEvent(QMouseEvent* e) {
       QString::fromStdString(params.get("DynamicTRGap")).trimmed());
     params.put("DynamicTRGap", next.toStdString());
     nvg->showPendingTRMode(next);
+    return;
+  }
+  if (std::abs(dx) < 40 && std::abs(dy) < 40 && nvg->isVisible() &&
+      nvg->hitPedalTile(nvg->mapFrom(this, endPos))) {
+    Params params;
+    const QString next = nextPedalProfile(
+      QString::fromStdString(params.get("CommaPedalResistance")).trimmed().toLower());
+    params.put("CommaPedalResistance", next.toStdString());
+    nvg->refreshPedalProfile();
     return;
   }
   if(std::abs(dx) > 250 || std::abs(dy) > 200) {
@@ -1304,8 +1332,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   static QString ai_pedal_profile = "MID";
   const uint64_t ai_profile_now = millis_since_boot();
 
-  if (last_ai_profile_update == 0 || ai_profile_now - last_ai_profile_update >= 1000) {
+  if (pedal_profile_refresh_ || last_ai_profile_update == 0 ||
+      ai_profile_now - last_ai_profile_update >= 1000) {
     last_ai_profile_update = ai_profile_now;
+    pedal_profile_refresh_ = false;
 
     QString pedal_profile = QString::fromStdString(
       Params().get("CommaPedalResistance")).toUpper();
@@ -1872,6 +1902,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       // 1.17 lands level with the pair and clears that disc.
       statusCircle(scol_r, speed_row, "페달 강도", ai_pedal_profile,
                    aiProfileColor, "HIGH", 1.17f, 0.10f);
+      pedal_tile_rect_ = QRect(scol_r - SD / 2, speed_row - SD / 2, SD, SD);
+      pedal_tile_drawn_t_ = millis_since_boot();
 
       statusCircle(scol_l, speed_row,
                    tr_label, tr_str, QColor(120, 255, 120, 200), "8.88");

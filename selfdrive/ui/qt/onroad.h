@@ -43,6 +43,11 @@ public:
   // Show this profile name on the tile right away, until controlsState (which
   // re-reads DynamicTRGap only once a second) catches up.
   void showPendingTRMode(const QString &mode);
+  // Same for the 페달 강도 tile, which cycles CommaPedalResistance.
+  bool hitPedalTile(const QPoint &pos) const;
+  // The tile re-reads CommaPedalResistance once a second; this makes the next
+  // frame read it at once.
+  void refreshPedalProfile() { pedal_profile_refresh_ = true; update(); }
 
 protected:
   void paintGL() override;
@@ -124,6 +129,10 @@ protected:
   // Profile name shown in place of controlsState's until pending_tr_until_.
   QString pending_tr_mode_;
   double pending_tr_until_ = 0;
+  // Where the 페달 강도 tile was last drawn, and when, for hitPedalTile.
+  QRect pedal_tile_rect_;
+  double pedal_tile_drawn_t_ = 0;
+  bool pedal_profile_refresh_ = false;
   void drawSpeedLimit(QPainter &p);
   void drawSteer(QPainter &p);
   void drawRestArea(QPainter &p);
