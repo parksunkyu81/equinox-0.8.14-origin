@@ -6,7 +6,6 @@ from selfdrive.swaglog import cloudlog
 from selfdrive.controls.lib.lateral_mpc_lib.lat_mpc import LateralMpc
 from selfdrive.controls.lib.drive_helpers import CONTROL_N, MPC_COST_LAT, LAT_MPC_N
 from selfdrive.controls.lib.desire_helper import DesireHelper, AUTO_LCA_START_TIME
-from selfdrive.controls.lib.curve_virtual_readiness import CurveVirtualReadinessMonitor
 import cereal.messaging as messaging
 from cereal import log
 from common.params import Params
@@ -15,10 +14,9 @@ from selfdrive.controls.lib.model_data_validation import as_finite_vector, valid
 TRAJECTORY_SIZE = 33
 
 # How far the lane blend is allowed to move the path away from the model path.
-# Every correction ceiling inside lane_planner is at or below this: ordinary
-# blending 1.00 m, temporal hold 0.75 m, road edge 0.70 m (1.20 m readiness
-# trusted), model-path hold 0.45 m (0.90 m trusted). Anything past it is a bug
-# in the blend, not a wide correction, so the model path is used for that frame.
+# Every correction ceiling inside lane_planner is at or below this (ordinary
+# blending tops out at 1.00 m). Anything past it is a bug in the blend, not a
+# wide correction, so the model path is used for that frame.
 MAX_LANE_BLEND_DEVIATION_M = 1.50
 
 # Geometric sanity envelope on the target handed to the MPC:
@@ -59,7 +57,6 @@ class LateralPlanner:
     self.t_idxs = np.arange(TRAJECTORY_SIZE)
     self.y_pts = np.zeros(TRAJECTORY_SIZE)
     self.model_data_valid = False
-    self.curve_virtual_readiness = CurveVirtualReadinessMonitor()
 
     self.lat_mpc = LateralMpc()
     self.reset_mpc(np.zeros(4))
@@ -118,41 +115,13 @@ class LateralPlanner:
 
     # Calculate final driving path and set MPC costs
     lane_change_active = self.DH.lane_change_state != log.LateralPlan.LaneChangeState.off
-    lane_confidence = max(self.LP.lll_prob, self.LP.rll_prob)
-    # This GM's EBCM does not transmit a usable yaw-rate signal on the CAN bus
-    # (car_state.yawRate's DBC-mapped bits read a constant 0 in every real
-    # drive log checked). Use the device's own IMU-derived yaw instead. Gate
-    # on the measurement's own validity, not liveLocationKalman.status: status
-    # stays 'uninitialized' on this device (it never gets a GPS lock) even
-    # while angularVelocityCalibrated itself is fine.
-    llk = sm['liveLocationKalman']
-    angular_velocity = llk.angularVelocityCalibrated
-    yaw_rate_valid = bool(
-      sm.valid['liveLocationKalman'] and angular_velocity.valid and
-      llk.inputsOK and llk.sensorsOK and llk.deviceStable)
-    yaw_rate_imu = (
-      float(angular_velocity.value[2])
-      if yaw_rate_valid and len(angular_velocity.value) > 2 else 0.0)
-    # Independent physical curvature estimate for the curve-fallback virtual
-    # path (see lane_planner.py's _blended_curvature): yaw_rate / v_ego, floored
-    # so the division stays finite near a stop.
-    imu_curvature = yaw_rate_imu / max(v_ego, 1.0)
-    _, completed_curve_readiness = self.curve_virtual_readiness.update(
-      v_ego, measured_curvature, yaw_rate_imu, car_state.steeringPressed,
-      lane_change_active, lane_confidence, yaw_valid=yaw_rate_valid)
-    if (completed_curve_readiness is not None and
-        completed_curve_readiness['laneLossRatio'] > 0.0):
-      cloudlog.event('virtualCurveReadiness', **completed_curve_readiness)
 
     # LanePlanner applies its offset in-place; a copy prevents an invalid
     # model frame from accumulating the offset on the last valid trajectory.
     d_path_xyz = self.LP.get_d_path(
       v_ego, self.t_idxs, self.path_xyz.copy(),
       measured_curvature=measured_curvature,
-      lane_change_active=lane_change_active,
-      readiness_eligible=self.curve_virtual_readiness.current['eligible'],
-      readiness_quality=self.curve_virtual_readiness.current['quality'],
-      imu_curvature=imu_curvature, imu_curvature_valid=yaw_rate_valid)
+      lane_change_active=lane_change_active)
     self.lat_mpc.set_weights(MPC_COST_LAT.PATH, MPC_COST_LAT.HEADING, MPC_COST_LAT.STEER_RATE)
 
     # Match the official planner: the current model/lane blend goes directly
@@ -298,26 +267,14 @@ class LateralPlanner:
     lateralPlan.pathWobbleFlips = 0
     lateralPlan.laneCenterCorrectionM = float(self.LP.lane_center_correction_m)
     lateralPlan.laneCenterCorrectionActive = bool(self.LP.lane_center_correction_active)
-    # Curve-tracking readiness. Published for drive-log analysis, but the same
-    # two values were passed to get_d_path above, where they widen the
-    # curve-fallback limits -- this is not a diagnostic-only signal.
-    #
-    # The field names predate that wiring and mislead: they measure agreement
-    # between steering-derived curvature and IMU yaw rate, not model path
-    # quality, and the model's output is not an input. They also read low
-    # because the monitor only samples inside a curve -- roughly 13% of frames
-    # on a mixed drive -- so a low rate here is mostly "not asked".
-    lateralPlan.modelPathQuality = float(self.curve_virtual_readiness.current['quality'])
-    lateralPlan.modelPathQualityTrusted = bool(self.curve_virtual_readiness.current['eligible'])
-    lateralPlan.modelNearCurvature = float(self.curve_virtual_readiness.current['curvatureMean'])
-    # Diagnostic-only view of the tight-curve temporal-hold store gate, so a
-    # drive log can show which condition prevents a fallback path from being
-    # cached before the lane lines leave this narrow camera's view.
+    # modelPathQuality*, modelNearCurvature, curveTemporalStored and
+    # curveTemporalHoldAgeS went with the curve lane fallback and its readiness
+    # monitor; the schema keeps the fields, which now read as their defaults.
+    # Diagnostic-only curve readings: how strongly a curve was detected and how
+    # far lane blending was trusted.
     lateralPlan.curveAssist = float(self.LP.curve_assist_diag)
     lateralPlan.curveRawTargetDProb = float(self.LP.curve_raw_target_d_prob_diag)
     lateralPlan.curveGeometryPlausible = bool(self.LP.curve_geometry_plausible_diag)
-    lateralPlan.curveTemporalStored = bool(self.LP.curve_temporal_stored_diag)
-    lateralPlan.curveTemporalHoldAgeS = float(self.LP.curve_temporal_hold_age_diag)
     lateralPlan.curveFallbackSource = int(self.LP.curve_fallback_source_diag)
 
     pm.send('lateralPlan', plan_send)

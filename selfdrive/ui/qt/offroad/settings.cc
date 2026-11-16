@@ -822,14 +822,6 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                           "../assets/offroad/icon_shell.png",
                                           this));
 
-  // Keep titles short: AbstractControl renders them in a QPushButton with no
-  // word wrap, so a long title widens the panel and adds a horizontal scrollbar.
-  toggles.append(new ParamControl("CurveFallbackDisabled",
-                                          "Disable Curve Lane Fallback",
-                                          "커브 중 차선을 놓쳤을 때 직전에 기억해둔 차선 모양을 대신 쓰는 보조 기능을 끕니다. 끄면 일반 차선 혼합만 사용하며, 이는 공식 오픈파일럿과 같은 동작입니다.\n\n측정 결과: 이 보조 기능은 전체 주행의 1.4%에서만 동작했고 보탠 조향량은 1~5도 수준이었습니다. 급커브(핸들 68도 이상)에서는 기억해둔 데이터가 12%만 살아있어 거의 기여하지 못했습니다.\n\n같은 도로를 켠 채와 끈 채로 각각 주행해 비교해보세요.\n\n다음 주행부터 적용됩니다.",
-                                          "../assets/offroad/icon_road.png",
-                                          this));
-
   for(ParamControl *toggle : toggles) {
     if(main_layout->count() != 0) {
       toggleLayout->addWidget(horizontal_line());
