@@ -7,11 +7,12 @@ Two kinds of evidence:
 
 * Style, from the driver's own acceleration. While the driver is on the gas
   (or openpilot's longitudinal control is off) every rise of aEgo above
-  EPISODE_START_A is one episode. Its peak acceleration and rise jerk are
-  scored against per-speed-bin thresholds, because 1.5 m/s^2 is ordinary at
-  20 km/h and very brisk at 100 km/h. Episodes taken behind a close lead, in a
-  corner or during a lane change are dropped: there the road chose the
-  acceleration, not the driver.
+  EPISODE_START_A is one episode; it ends when the acceleration fades or when
+  the driver lets go of the gas, whichever comes first. Its peak acceleration
+  and rise jerk are scored against per-speed-bin thresholds, because
+  1.5 m/s^2 is ordinary at 20 km/h and very brisk at 100 km/h. Episodes taken
+  behind a close lead, in a corner, during a lane change, or that never reach
+  15 km/h (queue creeping) are dropped.
 
 * Feedback, relative to the profile that was active at the time. A gas press
   that out-accelerates openpilot while openpilot was already accelerating says
@@ -21,7 +22,10 @@ Two kinds of evidence:
   brake presses could not tell "openpilot accelerated too hard" from "I needed
   to slow" and drove the gain down with no way back up. Brake feedback here
   therefore needs openpilot to have been accelerating hard for a full second
-  with no lead close, and a hard brake by itself is not counted as style.
+  with no lead close, and the press to be a short tap after which the car
+  keeps its speed -- a press that slows or stops the car is the driver
+  stopping for something openpilot cannot see. A hard brake by itself is not
+  counted as style.
 
 Old drives fade out: every new drive (controlsd start) multiplies the stored
 weights by DRIVE_DECAY, halving a drive's influence after about three drives.
@@ -51,7 +55,12 @@ EPISODE_START_A = 0.3
 EPISODE_END_A = 0.15
 EPISODE_END_HOLD_S = 0.5
 EPISODE_MIN_S = 1.0
-EPISODE_MIN_PEAK_V = 2.0      # m/s; creeping in a queue says nothing
+# Creeping in a queue says nothing, so an episode must reach 15 km/h at some
+# point. Tested on the speed it reaches, not the speed at the peak: a launch
+# from a stop peaks at 1-2 m/s, and those launches are the clearest sign of how
+# the driver accelerates. (The first version tested the peak speed against
+# 2 m/s and threw every launch away -- 6 of the 11 episodes on 2026-11-16.)
+EPISODE_MIN_REACHED_V = 15.0 / 3.6
 LEAD_MIN_HEADWAY_S = 1.0
 LAT_ACCEL_MAX = 1.5
 
@@ -63,9 +72,21 @@ FEEDBACK_BRAKE_OP_ACCEL = 0.5
 FEEDBACK_BRAKE_A_EGO = 0.3
 FEEDBACK_BRAKE_HOLD_S = 1.0
 FEEDBACK_BRAKE_LEAD_HEADWAY_S = 2.5
+# A brake press only says "too strong" if it was a tap to take the edge off:
+# released within 1.5 s with the car still above 80% of the speed it had at
+# the press, from at least 20 km/h. A press that slows the car down or stops
+# it is the driver stopping for a light, a crossing or a bump -- openpilot
+# accelerated toward it because it cannot see it, which says nothing about
+# the pedal. On 2026-11-16 the first rule caught 13 presses: 4 slowed the car
+# to 0-31 km/h, 4 more were held 1.8-2.8 s, and 5 were short taps after which
+# the car kept its speed; only those 5 count now.
+FEEDBACK_BRAKE_TAP_MAX_S = 1.5
+FEEDBACK_BRAKE_TAP_KEEP_SPEED = 0.80
+FEEDBACK_BRAKE_MIN_V = 20.0 / 3.6
 FEEDBACK_COOLDOWN_S = 5.0
 FEEDBACK_MIN_EVENTS = 3
 
+STATS_VERSION = 2
 MIN_EPISODES = 15
 MAX_EPISODES = 60
 MAX_FEEDBACK = 30
@@ -149,6 +170,7 @@ class CommaPedalAutoLearner:
     self._ep = None
     self._end_hold = 0.0
     self._pending_gas = None
+    self._pending_brake = None
     self._op_push_s = 0.0
     self._last_feedback_t = -1e9
     self._prev_gas = False
@@ -174,6 +196,10 @@ class CommaPedalAutoLearner:
                        if math.isfinite(float(s)) and float(w) > 0][-MAX_EPISODES:]
       self.feedback = [[float(t), float(w)] for t, w in d.get('feedback', [])
                        if math.isfinite(float(t)) and float(w) > 0][-MAX_FEEDBACK:]
+      if int(d.get('v', 1)) < STATS_VERSION:
+        # Version 1 counted every brake press after a push, stops included,
+        # so its feedback is all spurious "too strong". Start feedback over.
+        self.feedback = []
       r = d.get('result')
       self.result = r if r in PROFILES else None
     except Exception:
@@ -181,7 +207,7 @@ class CommaPedalAutoLearner:
 
   def to_json(self):
     return json.dumps({
-      'v': 1,
+      'v': STATS_VERSION,
       'result': self.result,
       'score': round(self.score, 3),
       'episodes': [[round(s, 3), round(w, 3)] for s, w in self.episodes],
@@ -209,7 +235,7 @@ class CommaPedalAutoLearner:
                   abs(lat_accel) > LAT_ACCEL_MAX or bool(lane_change)
 
     self._update_episode(dt, v_ego, a_ego, gas_pressed or not long_active, constrained)
-    self._update_feedback(now, dt, a_ego, gas_pressed, brake_pressed, long_active,
+    self._update_feedback(now, dt, v_ego, a_ego, gas_pressed, brake_pressed, long_active,
                           op_accel, lead_headway_s, lead_closing, constrained)
     self._prev_gas = gas_pressed
     self._prev_brake = brake_pressed
@@ -223,17 +249,26 @@ class CommaPedalAutoLearner:
     ep = self._ep
     if ep is None:
       if driver_in_control and a_ego > EPISODE_START_A:
-        self._ep = {'t': 0.0, 'peak': a_ego, 'v': v_ego, 'rise': 0.0, 'bad': constrained}
+        self._ep = {'t': 0.0, 'peak': a_ego, 'v': v_ego, 'v_max': v_ego,
+                    'rise': 0.0, 'bad': constrained}
         self._end_hold = 0.0
       return
 
     if not driver_in_control:
-      # openpilot took the pedal back mid-episode: the rest is not the driver's.
+      # The driver let go of the gas and openpilot has the pedal again. What
+      # follows is openpilot's, but what came before was the driver's and is
+      # complete: score it now. On this car the driver nearly always
+      # accelerates by pressing the gas over an engaged openpilot and lets go
+      # while the car is still accelerating, so the first version, which
+      # threw the episode away here, kept almost none of them.
+      self._end_hold = 0.0
+      self._finish_episode(ep)
       self._ep = None
       return
 
     ep['t'] += dt
     ep['bad'] = ep['bad'] or constrained
+    ep['v_max'] = max(ep['v_max'], v_ego)
     if a_ego > ep['peak']:
       ep['peak'] = a_ego
       ep['v'] = v_ego
@@ -248,7 +283,7 @@ class CommaPedalAutoLearner:
 
   def _finish_episode(self, ep):
     duration = ep['t'] - self._end_hold
-    if ep['bad'] or duration < EPISODE_MIN_S or ep['v'] < EPISODE_MIN_PEAK_V:
+    if ep['bad'] or duration < EPISODE_MIN_S or ep['v_max'] < EPISODE_MIN_REACHED_V:
       return
     s = score_episode(ep['peak'], ep['v'], ep['rise'])
     self.episodes.append([s, 1.0])
@@ -266,7 +301,7 @@ class CommaPedalAutoLearner:
     self.feedback = self.feedback[-MAX_FEEDBACK:]
     self._dirty = True
 
-  def _update_feedback(self, now, dt, a_ego, gas_pressed, brake_pressed, long_active,
+  def _update_feedback(self, now, dt, v_ego, a_ego, gas_pressed, brake_pressed, long_active,
                        op_accel, lead_headway_s, lead_closing, constrained):
     # How long openpilot has been pushing hard on its own.
     if long_active and not gas_pressed and not brake_pressed and \
@@ -288,14 +323,23 @@ class CommaPedalAutoLearner:
       elif now - pg['t'] > FEEDBACK_GAS_WINDOW_S or not gas_pressed:
         self._pending_gas = None
 
-    # Too strong: a brake press while openpilot had been pushing hard for a
-    # full second with nothing close ahead.
+    # Too strong: a brief brake tap while openpilot had been pushing hard for
+    # a full second with nothing close ahead, after which the car carries on.
+    # Decided at release (see FEEDBACK_BRAKE_TAP_*).
     if brake_pressed and not self._prev_brake and self._op_push_s >= FEEDBACK_BRAKE_HOLD_S:
       lead_clear = lead_headway_s is None or \
         (lead_headway_s >= FEEDBACK_BRAKE_LEAD_HEADWAY_S and not lead_closing)
-      if lead_clear and not constrained:
-        self._add_feedback(now, -1.0)
+      if lead_clear and not constrained and v_ego >= FEEDBACK_BRAKE_MIN_V:
+        self._pending_brake = {'t': now, 'v': v_ego}
       self._op_push_s = 0.0
+    pb = self._pending_brake
+    if pb is not None:
+      if now - pb['t'] > FEEDBACK_BRAKE_TAP_MAX_S:
+        self._pending_brake = None          # held too long: slowing or stopping
+      elif not brake_pressed:
+        if v_ego >= FEEDBACK_BRAKE_TAP_KEEP_SPEED * pb['v']:
+          self._add_feedback(now, -1.0)
+        self._pending_brake = None
 
   # ---- decision ----
   def _decide(self, now=0.0, force=False):
