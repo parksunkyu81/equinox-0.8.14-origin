@@ -817,12 +817,10 @@ void NvgWindow::drawHud(QPainter &p) {
   // the last string otherwise. This does not avoid the layout pass in
   // drawText -- that is unavoidable for a string drawn without measuring --
   // so it saves the formatting alone.
-  const float info_values[5] = {
+  const float info_values[3] = {
     controls_state.getLatAccelFactor(),
     controls_state.getFriction(),
     controls_state.getSteerRatio(),
-    controls_state.getMinTR(),
-    controls_state.getGlobalDfMod(),
   };
   // The size this line has always been drawn at, and the floor below which it
   // stops being readable at arm's length.
@@ -831,7 +829,7 @@ void NvgWindow::drawHud(QPainter &p) {
   constexpr int INFO_MARGIN = 20;
   static QString infoText;
   static int infoFontSize = INFO_FONT_MAX;
-  static float last_values[5] = {};
+  static float last_values[3] = {};
   static int last_cpus[MAX_CPUS] = {};
   static int last_n_cpus = -1;
   if (infoText.isEmpty() || n_cpus != last_n_cpus ||
@@ -847,12 +845,11 @@ void NvgWindow::drawHud(QPainter &p) {
       part.sprintf("CPU%d(%d%%) ", i + 1, cpus[i]);
       infoText += part;
     }
-    part.sprintf("(LatA:%.3f,Fri:%.3f) SR(%.2f) MIN_TR(%.1f) DF_MOD(%.1f)",
+    // MIN_TR and DF_MOD were dropped from this line on request.
+    part.sprintf("(LatA:%.3f,Fri:%.3f) SR(%.2f)",
                     info_values[0],
                     info_values[1],
-                    info_values[2],
-                    info_values[3],
-                    info_values[4]
+                    info_values[2]
                     );
     infoText += part;
 
