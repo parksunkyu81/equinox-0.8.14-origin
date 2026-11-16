@@ -61,6 +61,7 @@ from selfdrive.controls.lib.comma_pedal_profile import (
   CommaPedalProfileController, comma_pedal_profile_rise_scale,
   normalize_comma_pedal_profile,
 )
+from selfdrive.controls.lib.comma_pedal_auto import CommaPedalAutoLearner
 from selfdrive.process_diagnostics import (append_controls_mismatch_diagnostic,
                                           append_process_diagnostic)
 
@@ -101,6 +102,9 @@ COMM_ISSUE_CONSECUTIVE_FRAMES = max(1, int(0.30 / DT_CTRL))
 # raising commIssue.
 COMM_ISSUE_OPTIONAL_VALIDITY = ('liveParameters',)
 COMMA_PEDAL_PARAM_REFRESH_FRAMES = max(1, int(0.2 / DT_CTRL))
+# The AUTO pedal-profile learner runs at 20 Hz: driver acceleration episodes
+# last seconds, and this keeps it to a few comparisons every fifth frame.
+COMMA_PEDAL_AUTO_FRAMES = 5
 # Dynamic TR values are user settings echoed into controlsState for the UI, not
 # control inputs. Re-reading them off the filesystem every frame cost ~150 us at
 # 100 Hz, so they are cached and refreshed at 1 Hz.
@@ -527,8 +531,14 @@ class Controls:
         # "openpilot was holding speed and I needed to slow". Measured on
         # 2026-09-01--07-13-55, that pushed the gain to 0.85-0.90 with no
         # upward signal available to bring it back.
-        self.comma_pedal_profile = normalize_comma_pedal_profile(
-          params.get("CommaPedalResistance", encoding="utf8") or 'mid')
+        # CommaPedalResistance = auto hands the choice to CommaPedalAutoLearner
+        # (comma_pedal_auto.py), which learns LOW / MID / HIGH from the
+        # driver's own acceleration and gas/brake corrections. It drives MID
+        # until it has seen enough, and it only ever picks one of the three.
+        self.comma_pedal_auto = CommaPedalAutoLearner(
+          params.get("CommaPedalAutoStats"), put_fn=put_nonblocking)
+        self.comma_pedal_auto_selected = False
+        self.comma_pedal_profile = self._read_comma_pedal_profile(params)
         self.comma_pedal_profile_controller = CommaPedalProfileController(
           self.comma_pedal_profile)
         self.comma_pedal_profile_gain = 1.0
@@ -711,6 +721,16 @@ class Controls:
         global_df_mod = self.params.get("globalDfMod", encoding="utf8")
         if global_df_mod is not None:
             self.dynamic_tr_global_df_mod = float(global_df_mod)
+
+    def _read_comma_pedal_profile(self, params):
+        """The profile CommaPedalResistance selects, resolving AUTO to the
+        learner's current pick. Leaving AUTO saves what it learned."""
+        raw = (params.get("CommaPedalResistance", encoding="utf8") or 'mid').strip().lower()
+        auto = raw == 'auto'
+        if self.comma_pedal_auto_selected and not auto:
+            self.comma_pedal_auto.save_now()
+        self.comma_pedal_auto_selected = auto
+        return self.comma_pedal_auto.profile if auto else normalize_comma_pedal_profile(raw)
 
     def reset(self):
         self.max_speed_clu = 0.
@@ -2014,8 +2034,25 @@ class Controls:
                 lac_log.saturated = abs(steer) >= 0.9
 
         if self.sm.frame % COMMA_PEDAL_PARAM_REFRESH_FRAMES == 0:
-            self.comma_pedal_profile = normalize_comma_pedal_profile(
-              self.params.get("CommaPedalResistance", encoding="utf8") or 'mid')
+            self.comma_pedal_profile = self._read_comma_pedal_profile(self.params)
+        if self.comma_pedal_auto_selected and self.sm.frame % COMMA_PEDAL_AUTO_FRAMES == 0:
+            lead = self.sm['radarState'].leadOne
+            lead_headway_s = None
+            lead_closing = False
+            if lead.status:
+                lead_headway_s = float(lead.dRel) / max(float(CS.vEgo), 1.0)
+                lead_closing = float(lead.vRel) < -0.5
+            self.comma_pedal_auto.update(
+              now=sec_since_boot(), dt=COMMA_PEDAL_AUTO_FRAMES * DT_CTRL,
+              v_ego=float(CS.vEgo), a_ego=float(CS.aEgo),
+              gas_pressed=CS.gasPressed, brake_pressed=CS.brakePressed,
+              long_active=bool(self.active and self.CP.enableGasInterceptor),
+              op_accel=float(actuators.accel),
+              lead_headway_s=lead_headway_s, lead_closing=lead_closing,
+              lat_accel=float(CS.yawRate) * float(CS.vEgo),
+              lane_change=lat_plan.laneChangeState != LaneChangeState.off)
+            # The learner may have just decided; use it from this frame on.
+            self.comma_pedal_profile = self.comma_pedal_auto.profile
         pedal_profile_active = bool(
           self.active and self.CP.enableGasInterceptor and
           self.last_actuators.gas > 0.001 and

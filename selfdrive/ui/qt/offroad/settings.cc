@@ -594,7 +594,7 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   QString comma_pedal_resistance = QString::fromStdString(
     Params().get("CommaPedalResistance")).toLower();
   if (comma_pedal_resistance != "high" && comma_pedal_resistance != "mid" &&
-      comma_pedal_resistance != "low") {
+      comma_pedal_resistance != "low" && comma_pedal_resistance != "auto") {
     comma_pedal_resistance = "mid";
     Params().put("CommaPedalResistance", "mid");
   }
@@ -606,7 +606,8 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   commaPedalResistanceLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
   QComboBox* commaPedalResistanceCombo = new QComboBox(homeWidget);
   commaPedalResistanceCombo->setObjectName("commaPedalResistanceCombo");
-  commaPedalResistanceCombo->addItems(QStringList() << "HIGH" << "MID" << "LOW");
+  // AUTO: controlsd learns HIGH / MID / LOW from the driver (comma_pedal_auto.py).
+  commaPedalResistanceCombo->addItems(QStringList() << "HIGH" << "MID" << "LOW" << "AUTO");
   commaPedalResistanceCombo->setCurrentText(comma_pedal_resistance.toUpper());
   connect(commaPedalResistanceCombo, &QComboBox::currentTextChanged,
           [=](const QString &selected) {

@@ -179,7 +179,7 @@ static QString nextTRProfile(const QString &cur) {
 
 // Tapping the 페달 강도 tile steps CommaPedalResistance in the settings menu's
 // order. controlsd and the planner re-read it on their own, without a restart.
-static const char *const PEDAL_PROFILE_CYCLE[] = {"high", "mid", "low"};
+static const char *const PEDAL_PROFILE_CYCLE[] = {"high", "mid", "low", "auto"};
 
 static QString nextPedalProfile(const QString &cur) {
   constexpr int n = sizeof(PEDAL_PROFILE_CYCLE) / sizeof(PEDAL_PROFILE_CYCLE[0]);
@@ -1351,10 +1351,15 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   */
 
   // Community menu value:
-  //   CommaPedalResistance = high | mid | low
+  //   CommaPedalResistance = high | mid | low | auto
   // Refresh once per second instead of reading Params on every UI frame.
+  // In AUTO the tile is relabelled 페달 AUTO and shows what the learner picked
+  // (CommaPedalAutoStatus, written by controlsd), or its progress -- "9/15"
+  // usable acceleration episodes -- while it is still learning on MID.
   static uint64_t last_ai_profile_update = 0;
   static QString ai_pedal_profile = "MID";
+  static bool ai_pedal_auto = false;
+  static bool ai_pedal_learning = false;
   const uint64_t ai_profile_now = millis_since_boot();
 
   if (pedal_profile_refresh_ || last_ai_profile_update == 0 ||
@@ -1362,10 +1367,26 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     last_ai_profile_update = ai_profile_now;
     pedal_profile_refresh_ = false;
 
+    Params params;
     QString pedal_profile = QString::fromStdString(
-      Params().get("CommaPedalResistance")).toUpper();
-    if (pedal_profile != "HIGH" && pedal_profile != "MID" &&
-        pedal_profile != "LOW") {
+      params.get("CommaPedalResistance")).trimmed().toUpper();
+    ai_pedal_auto = pedal_profile == "AUTO";
+    ai_pedal_learning = false;
+    if (ai_pedal_auto) {
+      const QString status = QString::fromStdString(
+        params.get("CommaPedalAutoStatus")).trimmed();
+      if (status.startsWith("learn ")) {
+        pedal_profile = status.mid(6);
+        ai_pedal_learning = true;
+      } else {
+        pedal_profile = status.toUpper();
+        if (pedal_profile != "HIGH" && pedal_profile != "MID" && pedal_profile != "LOW") {
+          pedal_profile = "0/15";
+          ai_pedal_learning = true;
+        }
+      }
+    } else if (pedal_profile != "HIGH" && pedal_profile != "MID" &&
+               pedal_profile != "LOW") {
       pedal_profile = "MID";
     }
     ai_pedal_profile = pedal_profile;
@@ -1375,7 +1396,9 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // to read the word. The tile itself is drawn with the right-hand status
   // block below, above ACC and at that block's size.
   QColor aiProfileColor;
-  if (ai_pedal_profile == "HIGH") {
+  if (ai_pedal_learning) {
+    aiProfileColor = QColor(160, 160, 160, 220);
+  } else if (ai_pedal_profile == "HIGH") {
     aiProfileColor = QColor(254, 32, 32, 220);
   } else if (ai_pedal_profile == "MID") {
     aiProfileColor = QColor(255, 185, 15, 220);
@@ -1968,7 +1991,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       // high. The same 1.60 here would render visibly larger than its pair,
       // spill well past its own disc and reach the PEDAL MAX disc beside it.
       // 1.17 lands level with the pair and clears that disc.
-      statusCircle(scol_r, speed_row, "페달 강도", ai_pedal_profile,
+      statusCircle(scol_r, speed_row, ai_pedal_auto ? "페달 AUTO" : "페달 강도", ai_pedal_profile,
                    aiProfileColor, "HIGH", 1.17f, 0.10f);
       pedal_tile_rect_ = QRect(scol_r - SD / 2, speed_row - SD / 2, SD, SD);
       pedal_tile_drawn_t_ = millis_since_boot();
