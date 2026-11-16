@@ -21,6 +21,13 @@ from selfdrive.swaglog import cloudlog
 LON_MPC_STEP = 0.2  # first step is 0.2s
 AWARENESS_DECEL = -0.2  # car smoothly decel at .2m/s^2 when user is distracted
 LEAD_LOSS_CRUISE_BLEND_S = 0.60
+# Brake-minimizing follow: acceleration ceiling toward a slower or slowing lead.
+CLOSING_CAP_MIN_SPEED_MS = 1.0
+CLOSING_CAP_STANDSTILL_M = 4.5
+CLOSING_CAP_GAP_FACTOR = 2.0
+CLOSING_CAP_VREL_MS = -0.5
+CLOSING_CAP_ALEAD_MS2 = -0.5
+CLOSING_CAP_EASE_MPS3 = 1.0
 LEAD_LOSS_ACCEL_RISE_MPS3 = 0.70
 
 # 가속도를 낮추어 엑셀 사용을 최소화합니다.
@@ -163,6 +170,22 @@ class Planner:
         0.0, self.lead_loss_blend_remaining - DT_MDL)
 
     accel_limits_turns[1] = limit_stop_acceleration(v_ego, accel_limits_turns[1])
+
+    # Brake-minimizing follow: do not build speed that will have to come off
+    # again. On this car only coasting and the driver's brake can remove it,
+    # so with a slower or slowing lead inside twice the desired gap the
+    # acceleration ceiling eases to zero (holding speed is still allowed).
+    self.closing_accel_cap = False
+    if self.CP.enableGasInterceptor:
+      lead = sm['radarState'].leadOne
+      if lead.status and v_ego > CLOSING_CAP_MIN_SPEED_MS:
+        desired_gap = CLOSING_CAP_STANDSTILL_M + v_ego * float(self.mpc.desired_TR)
+        if (lead.dRel < CLOSING_CAP_GAP_FACTOR * desired_gap and
+            (lead.vRel < CLOSING_CAP_VREL_MS or lead.aLeadK < CLOSING_CAP_ALEAD_MS2)):
+          self.closing_accel_cap = True
+          accel_limits_turns[1] = min(
+            accel_limits_turns[1],
+            max(0.0, self.a_desired - CLOSING_CAP_EASE_MPS3 * DT_MDL))
 
     self.mpc.set_accel_limits(accel_limits_turns[0], accel_limits_turns[1])
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)

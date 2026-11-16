@@ -19,15 +19,3 @@ class CarData:
 class dfData:
   v_egos = []
   v_rels = []
-
-
-class dfProfiles:
-  traffic = 0
-  stock = 1
-  roadtrip = 2
-  auto = 3
-
-  to_profile = {0: 'traffic', 1: 'stock', 2: 'roadtrip', 3: 'auto'}
-  to_idx = {v: k for k, v in to_profile.items()}
-
-  default = traffic

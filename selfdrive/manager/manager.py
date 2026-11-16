@@ -73,9 +73,6 @@ def manager_init() -> None:
 
     # Dynamic TR
     ("CustomTREnabled", "1"),
-    ("DynamicTRGap", "auto"),
-    ("minTR", "0.9"),
-    ("globalDfMod", "1.0"),
     ("CommaPedalResistance", "mid"),
 
     # Temp

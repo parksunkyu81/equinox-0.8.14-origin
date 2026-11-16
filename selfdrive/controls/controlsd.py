@@ -62,6 +62,8 @@ from selfdrive.controls.lib.comma_pedal_profile import (
   normalize_comma_pedal_profile,
 )
 from selfdrive.controls.lib.comma_pedal_auto import CommaPedalAutoLearner
+from selfdrive.controls.lib.follow_learner import FollowLearner
+from selfdrive.controls.lib.dynamic_follow.follow_gap import FOLLOW_LEARN_PARAM, floor_tr
 from selfdrive.process_diagnostics import (append_controls_mismatch_diagnostic,
                                           append_process_diagnostic)
 
@@ -105,10 +107,6 @@ COMMA_PEDAL_PARAM_REFRESH_FRAMES = max(1, int(0.2 / DT_CTRL))
 # The AUTO pedal-profile learner runs at 20 Hz: driver acceleration episodes
 # last seconds, and this keeps it to a few comparisons every fifth frame.
 COMMA_PEDAL_AUTO_FRAMES = 5
-# Dynamic TR values are user settings echoed into controlsState for the UI, not
-# control inputs. Re-reading them off the filesystem every frame cost ~150 us at
-# 100 Hz, so they are cached and refreshed at 1 Hz.
-DYNAMIC_TR_PARAM_REFRESH_FRAMES = max(1, int(1.0 / DT_CTRL))
 
 # Warn while the lateral controller is still out of authority, instead of after
 # the car has already left the path. latcontrol's sat_count filter already
@@ -438,10 +436,12 @@ class Controls:
 
         # Seeded here so the first publish_logs frame has values without a
         # filesystem read; manager guarantees these keys exist at every start.
-        self.dynamic_tr_min = 0.9
-        self.dynamic_tr_mode = 'auto'
+        # The Dynamic Follow menus are gone (follow_gap.py has one gap and no
+        # settings). These keep their controlsState fields filled: no profile
+        # name, the low-speed floor, and a neutral multiplier.
+        self.dynamic_tr_min = 0.8
+        self.dynamic_tr_mode = ''
         self.dynamic_tr_global_df_mod = 1.0
-        self._refresh_dynamic_tr_params()
 
         self.slow_on_curves = Params().get_bool('SccSmootherSlowOnCurves')
         self.min_set_speed_clu = self.kph_to_clu(MIN_SET_SPEED_KPH)
@@ -539,6 +539,13 @@ class Controls:
           params.get("CommaPedalAutoStats"), put_fn=put_nonblocking)
         self.comma_pedal_auto_selected = False
         self.comma_pedal_profile = self._read_comma_pedal_profile(params)
+        # Brake-minimizing follow control (follow_learner.py): coast
+        # deceleration per speed, the lift margin and gap scale from the
+        # driver's corrections. The first state seeds the gap scale from the
+        # retired Dynamic Follow multiplier so the gap does not jump.
+        self.follow_learner = FollowLearner(
+          params.get(FOLLOW_LEARN_PARAM), put_fn=put_nonblocking,
+          seed_scale=params.get("globalDfMod", encoding="utf8"))
         self.comma_pedal_profile_controller = CommaPedalProfileController(
           self.comma_pedal_profile)
         self.comma_pedal_profile_gain = 1.0
@@ -708,19 +715,6 @@ class Controls:
             trigger=snapshot,
             history=list(self.controls_mismatch_history),
         )
-
-    def _refresh_dynamic_tr_params(self):
-        # Keep the last good value if a key goes missing rather than throwing
-        # inside the control loop.
-        min_tr = self.params.get("minTR", encoding="utf8")
-        if min_tr is not None:
-            self.dynamic_tr_min = float(min_tr)
-        mode = self.params.get("DynamicTRGap", encoding="utf8")
-        if mode is not None:
-            self.dynamic_tr_mode = mode
-        global_df_mod = self.params.get("globalDfMod", encoding="utf8")
-        if global_df_mod is not None:
-            self.dynamic_tr_global_df_mod = float(global_df_mod)
 
     def _read_comma_pedal_profile(self, params):
         """The profile CommaPedalResistance selects, resolving AUTO to the
@@ -1941,7 +1935,12 @@ class Controls:
                 boost_floor_context_safe and boost_floor_accel > 0.0),
               # Was a learned offset; the learner is gone, so predictive
               # coasting uses its own unshifted low-speed behaviour.
-              learned_low_speed_coast_offset_s=0.0)
+              learned_low_speed_coast_offset_s=0.0,
+              # Brake-minimizing lift: lift by what coasting can still shed
+              # before the gap reaches the brake-free floor.
+              coast_decel_ms2=self.follow_learner.coast_decel(CS.vEgo),
+              reach_floor_tr=floor_tr(CS.vEgo),
+              reach_margin=self.follow_learner.lift_margin)
 
             # Steering pinned: take the pedal off (applied below, together with
             # the pre-corner lift). The stopped-lead launch boost owns the pedal
@@ -2053,6 +2052,20 @@ class Controls:
               lane_change=lat_plan.laneChangeState != LaneChangeState.off)
             # The learner may have just decided; use it from this frame on.
             self.comma_pedal_profile = self.comma_pedal_auto.profile
+        if self.CP.enableGasInterceptor and self.sm.frame % COMMA_PEDAL_AUTO_FRAMES == 1:
+            follow_lead = self.sm['radarState'].leadOne
+            self.follow_learner.update(
+              now=sec_since_boot(), dt=COMMA_PEDAL_AUTO_FRAMES * DT_CTRL,
+              v_ego=float(CS.vEgo), a_ego=float(CS.aEgo),
+              pedal_cmd=float(self.last_actuators.gas),
+              gas_pressed=CS.gasPressed, brake_pressed=CS.brakePressed,
+              long_active=bool(self.active),
+              op_accel=float(actuators.accel),
+              lat_accel=float(CS.yawRate) * float(CS.vEgo),
+              lane_change=lat_plan.laneChangeState != LaneChangeState.off,
+              lead_status=bool(follow_lead.status),
+              lead_dist=float(follow_lead.dRel) if follow_lead.status else 0.0,
+              lead_vrel=float(follow_lead.vRel) if follow_lead.status else 0.0)
         pedal_profile_active = bool(
           self.active and self.CP.enableGasInterceptor and
           self.last_actuators.gas > 0.001 and
@@ -2336,9 +2349,6 @@ class Controls:
         controlsState.laneCenterCorrectionActive = bool(
           getattr(lat_plan, 'laneCenterCorrectionActive', False))
 
-        # Dynamic TR
-        if self.sm.frame % DYNAMIC_TR_PARAM_REFRESH_FRAMES == 0:
-            self._refresh_dynamic_tr_params()
         #controlsState.cruiseGap = int(Params().get("cruiseGap", encoding="utf8"))
         controlsState.minTR = float(self.dynamic_tr_min)
         #controlsState.dynamicTRMode = int(self.sm['longitudinalPlan'].dynamicTRMode)

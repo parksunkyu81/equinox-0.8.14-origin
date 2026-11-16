@@ -120,44 +120,6 @@ signals:
 
 };
 
-class DynamicTRGap : public QWidget {
-  Q_OBJECT
-public:
-  explicit DynamicTRGap(QWidget* parent = 0);
-
-private:
-
-signals:
-  void backPress();
-  void selected();
-
-};
-
-class MinTR : public QWidget {
-  Q_OBJECT
-public:
-  explicit MinTR(QWidget* parent = 0);
-
-private:
-
-signals:
-  void backPress();
-  void selected();
-
-};
-
-class GlobalDfMod : public QWidget {
-  Q_OBJECT
-public:
-  explicit GlobalDfMod(QWidget* parent = 0);
-
-private:
-
-signals:
-  void backPress();
-  void selected();
-
-};
 
 class CommunityPanel : public QWidget {
   Q_OBJECT
@@ -170,9 +132,6 @@ private:
   QWidget* homeScreen = nullptr;
   SelectCar* selectCar = nullptr;
   LateralControl* lateralControl = nullptr;
-  DynamicTRGap* dynamicTRGap = nullptr;
-  MinTR* minTR = nullptr;
-  GlobalDfMod* globalDfMod = nullptr;
 
   QWidget* homeWidget;
 

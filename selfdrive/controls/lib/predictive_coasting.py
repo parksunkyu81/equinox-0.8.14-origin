@@ -45,6 +45,17 @@ PREDICTIVE_COAST_POSITIVE_DEMAND_RELEASE_VREL_MS = 0.0
 PREDICTIVE_COAST_LEARNED_LOW_SPEED_MAX_KPH = 35.0
 PREDICTIVE_COAST_LEARNED_CLOSING_VREL_MS = -0.10
 PREDICTIVE_COAST_LEARNED_OFFSET_MAX_S = 0.10
+# Coast reachability (brake-minimizing follow): required deceleration divided
+# by coast capability. Below 0.3 nothing changes, 0.3-0.6 lifts partly, from
+# 0.6 the pedal is fully off -- leaving 40% of the coast deceleration spare
+# for the lead slowing further.
+REACH_PARTIAL_RATIO = 0.30
+REACH_FULL_RATIO = 0.60
+REACH_LEAD_LOOKAHEAD_S = 1.0
+REACH_MIN_CLOSING_MS = 0.30
+REACH_MIN_FLOOR_TR_S = 0.70
+REACH_MIN_MARGIN_M = 0.5
+REACH_MIN_COAST_MS2 = 0.1
 CURVE_APPROACH_START_S = 2.50
 CURVE_FULL_LIFT_S = 0.80
 SOURCE_SPEED_GAP_FULL_LIFT_KPH = 10.0
@@ -125,6 +136,7 @@ class PredictiveCoastingCoordinator:
     self.desired_gap_m = 0.0
     self.distance_margin_m = 0.0
     self.time_to_gap_s = math.inf
+    self.reach_ratio = 0.0
     self.ttc_s = math.inf
     self.lead_distance_m = 0.0
     self.lead_rel_speed_ms = 0.0
@@ -185,7 +197,8 @@ class PredictiveCoastingCoordinator:
              lead_loss_recovery_active=False,
              launch_boost_floor_active=False,
              positive_recovery_active=False,
-             learned_low_speed_coast_offset_s=0.0):
+             learned_low_speed_coast_offset_s=0.0,
+             coast_decel_ms2=None, reach_floor_tr=None, reach_margin=1.0):
     if not enabled or not control_active or not can_valid:
       self.reset()
       return self.pedal_scale
@@ -256,10 +269,33 @@ class PredictiveCoastingCoordinator:
           (PREDICTIVE_COAST_ENTER_TTG_S - self.time_to_gap_s) /
           (PREDICTIVE_COAST_ENTER_TTG_S - PREDICTIVE_COAST_FULL_LIFT_TTG_S),
           0.0, 1.0))
+      # Coast reachability (brake-minimizing follow). The time-to-gap ramp
+      # above lifts at a fixed 4.5 s whatever the speed difference: too late
+      # for a large one -- coasting alone can no longer shed it and the driver
+      # has to brake -- and earlier than needed for a small one. Compare the
+      # deceleration that matching the lead before the brake-free floor gap
+      # requires against what coasting delivers at this speed, and lift in
+      # proportion. It only ever adds lift: lead_pressure takes the larger.
+      self.reach_ratio = 0.0
+      coast = _finite(coast_decel_ms2, 0.0) if coast_decel_ms2 is not None else 0.0
+      if coast > 0.0 and reach_floor_tr is not None:
+        v_close = max(0.0, -v_rel - min(a_lead, 0.0) * REACH_LEAD_LOOKAHEAD_S)
+        if v_close > REACH_MIN_CLOSING_MS:
+          floor_gap = PREDICTIVE_COAST_STANDSTILL_GAP_M + v_ego * max(
+            _finite(reach_floor_tr, REACH_MIN_FLOOR_TR_S), REACH_MIN_FLOOR_TR_S)
+          margin = max(d_rel - floor_gap, REACH_MIN_MARGIN_M)
+          required = v_close * v_close / (2.0 * margin)
+          self.reach_ratio = float(clip(_finite(reach_margin, 1.0), 0.5, 2.0)) * \
+            required / max(coast, REACH_MIN_COAST_MS2)
+          reach_pressure = float(clip(
+            (self.reach_ratio - REACH_PARTIAL_RATIO) / (REACH_FULL_RATIO - REACH_PARTIAL_RATIO),
+            0.0, 1.0))
+          lead_pressure = max(lead_pressure, reach_pressure)
     else:
       self.desired_gap_m = 0.0
       self.distance_margin_m = 0.0
       self.time_to_gap_s = math.inf
+      self.reach_ratio = 0.0
       self.ttc_s = math.inf
       self.lead_distance_m = 0.0
       self.lead_rel_speed_ms = 0.0
