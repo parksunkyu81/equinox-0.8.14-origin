@@ -1,6 +1,6 @@
 import json
-import os
 import random
+import re
 
 import select
 import threading
@@ -11,16 +11,129 @@ import struct
 from threading import Thread
 from cereal import messaging, log
 from common.numpy_fast import clip
+from common.params import Params
 from common.realtime import sec_since_boot
 from common.conversions import Conversions as CV
+from selfdrive.speed_bump_planner import SpeedBumpPlanner
 
 CAMERA_SPEED_FACTOR = 1.05
 SAFE_STARTING_DIST = 60.
+
+UDP_RECV_BUFFER = 65535      # TmapNda는 road_limit + apilot(전체 TBT/SDI)을 한 패킷으로 보내 2KB를 넘을 수 있음
+SPEED_BUMP_CAM_TYPE = 22
+SPEED_BUMP_DEFAULT_LIMIT = 10  # 방지턱 제한속도가 0으로 올 때 대체값
+SECTION_KEYS = ("section_limit_speed", "section_left_dist", "section_avg_speed", "section_left_time")
 
 class Port:
   BROADCAST_PORT = 2899
   RECEIVE_PORT = 2843
   LOCATION_PORT = BROADCAST_PORT
+
+
+# nda_manager가 보내는 레거시 목적지 명령. 셸로 실행하지 않고 이 두 형태만 인식해 Params로 처리한다.
+LEGACY_DEST_SET = re.compile(r"^echo '(\{.*\})' > /data/params/d/NavDestination$", re.DOTALL)
+LEGACY_DEST_CLEAR = "rm /data/params/d/NavDestination"
+
+
+def parse_nav_destination(obj):
+  """폰이 보낸 목적지를 검증해 NavDestination 형식 dict로 반환. 잘못된 값이면 None."""
+  if not isinstance(obj, dict):
+    return None
+  try:
+    lat = float(obj["latitude"])
+    lon = float(obj["longitude"])
+  except (KeyError, TypeError, ValueError):
+    return None
+  if not (-90. <= lat <= 90. and -180. <= lon <= 180.) or (abs(lat) < 1e-6 and abs(lon) < 1e-6):
+    return None
+  name = obj.get("place_name")
+  name = str(name)[:200] if name is not None else None
+  return {"latitude": lat, "longitude": lon, "place_name": name, "place_details": None}
+
+
+def apply_nav_destination(dest, params=None):
+  """dest가 None이면 목적지 삭제, dict면 검증 후 저장. 저장/삭제했으면 True."""
+  params = params if params is not None else Params()
+  if dest is None:
+    params.delete("NavDestination")
+    return True
+  parsed = parse_nav_destination(dest)
+  if parsed is None:
+    return False
+  params.put("NavDestination", json.dumps(parsed))
+  return True
+
+
+def handle_legacy_cmd(cmd, params=None):
+  """레거시 {"cmd": ...} 처리. 목적지 설정/삭제 두 형태 외에는 무시한다 (임의 셸 실행 금지)."""
+  if not isinstance(cmd, str):
+    return False
+  if cmd.strip() == LEGACY_DEST_CLEAR:
+    return apply_nav_destination(None, params)
+  m = LEGACY_DEST_SET.match(cmd.strip())
+  if m:
+    try:
+      return apply_nav_destination(json.loads(m.group(1)), params)
+    except ValueError:
+      return False
+  print("road_speed_limiter: ignored unsupported cmd")
+  return False
+
+
+def _int_or_none(v):
+  try:
+    return int(v)
+  except (TypeError, ValueError):
+    return None
+
+
+def normalize_road_limit(road_limit, apilot=None):
+  """송신 앱마다 다른 road_limit 해석을 이 수신기 기준으로 맞춘다.
+
+  apilot(TmapNda가 같이 보내는 원본 TBT/SDI)이 있으면:
+    - section_*는 버린다. TmapNda는 여기에 '두 번째 카메라'(secondSDIInfo) 값을 넣는데,
+      이 수신기는 section_left_dist >= 10이면 카메라 접근 시 점진 감속을 끄기 때문에 급감속이 생긴다.
+    - 대신 첫 번째 SDI의 nSdiBlockDist / nSdiBlockSpeed(실제 구간단속)로 section_*를 다시 만든다.
+    - is_highway는 apilot.nRoadClass, 없으면 apilot.roadcate(0, 1 = 고속도로)로 판단한다.
+      TmapNda는 road_limit.is_highway를 항상 false로 보낸다.
+  공통:
+    - 방지턱(cam_type 22)의 제한속도가 0 이하면 SPEED_BUMP_DEFAULT_LIMIT로 대체한다.
+  nda_manager처럼 apilot이 없는 송신자는 방지턱 대체 외에는 그대로 둔다.
+  """
+  if not isinstance(road_limit, dict):
+    return road_limit
+  out = dict(road_limit)
+
+  if isinstance(apilot, dict):
+    for k in SECTION_KEYS:
+      out.pop(k, None)
+
+    block_dist = _int_or_none(apilot.get("nSdiBlockDist"))
+    block_speed = _int_or_none(apilot.get("nSdiBlockSpeed"))
+    if block_dist is not None and block_speed is not None and block_dist > 0 and block_speed > 0:
+      out["section_limit_speed"] = block_speed
+      out["section_left_dist"] = block_dist
+      avg = _int_or_none(apilot.get("nSdiBlockAverageSpeed"))
+      left_time = _int_or_none(apilot.get("nSdiBlockTime"))
+      if avg is not None:
+        out["section_avg_speed"] = avg
+      if left_time is not None:
+        out["section_left_time"] = left_time
+
+    # TmapNda: 실제 TMAP 도로등급(rgData.roadcate)은 nRoadClass로 오고(자동 진출 옵션이 켜졌을 때만, 모르면 -1),
+    # apilot.roadcate는 방지턱일 때만 8로 채워진다. 둘 다 0, 1 = 고속도로.
+    road_class = _int_or_none(apilot.get("nRoadClass"))
+    if road_class is None or road_class < 0:
+      road_class = _int_or_none(apilot.get("roadcate"))
+    if road_class is not None and road_class >= 0:
+      out["is_highway"] = road_class <= 1
+
+  if _int_or_none(out.get("cam_type")) == SPEED_BUMP_CAM_TYPE:
+    limit = _int_or_none(out.get("cam_limit_speed"))
+    if limit is None or limit <= 0:
+      out["cam_limit_speed"] = SPEED_BUMP_DEFAULT_LIMIT
+
+  return out
 
 
 class RoadLimitSpeedServer:
@@ -152,12 +265,21 @@ class RoadLimitSpeedServer:
       ready = select.select([sock], [], [], 1.)
       ret = bool(ready[0])
       if ret:
-        data, self.remote_addr = sock.recvfrom(2048)
+        data, self.remote_addr = sock.recvfrom(UDP_RECV_BUFFER)
         json_obj = json.loads(data.decode())
 
+        # 예전에는 os.system(json_obj['cmd'])로 LAN의 누구든 root 명령을 실행할 수 있었다.
+        # 이제 nda_manager의 목적지 명령만 해석하고 셸은 실행하지 않는다.
         if 'cmd' in json_obj:
           try:
-            os.system(json_obj['cmd'])
+            handle_legacy_cmd(json_obj['cmd'])
+            ret = False
+          except:
+            pass
+
+        if 'nav_destination' in json_obj:
+          try:
+            apply_nav_destination(json_obj['nav_destination'])
             ret = False
           except:
             pass
@@ -190,7 +312,7 @@ class RoadLimitSpeedServer:
             pass
 
           if 'road_limit' in json_obj:
-            self.json_road_limit = json_obj['road_limit']
+            self.json_road_limit = normalize_road_limit(json_obj['road_limit'], json_obj.get('apilot'))
             self.last_updated = sec_since_boot()
 
         finally:
@@ -299,6 +421,11 @@ class RoadSpeedLimiter:
     self.sock = messaging.sub_sock("roadLimitSpeed")
     self.roadLimitSpeed = None
 
+    # 방지턱: 50m 전까지 10km/h, 통과 후 해제. controlsd가 speed_bump_active를 보고
+    # V_CRUISE_MIN(20km/h) 아래 목표를 허용한다.
+    self.bump_planner = SpeedBumpPlanner()
+    self.speed_bump_active = False
+
   def recv(self):
     try:
       dat = messaging.recv_sock(self.sock, wait=False)
@@ -346,8 +473,21 @@ class RoadSpeedLimiter:
         MIN_LIMIT = 20
         MAX_LIMIT = 120
 
-      if cam_type == 22:  # speed bump
-        MIN_LIMIT = 10
+      # 방지턱은 전용 플래너가 전담한다 (아래 일반 카메라 로직을 타지 않음).
+      v_ego_ms = cluster_speed * (CV.KPH_TO_MS if is_metric else CV.MPH_TO_MS)
+      bump_dist = cam_limit_speed_left_dist if cam_type == SPEED_BUMP_CAM_TYPE else None
+      was_bump_active = self.speed_bump_active
+      bump_target_kph = self.bump_planner.update(cam_type, bump_dist, v_ego_ms, sec_since_boot())
+      self.speed_bump_active = bump_target_kph is not None
+      if self.speed_bump_active:
+        self.slowing_down = False
+        kph_to_clu = 1. if is_metric else CV.KPH_TO_MPH
+        return bump_target_kph * kph_to_clu, SpeedBumpPlanner.BUMP_SPEED_KPH * kph_to_clu, \
+               max(0., self.bump_planner.est_dist), not was_bump_active, log
+      if cam_type == SPEED_BUMP_CAM_TYPE:
+        # 통과 직후 재보고 / 고정값(150m) 등 플래너가 무시한 방지턱 정보
+        self.slowing_down = False
+        return 0, cam_limit_speed, cam_limit_speed_left_dist, False, log
 
       if cam_limit_speed_left_dist is not None and cam_limit_speed is not None and cam_limit_speed_left_dist > 0:
 
@@ -403,6 +543,7 @@ class RoadSpeedLimiter:
       pass
 
     self.slowing_down = False
+    self.speed_bump_active = False
     return 0, 0, 0, False, log
 
 

@@ -34,6 +34,7 @@ from selfdrive.manager.process_config import managed_processes
 from selfdrive.ntune import ntune_common_get, ntune_common_enabled, ntune_scc_get, ntune_torque_get
 from selfdrive.road_speed_limiter import road_speed_limiter_get_max_speed, \
   get_road_speed_limiter
+from selfdrive.speed_bump_planner import SpeedBumpPlanner
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, CONTROL_N
 from selfdrive.car.gm.values import MIN_CURVE_SPEED
 #from decimal import Decimal
@@ -400,6 +401,7 @@ class Controls:
         self.v_cruise_kph = 255
         self.v_cruise_kph_last = 0
         self.max_speed_clu = 0.
+        self.speed_bump_active = False
         self.curve_speed_ms = 0.
         self.curve_speed_limiter = CurveSpeedLimiter()
         # Speed the current curve was entered at, or None between curves.
@@ -712,6 +714,7 @@ class Controls:
 
     def reset(self):
         self.max_speed_clu = 0.
+        self.speed_bump_active = False
         self.curve_speed_ms = 0.
         self._curve_entry_speed_ms = None
         self.curve_speed_limiter.reset()
@@ -955,6 +958,8 @@ class Controls:
 
         apply_limit_speed, road_limit_speed, left_dist, first_started, max_speed_log = \
             road_speed_limiter_get_max_speed(v_ego_clu, self.is_metric)
+        # 방지턱 감속 중: V_CRUISE_MIN(20km/h) 아래 목표(10km/h)를 허용하고, 필터 없이 바로 반영한다.
+        self.speed_bump_active = bool(road_speed_limiter.speed_bump_active)
 
         # print("apply_limit_speed : ", apply_limit_speed)
         # print("road_limit_speed : ", road_limit_speed)
@@ -1019,7 +1024,8 @@ class Controls:
 
         max_speed_log = ""
 
-        if apply_limit_speed >= self.kph_to_clu(V_CRUISE_MIN):       # 크루즈 최저 속도보다 큰 경우 설정
+        if apply_limit_speed >= self.kph_to_clu(V_CRUISE_MIN) or \
+                (self.speed_bump_active and apply_limit_speed > 0):       # 크루즈 최저 속도보다 큰 경우 설정 (방지턱은 예외)
 
             # 크루즈 초기 설정 속도 (PSK)
             # controls.v_cruise_kph : 크루즈 설정 속도
@@ -1058,6 +1064,10 @@ class Controls:
 
     def update_max_speed(self, max_speed, CS, limited_curv):
         if not CS.cruiseState.enabled or self.max_speed_clu <= 0:
+            self.max_speed_clu = max_speed
+        elif self.speed_bump_active and max_speed < self.max_speed_clu:
+            # 방지턱 프로파일은 이미 거리 기반으로 부드럽게 내려가므로 지연 필터를 거치지 않는다.
+            # 통과 후 복귀(올라갈 때)는 아래 필터로 천천히 원래 속도로 돌아간다.
             self.max_speed_clu = max_speed
         else:
             kp = 0.02 if limited_curv else 0.01
@@ -2227,8 +2237,10 @@ class Controls:
 
         # Cruise SET
         # kph [applyMaxSpeed, cruiseMaxSpeed]
+        # 방지턱 감속 중에는 하한을 MIN_SET_SPEED_KPH(20) 대신 방지턱 속도(10)로 낮춘다.
+        min_set_kph = SpeedBumpPlanner.BUMP_SPEED_KPH if self.speed_bump_active else MIN_SET_SPEED_KPH
         controlsState.applyMaxSpeed = float(
-            clip(self.v_cruise_kph, MIN_SET_SPEED_KPH, self.max_speed_clu * self.speed_conv_to_ms * CV.MS_TO_KPH))
+            clip(self.v_cruise_kph, min_set_kph, self.max_speed_clu * self.speed_conv_to_ms * CV.MS_TO_KPH))
         controlsState.cruiseMaxSpeed = self.v_cruise_kph
 
         if controlsState.applyMaxSpeed == controlsState.cruiseMaxSpeed:
