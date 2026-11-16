@@ -41,7 +41,7 @@ STOP_ACCEL_BOOST_MIN_SPEED_KPH = 1.0
 STOP_ACCEL_BOOST_MIN_SPEED_MS = STOP_ACCEL_BOOST_MIN_SPEED_KPH / 3.6
 STOP_ACCEL_BOOST_MAX_SPEED_KPH = 25.0
 STOP_ACCEL_BOOST_MAX_SPEED_MS = STOP_ACCEL_BOOST_MAX_SPEED_KPH / 3.6
-STOP_ACCEL_BOOST_FACTOR = 1.40
+STOP_ACCEL_BOOST_FACTOR = 1.54
 STOP_ACCEL_ZERO_EPS = 1e-3
 
 # How much of the full boost authority the current lead picture justifies.
@@ -56,7 +56,11 @@ STOP_ACCEL_BOOST_GAP_FULL_MARGIN_M = 3.00
 # is the overshoot that made the car overtake its own still-launching lead. It
 # may raise a request up to a brisk-but-comfortable launch and no further; a
 # planner request already above this is passed through untouched.
-STOP_ACCEL_BOOST_MAX_ACCEL = 1.10
+#
+# 2026-11-17: factor 1.40 -> 1.54 and this cap 1.10 -> 1.21 (+10%) because the
+# start of the launch still felt sluggish. Raising the factor alone would have
+# done nothing above the old cap. Watch for mid-launch cancels after this.
+STOP_ACCEL_BOOST_MAX_ACCEL = 1.21
 
 # A confirmed, safely receding lead may need a small launch request before the
 # normal longitudinal PID becomes positive. Ramp to the known-effective
@@ -67,19 +71,23 @@ STOP_ACCEL_BOOST_MAX_ACCEL = 1.10
 # top of it. STOP_ACCEL_BOOST_FLOOR_GAP_ACCEL is sized so the fully justified
 # floor (0.36 + 0.35 = 0.71 m/s^2, about 0.13 of pedal) matches the plateau the
 # successful launches in the log actually held.
+#
+# 2026-11-17: both floor terms raised 10% (0.40 + 0.385 = 0.785 m/s^2, about
+# 0.146 of pedal) for a firmer first second of the launch. With the 0.060 pedal
+# deadzone this is roughly +18% of effective push, not +10%.
 STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_KPH = 20.0
 STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_MS = STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_KPH / 3.6
 STOP_ACCEL_BOOST_FLOOR_FADE_SPEED_KPH = 12.0
-STOP_ACCEL_BOOST_FLOOR_ACCEL = 0.36
-STOP_ACCEL_BOOST_FLOOR_GAP_ACCEL = 0.35
+STOP_ACCEL_BOOST_FLOOR_ACCEL = 0.40
+STOP_ACCEL_BOOST_FLOOR_GAP_ACCEL = 0.385
 STOP_ACCEL_BOOST_FLOOR_RAMP_S = 0.12
 # Absolute ceiling on the floor, grade compensation included. The gap term and
 # the hill term answer the same question -- "the floor is not moving the car" --
-# from opposite ends, and stacking them at full scale would put 0.95 m/s^2 of
-# unconditional launch floor on the road. 0.80 leaves the hill term its full
-# 0.24 of headroom while the gap is quiet and squeezes it out once the gap has
-# already commanded a strong launch.
-STOP_ACCEL_BOOST_FLOOR_TOTAL_MAX = 0.80
+# from opposite ends, and stacking them at full scale would put 1.03 m/s^2 of
+# unconditional launch floor on the road. 0.88 (0.80 before the 2026-11-17
+# +10%) leaves the hill term its full 0.24 of headroom while the gap is quiet
+# and squeezes it out once the gap has already commanded a strong launch.
+STOP_ACCEL_BOOST_FLOOR_TOTAL_MAX = 0.88
 STOP_ACCEL_BOOST_FLOOR_MIN_VREL_MS = 0.20
 STOP_ACCEL_BOOST_FLOOR_MIN_LEAD_SPEED_MS = 0.50
 STOP_ACCEL_BOOST_FLOOR_MIN_LEAD_DISTANCE_M = 2.50
@@ -346,8 +354,8 @@ class StopAccelBoostLatch:
     The fixed 0.36 m/s^2 came out to about 0.067 of pedal, barely above this
     car's 0.060 interceptor deadzone, so on its own it never actually moved the
     car -- every bit of real launch acceleration came from the PID and got lost
-    with it. The gap term takes the fully justified floor to 0.71 m/s^2, which
-    is the pedal plateau the successful launches held.
+    with it. The gap term takes the fully justified floor to 0.785 m/s^2, 10%
+    above the 0.71 pedal plateau the successful launches held.
     """
     ramp = min(1.0, self.floor_elapsed / STOP_ACCEL_BOOST_FLOOR_RAMP_S)
     accel = (STOP_ACCEL_BOOST_FLOOR_ACCEL +
