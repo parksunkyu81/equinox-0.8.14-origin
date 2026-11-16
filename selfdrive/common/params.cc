@@ -223,7 +223,6 @@ std::unordered_map<std::string, uint32_t> keys = {
     {"CommaPedalAutoStatus", PERSISTENT},
     {"CommaFollowLearn", PERSISTENT},
 
-    {"closeToRoadEdge", PERSISTENT},
     {"ActiveStopAccelBoost", PERSISTENT},
     {"AutoShutdown", PERSISTENT},
     {"E2ELong", PERSISTENT},

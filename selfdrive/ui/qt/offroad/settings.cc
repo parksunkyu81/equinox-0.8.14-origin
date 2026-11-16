@@ -810,12 +810,6 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                           "../assets/offroad/icon_shell.png",
                                           this));*/
 
-  toggles.append(new ParamControl("closeToRoadEdge",
-                                          "Close to road edge",
-                                          "",
-                                          "../assets/offroad/icon_road.png",
-                                          this));
-
   toggles.append(new ParamControl("AutoShutdown",
                                           "Enable auto shutdown",
                                           "Automatically power off the EON 180 seconds after external power is disconnected and driving has stopped.",
