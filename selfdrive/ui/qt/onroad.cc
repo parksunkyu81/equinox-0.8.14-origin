@@ -1161,7 +1161,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // clear the tile rows above them. Expressed against the pitch rather than as
   // a pixel count so it keeps its proportion if radius or row_gap change.
   const int row_drop = (y1 - y2) * 2 / 5;
-  const int bar_cy = y2 + row_drop;
+  // The bar alone then drops a further tenth of the pitch (on request); the
+  // wheel stays on wheel_row_cy, the line both used to share.
+  const int wheel_row_cy = y2 + row_drop;
+  const int bar_cy = wheel_row_cy + (y1 - y2) / 10;
 
   constexpr int WHEEL_GAP = 22;
   // The wheel is the one tile that is not part of a grid of equals -- it sits
@@ -1602,7 +1605,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // The wheel sits three twentieths of the row pitch below the bar -- a
     // further 10% of the pitch down from the one twentieth it started at -- so
     // its centre sits clear of the bar's spine rather than near it.
-    const int wheel_cy = bar_cy + (y1 - y2) * 3 / 20;
+    const int wheel_cy = wheel_row_cy + (y1 - y2) * 3 / 20;
 
     p.setPen(Qt::NoPen);
     // Green when hands-off (system driving alone), black when the driver is
