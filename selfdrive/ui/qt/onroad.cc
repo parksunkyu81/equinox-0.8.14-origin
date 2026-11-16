@@ -1109,6 +1109,31 @@ void NvgWindow::drawConfidenceGauge(QPainter &p, int cx, int top_y, int bottom_y
   p.restore();
 }
 
+// Label for a TmapNda safety event. The codes are TmapNda's nSdiType scheme,
+// passed through road_speed_limiter.py as roadLimitSpeed.camType (TmapNda
+// translates Kakao's KNSafetyCode into the same numbers). Note 33 is wildlife,
+// not school zone -- school zone is 20.
+static QString ndaSafetyLabel(int cam_type) {
+  switch (cam_type) {
+    case 1: case 8: return "단속카메라";
+    case 2: case 3: case 4: return "구간단속";
+    case 6: return "신호단속";
+    case 7: return "이동식카메라";
+    case 9: return "버스전용";
+    case 11: return "갓길감시";
+    case 12: return "끼어들기";
+    case 19: return "철길건널목";
+    case 20: return "스쿨존";
+    case 22: return "방지턱";
+    case 27: return "안개주의";
+    case 29: return "사고다발";
+    case 30: return "급커브";
+    case 32: return "급경사";
+    case 33: return "야생동물";
+    default: return "안전정보";
+  }
+}
+
 void NvgWindow::drawBottomIcons(QPainter &p) {
   const SubMaster &sm = *(uiState()->sm);
   auto car_state = sm["carState"].getCarState();
@@ -1597,6 +1622,45 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     p.setPen(QColor(0, 255, 0, 255));
     p.drawText(angle_rect, Qt::AlignCenter, angle_text);
     p.setPen(Qt::NoPen);
+
+    // NDA badge, centred above the wheel in the same style as the angle
+    // badge below it. Shown only while TmapNda is connected. With no safety
+    // event ahead it names the road (고속도로 / 일반도로; TmapNda sends the
+    // road class only with its 자동 길안내 주행 option on, otherwise every road
+    // reads 일반도로). With an event ahead it names only the event (no limit
+    // or distance), in yellow so it stands apart from the plain road label.
+    auto nda = sm["roadLimitSpeed"].getRoadLimitSpeed();
+    if (nda.getActive() > 0) {
+      const int cam_type = nda.getCamType();
+      const int cam_limit = nda.getCamLimitSpeed();
+      const int cam_dist = nda.getCamLimitSpeedLeftDist();
+      const int sec_limit = nda.getSectionLimitSpeed();
+      const int sec_dist = nda.getSectionLeftDist();
+
+      QString nda_text;
+      bool event = true;
+      if (cam_dist > 0 && (cam_type != 0 || cam_limit > 0)) {
+        nda_text = ndaSafetyLabel(cam_type == 0 ? 1 : cam_type);
+      } else if (sec_limit > 0 && sec_dist > 0) {
+        nda_text = "구간단속";
+      } else {
+        nda_text = nda.getIsHighway() ? "고속도로" : "일반도로";
+        event = false;
+      }
+
+      QFontMetrics nda_fm(p.font());
+      const int nda_w = std::max(angle_w, nda_fm.horizontalAdvance(nda_text) + 38);
+      const int nda_h = angle_h;
+      int nda_left = x - nda_w / 2;
+      nda_left = std::clamp(nda_left, 12, std::max(12, width() - nda_w - 12));
+      QRect nda_rect(nda_left, wheel_cy - wheel_d / 2 - 10 - nda_h, nda_w, nda_h);
+
+      p.setBrush(QColor(0, 0, 0, 160));
+      p.drawRoundedRect(nda_rect, 10, 10);
+      p.setPen(event ? QColor(255, 200, 0, 255) : QColor(0, 255, 0, 255));
+      p.drawText(nda_rect, Qt::AlignCenter, nda_text);
+      p.setPen(Qt::NoPen);
+    }
   }
 
   // 8. Right-hand status block, sitting above the temperature panel and
