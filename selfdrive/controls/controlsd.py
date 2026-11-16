@@ -404,6 +404,7 @@ class Controls:
         self.v_cruise_kph_last = 0
         self.max_speed_clu = 0.
         self.speed_bump_active = False
+        self.speed_bump_released = False
         self.curve_speed_ms = 0.
         self.curve_speed_limiter = CurveSpeedLimiter()
         # Speed the current curve was entered at, or None between curves.
@@ -973,7 +974,10 @@ class Controls:
         apply_limit_speed, road_limit_speed, left_dist, first_started, max_speed_log = \
             road_speed_limiter_get_max_speed(v_ego_clu, self.is_metric)
         # 방지턱 감속 중: V_CRUISE_MIN(20km/h) 아래 목표(10km/h)를 허용하고, 필터 없이 바로 반영한다.
+        was_bump_active = self.speed_bump_active
         self.speed_bump_active = bool(road_speed_limiter.speed_bump_active)
+        # 방지턱을 지나 제한이 풀린 순간: 원래 속도로 즉시 돌아간다 (update_max_speed 참고).
+        self.speed_bump_released = bool(was_bump_active and not self.speed_bump_active)
 
         # print("apply_limit_speed : ", apply_limit_speed)
         # print("road_limit_speed : ", road_limit_speed)
@@ -1081,7 +1085,11 @@ class Controls:
             self.max_speed_clu = max_speed
         elif self.speed_bump_active and max_speed < self.max_speed_clu:
             # 방지턱 프로파일은 이미 거리 기반으로 부드럽게 내려가므로 지연 필터를 거치지 않는다.
-            # 통과 후 복귀(올라갈 때)는 아래 필터로 천천히 원래 속도로 돌아간다.
+            self.max_speed_clu = max_speed
+        elif self.speed_bump_released and max_speed > self.max_speed_clu:
+            # 방지턱 통과 직후에도 원래 속도로 바로 돌아간다. 예전엔 아래 1초 시상수
+            # 필터를 타서 실제 가속이 1초쯤 늦게 시작됐다(2026-11-16 1140.75초 해제 →
+            # 1141.75초 가속 시작). 가속 세기는 여전히 플래너 한도와 페달 프로필이 정한다.
             self.max_speed_clu = max_speed
         else:
             kp = 0.02 if limited_curv else 0.01
