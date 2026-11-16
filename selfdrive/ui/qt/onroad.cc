@@ -1651,7 +1651,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       QFontMetrics nda_fm(p.font());
       const int nda_w = std::max(angle_w, nda_fm.horizontalAdvance(nda_text) + 38);
       const int nda_h = angle_h;
+      // Centred on the wheel, but never over the speed panel to its left: a
+      // Hangul label is wider than the wheel, and centred it ran 15-35 px into
+      // that panel's right edge. It shifts right instead.
       int nda_left = x - nda_w / 2;
+      if (speed_panel_right_ > 0) nda_left = std::max(nda_left, speed_panel_right_ + 10);
       nda_left = std::clamp(nda_left, 12, std::max(12, width() - nda_w - 12));
       QRect nda_rect(nda_left, wheel_cy - wheel_d / 2 - 10 - nda_h, nda_w, nda_h);
 
