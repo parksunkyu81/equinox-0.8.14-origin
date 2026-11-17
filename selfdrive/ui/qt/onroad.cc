@@ -1589,13 +1589,29 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // The badge is sized from the widest string the tile can ever show
     // ("-888") rather than from the live text, so a changing angle never
     // resizes the box or shifts it sideways under the wheel.
-    const QString angle_text = QString("%1°").arg(static_cast<int>(std::lround(steer_angle_deg)));
+    // In brackets: the steering torque actually sent to the EPS, 0..STEER_MAX
+    // (300). It is actuatorsOutput, after the driver-override and rate limits,
+    // so with a hand on the wheel it can read below the full steering gauge,
+    // which shows the controller's request.
+    constexpr int STEER_MAX_COUNTS = 300;
+    const int steer_torque = static_cast<int>(std::lround(
+      std::min(1.0f, std::abs(car_control.getActuatorsOutput().getSteer())) * STEER_MAX_COUNTS));
+    const QString angle_text = QString("%1° (%2)")
+                                 .arg(static_cast<int>(std::lround(steer_angle_deg)))
+                                 .arg(steer_torque);
 
     configFont(p, "Open Sans", 43, "Bold");
     QFontMetrics angle_fm(p.font());
-    const int angle_w = angle_fm.horizontalAdvance("-888°") + 38;
+    // The NDA badge above keeps the old angle-only width as its minimum.
+    const int badge_min_w = angle_fm.horizontalAdvance("-888°") + 38;
+    const int angle_w = angle_fm.horizontalAdvance("-888° (300)") + 38;
     const int angle_h = angle_fm.height() + 24;
-    QRect angle_rect(x - angle_w / 2, wheel_cy + wheel_d / 2 + 10, angle_w, angle_h);
+    // Centred on the wheel, but kept off the speed panel to its left, the same
+    // rule as the NDA badge: the torque value makes this box wider than the wheel.
+    int angle_left = x - angle_w / 2;
+    if (speed_panel_right_ > 0) angle_left = std::max(angle_left, speed_panel_right_ + 10);
+    angle_left = std::clamp(angle_left, 12, std::max(12, width() - angle_w - 12));
+    QRect angle_rect(angle_left, wheel_cy + wheel_d / 2 + 10, angle_w, angle_h);
 
     p.setPen(Qt::NoPen);
     p.setBrush(QColor(0, 0, 0, 160));
@@ -1630,7 +1646,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       }
 
       QFontMetrics nda_fm(p.font());
-      const int nda_w = std::max(angle_w, nda_fm.horizontalAdvance(nda_text) + 38);
+      const int nda_w = std::max(badge_min_w, nda_fm.horizontalAdvance(nda_text) + 38);
       const int nda_h = angle_h;
       // Centred on the wheel, but never over the speed panel to its left: a
       // Hangul label is wider than the wheel, and centred it ran 15-35 px into
