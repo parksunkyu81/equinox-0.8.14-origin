@@ -15,10 +15,19 @@ from common.numpy_fast import clip
 from common.params import Params
 from common.realtime import sec_since_boot
 from common.conversions import Conversions as CV
-from selfdrive.speed_bump_planner import SpeedBumpPlanner
+from selfdrive.speed_bump_planner import SpeedBumpPlanner, coast_start_kph
 
-CAMERA_SPEED_FACTOR = 1.05
-SAFE_STARTING_DIST = 60.
+# 카메라·구간단속 목표 = 제한속도 그대로 (예전 1.05배). 이 차는 페달을 떼서만 줄이고
+# 브레이크는 운전자가 밟으므로, 제한보다 높게 잡을 이유가 없다. TmapNda가 다른 값을
+# 보내도 쓰지 않는다.
+CAMERA_SPEED_FACTOR = 1.0
+# 과속카메라: 페달을 떼서 타력으로만 줄이고, 카메라 CAM_HOLD_M 전에 제한속도가 되게 한다.
+# 예전엔 '60초 안에 도착할 거리'부터 시작해(60km/h면 1km) 카메라 6초 전에 1.05배를 맞췄지만,
+# 실제 주행(2026-11-15~17 rlog)에선 TmapNda가 66~1000m 앞에서 알려줘 시작 시점이 대부분
+# 그쪽으로 정해졌고, 곡선이 타력과 맞지 않았다. 이제 실측 타력(COAST_DECEL)으로 페달 뗄
+# 지점을 계산한다: 60->50km/h 약 220m, 70->50 약 420m, 60->30 약 460m 전.
+CAM_HOLD_M = 30.
+CAM_LOOKAHEAD_S = 1.0   # 페달을 떼고 실제로 줄기 시작하기까지의 지연 보상
 
 UDP_RECV_BUFFER = 65535      # TmapNda는 road_limit + apilot(전체 TBT/SDI)을 한 패킷으로 보내 2KB를 넘을 수 있음
 SPEED_BUMP_CAM_TYPE = 22
@@ -400,7 +409,7 @@ def main():
         dat.roadLimitSpeed.camLimitSpeed = server.get_limit_val("cam_limit_speed", 0)
         dat.roadLimitSpeed.sectionLimitSpeed = server.get_limit_val("section_limit_speed", 0)
         dat.roadLimitSpeed.sectionLeftDist = server.get_limit_val("section_left_dist", 0)
-        dat.roadLimitSpeed.camSpeedFactor = server.get_limit_val("cam_speed_factor", CAMERA_SPEED_FACTOR)
+        dat.roadLimitSpeed.camSpeedFactor = CAMERA_SPEED_FACTOR
         dat.roadLimitSpeed.bumpLeftDist = int(clip(server.get_limit_val("bump_dist", 0) or 0, 0, 32767))
 
         try:
@@ -492,7 +501,6 @@ class BumpLog:
 class RoadSpeedLimiter:
   def __init__(self):
     self.slowing_down = False
-    self.started_dist = 0
 
     self.sock = messaging.sub_sock("roadLimitSpeed")
     self.roadLimitSpeed = None
@@ -537,7 +545,7 @@ class RoadSpeedLimiter:
 
       section_limit_speed = self.roadLimitSpeed.sectionLimitSpeed
       section_left_dist = self.roadLimitSpeed.sectionLeftDist
-      camSpeedFactor = clip(self.roadLimitSpeed.camSpeedFactor, 1.0, 1.1)
+      camSpeedFactor = CAMERA_SPEED_FACTOR
 
       if is_highway is not None:
         if is_highway:
@@ -600,34 +608,22 @@ class RoadSpeedLimiter:
     if cam_limit_speed_left_dist is not None and cam_limit_speed is not None and cam_limit_speed_left_dist > 0:
 
       v_ego = cluster_speed * (CV.KPH_TO_MS if is_metric else CV.MPH_TO_MS)
-      diff_speed = cluster_speed - (cam_limit_speed * camSpeedFactor)
-      #cam_limit_speed_ms = cam_limit_speed * (CV.KPH_TO_MS if is_metric else CV.MPH_TO_MS)
+      to_kph = 1. if is_metric else CV.MPH_TO_KPH
+      limit_clu = cam_limit_speed * camSpeedFactor
 
-      starting_dist = v_ego * SAFE_STARTING_DIST  # def : 30
+      if MIN_LIMIT <= cam_limit_speed <= MAX_LIMIT:
+        if section_left_dist is not None and section_left_dist >= 10:
+          target_clu = limit_clu          # 구간단속 안: 제한속도 그대로
+        else:
+          # 타력 곡선: 페달을 떼고 굴러서 카메라 CAM_HOLD_M 전에 제한속도가 되는 속도.
+          # 지금 속도가 이보다 높아지는 순간이 페달을 뗄 때다 (예전 60초 규칙 대신).
+          coast_dist = cam_limit_speed_left_dist - CAM_HOLD_M - v_ego * CAM_LOOKAHEAD_S
+          target_clu = coast_start_kph(limit_clu * to_kph, coast_dist) / to_kph
 
-      if cam_type == 22:
-        safe_dist = v_ego * 3.
-      else:
-        safe_dist = v_ego * 6.
-
-      if MIN_LIMIT <= cam_limit_speed <= MAX_LIMIT and (self.slowing_down or cam_limit_speed_left_dist < starting_dist):
-        if not self.slowing_down:
-          self.started_dist = cam_limit_speed_left_dist
+        if self.slowing_down or target_clu < cluster_speed:
+          first_started = not self.slowing_down
           self.slowing_down = True
-          first_started = True
-        else:
-          first_started = False
-
-        td = self.started_dist - safe_dist
-        d = cam_limit_speed_left_dist - safe_dist
-
-        if d > 0. and td > 0. and diff_speed > 0. and (section_left_dist is None or section_left_dist < 10):
-          pp = (d / td) ** 0.6
-        else:
-          pp = 0
-
-        return cam_limit_speed * camSpeedFactor + int(pp * diff_speed), \
-               cam_limit_speed, cam_limit_speed_left_dist, first_started, log
+          return target_clu, cam_limit_speed, cam_limit_speed_left_dist, first_started, log
 
       self.slowing_down = False
       return 0, cam_limit_speed, cam_limit_speed_left_dist, False, log

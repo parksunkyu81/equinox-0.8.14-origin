@@ -36,13 +36,37 @@ import math
 KPH_TO_MS = 1. / 3.6
 SPEED_BUMP_CAM_TYPE = 22
 
+# 페달을 뗐을 때 타력 감속 (구간 상한 km/h, m/s²). 2026-11-15~17 주행 rlog의 중앙값:
+# 10~15km/h 0.09, 15~20 0.14, 20~25 0.20, 25~35 약 0.3. 30km/h 위는 표본이 적고 경사에
+# 흔들려(0.05~0.3) 보수적으로 0.25를 쓴다: 실제가 더 세면 목표보다 조금 일찍 줄어 페달이
+# 살짝 다시 들어올 뿐이고, 약하게 잡아야 운전자 브레이크 없이 목표에 닿는다.
+COAST_DECEL = ((15., 0.09), (20., 0.14), (25., 0.20), (1e9, 0.25))
+
+
+def coast_start_kph(end_kph, dist_m, table=COAST_DECEL):
+  """dist_m 동안 페달을 떼고 타력만으로 가서 end_kph가 되려면 지금 몇 km/h여야 하는가.
+
+  방지턱과 과속카메라가 함께 쓴다: 목표 속도를 이 값으로 두면, 딱 필요한 지점에서
+  페달이 떨어지고 그 뒤로는 타력으로 end_kph까지 내려간다.
+  """
+  x = max(0., dist_m)
+  v = end_kph * KPH_TO_MS
+  for upper_kph, decel in table:
+    v_hi = upper_kph * KPH_TO_MS
+    if v_hi <= v:
+      continue
+    need = (v_hi ** 2 - v ** 2) / (2. * decel)
+    if x <= need:
+      return math.sqrt(v ** 2 + 2. * decel * x) / KPH_TO_MS
+    x -= need
+    v = v_hi
+  return v / KPH_TO_MS
+
 
 class SpeedBumpPlanner:
   BUMP_SPEED_KPH = 10.
   SLOW_DIST_M = 20.        # 방지턱 이 거리 안에서 목표 BUMP_SPEED_KPH
-  # 페달을 뗐을 때 타력 감속 (구간 상한 km/h, m/s²). 2026-11-16/17 주행 7개 rlog의 중앙값:
-  # 10~15km/h 0.09, 15~20 0.14, 20~25 0.20, 25~35 약 0.33 (그 위는 보수적으로 0.30).
-  COAST_DECEL = ((15., 0.09), (20., 0.14), (25., 0.20), (1e9, 0.30))
+  COAST_DECEL = COAST_DECEL
   # 페달을 떼고 실제로 줄기 시작하기까지의 지연 보상: 이만큼 앞 위치 기준으로 목표 계산
   LOOKAHEAD_S = 1.0
   BETWEEN_SPEED_KPH = 20.  # 방지턱 사이 상한
@@ -143,18 +167,7 @@ class SpeedBumpPlanner:
 
     dist_m은 방지턱까지 남은 거리. SLOW_DIST_M 안쪽은 BUMP_SPEED_KPH.
     """
-    x = max(0., dist_m - cls.SLOW_DIST_M)
-    v = cls.BUMP_SPEED_KPH * KPH_TO_MS
-    for upper_kph, decel in cls.COAST_DECEL:
-      v_hi = upper_kph * KPH_TO_MS
-      if v_hi <= v:
-        continue
-      need = (v_hi ** 2 - v ** 2) / (2. * decel)
-      if x <= need:
-        return math.sqrt(v ** 2 + 2. * decel * x) / KPH_TO_MS
-      x -= need
-      v = v_hi
-    return v / KPH_TO_MS
+    return coast_start_kph(cls.BUMP_SPEED_KPH, dist_m - cls.SLOW_DIST_M, cls.COAST_DECEL)
 
   def _target(self, v_ego_ms):
     if self.tracking and self._slow:
