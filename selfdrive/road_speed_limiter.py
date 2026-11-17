@@ -441,30 +441,32 @@ class BumpLog:
   had to infer them). While a bump is reported or tracked this appends one line
   every 0.5 s, plus one at every tracking start/stop: what arrived (first SDI
   slot, bump distance from either slot), the planner's estimate, and its
-  target. A dict and a background-thread append twice a second -- nothing
-  measurable on controlsd.
+  target. Every planner event (detect / slow / pass / release / lost) gets its
+  own line at once, tagged with the bump number, so each bump reads as
+  detect -> slow -> pass -> (between ->) release. A dict and a background-thread
+  append twice a second -- nothing measurable on controlsd.
   """
 
   def __init__(self, path=BUMP_LOG_PATH):
     self.path = path
     self.last_t = -1e9
-    self.prev_tracking = (False, False)
+    self.prev_phase = 'idle'
 
   def update(self, now, v_ego_ms, cam_type, cam_limit, cam_dist, bump_dist, target_kph, planner):
     tracking = bool(planner.tracking)
-    recovering = bool(planner.recovering)
-    phase = (tracking, recovering)
-    changed = phase != self.prev_tracking
-    self.prev_tracking = phase
-    relevant = tracking or recovering or bump_dist is not None or cam_type == SPEED_BUMP_CAM_TYPE
+    phase = planner.phase
+    events = list(planner.events)
+    changed = bool(events) or phase != self.prev_phase
+    self.prev_phase = phase
+    relevant = phase != 'idle' or bump_dist is not None or cam_type == SPEED_BUMP_CAM_TYPE
     if not (changed or (relevant and now - self.last_t >= BUMP_LOG_INTERVAL_S)):
       return
     self.last_t = now
     since_passed = (round(planner.odo - planner.passed_pos, 1)
                     if planner.passed_pos is not None else None)
     line = json.dumps({
-      't': round(now, 2), 'event': (('start' if tracking else 'recover' if recovering else 'stop')
-                if changed else 'tick'),
+      't': round(now, 2), 'event': '+'.join(events) if events else 'tick',
+      'phase': phase, 'bump_no': planner.bump_no,
       'kph': round(v_ego_ms * 3.6, 1),
       'cam_type': int(cam_type), 'cam_limit': int(cam_limit), 'cam_dist': int(cam_dist),
       'bump_dist': bump_dist, 'tracking': tracking,
