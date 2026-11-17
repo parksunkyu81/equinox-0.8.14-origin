@@ -2,11 +2,16 @@
 
 방지턱 하나의 흐름 (phase):
   idle      방지턱 없음. 제한 없음.
-  approach  TmapNda가 방지턱을 알려줌(이벤트 detect). 아직 SLOW_DIST_M(20m)보다 멀면 제한 없음.
-  slow      방지턱 SLOW_DIST_M 안(이벤트 slow): 바로 BUMP_SPEED_KPH(10km/h).
+  approach  TmapNda가 방지턱을 알려줌(이벤트 detect). 미리 페달을 떼서 타력으로 최대한 줄인다:
+            목표 = 지금부터 타력만으로 SLOW_DIST_M 지점에 BUMP_SPEED_KPH가 되는 속도
+            (실측 타력 감속 COAST_DECEL로 계산). 20km/h면 약 120m, 30km/h면 약 200m 전부터
+            페달을 뗀다. TmapNda는 보통 40~120m 앞에서 알려주므로 대부분 인식 즉시 뗀다.
+  slow      방지턱 SLOW_DIST_M(20m) 안(이벤트 slow): 목표 BUMP_SPEED_KPH(10km/h).
+            이 차는 브레이크를 못 쓰므로 남은 감속은 운전자가 브레이크를 살짝 밟아 맞춘다.
   between   방지턱을 넘음(이벤트 pass). 10km/h에서 RAMP_KPH_S로 천천히 올리되
             BETWEEN_SPEED_KPH(20km/h)를 넘지 않는다.
-              * 다음 방지턱이 NEAR_NEXT_M 안에서 보이면(detect) 20km/h 상한을 유지한 채 다가가고,
+              * 다음 방지턱이 NEAR_NEXT_M 안에서 보이면(detect) 20km/h 상한과 그 방지턱의
+                타력 목표 중 낮은 쪽으로 다가가고(가까우면 거의 올리지 않고 굴러간다),
                 그 방지턱 20m 안에서 다시 slow.
               * NEXT_WAIT_M 동안 다음 방지턱이 안 보이거나 멀면 제한을 푼다(이벤트 release).
             TmapNda는 넘은 뒤 다음 항목으로 바뀌는 데 0.5~4초 걸린다(2026-11-17 주행).
@@ -26,6 +31,7 @@
 
 외부 의존성 없음(단위 테스트 가능).
 """
+import math
 
 KPH_TO_MS = 1. / 3.6
 SPEED_BUMP_CAM_TYPE = 22
@@ -33,7 +39,12 @@ SPEED_BUMP_CAM_TYPE = 22
 
 class SpeedBumpPlanner:
   BUMP_SPEED_KPH = 10.
-  SLOW_DIST_M = 20.        # 방지턱 이 거리 안에서 바로 BUMP_SPEED_KPH
+  SLOW_DIST_M = 20.        # 방지턱 이 거리 안에서 목표 BUMP_SPEED_KPH
+  # 페달을 뗐을 때 타력 감속 (구간 상한 km/h, m/s²). 2026-11-16/17 주행 7개 rlog의 중앙값:
+  # 10~15km/h 0.09, 15~20 0.14, 20~25 0.20, 25~35 약 0.33 (그 위는 보수적으로 0.30).
+  COAST_DECEL = ((15., 0.09), (20., 0.14), (25., 0.20), (1e9, 0.30))
+  # 페달을 떼고 실제로 줄기 시작하기까지의 지연 보상: 이만큼 앞 위치 기준으로 목표 계산
+  LOOKAHEAD_S = 1.0
   BETWEEN_SPEED_KPH = 20.  # 방지턱 사이 상한
   RAMP_KPH_S = 2.0         # 넘은 뒤 10 -> 20km/h를 5초에 걸쳐 천천히
   NEXT_WAIT_M = 15.        # 넘은 뒤 다음 방지턱 보고를 기다리는 거리. 없으면 release.
@@ -84,7 +95,7 @@ class SpeedBumpPlanner:
   @property
   def active(self):
     """제한을 걸고 있는가 (controlsd가 10km/h 아래 목표를 허용하고 필터 없이 따른다)."""
-    return self.phase in ('slow', 'between')
+    return self.phase != 'idle'
 
   @property
   def recovering(self):
@@ -126,12 +137,35 @@ class SpeedBumpPlanner:
     self._clear_history()
     return True
 
-  def _target(self):
+  @classmethod
+  def coast_kph(cls, dist_m):
+    """dist_m 동안 페달을 떼고 타력만으로 가면 SLOW_DIST_M 지점에서 BUMP_SPEED_KPH가 되는 속도.
+
+    dist_m은 방지턱까지 남은 거리. SLOW_DIST_M 안쪽은 BUMP_SPEED_KPH.
+    """
+    x = max(0., dist_m - cls.SLOW_DIST_M)
+    v = cls.BUMP_SPEED_KPH * KPH_TO_MS
+    for upper_kph, decel in cls.COAST_DECEL:
+      v_hi = upper_kph * KPH_TO_MS
+      if v_hi <= v:
+        continue
+      need = (v_hi ** 2 - v ** 2) / (2. * decel)
+      if x <= need:
+        return math.sqrt(v ** 2 + 2. * decel * x) / KPH_TO_MS
+      x -= need
+      v = v_hi
+    return v / KPH_TO_MS
+
+  def _target(self, v_ego_ms):
     if self.tracking and self._slow:
       return self.BUMP_SPEED_KPH
+    target = None
+    if self.tracking:
+      # 미리 페달 떼기: 응답 지연만큼 앞 위치 기준
+      target = self.coast_kph(self.est_dist - v_ego_ms * self.LOOKAHEAD_S)
     if self.between:
-      return self.ramp_kph
-    return None
+      target = self.ramp_kph if target is None else min(target, self.ramp_kph)
+    return target
 
   def update(self, cam_type, reported_dist, v_ego_ms, now):
     """매 프레임 호출. 제한 중이면 목표 속도(km/h), 아니면 None."""
@@ -194,4 +228,4 @@ class SpeedBumpPlanner:
       self.between = False
       self.events.append('release')
 
-    return self._target()
+    return self._target(v_ego_ms)
