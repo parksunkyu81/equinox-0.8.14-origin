@@ -448,23 +448,27 @@ class BumpLog:
   def __init__(self, path=BUMP_LOG_PATH):
     self.path = path
     self.last_t = -1e9
-    self.prev_tracking = False
+    self.prev_tracking = (False, False)
 
   def update(self, now, v_ego_ms, cam_type, cam_limit, cam_dist, bump_dist, target_kph, planner):
     tracking = bool(planner.tracking)
-    changed = tracking != self.prev_tracking
-    self.prev_tracking = tracking
-    relevant = tracking or bump_dist is not None or cam_type == SPEED_BUMP_CAM_TYPE
+    recovering = bool(planner.recovering)
+    phase = (tracking, recovering)
+    changed = phase != self.prev_tracking
+    self.prev_tracking = phase
+    relevant = tracking or recovering or bump_dist is not None or cam_type == SPEED_BUMP_CAM_TYPE
     if not (changed or (relevant and now - self.last_t >= BUMP_LOG_INTERVAL_S)):
       return
     self.last_t = now
     since_passed = (round(planner.odo - planner.passed_pos, 1)
                     if planner.passed_pos is not None else None)
     line = json.dumps({
-      't': round(now, 2), 'event': ('start' if tracking else 'stop') if changed else 'tick',
+      't': round(now, 2), 'event': (('start' if tracking else 'recover' if recovering else 'stop')
+                if changed else 'tick'),
       'kph': round(v_ego_ms * 3.6, 1),
       'cam_type': int(cam_type), 'cam_limit': int(cam_limit), 'cam_dist': int(cam_dist),
       'bump_dist': bump_dist, 'tracking': tracking,
+      'recover_kph': None if planner.recover_kph is None else round(planner.recover_kph, 1),
       'est_dist': round(planner.est_dist, 1) if tracking else None,
       'target_kph': None if target_kph is None else round(target_kph, 1),
       'since_passed_m': since_passed,
@@ -576,7 +580,7 @@ class RoadSpeedLimiter:
           return cam_result
         self.slowing_down = False
         return bump_apply, SpeedBumpPlanner.BUMP_SPEED_KPH * kph_to_clu, \
-               max(0., self.bump_planner.est_dist), not was_bump_active, log
+               self.bump_planner.left_dist, not was_bump_active, log
       return cam_result
 
     except Exception as e:

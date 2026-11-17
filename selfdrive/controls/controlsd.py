@@ -1083,8 +1083,10 @@ class Controls:
     def update_max_speed(self, max_speed, CS, limited_curv):
         if not CS.cruiseState.enabled or self.max_speed_clu <= 0:
             self.max_speed_clu = max_speed
-        elif self.speed_bump_active and max_speed < self.max_speed_clu:
-            # 방지턱 프로파일은 이미 거리 기반으로 부드럽게 내려가므로 지연 필터를 거치지 않는다.
+        elif self.speed_bump_active:
+            # 방지턱 프로파일은 이미 거리 기반으로 부드럽게 내려가고, 통과 후에는 플래너가
+            # 2km/h/s로 천천히 올린다. 둘 다 이미 다듬어진 값이라 지연 필터를 거치지 않는다
+            # (필터를 타면 회복이 1초쯤 더 늦어진다).
             self.max_speed_clu = max_speed
         elif self.speed_bump_released and max_speed > self.max_speed_clu:
             # 방지턱 통과 직후에도 원래 속도로 바로 돌아간다. 예전엔 아래 1초 시상수
