@@ -24,14 +24,16 @@ class CarControllerParams():
         self.STEER_DELTA_UP = 14  # Low-speed ceiling; CarController applies the speed map.
         self.STEER_DELTA_DOWN = 20
         self.MIN_STEER_SPEED = GM_MIN_STEER_SPEED_MS
-        # Driver override starts cutting LKA torque at 1.0 Nm (was 0.5) and reaches
-        # zero at 1.75 Nm (was 1.25). A hand resting on the wheel reads 0.5-1.0 Nm
-        # against the turn, and at 50 it cut torque in about half of the corner
-        # frames that were still short of the turn (2026-11-15..17 rlogs).
-        # 1.0 Nm is also STEER_THRESHOLD, where openpilot itself starts calling it
-        # a driver press. Must equal GM_DRIVER_TORQUE_ALLOWANCE in
+        # Driver override starts cutting LKA torque at 1.5 Nm and reaches zero at
+        # 2.25 Nm. A hand on the wheel in a corner reads 1.25-1.3 Nm against the
+        # turn (median, 2026-11-16..17 rlogs), so at 1.0 Nm (100) the cut still
+        # held 30-45 km/h under-turn frames at 0.65 of full torque. Replaying
+        # the logged request and driver torque through this limiter puts them at
+        # 0.93 with 150, and 20-30 km/h at 1.00 (was 0.86).
+        # Above STEER_THRESHOLD (1.0 Nm) openpilot already counts a driver press.
+        # Must equal GM_DRIVER_TORQUE_ALLOWANCE in
         # panda/board/safety/safety_gm.h, or panda rejects the command.
-        self.STEER_DRIVER_ALLOWANCE = 100
+        self.STEER_DRIVER_ALLOWANCE = 150
         self.STEER_DRIVER_MULTIPLIER = 4
         self.STEER_DRIVER_FACTOR = 100
         self.NEAR_STOP_BRAKE_PHASE = 0.25  # m/s, 0.5
