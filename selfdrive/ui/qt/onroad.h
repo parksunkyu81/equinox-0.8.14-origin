@@ -87,8 +87,6 @@ protected:
   QPixmap ic_lkas;
   QPixmap ic_wheel;
 
-  QMap<QString, QPixmap> ic_oil_com;
-
   void drawMaxSpeed(QPainter &p);
   void drawSpeed(QPainter &p);
   void drawBottomIcons(QPainter &p);
@@ -124,17 +122,11 @@ protected:
   bool pedal_profile_refresh_ = false;
   void drawSpeedLimit(QPainter &p);
   void drawSteer(QPainter &p);
-  void drawRestArea(QPainter &p);
   void drawTurnSignals(QPainter &p);
   void drawGpsStatus(QPainter &p);
   void drawDebugText(QPainter &p);
   void drawThermal(QPainter &p);
   void drawHud(QPainter &p);
-
-private:
-  QPixmap get_icon_iol_com(const char* key);
-  void drawRestAreaItem(QPainter &p, int yPos, capnp::Text::Reader image, capnp::Text::Reader title,
-                        capnp::Text::Reader oilPrice, capnp::Text::Reader distance, bool lastItem);
 };
 
 // container for all onroad widgets
