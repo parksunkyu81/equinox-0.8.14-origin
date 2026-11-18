@@ -1,34 +1,37 @@
-"""AUTO comma-pedal profile: learn LOW / MID / HIGH from how the driver drives.
+"""AUTO comma-pedal profile: step LOW / MID / HIGH by how the driver answers openpilot's acceleration.
 
 The learner only ever picks one of the three existing profiles, so AUTO can
 never make the pedal stronger or weaker than a manual choice could.
 
-Two kinds of evidence:
+Why votes. The previous learner mixed a style score from the driver's own
+accelerations with "too weak" / "too strong" feedback. On the 11-17/18 drives
+it sat on LOW and could not leave: the style score read calm (-0.15), twelve
+brake taps said "too strong", and "too weak" never fired once -- it needed the
+driver to out-accelerate openpilot by 0.3 m/s^2 while openpilot was already
+asking +0.3, which almost never happens. Down had evidence, up had none, and
+old drives faded only by half every three drives.
 
-* Style, from the driver's own acceleration. While the driver is on the gas
-  (or openpilot's longitudinal control is off) every rise of aEgo above
-  EPISODE_START_A is one episode; it ends when the acceleration fades or when
-  the driver lets go of the gas, whichever comes first. Its peak acceleration
-  and rise jerk are scored against per-speed-bin thresholds, because
-  1.5 m/s^2 is ordinary at 20 km/h and very brisk at 100 km/h. Episodes taken
-  behind a close lead, in a corner, during a lane change, or that never reach
-  15 km/h (queue creeping) are dropped.
+What a profile changes is how hard openpilot accelerates (the planner's
+ceiling and the pedal rise rate). So the question is asked only while
+openpilot is accelerating -- accel command above PUSH_ACCEL for PUSH_MIN_S, no
+lead it is closing on, not in a corner or lane change, above a crawl:
 
-* Feedback, relative to the profile that was active at the time. A gas press
-  that out-accelerates openpilot while openpilot was already accelerating says
-  "too weak"; a brake press while openpilot was pushing hard on an open road
-  says "too strong". This car cannot brake under openpilot, so the driver
-  supplies every deceleration -- an earlier learner that counted ordinary
-  brake presses could not tell "openpilot accelerated too hard" from "I needed
-  to slow" and drove the gain down with no way back up. Brake feedback here
-  therefore needs openpilot to have been accelerating hard for a full second
-  with no lead close, and the press to be a short tap after which the car
-  keeps its speed -- a press that slows or stops the car is the driver
-  stopping for something openpilot cannot see. A hard brake by itself is not
-  counted as style.
+* the driver presses the gas  -> one vote "more"
+* the driver taps the brake (released within BRAKE_TAP_MAX_S, the car still
+  above BRAKE_TAP_KEEP_SPEED of its speed, from BRAKE_MIN_V) -> one vote "less"
+* a brake press that slows or stops the car is ignored: this car cannot brake
+  under openpilot, so the driver brakes for every light, crossing and bump,
+  which says nothing about pedal strength.
 
-Old drives fade out: every new drive (controlsd start) multiplies the stored
-weights by DRIVE_DECAY, halving a drive's influence after about three drives.
+Presses within CLUSTER_S of the previous pedal input are one press. Votes
+halve every HALF_LIFE_S of engaged driving, so the choice follows the drive
+as it goes. When one side has at least STEP_MIN_VOTES and STEP_SHARE of the
+votes, the profile steps one level that way and the votes reset -- they were
+cast against the old level. A step is held at least MIN_CHANGE_INTERVAL_S.
+The level is kept across drives; the votes are halved at each start.
+
+On the 11-18 drives this counted 25 "more" and 20 "less" (51 slowing / stopping
+brakes ignored), and the "more" share of 10-minute windows ranged 0.22-0.73.
 """
 
 import json
@@ -37,66 +40,23 @@ import os
 import threading
 
 PROFILES = ('low', 'mid', 'high')
-LEVEL = {'low': -1.0, 'mid': 0.0, 'high': 1.0}
 
-# Speed bins: below 40 km/h, 40-80 km/h, above 80 km/h.
-SPEED_BIN_EDGES_MS = (40.0 / 3.6, 80.0 / 3.6)
-# Peak acceleration that scores -1 (calm) and +1 (brisk), per speed bin.
-PEAK_ACCEL_LOW = (1.0, 0.7, 0.45)
-PEAK_ACCEL_HIGH = (2.0, 1.4, 0.9)
-# Mean jerk of the rise to the peak that scores -1 and +1. An ordinary
-# pull-away -- 0.3 to 1.5 m/s^2 in about 1.2 s -- is 1.0 m/s^3 and should land
-# just under the middle, not at the calm end.
-RISE_JERK_LOW = 0.5
-RISE_JERK_HIGH = 2.0
-PEAK_WEIGHT = 0.7
-
-EPISODE_START_A = 0.3
-EPISODE_END_A = 0.15
-EPISODE_END_HOLD_S = 0.5
-EPISODE_MIN_S = 1.0
-# Creeping in a queue says nothing, so an episode must reach 15 km/h at some
-# point. Tested on the speed it reaches, not the speed at the peak: a launch
-# from a stop peaks at 1-2 m/s, and those launches are the clearest sign of how
-# the driver accelerates. (The first version tested the peak speed against
-# 2 m/s and threw every launch away -- 6 of the 11 episodes on 2026-11-16.)
-EPISODE_MIN_REACHED_V = 15.0 / 3.6
-LEAD_MIN_HEADWAY_S = 1.0
+PUSH_ACCEL = 0.2              # m/s^2 accel command that counts as accelerating
+PUSH_MIN_S = 1.0              # and for this long before a pedal press counts
+PUSH_MIN_V = 3.0 / 3.6
 LAT_ACCEL_MAX = 1.5
+CLUSTER_S = 3.0
+BRAKE_TAP_MAX_S = 1.5
+BRAKE_TAP_KEEP_SPEED = 0.80
+BRAKE_MIN_V = 20.0 / 3.6
 
-# Feedback.
-FEEDBACK_OP_ACCEL_MIN = 0.3   # openpilot must be accelerating for a gas press to count
-FEEDBACK_GAS_MARGIN = 0.3     # and the driver must then out-accelerate it by this much
-FEEDBACK_GAS_WINDOW_S = 2.0
-FEEDBACK_BRAKE_OP_ACCEL = 0.5
-FEEDBACK_BRAKE_A_EGO = 0.3
-FEEDBACK_BRAKE_HOLD_S = 1.0
-FEEDBACK_BRAKE_LEAD_HEADWAY_S = 2.5
-# A brake press only says "too strong" if it was a tap to take the edge off:
-# released within 1.5 s with the car still above 80% of the speed it had at
-# the press, from at least 20 km/h. A press that slows the car down or stops
-# it is the driver stopping for a light, a crossing or a bump -- openpilot
-# accelerated toward it because it cannot see it, which says nothing about
-# the pedal. On 2026-11-16 the first rule caught 13 presses: 4 slowed the car
-# to 0-31 km/h, 4 more were held 1.8-2.8 s, and 5 were short taps after which
-# the car kept its speed; only those 5 count now.
-FEEDBACK_BRAKE_TAP_MAX_S = 1.5
-FEEDBACK_BRAKE_TAP_KEEP_SPEED = 0.80
-FEEDBACK_BRAKE_MIN_V = 20.0 / 3.6
-FEEDBACK_COOLDOWN_S = 5.0
-FEEDBACK_MIN_EVENTS = 3
+HALF_LIFE_S = 600.0           # engaged driving
+STEP_MIN_VOTES = 2.5          # three recent votes (the decay shaves a little off each)
+STEP_SHARE = 0.65
+MIN_CHANGE_INTERVAL_S = 60.0
+DRIVE_START_DECAY = 0.5
 
-STATS_VERSION = 2
-MIN_EPISODES = 15
-MAX_EPISODES = 60
-MAX_FEEDBACK = 30
-DRIVE_DECAY = 0.79
-MIN_WEIGHT = 0.05
-
-STYLE_WEIGHT = 0.6
-ENTER_THRESHOLD = 0.30
-LEAVE_THRESHOLD = 0.20
-MIN_CHANGE_INTERVAL_S = 180.0
+STATS_VERSION = 3
 DECIDE_INTERVAL_S = 1.0
 SAVE_INTERVAL_S = 60.0
 LOG_INTERVAL_S = 300.0
@@ -105,84 +65,35 @@ LOG_PATH = os.getenv("COMMA_PEDAL_AUTO_LOG_PATH", "/data/log/comma_pedal_auto.js
 LOG_MAX_BYTES = 2 * 1024 * 1024
 
 
-def _clip(x, lo, hi):
-  return lo if x < lo else hi if x > hi else x
-
-
-def _ramp(x, lo, hi):
-  """-1 at lo, +1 at hi, linear between, clipped."""
-  if hi <= lo:
-    return 0.0
-  return _clip(2.0 * (x - lo) / (hi - lo) - 1.0, -1.0, 1.0)
-
-
-def _speed_bin(v):
-  if v < SPEED_BIN_EDGES_MS[0]:
-    return 0
-  if v < SPEED_BIN_EDGES_MS[1]:
-    return 1
-  return 2
-
-
-def _weighted_quantile(pairs, q):
-  """pairs = [(value, weight)]; q in [0, 1]."""
-  pairs = sorted((v, w) for v, w in pairs if w > 0)
-  total = sum(w for _, w in pairs)
-  if total <= 0:
-    return 0.0
-  target = q * total
-  acc = 0.0
-  for v, w in pairs:
-    acc += w
-    if acc >= target:
-      return v
-  return pairs[-1][0]
-
-
-def score_episode(peak_a, v_at_peak, rise_s):
-  b = _speed_bin(v_at_peak)
-  peak_score = _ramp(peak_a, PEAK_ACCEL_LOW[b], PEAK_ACCEL_HIGH[b])
-  jerk = (peak_a - EPISODE_START_A) / max(rise_s, 0.2)
-  jerk_score = _ramp(jerk, RISE_JERK_LOW, RISE_JERK_HIGH)
-  return PEAK_WEIGHT * peak_score + (1.0 - PEAK_WEIGHT) * jerk_score
-
-
 def _write_async(fn):
-  t = threading.Thread(target=fn, daemon=True)
-  t.start()
+  threading.Thread(target=fn, daemon=True).start()
 
 
 class CommaPedalAutoLearner:
   def __init__(self, stats=None, put_fn=None):
     """stats: the saved JSON (str/bytes) or None. put_fn(key, value) stores a param."""
     self.put_fn = put_fn
-    self.episodes = []      # [score, weight]
-    self.feedback = []      # [target_level, weight]
-    self.result = None      # 'low' | 'mid' | 'high' once decided
-    self.score = 0.0
-    self.style = 0.0
-    self.fb_target = None
+    self.level = 'mid'
+    self.more = 0.0
+    self.less = 0.0
     self._load(stats)
-    # A new drive: fade what earlier drives taught.
-    self.episodes = [[s, w * DRIVE_DECAY] for s, w in self.episodes if w * DRIVE_DECAY >= MIN_WEIGHT]
-    self.feedback = [[t, w * DRIVE_DECAY] for t, w in self.feedback if w * DRIVE_DECAY >= MIN_WEIGHT]
+    # A new drive: earlier votes count half.
+    self.more *= DRIVE_START_DECAY
+    self.less *= DRIVE_START_DECAY
 
-    self._ep = None
-    self._end_hold = 0.0
-    self._pending_gas = None
-    self._pending_brake = None
-    self._op_push_s = 0.0
-    self._last_feedback_t = -1e9
+    self._push_s = 0.0
+    self._push_at_press = 0.0
+    self._last_pedal_t = -1e9
     self._prev_gas = False
     self._prev_brake = False
+    self._pending_brake = None
     self._last_decide_t = -1e9
     self._last_change_t = -1e9
     self._last_save_t = None
     self._last_log_t = None
     self._dirty = False
     self._status = None
-    self.last_episode = None
-    self._decide(force=True)
+    self.counts = {'more': 0, 'less': 0, 'brake_ignored': 0, 'steps': 0}
 
   # ---- persistence ----
   def _load(self, stats):
@@ -192,206 +103,130 @@ class CommaPedalAutoLearner:
       if isinstance(stats, bytes):
         stats = stats.decode('utf8')
       d = json.loads(stats)
-      self.episodes = [[float(s), float(w)] for s, w in d.get('episodes', [])
-                       if math.isfinite(float(s)) and float(w) > 0][-MAX_EPISODES:]
-      self.feedback = [[float(t), float(w)] for t, w in d.get('feedback', [])
-                       if math.isfinite(float(t)) and float(w) > 0][-MAX_FEEDBACK:]
       if int(d.get('v', 1)) < STATS_VERSION:
-        # Version 1 counted every brake press after a push, stops included,
-        # so its feedback is all spurious "too strong". Start feedback over.
-        self.feedback = []
-      r = d.get('result')
-      self.result = r if r in PROFILES else None
+        # The old learner's result was pinned by one-sided feedback; start
+        # again from the middle.
+        return
+      lvl = d.get('level')
+      self.level = lvl if lvl in PROFILES else 'mid'
+      self.more = max(0.0, float(d.get('more', 0.0)))
+      self.less = max(0.0, float(d.get('less', 0.0)))
+      if not (math.isfinite(self.more) and math.isfinite(self.less)):
+        self.more = self.less = 0.0
     except Exception:
-      self.episodes, self.feedback, self.result = [], [], None
+      self.level, self.more, self.less = 'mid', 0.0, 0.0
 
   def to_json(self):
-    return json.dumps({
-      'v': STATS_VERSION,
-      'result': self.result,
-      'score': round(self.score, 3),
-      'episodes': [[round(s, 3), round(w, 3)] for s, w in self.episodes],
-      'feedback': [[round(t, 3), round(w, 3)] for t, w in self.feedback],
-    }, separators=(',', ':'))
+    return json.dumps({'v': STATS_VERSION, 'level': self.level,
+                       'more': round(self.more, 3), 'less': round(self.less, 3)},
+                      separators=(',', ':'))
 
   @property
   def profile(self):
-    """The profile to drive with now. MID while still learning."""
-    return self.result or 'mid'
+    return self.level
 
   @property
   def status(self):
-    """'learn N/15' while learning, else the learned profile."""
-    if self.result is None:
-      return "learn %d/%d" % (min(len(self.episodes), MIN_EPISODES), MIN_EPISODES)
-    return self.result
+    return self.level
 
   # ---- per-step update (call at ~20 Hz) ----
   def update(self, now, dt, v_ego, a_ego, gas_pressed, brake_pressed, long_active,
              op_accel, lead_headway_s, lead_closing, lat_accel, lane_change):
-    gas_pressed = bool(gas_pressed)
-    brake_pressed = bool(brake_pressed)
-    constrained = (lead_headway_s is not None and lead_headway_s < LEAD_MIN_HEADWAY_S) or \
-                  abs(lat_accel) > LAT_ACCEL_MAX or bool(lane_change)
+    gas = bool(gas_pressed)
+    brake = bool(brake_pressed)
+    v_ego = float(v_ego)
 
-    self._update_episode(dt, v_ego, a_ego, gas_pressed or not long_active, constrained)
-    self._update_feedback(now, dt, v_ego, a_ego, gas_pressed, brake_pressed, long_active,
-                          op_accel, lead_headway_s, lead_closing, constrained)
-    self._prev_gas = gas_pressed
-    self._prev_brake = brake_pressed
+    if long_active:
+      k = 0.5 ** (dt / HALF_LIFE_S)
+      self.more *= k
+      self.less *= k
+
+    # How long openpilot has been accelerating on its own, with nothing that
+    # would make a pedal press about something other than its strength.
+    pushing = bool(long_active and not gas and not brake and
+                   float(op_accel) > PUSH_ACCEL and v_ego > PUSH_MIN_V and
+                   not lead_closing and abs(float(lat_accel)) <= LAT_ACCEL_MAX and
+                   not lane_change)
+    if pushing:
+      self._push_s += dt
+    elif not (gas or brake):
+      self._push_s = 0.0
+
+    gas_edge = gas and not self._prev_gas
+    brake_edge = brake and not self._prev_brake
+    fresh = now - self._last_pedal_t >= CLUSTER_S
+    if gas_edge and fresh and self._push_s >= PUSH_MIN_S:
+      self._vote(now, 'more', v_ego)
+    elif brake_edge and fresh and self._push_s >= PUSH_MIN_S and v_ego >= BRAKE_MIN_V:
+      self._pending_brake = {'t': now, 'v': v_ego}
+    if gas or brake:
+      self._last_pedal_t = now
+      if gas_edge or brake_edge:
+        self._push_s = 0.0
+
+    pb = self._pending_brake
+    if pb is not None:
+      held = now - pb['t']
+      if held > BRAKE_TAP_MAX_S:
+        self._pending_brake = None
+        self._ignored(now, pb, held, v_ego)
+      elif not brake:
+        self._pending_brake = None
+        if v_ego >= BRAKE_TAP_KEEP_SPEED * pb['v']:
+          self._vote(now, 'less', pb['v'])
+        else:
+          self._ignored(now, pb, held, v_ego)
+
+    self._prev_gas = gas
+    self._prev_brake = brake
 
     if now - self._last_decide_t >= DECIDE_INTERVAL_S:
       self._last_decide_t = now
-      self._decide(now=now)
+      self._decide(now)
     self._maybe_persist(now)
 
-  def _update_episode(self, dt, v_ego, a_ego, driver_in_control, constrained):
-    ep = self._ep
-    if ep is None:
-      if driver_in_control and a_ego > EPISODE_START_A:
-        self._ep = {'t': 0.0, 'peak': a_ego, 'v': v_ego, 'v_max': v_ego,
-                    'rise': 0.0, 'bad': constrained}
-        self._end_hold = 0.0
-      return
-
-    if not driver_in_control:
-      # The driver let go of the gas and openpilot has the pedal again. What
-      # follows is openpilot's, but what came before was the driver's and is
-      # complete: score it now. On this car the driver nearly always
-      # accelerates by pressing the gas over an engaged openpilot and lets go
-      # while the car is still accelerating, so the first version, which
-      # threw the episode away here, kept almost none of them.
-      self._end_hold = 0.0
-      self._finish_episode(ep)
-      self._ep = None
-      return
-
-    ep['t'] += dt
-    ep['bad'] = ep['bad'] or constrained
-    ep['v_max'] = max(ep['v_max'], v_ego)
-    if a_ego > ep['peak']:
-      ep['peak'] = a_ego
-      ep['v'] = v_ego
-      ep['rise'] = ep['t']
-    if a_ego < EPISODE_END_A:
-      self._end_hold += dt
-      if self._end_hold >= EPISODE_END_HOLD_S:
-        self._finish_episode(ep)
-        self._ep = None
+  def _vote(self, now, side, v):
+    if side == 'more':
+      self.more += 1.0
     else:
-      self._end_hold = 0.0
-
-  def _finish_episode(self, ep):
-    duration = ep['t'] - self._end_hold
-    if ep['bad'] or duration < EPISODE_MIN_S or ep['v_max'] < EPISODE_MIN_REACHED_V:
-      return
-    s = score_episode(ep['peak'], ep['v'], ep['rise'])
-    self.episodes.append([s, 1.0])
-    self.episodes = self.episodes[-MAX_EPISODES:]
-    self.last_episode = {'peak': round(ep['peak'], 2), 'kph': round(ep['v'] * 3.6),
-                         'rise': round(ep['rise'], 2), 'score': round(s, 2)}
+      self.less += 1.0
+    self.counts[side] += 1
     self._dirty = True
+    self._log(now, 'vote_' + side, kph=round(v * 3.6))
 
-  def _add_feedback(self, now, delta):
-    if now - self._last_feedback_t < FEEDBACK_COOLDOWN_S:
-      return
-    self._last_feedback_t = now
-    target = _clip(LEVEL[self.profile] + delta, -1.0, 1.0)
-    self.feedback.append([target, 1.0])
-    self.feedback = self.feedback[-MAX_FEEDBACK:]
-    self._dirty = True
-
-  def _update_feedback(self, now, dt, v_ego, a_ego, gas_pressed, brake_pressed, long_active,
-                       op_accel, lead_headway_s, lead_closing, constrained):
-    # How long openpilot has been pushing hard on its own.
-    if long_active and not gas_pressed and not brake_pressed and \
-        op_accel >= FEEDBACK_BRAKE_OP_ACCEL and a_ego >= FEEDBACK_BRAKE_A_EGO:
-      self._op_push_s += dt
-    elif not brake_pressed:
-      self._op_push_s = 0.0
-
-    # Too weak: a gas press while openpilot was already accelerating, which
-    # the driver then out-accelerates.
-    if long_active and gas_pressed and not self._prev_gas and \
-        op_accel >= FEEDBACK_OP_ACCEL_MIN and not constrained:
-      self._pending_gas = {'t': now, 'need': op_accel + FEEDBACK_GAS_MARGIN}
-    pg = self._pending_gas
-    if pg is not None:
-      if a_ego >= pg['need']:
-        self._add_feedback(now, +1.0)
-        self._pending_gas = None
-      elif now - pg['t'] > FEEDBACK_GAS_WINDOW_S or not gas_pressed:
-        self._pending_gas = None
-
-    # Too strong: a brief brake tap while openpilot had been pushing hard for
-    # a full second with nothing close ahead, after which the car carries on.
-    # Decided at release (see FEEDBACK_BRAKE_TAP_*).
-    if brake_pressed and not self._prev_brake and self._op_push_s >= FEEDBACK_BRAKE_HOLD_S:
-      lead_clear = lead_headway_s is None or \
-        (lead_headway_s >= FEEDBACK_BRAKE_LEAD_HEADWAY_S and not lead_closing)
-      if lead_clear and not constrained and v_ego >= FEEDBACK_BRAKE_MIN_V:
-        self._pending_brake = {'t': now, 'v': v_ego}
-      self._op_push_s = 0.0
-    pb = self._pending_brake
-    if pb is not None:
-      if now - pb['t'] > FEEDBACK_BRAKE_TAP_MAX_S:
-        self._pending_brake = None          # held too long: slowing or stopping
-      elif not brake_pressed:
-        if v_ego >= FEEDBACK_BRAKE_TAP_KEEP_SPEED * pb['v']:
-          self._add_feedback(now, -1.0)
-        self._pending_brake = None
+  def _ignored(self, now, pb, held, v_now):
+    self.counts['brake_ignored'] += 1
+    self._log(now, 'brake_ignored', kph=round(pb['v'] * 3.6), held=round(held, 2),
+              kph_after=round(v_now * 3.6))
 
   # ---- decision ----
-  def _decide(self, now=0.0, force=False):
-    if self.episodes:
-      self.style = 0.5 * _weighted_quantile(self.episodes, 0.5) + \
-                   0.5 * _weighted_quantile(self.episodes, 0.9)
-    else:
-      self.style = 0.0
-    if len(self.feedback) >= FEEDBACK_MIN_EVENTS:
-      wsum = sum(w for _, w in self.feedback)
-      self.fb_target = sum(t * w for t, w in self.feedback) / wsum if wsum > 0 else None
-    else:
-      self.fb_target = None
-    self.score = self.style if self.fb_target is None else \
-      STYLE_WEIGHT * self.style + (1.0 - STYLE_WEIGHT) * self.fb_target
-
-    if len(self.episodes) < MIN_EPISODES and self.result is None:
+  def _decide(self, now):
+    total = self.more + self.less
+    if total <= 0.0 or now - self._last_change_t < MIN_CHANGE_INTERVAL_S:
       return
-
-    cur = self.result or 'mid'
-    new = cur
-    if cur == 'high':
-      if self.score < LEAVE_THRESHOLD:
-        new = 'low' if self.score <= -ENTER_THRESHOLD else 'mid'
-    elif cur == 'low':
-      if self.score > -LEAVE_THRESHOLD:
-        new = 'high' if self.score >= ENTER_THRESHOLD else 'mid'
-    else:
-      if self.score >= ENTER_THRESHOLD:
-        new = 'high'
-      elif self.score <= -ENTER_THRESHOLD:
-        new = 'low'
-
-    if self.result is None:
-      self.result = new
+    i = PROFILES.index(self.level)
+    step = 0
+    if self.more >= STEP_MIN_VOTES and self.more / total >= STEP_SHARE and i < len(PROFILES) - 1:
+      step = 1
+    elif self.less >= STEP_MIN_VOTES and self.less / total >= STEP_SHARE and i > 0:
+      step = -1
+    if step:
+      old = self.level
+      votes = (round(self.more, 2), round(self.less, 2))
+      self.level = PROFILES[i + step]
+      self.more = self.less = 0.0
       self._last_change_t = now
+      self.counts['steps'] += 1
       self._dirty = True
-      self._log(now, 'decided')
-    elif new != cur and (force or now - self._last_change_t >= MIN_CHANGE_INTERVAL_S):
-      self.result = new
-      self._last_change_t = now
-      self._dirty = True
-      self._log(now, 'changed')
+      self._log(now, 'step', frm=old, to=self.level, more=votes[0], less=votes[1])
 
   # ---- output ----
   def _maybe_persist(self, now):
     if self.put_fn is None:
       return
-    status = self.status
-    if status != self._status:
-      self._status = status
-      self.put_fn("CommaPedalAutoStatus", status)
+    if self.level != self._status:
+      self._status = self.level
+      self.put_fn("CommaPedalAutoStatus", self.level)
     if self._last_save_t is None:
       self._last_save_t = now
       self._last_log_t = now
@@ -407,17 +242,14 @@ class CommaPedalAutoLearner:
       self._dirty = False
       self.put_fn("CommaPedalAutoStats", self.to_json())
 
-  def _log(self, now, reason):
+  def _log(self, now, reason, **extra):
     self._last_log_t = now
     if self.put_fn is None:
       return
-    line = json.dumps({
-      'reason': reason, 't': round(now, 1), 'result': self.result, 'status': self.status,
-      'score': round(self.score, 3), 'style': round(self.style, 3),
-      'feedback_target': None if self.fb_target is None else round(self.fb_target, 3),
-      'episodes': len(self.episodes), 'feedback': len(self.feedback),
-      'last_episode': self.last_episode,
-    }, separators=(',', ':'))
+    d = {'reason': reason, 't': round(now, 1), 'level': self.level,
+         'more': round(self.more, 2), 'less': round(self.less, 2), 'counts': dict(self.counts)}
+    d.update(extra)
+    line = json.dumps(d, separators=(',', ':'))
 
     def write():
       try:

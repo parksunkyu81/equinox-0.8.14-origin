@@ -540,9 +540,9 @@ class Controls:
         # 2026-09-01--07-13-55, that pushed the gain to 0.85-0.90 with no
         # upward signal available to bring it back.
         # CommaPedalResistance = auto hands the choice to CommaPedalAutoLearner
-        # (comma_pedal_auto.py), which learns LOW / MID / HIGH from the
-        # driver's own acceleration and gas/brake corrections. It drives MID
-        # until it has seen enough, and it only ever picks one of the three.
+        # (comma_pedal_auto.py), which steps LOW / MID / HIGH by the driver's
+        # gas presses ("more") and brake taps ("less") while openpilot is
+        # accelerating. It starts from MID and only ever picks one of the three.
         self.comma_pedal_auto = CommaPedalAutoLearner(
           params.get("CommaPedalAutoStats"), put_fn=put_nonblocking)
         self.comma_pedal_auto_selected = False
