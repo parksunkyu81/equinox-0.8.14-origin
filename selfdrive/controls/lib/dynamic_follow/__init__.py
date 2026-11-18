@@ -64,6 +64,20 @@ LEAD_LAUNCH_MAX_ACTIVE_S = 6.0
 LEAD_LAUNCH_BLEND_IN_S = 0.15
 LEAD_LAUNCH_BLEND_OUT_S = 1.5
 
+# Rolling pull-away in a queue. On the 11-18 drive (109 of 150 engaged
+# minutes in jams) the driver pressed the gas 76 times as the lead pulled away
+# while the car was still rolling, because nothing above 5 km/h counted as a
+# launch: the plan waited for the gap to open, and cut-ins came at a ~25 m gap
+# against a usual ~6 m. With ActiveStopAccelBoost on, a lead clearly pulling
+# away at 3-25 km/h now starts the same launch (boost and floor in
+# stop_accel_boost.py, with all of its cancels) as a lead leaving a stop.
+LEAD_ROLL_MIN_EGO_KPH = 3.0
+LEAD_ROLL_REL_SPEED_MS = 0.5
+LEAD_ROLL_REARM_VREL_MS = 0.2
+LEAD_ROLL_MIN_DISTANCE_M = 3.0
+LEAD_ROLL_MAX_DISTANCE_M = 25.0
+LEAD_ROLL_CONFIRM_S = 0.3
+
 
 class DistanceModController:
   def __init__(self, k_i, k_d, x_clip, mods):
@@ -157,6 +171,9 @@ class DynamicFollow:
     self.lead_launch_filtered_speed = None
     self.last_launch_lead_status = False
     self.last_launch_lead_distance = None
+    self.lead_roll_rearmed = True
+    self.lead_roll_since = None
+    self.lead_roll_count = 0
 
     self.last_cost = 0.0
     self._get_live_params()  # so they're defined just in case
@@ -260,6 +277,7 @@ class DynamicFollow:
     self.lead_launch_speed_samples.clear()
     self.lead_launch_distance_samples.clear()
     self.lead_launch_filtered_speed = None
+    self.lead_roll_since = None
     if immediate:
       self.lead_launch_blend = 0.0
 
@@ -375,6 +393,32 @@ class DynamicFollow:
                               now - self.lead_launch_started_at >= LEAD_LAUNCH_MAX_ACTIVE_S)
           if v_ego_kph > LEAD_LAUNCH_MAX_EGO_KPH or active_timed_out:
             self._reset_lead_launch(immediate=False)
+
+        # Rolling pull-away: the same launch, but while creeping in a queue
+        # rather than from a stop. A new pull-away needs the lead to have
+        # stopped pulling away since the last one (re-arm), so one long
+        # opening does not chain launches back to back.
+        if filtered_v_rel < LEAD_ROLL_REARM_VREL_MS:
+          self.lead_roll_rearmed = True
+        rolling = bool(self.lead_roll_rearmed and
+                       self.lead_launch_state in (LEAD_LAUNCH_IDLE, LEAD_LAUNCH_RELEASING) and
+                       LEAD_ROLL_MIN_EGO_KPH <= v_ego_kph <= LEAD_LAUNCH_MAX_EGO_KPH and
+                       filtered_v_lead >= LEAD_START_STRONG_SPEED_MS and
+                       filtered_v_rel >= LEAD_ROLL_REL_SPEED_MS and
+                       LEAD_ROLL_MIN_DISTANCE_M <= x_lead <= LEAD_ROLL_MAX_DISTANCE_M)
+        if rolling:
+          if self.lead_roll_since is None:
+            self.lead_roll_since = now
+          elif now - self.lead_roll_since >= LEAD_ROLL_CONFIRM_S and not self.car_data.brake_pressed:
+            self.lead_launch_state = LEAD_LAUNCH_ACTIVE
+            self.lead_launch_started_at = now
+            self.lead_launch_armed_distance = None   # no standstill gap to launch off
+            self.lead_launch_armed_until = None
+            self.lead_roll_rearmed = False
+            self.lead_roll_since = None
+            self.lead_roll_count += 1
+        else:
+          self.lead_roll_since = None
 
       self.last_launch_lead_status = True
       self.last_launch_lead_distance = x_lead
