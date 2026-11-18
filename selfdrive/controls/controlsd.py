@@ -63,6 +63,7 @@ from selfdrive.controls.lib.comma_pedal_profile import (
 )
 from selfdrive.controls.lib.comma_pedal_auto import CommaPedalAutoLearner
 from selfdrive.controls.lib.follow_learner import FollowLearner
+from selfdrive.controls.lib.pedal_hold_diag import PedalHoldDiag
 from selfdrive.controls.lib.dynamic_follow.follow_gap import FOLLOW_LEARN_PARAM, floor_tr
 from selfdrive.process_diagnostics import (append_controls_mismatch_diagnostic,
                                           append_process_diagnostic)
@@ -547,6 +548,11 @@ class Controls:
         self.follow_learner = FollowLearner(
           params.get(FOLLOW_LEARN_PARAM), put_fn=put_nonblocking,
           seed_scale=params.get("globalDfMod", encoding="utf8"))
+        # Why the pedal sat at zero while the planner asked for accel
+        # (pedal_hold_diag.py, /data/log/pedal_hold.jsonl).
+        self.pedal_hold_diag = PedalHoldDiag(DT_CTRL)
+        self.corner_lift_last = False
+        self.corner_lift_scale_last = 1.0
         self.comma_pedal_profile_controller = CommaPedalProfileController(
           self.comma_pedal_profile)
         self.comma_pedal_profile_gain = 1.0
@@ -1988,6 +1994,8 @@ class Controls:
             corner_lift = bool(predictive_enabled and (steer_sat_lift or pre_corner_lift) and
                                not self.stop_accel_boost_active)
             corner_lift_scale = self.corner_lift_speed_hold.update(corner_lift, CS.aEgo, DT_CTRL)
+            self.corner_lift_last = corner_lift
+            self.corner_lift_scale_last = corner_lift_scale
             self.predictive_coast_pedal_scale = min(self.predictive_coast_pedal_scale,
                                                     corner_lift_scale)
 
@@ -2160,6 +2168,39 @@ class Controls:
             if b.type.raw in self.button_timers:
                 self.button_timers[b.type.raw] = 1 if b.pressed else 0
 
+    def _pedal_hold_snapshot(self, CS):
+        """Pedal-path state for PedalHoldDiag; only called while the pedal is held at zero."""
+        pc = self.predictive_coasting
+        sp = pc.source_pressures
+        cc = getattr(self.CI, 'CC', None)
+        rl = getattr(cc, 'pedal_rise_limiter', None)
+        r2 = lambda x: round(float(x), 2) if math.isfinite(float(x)) else None
+        snap = {
+            'acc_on': bool(CS.adaptiveCruise),
+            'stop_boost': bool(self.stop_accel_boost_active),
+            'raw': r2(getattr(self, 'comma_pedal_raw_command', 0.0)),
+            'coast_scale': r2(self.predictive_coast_pedal_scale),
+            'coast_phase': pc.phase,
+            'coast_pressure': r2(pc.last_pressure),
+            'coast_source': pc.dominant_source,
+            'p_lead': r2(sp.get('lead', 0.0)),
+            'p_curve': r2(sp.get('curve', 0.0)),
+            'p_speed': r2(sp.get('speed_limit', 0.0)),
+            'brake_latched': bool(pc.brake_latched),
+            'lead_d': r2(pc.lead_distance_m),
+            'lead_vrel': r2(pc.lead_rel_speed_ms),
+            'gap_margin': r2(pc.distance_margin_m),
+            'ttg': r2(pc.time_to_gap_s),
+            'reach': r2(pc.reach_ratio),
+            'corner_lift': bool(self.corner_lift_last),
+            'corner_scale': r2(self.corner_lift_scale_last),
+            'speed_limit_coast': bool(self.speed_limit_coast_active),
+        }
+        if rl is not None:
+            snap.update(rise_holding=bool(rl.holding), rise_rate=r2(rl.rise_rate),
+                        post_brake_s=r2(rl.post_brake_elapsed))
+        return snap
+
     def publish_logs(self, CS, start_time, actuators, lac_log):
         """Send actuators and hud commands to the car, send controlsstate and MPC logging"""
 
@@ -2249,6 +2290,11 @@ class Controls:
             # out of CC: a nested capnp read is ~10 us, and these two are the
             # actuators passed in and what CI.apply just returned.
             self.steer_limited = abs(actuators.steer - self.last_actuators.steer) > 1e-2
+            if self.CP.enableGasInterceptor:
+                self.pedal_hold_diag.update(
+                    self.active, CS.vEgo, actuators.accel, self.last_actuators.gas,
+                    CS.gasPressed, CS.brakePressed,
+                    lambda: self._pedal_hold_snapshot(CS))
         p2 = sec_since_boot()
 
         # Only soft-disable forces decel now: the other trigger was driver
