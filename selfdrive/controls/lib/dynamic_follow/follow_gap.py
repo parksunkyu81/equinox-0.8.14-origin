@@ -13,11 +13,13 @@ selectable profiles: the gap is an elastic band per speed.
   already had margin and is kept.
 
 * The band runs from the floor to floor + width * scale. Inside it the gap is
-  allowed to drift: when the lead pulls away the car does not chase it (speed
-  it gains it would only have to coast or brake off again), and only past the
-  top of the band does it close in. When the lead closes or slows, the gap
-  target is held or raised, never lowered, so the planner keeps easing off
-  instead of redefining the shrinking gap as fine.
+  allowed to drift. When the lead pulls away the target leans to the middle of
+  the band and never rises, so the car follows it. (It used to rise with the
+  gap so the car would not chase; on the 11-16/17 drives the driver then
+  pressed the gas 291 times in 86 engaged minutes, 41% of them with the lead
+  pulling away or the gap already near the target.) When the lead closes or
+  slows, the gap target is held or raised, never lowered, so the planner keeps
+  easing off instead of redefining the shrinking gap as fine.
 
 * scale comes from FollowLearner (controlsd): gas presses while following
   shrink it, brake presses while closing on a moving lead widen it.
@@ -42,7 +44,7 @@ MIN_FOLLOW_TR = FLOOR_TR_S[0]
 BAND_BP_KPH = (0.0, 30.0, 60.0, 100.0, 140.0)
 BAND_WIDTH_S = (0.4, 0.5, 0.5, 0.4, 0.3)
 
-SCALE_MIN = 0.8
+SCALE_MIN = 0.6   # was 0.8, and the learner sat pinned there (gas presses kept pushing)
 SCALE_MAX = 1.3
 
 # Mirrors of long_mpc.py (importing it here would be circular).
@@ -54,7 +56,7 @@ OPENING_VREL_MS = 0.3
 LEAD_SLOWING_MS2 = -0.5
 STABLE_DRIFT_S = 0.05          # how far off the current gap the stable target leans toward mid
 TR_RISE_PER_S = 0.30
-TR_FALL_PER_S = 0.10
+TR_FALL_PER_S = 0.25   # 1.4 -> 1.1 s in ~1.2 s (was 3 s at 0.10)
 NEW_LEAD_JUMP_M = 5.0
 
 
@@ -129,7 +131,9 @@ class FollowGap:
         target = max(self.tr, mid) if a_lead < LEAD_SLOWING_MS2 else self.tr
       elif v_rel > OPENING_VREL_MS:
         self.phase = "opening"
-        target = max(self.tr, float(clip(eq, low, high)))
+        # Follow a lead that pulls away: lean to the middle of the band, never
+        # widen. The planner then sees the growing gap as too big and closes it.
+        target = min(self.tr, mid)
       else:
         self.phase = "stable"
         target = float(clip(eq + clip(mid - eq, -STABLE_DRIFT_S, STABLE_DRIFT_S), low, high))
