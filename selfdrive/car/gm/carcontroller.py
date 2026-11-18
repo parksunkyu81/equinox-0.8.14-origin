@@ -102,10 +102,13 @@ class CarController():
 
     if CS.CP.enableGasInterceptor:
       # 이것이 없으면 저속에서 너무 공격적입니다.
-      # Automatic pedal output is never allowed below 1 km/h. The driver must
-      # initiate motion; launch boost can begin only after measured speed has
-      # crossed that threshold.
-      pedal_speed_allowed = pedal_command_allowed(CS.out.vEgo, V_CRUISE_ENABLE_MIN)
+      # Automatic pedal output is not allowed below 1 km/h: the driver starts
+      # the car. The one exception is the opt-in StandstillAutoLaunch toggle,
+      # and only while controlsd's launch latch has confirmed the same lead
+      # pulling away from a gap of at least 2.5 m (stop_accel_boost.py).
+      pedal_speed_allowed = pedal_command_allowed(
+        CS.out.vEgo, V_CRUISE_ENABLE_MIN,
+        standstill_launch=bool(getattr(controls, 'standstill_launch_active', False)))
       if CS.adaptive_Cruise and not brake_pressed and not CS.out.gasPressed and \
          pedal_speed_allowed:
 

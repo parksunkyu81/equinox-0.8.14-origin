@@ -214,6 +214,7 @@ class LongitudinalMpc:
     self.solver = AcadosOcpSolverCython('long', 'SQP_RTI', N)
     self.desired_TR = desired_TR
     self.v_ego = 0.
+    self.standstill_launch_shift = 0.0
     self.reset()
     self.source = SOURCES[2]
 
@@ -377,6 +378,10 @@ class LongitudinalMpc:
     # 리드가 최소한으로 필요로 하는 거리. 현재 거리에 추가할 수 있습니다.
     # 그런 다음 이 새로운 거리에서 정지된 자동차/장애물로 처리합니다.
     lead_0_obstacle = lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1], self.x_sol[:,1])
+    # StandstillAutoLaunch: launch off the gap the car stopped at (dynamic_follow).
+    self.standstill_launch_shift = (self.dynamic_follow.standstill_launch_shift(self.v_ego, STOP_DISTANCE)
+                                    if radarstate.leadOne.status else 0.0)
+    lead_0_obstacle = lead_0_obstacle + self.standstill_launch_shift
     lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1], self.x_sol[:,1])
 
     # Fake an obstacle for cruise, this ensures smooth acceleration to set speed

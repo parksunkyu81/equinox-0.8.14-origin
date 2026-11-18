@@ -399,6 +399,24 @@ class DynamicFollow:
     launch_TR = min(base_TR, max(LEAD_LAUNCH_TR, MIN_FOLLOW_TR))
     return base_TR + self.lead_launch_blend * (launch_TR - base_TR)
 
+  def standstill_launch_shift(self, v_ego, stop_distance):
+    """Metres to add to the lead obstacle so the MPC launches off the stopped gap.
+
+    The car stops wherever the driver brakes it, typically ~3.6 m behind the
+    lead, while the MPC wants stop_distance (5.5 m) at standstill. Its plan for
+    a launching lead therefore stays at zero until the lead has opened that
+    difference too. With StandstillAutoLaunch on and a confirmed lead launch,
+    the gap the car stopped at counts as the standstill gap instead, so any
+    opening is a reason to go. Faded out between 5 and 15 km/h, by which time
+    the normal following gap has taken over.
+    """
+    if not (getattr(self, 'standstill_auto_launch', False) and self.stop_accel_boost_enabled and
+            self.lead_launch_state == LEAD_LAUNCH_ACTIVE and
+            self.lead_launch_armed_distance is not None):
+      return 0.0
+    base = max(0.0, float(stop_distance) - float(self.lead_launch_armed_distance))
+    return base * float(interp(float(v_ego) * CV.MS_TO_KPH, [5.0, 15.0], [1.0, 0.0]))
+
   def update_lead(self, v_lead=None, a_lead=None, x_lead=None, status=False, new_lead=False):
     self.lead_data.v_lead = v_lead
     self.lead_data.a_lead = a_lead
@@ -422,6 +440,10 @@ class DynamicFollow:
     # switch takes effect without restarting controls.
     params = Params()
     self.stop_accel_boost_enabled = params.get_bool("ActiveStopAccelBoost")
+    try:
+      self.standstill_auto_launch = params.get_bool("StandstillAutoLaunch")
+    except Exception:   # key not built into params yet: stay off
+      self.standstill_auto_launch = False
 
 
     # gap_scale is learned in controlsd (follow_learner.py) and handed over

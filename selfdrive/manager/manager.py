@@ -64,6 +64,7 @@ def manager_init() -> None:
     ("ShowDebugUI", "0"),
     ("NewRadarInterface", "0"),
     ("ActiveStopAccelBoost", "0"),
+    ("StandstillAutoLaunch", "0"),
     ("AutoShutdown", "1"),
     ("E2ELong", "0"),
 

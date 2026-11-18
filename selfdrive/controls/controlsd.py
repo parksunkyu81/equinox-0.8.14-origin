@@ -515,6 +515,12 @@ class Controls:
         self.right_lane_visible = False
         self.stop_accel_boost_latch = StopAccelBoostLatch(DT_CTRL)
         self.stop_accel_boost_active = False
+        # Community toggle: a confirmed lead launch may start the car from
+        # standstill (stop_accel_boost.py). Read once a second below.
+        self.standstill_auto_launch = self._read_standstill_auto_launch()
+        # True while that standstill launch is what lets the pedal through
+        # below 1 km/h; the CarController checks it.
+        self.standstill_launch_active = False
         # Lead picture handed to the interceptor rise-rate limit. Seeded with
         # the no-lead case; only the longitudinal path below refreshes it, so
         # joystick mode never gets a lead-relaxed rise rate.
@@ -1839,6 +1845,8 @@ class Controls:
                                   len(self.sm['radarState'].radarErrors) == 0 and
                                   not long_plan.fcw and dynamic_follow_valid and
                                   dynamic_follow.stopAccelBoostEnabled)
+        if self.sm.frame % 100 == 0:
+            self.standstill_auto_launch = self._read_standstill_auto_launch()
         self.stop_accel_boost_active = self.stop_accel_boost_latch.update(
           boost_system_ready,
           dynamic_follow_valid and dynamic_follow.leadCatchupActive,
@@ -1847,7 +1855,10 @@ class Controls:
           gas_pressed=CS.gasPressed,
           lead_speed=dynamic_follow.leadSpeed if dynamic_follow_valid else 0.0,
           lead_relative_speed=dynamic_follow.leadRelativeSpeed if dynamic_follow_valid else 0.0,
-          lead_distance=dynamic_follow.leadDistance if dynamic_follow_valid else 0.0)
+          lead_distance=dynamic_follow.leadDistance if dynamic_follow_valid else 0.0,
+          standstill_launch_enabled=self.standstill_auto_launch)
+        self.standstill_launch_active = bool(
+          self.stop_accel_boost_active and self.stop_accel_boost_latch.standstill_launch)
 
         c1 = sec_since_boot()
         if not self.joystick_mode:
@@ -2167,6 +2178,13 @@ class Controls:
         for b in buttonEvents:
             if b.type.raw in self.button_timers:
                 self.button_timers[b.type.raw] = 1 if b.pressed else 0
+
+    def _read_standstill_auto_launch(self):
+        """Community toggle; off if the key is not built into params yet."""
+        try:
+            return self.params.get_bool("StandstillAutoLaunch")
+        except Exception:
+            return False
 
     def _pedal_hold_snapshot(self, CS):
         """Pedal-path state for PedalHoldDiag; only called while the pedal is held at zero."""

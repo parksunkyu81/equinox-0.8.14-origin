@@ -128,6 +128,18 @@ STOP_ACCEL_BOOST_SAFE_GAP_TR_S = 0.6
 STOP_ACCEL_BOOST_MIN_LEAD_DISTANCE_M = 1.5
 STOP_ACCEL_BOOST_LEAD_DROPOUT_HOLD_S = 0.15
 
+# Standstill auto launch (Community toggle "StandstillAutoLaunch", off by
+# default). Without it nothing sends pedal below 1 km/h and the driver has to
+# start the car. On the 11-18 drives that meant 64 of 75 stop launches were the
+# driver's gas press, 0.25 s after the lead started to move: the car stops about
+# 3.6 m behind the lead, the MPC wants 5.5 m at standstill, so the plan only asks
+# to go once the lead has opened ~2 m more. With the toggle on, a confirmed lead
+# launch may start the car from standstill, but only while the same lead is
+# clearly pulling away from a gap that is not tiny.
+STANDSTILL_LAUNCH_MIN_LEAD_DISTANCE_M = 2.5
+STANDSTILL_LAUNCH_MIN_LEAD_SPEED_MS = 0.5
+STANDSTILL_LAUNCH_MIN_VREL_MS = 0.3
+
 
 def _clip01(value):
   return 0.0 if value < 0.0 else (1.0 if value > 1.0 else float(value))
@@ -245,6 +257,7 @@ class StopAccelBoostLatch:
     self.closing_elapsed = 0.0
     self.pressure = 0.0
     self.boost_factor = 1.0
+    self.standstill_launch = False
     self._v_ego = 0.0
 
   def _clear_latch(self):
@@ -259,7 +272,7 @@ class StopAccelBoostLatch:
 
   def update(self, system_ready, launch_detected, v_ego, brake_pressed=False,
              gas_pressed=False, lead_speed=0.0, lead_relative_speed=0.0,
-             lead_distance=0.0):
+             lead_distance=0.0, standstill_launch_enabled=False):
     v_ego = float(v_ego)
     lead_speed = float(lead_speed)
     lead_relative_speed = float(lead_relative_speed)
@@ -322,9 +335,21 @@ class StopAccelBoostLatch:
       lead_distance >= STOP_ACCEL_BOOST_FLOOR_MIN_LEAD_DISTANCE_M and
       lead_speed >= STOP_ACCEL_BOOST_FLOOR_MIN_LEAD_SPEED_MS and
       lead_relative_speed >= STOP_ACCEL_BOOST_FLOOR_MIN_VREL_MS)
+    # Below 1 km/h only with the toggle on, and only while the lead is clearly
+    # pulling away. A latch that was already carrying the car keeps it until
+    # the next stop: once moving, the normal >= 1 km/h band takes over.
+    self.standstill_launch = bool(
+      standstill_launch_enabled and self.latched and
+      not gas_pressed and not brake_pressed and
+      v_ego < STOP_ACCEL_BOOST_MIN_SPEED_MS and
+      lead_valid and
+      lead_distance >= STANDSTILL_LAUNCH_MIN_LEAD_DISTANCE_M and
+      lead_speed >= STANDSTILL_LAUNCH_MIN_LEAD_SPEED_MS and
+      lead_relative_speed >= STANDSTILL_LAUNCH_MIN_VREL_MS)
+    in_band = STOP_ACCEL_BOOST_MIN_SPEED_MS <= v_ego < STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_MS
     self.floor_allowed = bool(
       self.latched and not gas_pressed and not brake_pressed and floor_lead_opening and
-      STOP_ACCEL_BOOST_MIN_SPEED_MS <= v_ego < STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_MS)
+      (in_band or self.standstill_launch))
 
     # Precharge only after the driver has declared launch intent and the same
     # lead is safely opening. No automatic command is emitted while gasPressed;
@@ -346,7 +371,8 @@ class StopAccelBoostLatch:
     self.floor_accel = self._base_floor() if self.floor_allowed else 0.0
 
     return bool(self.latched and not gas_pressed and not brake_pressed and
-                STOP_ACCEL_BOOST_MIN_SPEED_MS <= v_ego < STOP_ACCEL_BOOST_MAX_SPEED_MS)
+                (STOP_ACCEL_BOOST_MIN_SPEED_MS <= v_ego < STOP_ACCEL_BOOST_MAX_SPEED_MS or
+                 self.standstill_launch))
 
   def _base_floor(self):
     """Ramped launch floor, sized by the justified authority and the speed band.
@@ -405,6 +431,7 @@ def apply_stop_accel_boost(requested_accel, v_ego, boost_active, accel_limits,
   return min(float(accel_limits[1]), max(float(accel_limits[0]), accel))
 
 
-def pedal_command_allowed(v_ego, normal_min_speed_kph=1.0):
-  """Never send an automatic pedal command below 1 km/h."""
-  return float(v_ego) >= float(normal_min_speed_kph) / 3.6
+def pedal_command_allowed(v_ego, normal_min_speed_kph=1.0, standstill_launch=False):
+  """No automatic pedal command below 1 km/h, except a standstill launch that
+  StopAccelBoostLatch confirmed with the StandstillAutoLaunch toggle on."""
+  return bool(standstill_launch) or float(v_ego) >= float(normal_min_speed_kph) / 3.6

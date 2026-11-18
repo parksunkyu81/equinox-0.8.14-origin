@@ -798,6 +798,12 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                             "../assets/offroad/icon_road.png",
                                             this));
 
+  toggles.append(new ParamControl("StandstillAutoLaunch",
+                                            "정지 상태 자동 출발",
+                                            "앞차가 출발하면 정지 상태에서도 자동으로 따라 출발합니다. 앞차와 2.5 m 이상 떨어져 있고, 앞차가 분명히 멀어지고 있고, 브레이크를 밟지 않았을 때만 동작합니다. 위의 stop accel boost가 켜져 있어야 합니다.",
+                                            "../assets/offroad/icon_road.png",
+                                            this));
+
   /*toggles.append(new ParamControl("E2ELong",
                                           "Enable E2E Long",
                                           "Activate E2E Long. It may work unexpectedly. Be careful.",
