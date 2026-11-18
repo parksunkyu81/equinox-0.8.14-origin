@@ -1191,6 +1191,14 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   const float comma_pedal_ratio = (comma_pedal - comma_pedal_min) /
                                   (comma_pedal_max - comma_pedal_min);
 
+  // 조향 신호 -- the steering torque actually sent to the EPS, 0..STEER_MAX
+  // (300). It is actuatorsOutput, after the driver-override and rate limits,
+  // so with a hand on the wheel it can read below the steering bar, which
+  // shows the controller's request. Drawn as a ring tile beside 페달 상태.
+  constexpr int STEER_MAX_COUNTS = 300;
+  const float steer_ratio = std::min(1.0f, std::abs(car_control.getActuatorsOutput().getSteer()));
+  const int steer_torque = static_cast<int>(std::lround(steer_ratio * STEER_MAX_COUNTS));
+
   // 2. VISION DIST -- hidden, kept for easy restoration.
   // The shared textSize local that used to live here is gone with the tiles
   // that read it (TR, PEDAL STATUS); those now size their own text.
@@ -1588,22 +1596,16 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // The badge is sized from the widest string the tile can ever show
     // ("-888") rather than from the live text, so a changing angle never
     // resizes the box or shifts it sideways under the wheel.
-    // In brackets: the steering torque actually sent to the EPS, 0..STEER_MAX
-    // (300). It is actuatorsOutput, after the driver-override and rate limits,
-    // so with a hand on the wheel it can read below the full steering gauge,
-    // which shows the controller's request.
-    constexpr int STEER_MAX_COUNTS = 300;
-    const int steer_torque = static_cast<int>(std::lround(
-      std::min(1.0f, std::abs(car_control.getActuatorsOutput().getSteer())) * STEER_MAX_COUNTS));
-    const QString angle_text = QString("%1° (%2)")
-                                 .arg(static_cast<int>(std::lround(steer_angle_deg)))
-                                 .arg(steer_torque);
+    // The steering torque used to follow in brackets; it moved to the 조향 신호
+    // ring tile beside 페달 상태.
+    const QString angle_text = QString("%1°")
+                                 .arg(static_cast<int>(std::lround(steer_angle_deg)));
 
     configFont(p, "Open Sans", 43, "Bold");
     QFontMetrics angle_fm(p.font());
-    // The NDA badge above keeps the old angle-only width as its minimum.
+    // The NDA badge above uses the same angle-only width as its minimum.
     const int badge_min_w = angle_fm.horizontalAdvance("-888°") + 38;
-    const int angle_w = angle_fm.horizontalAdvance("-888° (300)") + 38;
+    const int angle_w = badge_min_w;
     const int angle_h = angle_fm.height() + 24;
     // Centred on the wheel, but kept off the speed panel to its left, the same
     // rule as the NDA badge: the torque value makes this box wider than the wheel.
@@ -1991,6 +1993,13 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
                    // reads badly on the road.
                    "페달 상태", pedal_status_str, pedalStatusColor, "브레이크",
                    1.60f, 0.10f);
+
+      // 조향 신호, right of 페달 상태 on the same row and in the same style as
+      // 페달 신호: red ring filling with the torque sent to the EPS (0..300),
+      // the value in the middle. Sized against "300" so a three-digit value
+      // stays inside the ring.
+      statusRing(scol_r + SD + SGAP_X, speed_row_top, "조향 신호",
+                 QString::number(steer_torque), steer_ratio, "300", 0.10f, 1.40f);
     }
   }
 }
