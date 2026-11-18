@@ -9,7 +9,9 @@
      compared with coast capability. A brake press while closing on a moving
      lead means the pedal came off too late -> k up (lift earlier).
    * gap_scale (s): widens or narrows the gap band in follow_gap.py. The same
-     brake press widens it a little; a gas press while following a lead that
+     brake press widens it a little, but only when the car really was running
+     close (within 10% of the floor gap) -- a wider gap did not cut brake
+     presses and invited cut-ins; a gas press while following a lead that
      is not closing, with the gap already past the floor, means it was too
      far or too slow -> s and k down.
    Brake presses are only counted against a lead that is still moving
@@ -63,6 +65,7 @@ K_MIN, K_MAX = 0.8, 1.5
 K_BRAKE_STEP = 0.05
 S_BRAKE_STEP = 0.02
 K_GAS_STEP = 0.03
+BRAKE_WIDEN_GAP_FACTOR = 1.1   # a brake widens the gap only within 10% of the floor gap
 S_GAS_STEP = 0.03
 
 SAVE_INTERVAL_S = 60.0
@@ -193,7 +196,13 @@ class FollowLearner:
           now - self._last_feedback_t >= FEEDBACK_COOLDOWN_S):
         self._last_feedback_t = now
         self.lift_margin = min(K_MAX, self.lift_margin + K_BRAKE_STEP)
-        self.gap_scale = min(SCALE_MAX, self.gap_scale + S_BRAKE_STEP)
+        # Widen the gap only for a brake that came from really running close.
+        # Otherwise the answer is lifting earlier (lift_margin, above): in
+        # flowing traffic on 11-16..18 brake presses ran at 33-52 per 10 min
+        # whatever the time gap, while cut-ins went from 0-4 per 10 min below
+        # 2.2 s to 11 at 2.2-3.5 s and 44 beyond.
+        if lead_dist <= (MPC_STOP_DISTANCE + v_ego * floor_tr(v_ego)) * BRAKE_WIDEN_GAP_FACTOR:
+          self.gap_scale = min(SCALE_MAX, self.gap_scale + S_BRAKE_STEP)
         self.brakes_counted += 1
         self._dirty = True
 
