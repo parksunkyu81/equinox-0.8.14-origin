@@ -148,6 +148,11 @@ bool NvgWindow::hitPedalTile(const QPoint &pos) const {
          pedal_tile_rect_.contains(pos);
 }
 
+bool NvgWindow::hitAutoLaunchTile(const QPoint &pos) const {
+  return !auto_launch_tile_rect_.isEmpty() && millis_since_boot() - auto_launch_tile_drawn_t_ < 500.0 &&
+         auto_launch_tile_rect_.contains(pos);
+}
+
 // The TR tile no longer takes taps: there are no following-distance profiles
 // to step through (dynamic_follow/follow_gap.py has one gap and no settings).
 
@@ -179,6 +184,15 @@ void OnroadWindow::mouseReleaseEvent(QMouseEvent* e) {
     const QString next = nextPedalProfile(
       QString::fromStdString(params.get("CommaPedalResistance")).trimmed().toLower());
     params.put("CommaPedalResistance", next.toStdString());
+    nvg->refreshPedalProfile();
+    return;
+  }
+  // Same for the 자동 출발 tile: a tap flips ActiveStopAccelBoost. The
+  // planner's dynamic follow and controlsd read it live.
+  if (std::abs(dx) < 40 && std::abs(dy) < 40 && nvg->isVisible() &&
+      nvg->hitAutoLaunchTile(nvg->mapFrom(this, endPos))) {
+    Params params;
+    params.putBool("ActiveStopAccelBoost", !params.getBool("ActiveStopAccelBoost"));
     nvg->refreshPedalProfile();
     return;
   }
@@ -1362,6 +1376,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       pedal_profile = "MID";
     }
     ai_pedal_profile = pedal_profile;
+    // 자동 출발 tile: Community "Activate stop accel boost", same refresh.
+    auto_launch_on_ = params.getBool("ActiveStopAccelBoost");
   }
 
   // Colour encodes the level so the setting reads at a glance without having
@@ -1970,6 +1986,16 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
                    aiProfileColor, "HIGH", 1.17f, 0.10f);
       pedal_tile_rect_ = QRect(scol_r - SD / 2, speed_row - SD / 2, SD, SD);
       pedal_tile_drawn_t_ = millis_since_boot();
+
+      // 자동 출발, right of 페달 강도 on its row (below 조향 신호). Shows and,
+      // on a tap, flips the Community "Activate stop accel boost" toggle
+      // (ActiveStopAccelBoost). Matched to 페달 강도: same size_ref and scale.
+      const int auto_launch_x = scol_r + SD + SGAP_X;
+      statusCircle(auto_launch_x, speed_row, "자동 출발", auto_launch_on_ ? "ON" : "OFF",
+                   auto_launch_on_ ? QColor(120, 255, 120, 220) : QColor(254, 32, 32, 220),
+                   "HIGH", 1.17f, 0.10f);
+      auto_launch_tile_rect_ = QRect(auto_launch_x - SD / 2, speed_row - SD / 2, SD, SD);
+      auto_launch_tile_drawn_t_ = millis_since_boot();
 
       statusCircle(scol_l, speed_row,
                    tr_label, tr_str, QColor(120, 255, 120, 200), "8.88");

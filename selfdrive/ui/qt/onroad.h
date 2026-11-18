@@ -43,6 +43,9 @@ public:
   // The tile re-reads CommaPedalResistance once a second; this makes the next
   // frame read it at once.
   void refreshPedalProfile() { pedal_profile_refresh_ = true; update(); }
+  // 자동 출발 tile: tapping it flips ActiveStopAccelBoost. Same rules as
+  // hitPedalTile; refreshPedalProfile also re-reads this tile's state.
+  bool hitAutoLaunchTile(const QPoint &pos) const;
 
 protected:
   void paintGL() override;
@@ -120,6 +123,10 @@ protected:
   QRect pedal_tile_rect_;
   double pedal_tile_drawn_t_ = 0;
   bool pedal_profile_refresh_ = false;
+  // Where the 자동 출발 tile was last drawn, and the toggle it shows.
+  QRect auto_launch_tile_rect_;
+  double auto_launch_tile_drawn_t_ = 0;
+  bool auto_launch_on_ = false;
   void drawSpeedLimit(QPainter &p);
   void drawSteer(QPainter &p);
   void drawTurnSignals(QPainter &p);
