@@ -30,6 +30,11 @@ votes, the profile steps one level that way and the votes reset -- they were
 cast against the old level. A step is held at least MIN_CHANGE_INTERVAL_S.
 The level is kept across drives; the votes are halved at each start.
 
+In a traffic jam (traffic_state.JamDetector) nothing is voted and the votes
+do not fade: the driver presses the gas there to keep cut-ins out and brakes
+because the queue stops, which says nothing about how hard openpilot should
+accelerate in flowing traffic.
+
 On the 11-18 drives this counted 25 "more" and 20 "less" (51 slowing / stopping
 brakes ignored), and the "more" share of 10-minute windows ranged 0.22-0.73.
 """
@@ -93,7 +98,7 @@ class CommaPedalAutoLearner:
     self._last_log_t = None
     self._dirty = False
     self._status = None
-    self.counts = {'more': 0, 'less': 0, 'brake_ignored': 0, 'steps': 0}
+    self.counts = {'more': 0, 'less': 0, 'brake_ignored': 0, 'jam_skipped': 0, 'steps': 0}
 
   # ---- persistence ----
   def _load(self, stats):
@@ -131,10 +136,22 @@ class CommaPedalAutoLearner:
 
   # ---- per-step update (call at ~20 Hz) ----
   def update(self, now, dt, v_ego, a_ego, gas_pressed, brake_pressed, long_active,
-             op_accel, lead_headway_s, lead_closing, lat_accel, lane_change):
+             op_accel, lead_headway_s, lead_closing, lat_accel, lane_change, jam=False):
     gas = bool(gas_pressed)
     brake = bool(brake_pressed)
     v_ego = float(v_ego)
+
+    if jam:
+      if long_active and ((gas and not self._prev_gas) or (brake and not self._prev_brake)):
+        self.counts['jam_skipped'] += 1
+      self._push_s = 0.0
+      self._pending_brake = None
+      if gas or brake:
+        self._last_pedal_t = now
+      self._prev_gas = gas
+      self._prev_brake = brake
+      self._maybe_persist(now)
+      return
 
     if long_active:
       k = 0.5 ** (dt / HALF_LIFE_S)

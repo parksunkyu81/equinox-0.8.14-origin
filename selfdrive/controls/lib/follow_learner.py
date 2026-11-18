@@ -17,7 +17,12 @@
    of corners and lane changes. Stopping for a light or a queue needs the brake
    whatever the gap -- counting those is what sank the earlier style learner.
 
-3. A score to judge the change: brake presses per 10 km of following.
+3. A score to judge the change: brake presses per 10 km of following, also
+   split into flowing traffic and jams.
+
+In a traffic jam (traffic_state.JamDetector) the gas/brake corrections are
+not learned: the driver presses the gas there to keep cut-ins out and brakes
+because the queue stops. Coast deceleration is physics and is still learned.
 
 State is saved to the CommaFollowLearn param once a minute and read back
 by plannerd's dynamic follow for gap_scale. The first state seeds gap_scale
@@ -94,6 +99,9 @@ class FollowLearner:
     self.follow_brakes = 0
     self.brakes_counted = 0
     self.gas_counted = 0
+    self.follow_m_jam = 0.0
+    self.follow_brakes_jam = 0
+    self.jam_skipped = 0
     self._dirty = False
     self._last_save_t = None
     self._last_log_t = None
@@ -153,10 +161,11 @@ class FollowLearner:
 
   # ---- per-step update (~20 Hz) ----
   def update(self, now, dt, v_ego, a_ego, pedal_cmd, gas_pressed, brake_pressed, long_active,
-             op_accel, lat_accel, lane_change, lead_status, lead_dist, lead_vrel):
+             op_accel, lat_accel, lane_change, lead_status, lead_dist, lead_vrel, jam=False):
     v_ego = max(0.0, float(v_ego))
     gas = bool(gas_pressed)
     brake = bool(brake_pressed)
+    jam = bool(jam)
     self._update_coast(dt, v_ego, float(a_ego), float(pedal_cmd), gas, brake, bool(long_active),
                        float(lat_accel))
 
@@ -164,15 +173,21 @@ class FollowLearner:
     self._lead_age = self._lead_age + dt if (lead_status and lead_dist > 0.0) else 0.0
     if following:
       self.follow_m += v_ego * dt
+      if jam:
+        self.follow_m_jam += v_ego * dt
     if following and lead_vrel < CLOSING_VREL_MS:
       self._last_closing_t = now
     calm = abs(lat_accel) < LAT_MAX and not lane_change
     seasoned = self._lead_age >= LEAD_MIN_AGE_S
 
+    if jam and following and ((brake and not self._prev_brake) or (gas and not self._prev_gas)):
+      self.jam_skipped += 1
     if brake and not self._prev_brake and following:
       self.follow_brakes += 1
+      if jam:
+        self.follow_brakes_jam += 1
       lead_speed_kph = (v_ego + lead_vrel) * 3.6
-      if (seasoned and calm and v_ego * 3.6 >= BRAKE_MIN_KPH and
+      if (not jam and seasoned and calm and v_ego * 3.6 >= BRAKE_MIN_KPH and
           lead_speed_kph >= BRAKE_LEAD_MIN_KPH and
           now - self._last_closing_t <= CLOSING_MEMORY_S and
           now - self._last_feedback_t >= FEEDBACK_COOLDOWN_S):
@@ -184,7 +199,7 @@ class FollowLearner:
 
     if gas and not self._prev_gas and following:
       floor_gap = MPC_STOP_DISTANCE + v_ego * floor_tr(v_ego)
-      if (seasoned and calm and v_ego * 3.6 >= GAS_MIN_KPH and lead_vrel > CLOSING_VREL_MS and
+      if (not jam and seasoned and calm and v_ego * 3.6 >= GAS_MIN_KPH and lead_vrel > CLOSING_VREL_MS and
           lead_dist > floor_gap * 1.1 and op_accel < GAS_OP_ACCEL_MAX and
           now - self._last_feedback_t >= FEEDBACK_COOLDOWN_S):
         self._last_feedback_t = now
@@ -201,6 +216,10 @@ class FollowLearner:
   def brakes_per_10km(self):
     km = self.follow_m / 1000.0
     return round(self.follow_brakes / km * 10.0, 2) if km >= 0.5 else None
+
+  @staticmethod
+  def _per_10km(brakes, m):
+    return round(brakes / (m / 1000.0) * 10.0, 2) if m >= 500.0 else None
 
   def _maybe_persist(self, now):
     if self.put_fn is None:
@@ -223,6 +242,12 @@ class FollowLearner:
       'follow_km': round(self.follow_m / 1000.0, 2),
       'follow_brakes': self.follow_brakes,
       'brakes_per_10km': self.brakes_per_10km(),
+      'flow_km': round((self.follow_m - self.follow_m_jam) / 1000.0, 2),
+      'flow_brakes_per_10km': self._per_10km(self.follow_brakes - self.follow_brakes_jam,
+                                             self.follow_m - self.follow_m_jam),
+      'jam_km': round(self.follow_m_jam / 1000.0, 2),
+      'jam_brakes_per_10km': self._per_10km(self.follow_brakes_jam, self.follow_m_jam),
+      'jam_skipped': self.jam_skipped,
       'brakes_counted': self.brakes_counted, 'gas_counted': self.gas_counted,
       'gap_scale': round(self.gap_scale, 3), 'lift_margin': round(self.lift_margin, 3),
       'coast_kph_decel_n': [[b, round(m, 2), n] for b, (m, n) in zip(COAST_BINS_KPH, self.coast) if n],

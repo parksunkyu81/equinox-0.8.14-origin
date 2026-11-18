@@ -63,6 +63,7 @@ from selfdrive.controls.lib.comma_pedal_profile import (
 )
 from selfdrive.controls.lib.comma_pedal_auto import CommaPedalAutoLearner
 from selfdrive.controls.lib.follow_learner import FollowLearner
+from selfdrive.controls.lib.traffic_state import JamDetector
 from selfdrive.controls.lib.pedal_hold_diag import PedalHoldDiag
 from selfdrive.controls.lib.dynamic_follow.follow_gap import FOLLOW_LEARN_PARAM, floor_tr
 from selfdrive.process_diagnostics import (append_controls_mismatch_diagnostic,
@@ -546,6 +547,10 @@ class Controls:
         self.comma_pedal_auto = CommaPedalAutoLearner(
           params.get("CommaPedalAutoStats"), put_fn=put_nonblocking)
         self.comma_pedal_auto_selected = False
+        # Traffic jam (60 s mean speed < 25 km/h): the follow and pedal AUTO
+        # learners do not learn from the driver's presses there.
+        self.jam_detector = JamDetector()
+        self.traffic_jam = False
         self.comma_pedal_profile = self._read_comma_pedal_profile(params)
         # Brake-minimizing follow control (follow_learner.py): coast
         # deceleration per speed, the lift margin and gap scale from the
@@ -2078,10 +2083,12 @@ class Controls:
               op_accel=float(actuators.accel),
               lead_headway_s=lead_headway_s, lead_closing=lead_closing,
               lat_accel=float(CS.yawRate) * float(CS.vEgo),
-              lane_change=lat_plan.laneChangeState != LaneChangeState.off)
+              lane_change=lat_plan.laneChangeState != LaneChangeState.off,
+              jam=self.traffic_jam)
             # The learner may have just decided; use it from this frame on.
             self.comma_pedal_profile = self.comma_pedal_auto.profile
         if self.CP.enableGasInterceptor and self.sm.frame % COMMA_PEDAL_AUTO_FRAMES == 1:
+            self.traffic_jam = self.jam_detector.update(CS.vEgo, COMMA_PEDAL_AUTO_FRAMES * DT_CTRL)
             follow_lead = self.sm['radarState'].leadOne
             self.follow_learner.update(
               now=sec_since_boot(), dt=COMMA_PEDAL_AUTO_FRAMES * DT_CTRL,
@@ -2094,7 +2101,8 @@ class Controls:
               lane_change=lat_plan.laneChangeState != LaneChangeState.off,
               lead_status=bool(follow_lead.status),
               lead_dist=float(follow_lead.dRel) if follow_lead.status else 0.0,
-              lead_vrel=float(follow_lead.vRel) if follow_lead.status else 0.0)
+              lead_vrel=float(follow_lead.vRel) if follow_lead.status else 0.0,
+              jam=self.traffic_jam)
         pedal_profile_active = bool(
           self.active and self.CP.enableGasInterceptor and
           self.last_actuators.gas > 0.001 and
