@@ -2532,6 +2532,51 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   p.restore();
 }*/
 
+// Speed bump warning sign (red rounded triangle, amber face, black bump),
+// drawn as vectors so it needs no image asset and stays sharp at any size.
+// Coordinates are in a 1920 x 1695 design box (the reference sign's own
+// proportions) and are fitted, centred, into `area`.
+static void drawSpeedBumpSign(QPainter &p, const QRectF &area) {
+  const qreal DW = 1920.0, DH = 1695.0;
+  const qreal s = std::min(area.width() / DW, area.height() / DH);
+  const QPointF o(area.center().x() - DW * s / 2, area.center().y() - DH * s / 2);
+  auto P = [&](qreal x, qreal y) { return QPointF(o.x() + x * s, o.y() + y * s); };
+
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing, true);
+
+  // Rounded corners: fill a smaller triangle and stroke it with a thick,
+  // round-joined pen of the same colour.
+  const QPolygonF red_tri(QVector<QPointF>{P(960, 147), P(120, 1600), P(1800, 1600)});
+  auto rounded = [&](const QColor &c, qreal pen_w) {
+    QPen pen(c, pen_w * s, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    p.setPen(pen);
+    p.setBrush(c);
+    p.drawPolygon(red_tri);
+  };
+  rounded(Qt::white, 230);              // thin white rim
+  rounded(QColor(0xD3, 0x1F, 0x25), 180);
+
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(0xF8, 0xA7, 0x0F));
+  p.drawPolygon(QPolygonF(QVector<QPointF>{P(960, 259), P(240, 1505), P(1680, 1505)}));
+
+  // Bump: a base bar with a dome on top.
+  QPainterPath bump;
+  bump.moveTo(P(452, 1321));
+  bump.lineTo(P(590, 1321));
+  bump.cubicTo(P(700, 1175), P(830, 1135), P(960, 1135));
+  bump.cubicTo(P(1090, 1135), P(1220, 1175), P(1329, 1321));
+  bump.lineTo(P(1468, 1321));
+  bump.lineTo(P(1468, 1413));
+  bump.lineTo(P(452, 1413));
+  bump.closeSubpath();
+  p.setBrush(Qt::black);
+  p.drawPath(bump);
+
+  p.restore();
+}
+
 // SpeedLimit만 표시하고, Cruise/Apply(=MaxSpeed 박스)는 완전히 제거
 // + 보드 위치20% 아래 이동(클램프)
 // + roadLimit_Speed(SPEED LIMIT 박스)일 때 NDA/HDA 아이콘을 박스 위에 표시
@@ -2559,7 +2604,16 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
     left_dist = sectionLeftDist;
   }
 
-  const bool show_cam_or_section = (limit_speed > 0 && left_dist > 0);
+  // Speed bump ahead: road_speed_limiter puts the nearest bump from either
+  // SDI slot into bumpLeftDist. A sender that predates that field only has
+  // the first slot, so fall back to it when that slot is a bump (cam type 22).
+  int bump_dist = roadLimitSpeed.getBumpLeftDist();
+  if (bump_dist <= 0 && roadLimitSpeed.getCamType() == 22) bump_dist = camLimitSpeedLeftDist;
+  const bool show_bump = activeNDA > 0 && bump_dist > 0;
+
+  // The bump sign takes the board's place; the camera/section board returns
+  // once the bump is gone.
+  const bool show_cam_or_section = !show_bump && (limit_speed > 0 && left_dist > 0);
   const bool show_road = (roadLimit_Speed > 0 && roadLimit_Speed < 200);
 
   // ============================================================
@@ -2590,13 +2644,15 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
     nda_badge_cx_ = x_start + S(210) / 2;
   }
 
-  if (!show_cam_or_section && !show_road) {
+  if (!show_bump && !show_cam_or_section && !show_road) {
     p.restore();
     return;
   }
 
   int needed_h = 0;
-  if (show_cam_or_section) {
+  if (show_bump) {
+    needed_h = S(210) + S(110);
+  } else if (show_cam_or_section) {
     const int board_w = S((limit_speed < 100) ? 210 : 230);
     // 원형 표지(보드) + 아래 거리 pill 여유
     needed_h = board_w + S(110);
@@ -2616,7 +2672,7 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
     const int w = S(120);
     const int h = S(54);
     const int top_margin = S(10);
-    const int board_width = show_road ? S(210)
+    const int board_width = (show_bump || !show_cam_or_section) ? S(210)
                                       : S((limit_speed < 100) ? 210 : 230);
     const int x_icon = x_start + (board_width - w) / 2;
     const int y_icon = std::max(0, y_start - h - top_margin);
@@ -2629,10 +2685,53 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
 
   QString str;
 
+  // Distance pill centred under a board: "85m" / "1.2km".
+  auto draw_dist_pill = [&](int board_width, int board_height, int dist) {
+    QString s_dist;
+    if (dist < 1000) s_dist.sprintf("%dm", dist);
+    else s_dist.sprintf("%.1fkm", dist / 1000.f);
+
+    QFont font("Inter");
+    font.setPixelSize(S(55));
+    font.setStyleName("Bold");
+    const int w_txt = QFontMetrics(font).width(s_dist);
+    const int pad = S(10);
+    const int center_x = x_start + board_width / 2;
+
+    QRect rc(center_x - w_txt / 2, y_start + board_height + S(15), w_txt, font.pixelSize() + S(10));
+    rc.adjust(-pad * 2, -pad, pad * 2, pad);
+
+    p.setPen(Qt::NoPen);
+    p.setBrush(bgColor);
+    p.drawRoundedRect(rc, S(20), S(20));
+
+    configFont(p, "Inter", S(55), "Bold");
+    p.setBrush(Qt::NoBrush);
+    p.setPen(QColor(255, 255, 255, 230));
+    p.drawText(rc, Qt::AlignCenter | Qt::AlignVCenter, s_dist);
+  };
+
+  // ------------------------------------------------------------
+  // 방지턱 (삼각 경고 표지 + 아래 남은 거리 pill)
+  // ------------------------------------------------------------
+  if (show_bump) {
+    const int board_width = S(210);
+    const int board_height = board_width;
+
+    p.setPen(Qt::NoPen);
+    p.setBrush(bgColor);
+    p.drawRoundedRect(QRectF(x_start, y_start, board_width, board_height), corner_radius, corner_radius);
+
+    const int pad = S(14);
+    drawSpeedBumpSign(p, QRectF(x_start + pad, y_start + pad, board_width - 2 * pad, board_height - 2 * pad));
+
+    draw_dist_pill(board_width, board_height, bump_dist);
+  }
+
   // ------------------------------------------------------------
   // CAM/SECTION 제한속도 (원형 표지 + 아래 거리 pill)
   // ------------------------------------------------------------
-  if (show_cam_or_section) {
+  else if (show_cam_or_section) {
     const int board_width = S((limit_speed < 100) ? 210 : 230);
     const int board_height = board_width;
 
@@ -2666,37 +2765,7 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
     text_rect.moveTop(b_rect.top() + (b_rect.height() - text_rect.height()) / 2);
     p.drawText(text_rect, Qt::AlignCenter, str);
 
-    // left dist pill
-    QRect rcLeftDist;
-    QString strLeftDist;
-
-    if (left_dist < 1000) strLeftDist.sprintf("%dm", left_dist);
-    else strLeftDist.sprintf("%.1fkm", left_dist / 1000.f);
-
-    QFont font("Inter");
-    font.setPixelSize(S(55));
-    font.setStyleName("Bold");
-
-    QFontMetrics fm(font);
-    int w_txt = fm.width(strLeftDist);
-
-    padding = S(10);
-    const int center_x = x_start + board_width / 2;
-
-    rcLeftDist.setRect(center_x - w_txt / 2,
-                       y_start + board_height + S(15),
-                       w_txt,
-                       font.pixelSize() + S(10));
-    rcLeftDist.adjust(-padding * 2, -padding, padding * 2, padding);
-
-    p.setPen(Qt::NoPen);
-    p.setBrush(bgColor);
-    p.drawRoundedRect(rcLeftDist, S(20), S(20));
-
-    configFont(p, "Inter", S(55), "Bold");
-    p.setBrush(Qt::NoBrush);
-    p.setPen(QColor(255, 255, 255, 230));
-    p.drawText(rcLeftDist, Qt::AlignCenter | Qt::AlignVCenter, strLeftDist);
+    draw_dist_pill(board_width, board_height, left_dist);
   }
 
   // ------------------------------------------------------------
