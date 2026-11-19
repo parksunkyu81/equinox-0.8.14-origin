@@ -1656,8 +1656,9 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // badge below it. Shown only while TmapNda is connected. With no safety
     // event ahead it names the road (고속도로 / 일반도로; TmapNda sends the
     // road class only with its 자동 길안내 주행 option on, otherwise every road
-    // reads 일반도로). With an event ahead it names only the event (no limit
-    // or distance), in yellow so it stands apart from the plain road label.
+    // reads 일반도로). With an event ahead it names the event and its
+    // distance ("방지턱 85m", no limit), in yellow so it stands apart from the
+    // plain road label.
     auto nda = sm["roadLimitSpeed"].getRoadLimitSpeed();
     if (nda.getActive() > 0) {
       const int cam_type = nda.getCamType();
@@ -1666,13 +1667,17 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       const int sec_limit = nda.getSectionLimitSpeed();
       const int sec_dist = nda.getSectionLeftDist();
 
+      auto dist_text = [](int m) {
+        return m < 1000 ? QString("%1m").arg(m) : QString::number(m / 1000.0, 'f', 1) + "km";
+      };
+
       QString nda_text;
       bool event = true;
       const bool bump_placeholder = cam_type == SPEED_BUMP_CAM_TYPE && cam_dist == BUMP_PLACEHOLDER_DIST;
       if (cam_dist > 0 && !bump_placeholder && (cam_type != 0 || cam_limit > 0)) {
-        nda_text = ndaSafetyLabel(cam_type == 0 ? 1 : cam_type);
+        nda_text = ndaSafetyLabel(cam_type == 0 ? 1 : cam_type) + " " + dist_text(cam_dist);
       } else if (sec_limit > 0 && sec_dist > 0) {
-        nda_text = "구간단속";
+        nda_text = "구간단속 " + dist_text(sec_dist);
       } else {
         nda_text = nda.getIsHighway() ? "고속도로" : "일반도로";
         event = false;
