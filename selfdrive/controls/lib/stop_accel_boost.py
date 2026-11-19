@@ -80,7 +80,7 @@ STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_MS = STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_KPH / 3.6
 STOP_ACCEL_BOOST_FLOOR_FADE_SPEED_KPH = 12.0
 STOP_ACCEL_BOOST_FLOOR_ACCEL = 0.40
 STOP_ACCEL_BOOST_FLOOR_GAP_ACCEL = 0.385
-STOP_ACCEL_BOOST_FLOOR_RAMP_S = 0.12
+STOP_ACCEL_BOOST_FLOOR_RAMP_S = 0.40   # 0.12 before 2026-11-19 evening, see LAUNCH_GO_*
 # Absolute ceiling on the floor, grade compensation included. The gap term and
 # the hill term answer the same question -- "the floor is not moving the car" --
 # from opposite ends, and stacking them at full scale would put 1.03 m/s^2 of
@@ -114,8 +114,8 @@ STOP_ACCEL_BOOST_LEAD_ACCEL_TAU_S = 0.30   # low-pass on the model's a_lead
 STOP_ACCEL_BOOST_MATCH_VREL_GAIN = 0.30    # m/s^2 per m/s of opening
 STOP_ACCEL_BOOST_MATCH_VREL_MAX_MS = 2.0
 STOP_ACCEL_BOOST_MATCH_GAP_FULL_MARGIN_M = 2.0
-STOP_ACCEL_BOOST_MATCH_MAX = 1.30
-STOP_ACCEL_BOOST_MATCH_RISE_MS3 = 2.0
+STOP_ACCEL_BOOST_MATCH_MAX = 1.00        # 1.30 in 04c6762d
+STOP_ACCEL_BOOST_MATCH_RISE_MS3 = 1.0    # 2.0 in 04c6762d
 
 # Once the floor has engaged in a launch it holds while the lead is not
 # closing, instead of while it is opening by 0.2 m/s. On the same drive the
@@ -125,6 +125,35 @@ STOP_ACCEL_BOOST_MATCH_RISE_MS3 = 2.0
 # off instead of stepping to zero.
 STOP_ACCEL_BOOST_FLOOR_HOLD_VREL_MS = -0.10
 STOP_ACCEL_BOOST_FLOOR_HOLD_MIN_LEAD_ACCEL = -0.20
+
+# Calmer launch, 2026-11-19 evening. On the 10-16 drive (12 launches with the
+# lead-matching floor) the driver braked in 4, every time with the car
+# closing on a lead that had pulled away and then slowed again in the queue:
+#   * standstill, stopped 2.7-3.4 m behind: the car went as soon as the lead
+#     had moved ~1 m, reached 1.2-1.4 m/s^2 (command 0.4-0.8, breakaway
+#     overshoot), and was back at 3.1-3.3 m and closing at 0.5-1.1 m/s when
+#     the driver braked at 4.5-8 km/h;
+#   * rolling at 6 km/h: the speed PID had wound up to 2.0 while coasting held
+#     the pedal at zero, the latch bypassed the rise limiter, and the car
+#     surged at 2.05 m/s^2 onto a lead doing 11 km/h.
+# This car cannot brake by itself, so every metre it closes is the driver's.
+#
+# GO: from standstill, wait until the lead has opened LAUNCH_GO_OPEN_M past
+# where the car stopped, and at least LAUNCH_GO_MIN_GAP_M -- "let it get
+# going, then go". The 0.40 s floor ramp makes the start a roll-on.
+LAUNCH_GO_OPEN_M = 1.5
+LAUNCH_GO_MIN_GAP_M = 5.0
+# GUARD: the whole floor (base, hill and lead-matching) fades to zero as the
+# gap falls to FOLLOW_GUARD_GAP_M + FOLLOW_GUARD_TR_S * v (7.3 m at 10 km/h),
+# over FOLLOW_GUARD_SPAN_M. A lead that keeps pulling away keeps the full
+# floor (the 11-19 afternoon launches sat at 9-15 m by 10 km/h); a lead that
+# slows in front stops getting pushed at, smoothly instead of by a cancel.
+FOLLOW_GUARD_GAP_M = 4.5
+FOLLOW_GUARD_TR_S = 1.0
+FOLLOW_GUARD_SPAN_M = 1.5
+# CAP: no acceleration above this while the launch latch owns the pedal, PID
+# included (the latch bypasses the pedal rise limiter).
+LAUNCH_ACCEL_CAP = 1.10
 STOP_ACCEL_BOOST_FLOOR_FALL_MS3 = 2.0
 
 # A driver pedal press during a confirmed lead launch is an intent to move, not
@@ -230,6 +259,14 @@ def stop_accel_boost_match_floor(v_ego, lead_distance, lead_relative_speed, lead
   opening = min(STOP_ACCEL_BOOST_MATCH_VREL_MAX_MS, max(0.0, float(lead_relative_speed)))
   return min(STOP_ACCEL_BOOST_MATCH_MAX,
              room * (a_lead + STOP_ACCEL_BOOST_MATCH_VREL_GAIN * opening))
+
+
+def follow_guard(v_ego, lead_distance):
+  """0..1: floor authority left before the car tails the lead too closely."""
+  if float(lead_distance) <= 0.0:
+    return 0.0
+  guard_gap = FOLLOW_GUARD_GAP_M + FOLLOW_GUARD_TR_S * max(0.0, float(v_ego))
+  return _clip01((float(lead_distance) - guard_gap) / FOLLOW_GUARD_SPAN_M)
 
 
 def stop_accel_boost_factor(pressure):
@@ -354,6 +391,8 @@ class StopAccelBoostLatch:
     self.match_floor = 0.0
     self._floor_prev = 0.0
     self._v_ego = 0.0
+    self.guard = 0.0
+    self.stop_gap = 0.0
 
   def _clear_latch(self):
     self.latched = False
@@ -450,8 +489,17 @@ class StopAccelBoostLatch:
     # Below 1 km/h only with the toggle on, and only while the lead is clearly
     # pulling away. A latch that was already carrying the car keeps it until
     # the next stop: once moving, the normal >= 1 km/h band takes over.
+    # Where the car stopped behind the lead: the GO gap is measured from here.
+    if v_ego < STOP_ACCEL_BOOST_MIN_SPEED_MS and lead_valid and \
+       lead_speed < STANDSTILL_LAUNCH_MIN_LEAD_SPEED_MS:
+      self.stop_gap = lead_distance
+    elif v_ego >= STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_MS:
+      self.stop_gap = 0.0
+    go_gap = max(LAUNCH_GO_MIN_GAP_M, self.stop_gap + LAUNCH_GO_OPEN_M)
+    self.guard = follow_guard(v_ego, lead_distance)
     self.standstill_launch = bool(
       standstill_launch_enabled and self.latched and
+      (lead_distance >= go_gap or self.standstill_launch) and
       not gas_pressed and not brake_pressed and
       v_ego < STOP_ACCEL_BOOST_MIN_SPEED_MS and
       lead_valid and
@@ -526,8 +574,9 @@ class StopAccelBoostLatch:
       # The base floor keeps its proven 0.12 s ramp; anything above it from
       # the lead-matching floor rises at MATCH_RISE_MS3 so the extra push
       # comes in as a roll-on, not a second lurch off the line.
-      base = min(STOP_ACCEL_BOOST_FLOOR_TOTAL_MAX, self._base_floor() + self.hill_extra_accel)
-      match = min(self._match_floor(),
+      base = self.guard * min(STOP_ACCEL_BOOST_FLOOR_TOTAL_MAX,
+                              self._base_floor() + self.hill_extra_accel)
+      match = min(self.guard * self._match_floor(),
                   max(base, self._floor_prev) + STOP_ACCEL_BOOST_MATCH_RISE_MS3 * self.dt)
       self.floor_accel = max(base, match)
     elif self.latched:
@@ -559,6 +608,8 @@ def apply_stop_accel_boost(requested_accel, v_ego, boost_active, accel_limits,
   # meaningful planner deceleration request into positive pedal.
   if boost_active and accel >= -STOP_ACCEL_ZERO_EPS:
     accel = max(accel, max(0.0, float(launch_floor_accel)))
+  if boost_active:
+    accel = min(accel, LAUNCH_ACCEL_CAP)
 
   return min(float(accel_limits[1]), max(float(accel_limits[0]), accel))
 
