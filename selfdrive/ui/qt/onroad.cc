@@ -1093,10 +1093,6 @@ static constexpr int SPEED_BUMP_CAM_TYPE = 22;
 // It is not a real bump -- the same rule as SpeedBumpPlanner.PLACEHOLDER_DIST.
 static constexpr int BUMP_PLACEHOLDER_DIST = 150;
 static constexpr int PARKING_CAM_TYPE = 17;
-// A bump is shown (limit board and wheel badge) only once TmapNda's reported
-// distance is this close. Judged on TmapNda's own number, not the planner's
-// odometry estimate, so the screen matches what the navigation app says.
-static constexpr int BUMP_SHOW_DIST = 100;
 
 static QString ndaSafetyLabel(int cam_type) {
   switch (cam_type) {
@@ -1678,11 +1674,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
       QString nda_text;
       bool event = true;
-      // A bump that is the placeholder or still beyond BUMP_SHOW_DIST is not
-      // shown yet; the badge keeps the road label until it comes in range.
-      const bool bump_hidden = cam_type == SPEED_BUMP_CAM_TYPE &&
-                               (cam_dist == BUMP_PLACEHOLDER_DIST || cam_dist > BUMP_SHOW_DIST);
-      if (cam_dist > 0 && !bump_hidden && (cam_type != 0 || cam_limit > 0)) {
+      const bool bump_placeholder = cam_type == SPEED_BUMP_CAM_TYPE && cam_dist == BUMP_PLACEHOLDER_DIST;
+      if (cam_dist > 0 && !bump_placeholder && (cam_type != 0 || cam_limit > 0)) {
         nda_text = ndaSafetyLabel(cam_type == 0 ? 1 : cam_type) + " " + dist_text(cam_dist);
       } else if (sec_limit > 0 && sec_dist > 0) {
         nda_text = "구간단속 " + dist_text(sec_dist);
@@ -2696,7 +2689,7 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   int bump_dist = roadLimitSpeed.getBumpLeftDist();
   if (bump_dist <= 0 && cam_is_bump) bump_dist = camLimitSpeedLeftDist;
   if (bump_dist == BUMP_PLACEHOLDER_DIST) bump_dist = 0;
-  const bool show_bump = activeNDA > 0 && bump_dist > 0 && bump_dist <= BUMP_SHOW_DIST;
+  const bool show_bump = activeNDA > 0 && bump_dist > 0;
 
   // Parking enforcement camera ahead (first SDI slot). It carries no speed
   // limit, so it never reached the camera board before.
