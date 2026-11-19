@@ -2596,7 +2596,11 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   int limit_speed = 0;
   int left_dist = 0;
 
-  if (camLimitSpeed > 0 && camLimitSpeedLeftDist > 0) {
+  // A bump in the first SDI slot is drawn as the bump sign below, never as a
+  // "10" camera board (road_speed_limiter fills its limit with 10).
+  const bool cam_is_bump = roadLimitSpeed.getCamType() == 22;
+
+  if (!cam_is_bump && camLimitSpeed > 0 && camLimitSpeedLeftDist > 0) {
     limit_speed = camLimitSpeed;
     left_dist = camLimitSpeedLeftDist;
   } else if (sectionLimitSpeed > 0 && sectionLeftDist > 0) {
@@ -2608,7 +2612,12 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   // SDI slot into bumpLeftDist. A sender that predates that field only has
   // the first slot, so fall back to it when that slot is a bump (cam type 22).
   int bump_dist = roadLimitSpeed.getBumpLeftDist();
-  if (bump_dist <= 0 && roadLimitSpeed.getCamType() == 22) bump_dist = camLimitSpeedLeftDist;
+  if (bump_dist <= 0 && cam_is_bump) bump_dist = camLimitSpeedLeftDist;
+  // TmapNda sends a fixed 150 m once the bump distance reaches 0 (just
+  // passed). It is not a real bump, so hide it -- the same rule as
+  // SpeedBumpPlanner.PLACEHOLDER_DIST.
+  constexpr int BUMP_PLACEHOLDER_DIST = 150;
+  if (bump_dist == BUMP_PLACEHOLDER_DIST) bump_dist = 0;
   const bool show_bump = activeNDA > 0 && bump_dist > 0;
 
   // The bump sign takes the board's place; the camera/section board returns
