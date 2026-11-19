@@ -18,11 +18,12 @@ from common.realtime import sec_since_boot
 from common.conversions import Conversions as CV
 from selfdrive.speed_bump_planner import SpeedBumpPlanner
 
-# 카메라·구간단속 목표 = 제한속도의 90% (50km/h -> 45km/h). 예전 1.05배.
+# 카메라·구간단속 목표 = 제한속도의 95% (50km/h -> 47.5km/h). 2026-11-19 0.9 -> 0.95
+# (사용자 요청: 10% 감속은 너무 답답함). 그 전에는 1.05배.
 # TmapNda가 다른 값을 보내도 쓰지 않는다.
-CAMERA_SPEED_FACTOR = 0.9
+CAMERA_SPEED_FACTOR = 0.95
 # 목표가 이보다 낮아지면 이 값으로 둔다. controlsd는 V_CRUISE_MIN(20km/h) 아래 제한을
-# 아예 적용하지 않으므로, 20km/h 구간의 90%(18)는 통째로 무시됐을 것이다.
+# 아예 적용하지 않으므로, 20km/h 구간의 95%(19)는 통째로 무시됐을 것이다.
 CAMERA_TARGET_FLOOR = 20.
 # 카메라 감속 곡선. 예전에는 '지금 속도로 60초 안에 닿는 거리'(60km/h면 1km)부터
 # 제한을 걸고, 목표를 매 순간 '지금 속도' 기준으로 다시 계산했다. 2026-11-19 주행:
@@ -35,7 +36,7 @@ CAMERA_TARGET_FLOOR = 20.
 # CAM_DECEL_MS2 곡선 v = sqrt(vt^2 + 2a(d - vt*CAM_REACH_S)). 이 차는 브레이크를 못
 # 쓰므로 a는 타력으로 낼 수 있는 값이어야 한다. 학습된 타력은 50-60km/h에서 0.17-0.20
 # m/s^2뿐이라, 그 곡선으로 시뮬레이션하면 0.3은 50 카메라를 50km/h로 지나고 0.25도
-# 46-47로 지나지만 0.2는 모든 경우 목표(45)로 지난다.
+# 46-47로 지나지만 0.2는 모든 경우 목표로 지난다 (당시 목표 90%, 45km/h).
 # 곡선이 지금 속도 + CAM_START_MARGIN_KPH 아래로 내려올 때 시작하고(67->45면 약 630m,
 # 예전 1.1km), 곡선이 지금 속도보다 CAM_RELEASE_MARGIN_KPH 넘게 위면(정체로 멈췄을 때,
 # 먼 다음 카메라) 푼다. 목표 이하로 달리고 있으면 카메라 CAM_HOLD_S초 전부터만 목표를
