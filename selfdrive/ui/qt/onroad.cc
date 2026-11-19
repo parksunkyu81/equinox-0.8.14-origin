@@ -1088,6 +1088,11 @@ void NvgWindow::drawConfidenceGauge(QPainter &p, int cx, int top_y, int bottom_y
 // passed through road_speed_limiter.py as roadLimitSpeed.camType (TmapNda
 // translates Kakao's KNSafetyCode into the same numbers). Note 33 is wildlife,
 // not school zone -- school zone is 20.
+static constexpr int SPEED_BUMP_CAM_TYPE = 22;
+// TmapNda sends a fixed 150 m once a bump's distance reaches 0 (just passed).
+// It is not a real bump -- the same rule as SpeedBumpPlanner.PLACEHOLDER_DIST.
+static constexpr int BUMP_PLACEHOLDER_DIST = 150;
+
 static QString ndaSafetyLabel(int cam_type) {
   switch (cam_type) {
     case 1: case 8: return "단속카메라";
@@ -1097,14 +1102,24 @@ static QString ndaSafetyLabel(int cam_type) {
     case 9: return "버스전용";
     case 11: return "갓길감시";
     case 12: return "끼어들기";
+    case 13: return "교통정보수집";
+    case 15: return "과적단속";
+    case 16: return "적재불량";
+    case 17: return "주차단속";
     case 19: return "철길건널목";
     case 20: return "스쿨존";
     case 22: return "방지턱";
+    case 25: return "휴게소";
+    case 26: return "톨게이트";
     case 27: return "안개주의";
     case 29: return "사고다발";
     case 30: return "급커브";
     case 32: return "급경사";
     case 33: return "야생동물";
+    // TmapNda's live incidents (IncidentRepository), not SDI codes.
+    case 90: return "사고발생";
+    case 91: return "공사중";
+    case 92: return "재난발생";
     default: return "안전정보";
   }
 }
@@ -1653,7 +1668,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
       QString nda_text;
       bool event = true;
-      if (cam_dist > 0 && (cam_type != 0 || cam_limit > 0)) {
+      const bool bump_placeholder = cam_type == SPEED_BUMP_CAM_TYPE && cam_dist == BUMP_PLACEHOLDER_DIST;
+      if (cam_dist > 0 && !bump_placeholder && (cam_type != 0 || cam_limit > 0)) {
         nda_text = ndaSafetyLabel(cam_type == 0 ? 1 : cam_type);
       } else if (sec_limit > 0 && sec_dist > 0) {
         nda_text = "구간단속";
@@ -2598,7 +2614,7 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
 
   // A bump in the first SDI slot is drawn as the bump sign below, never as a
   // "10" camera board (road_speed_limiter fills its limit with 10).
-  const bool cam_is_bump = roadLimitSpeed.getCamType() == 22;
+  const bool cam_is_bump = roadLimitSpeed.getCamType() == SPEED_BUMP_CAM_TYPE;
 
   if (!cam_is_bump && camLimitSpeed > 0 && camLimitSpeedLeftDist > 0) {
     limit_speed = camLimitSpeed;
@@ -2613,10 +2629,6 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   // the first slot, so fall back to it when that slot is a bump (cam type 22).
   int bump_dist = roadLimitSpeed.getBumpLeftDist();
   if (bump_dist <= 0 && cam_is_bump) bump_dist = camLimitSpeedLeftDist;
-  // TmapNda sends a fixed 150 m once the bump distance reaches 0 (just
-  // passed). It is not a real bump, so hide it -- the same rule as
-  // SpeedBumpPlanner.PLACEHOLDER_DIST.
-  constexpr int BUMP_PLACEHOLDER_DIST = 150;
   if (bump_dist == BUMP_PLACEHOLDER_DIST) bump_dist = 0;
   const bool show_bump = activeNDA > 0 && bump_dist > 0;
 
