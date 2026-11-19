@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import random
 import re
@@ -23,12 +24,27 @@ CAMERA_SPEED_FACTOR = 0.9
 # 목표가 이보다 낮아지면 이 값으로 둔다. controlsd는 V_CRUISE_MIN(20km/h) 아래 제한을
 # 아예 적용하지 않으므로, 20km/h 구간의 90%(18)는 통째로 무시됐을 것이다.
 CAMERA_TARGET_FLOOR = 20.
-# 카메라까지 '지금 속도로 이 시간 안에 도착할 거리'부터 감속(과 적용 최대속도 표시)을
-# 시작한다: 30km/h 500m, 50km/h 830m, 60km/h 1km. TmapNda가 그보다 늦게 알려주면
-# 알려준 순간부터. 잠깐 바꿨던 타력 계산(4f55e9a2)은 페달 뗄 지점 전까지 제한을 아예
-# 넣지 않아, 제한 이하로 달리면 카메라를 지날 때까지 적용 최대속도가 크루즈 그대로였다
-# (2026-11-17 주행 카메라 11번 중 10번).
-SAFE_STARTING_DIST = 60.
+# 카메라 감속 곡선. 예전에는 '지금 속도로 60초 안에 닿는 거리'(60km/h면 1km)부터
+# 제한을 걸고, 목표를 매 순간 '지금 속도' 기준으로 다시 계산했다. 2026-11-19 주행:
+#  - 67km/h에서 카메라 890m 앞부터 감속, 170m 만에 45km/h가 되어 남은 720m를 45로 갔다
+#    (속도가 줄면 목표도 같이 내려가는 되먹임).
+#  - 이미 목표 이하면 처음부터 목표가 상한이라, 50 구간에서 1km 넘게 45에 묶였다.
+#  - 한 번 시작하면 카메라를 지날 때까지(다음 카메라로 바로 넘어가면 그 뒤까지) 풀리지
+#    않아, 정체 구간에서 1.8km·3분 넘게 45에 묶인 적도 있다.
+# 이제 상한은 거리만으로 정한다: 카메라 CAM_REACH_S초 전에 목표가 되는 일정 감속
+# CAM_DECEL_MS2 곡선 v = sqrt(vt^2 + 2a(d - vt*CAM_REACH_S)). 이 차는 브레이크를 못
+# 쓰므로 a는 타력으로 낼 수 있는 값이어야 한다. 학습된 타력은 50-60km/h에서 0.17-0.20
+# m/s^2뿐이라, 그 곡선으로 시뮬레이션하면 0.3은 50 카메라를 50km/h로 지나고 0.25도
+# 46-47로 지나지만 0.2는 모든 경우 목표(45)로 지난다.
+# 곡선이 지금 속도 + CAM_START_MARGIN_KPH 아래로 내려올 때 시작하고(67->45면 약 630m,
+# 예전 1.1km), 곡선이 지금 속도보다 CAM_RELEASE_MARGIN_KPH 넘게 위면(정체로 멈췄을 때,
+# 먼 다음 카메라) 푼다. 목표 이하로 달리고 있으면 카메라 CAM_HOLD_S초 전부터만 목표를
+# 상한으로 건다.
+CAM_DECEL_MS2 = 0.2
+CAM_REACH_S = 6.
+CAM_START_MARGIN_KPH = 3.
+CAM_RELEASE_MARGIN_KPH = 10.
+CAM_HOLD_S = 10.
 
 UDP_RECV_BUFFER = 65535      # TmapNda는 road_limit + apilot(전체 TBT/SDI)을 한 패킷으로 보내 2KB를 넘을 수 있음
 SPEED_BUMP_CAM_TYPE = 22
@@ -610,39 +626,49 @@ class RoadSpeedLimiter:
     floor_clu = CAMERA_TARGET_FLOOR * (1. if is_metric else CV.KPH_TO_MPH)
     return max(limit * factor, min(limit, floor_clu))
 
+  def _camera_cap(self, cluster_speed, is_metric, cam_limit_speed, left_dist, factor, in_section=False):
+    """(speed ceiling in cluster units, whether it applies now) for a camera left_dist m ahead.
+
+    The ceiling depends on the distance only: the constant-decel curve that
+    reaches the target CAM_REACH_S before the camera, never below the target.
+    """
+    clu_to_ms = CV.KPH_TO_MS if is_metric else CV.MPH_TO_MS
+    kph_to_clu = 1. if is_metric else CV.KPH_TO_MPH
+    target_clu = self._camera_target(cam_limit_speed, factor, is_metric)
+    if in_section:
+      # 구간단속 안: 곡선 없이 목표가 바로 상한 (예전과 같음).
+      return target_clu, True
+    vt = target_clu * clu_to_ms
+    d = float(left_dist) - vt * CAM_REACH_S
+    cap_ms = math.sqrt(vt * vt + 2. * CAM_DECEL_MS2 * max(0., d))
+    cap_clu = max(target_clu, cap_ms / clu_to_ms)
+    v_ms = max(0., float(cluster_speed)) * clu_to_ms
+
+    if cap_clu <= cluster_speed + CAM_START_MARGIN_KPH * kph_to_clu:
+      active = True            # 지금 줄이기 시작해야 곡선을 지킨다
+    elif float(left_dist) <= max(v_ms, vt) * CAM_HOLD_S:
+      active = True            # 목표 이하로 달리는 중: 카메라 직전에만 목표를 상한으로
+    elif self.slowing_down:
+      active = cap_clu <= cluster_speed + CAM_RELEASE_MARGIN_KPH * kph_to_clu
+    else:
+      active = False
+    return cap_clu, active
+
   def _camera_or_section_limit(self, cluster_speed, is_metric, cam_type, cam_limit_speed,
                                cam_limit_speed_left_dist, section_limit_speed, section_left_dist,
                                camSpeedFactor, MIN_LIMIT, MAX_LIMIT, log):
     """Camera / section-enforcement slowdown from the first SDI slot (bumps excluded)."""
     if cam_limit_speed_left_dist is not None and cam_limit_speed is not None and cam_limit_speed_left_dist > 0:
 
-      v_ego = cluster_speed * (CV.KPH_TO_MS if is_metric else CV.MPH_TO_MS)
-      target_clu = self._camera_target(cam_limit_speed, camSpeedFactor, is_metric)
-      diff_speed = cluster_speed - target_clu
-
-      starting_dist = v_ego * SAFE_STARTING_DIST
-      safe_dist = v_ego * 6.
-
-      if MIN_LIMIT <= cam_limit_speed <= MAX_LIMIT and (self.slowing_down or cam_limit_speed_left_dist < starting_dist):
-        if not self.slowing_down:
-          self.started_dist = cam_limit_speed_left_dist
+      if MIN_LIMIT <= cam_limit_speed <= MAX_LIMIT:
+        cap_clu, active = self._camera_cap(
+          cluster_speed, is_metric, cam_limit_speed, cam_limit_speed_left_dist, camSpeedFactor,
+          in_section=(section_left_dist is not None and section_left_dist >= 10))
+        if active:
+          first_started = not self.slowing_down
           self.slowing_down = True
-          first_started = True
-        else:
-          first_started = False
-
-        td = self.started_dist - safe_dist
-        d = cam_limit_speed_left_dist - safe_dist
-
-        # 제한보다 빠르면 지금 속도에서 목표까지 남은 거리에 맞춰 내려가 카메라 6초 전에
-        # 목표가 되고, 이미 목표 이하면 처음부터 목표를 상한으로 건다.
-        if d > 0. and td > 0. and diff_speed > 0. and (section_left_dist is None or section_left_dist < 10):
-          pp = (d / td) ** 0.6
-        else:
-          pp = 0
-
-        return target_clu + int(pp * diff_speed), \
-               cam_limit_speed, cam_limit_speed_left_dist, first_started, log
+          self.started_dist = cam_limit_speed_left_dist if first_started else self.started_dist
+          return cap_clu, cam_limit_speed, cam_limit_speed_left_dist, first_started, log
 
       self.slowing_down = False
       return 0, cam_limit_speed, cam_limit_speed_left_dist, False, log
