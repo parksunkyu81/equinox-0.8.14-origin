@@ -252,8 +252,7 @@ def _log_curvature_limit(requested, limited, v_ego):
   _curvature_limited_frames += 1
 
 
-def get_lag_adjusted_curvature(CP, v_ego, psis, curvatures, curvature_rates, lat_active=True,
-                               preload=None):
+def get_lag_adjusted_curvature(CP, v_ego, psis, curvatures, curvature_rates, lat_active=True):
   if len(psis) != CONTROL_N:
     psis = [0.0]*CONTROL_N
     curvatures = [0.0]*CONTROL_N
@@ -280,13 +279,6 @@ def get_lag_adjusted_curvature(CP, v_ego, psis, curvatures, curvature_rates, lat
   safe_desired_curvature = clip(desired_curvature,
                                      current_curvature_desired - max_curvature_rate * DT_MDL,
                                      current_curvature_desired + max_curvature_rate * DT_MDL)
-
-  # Corner preload (corner_preload.py) adds turn the model already sees ahead.
-  # It goes after the clip above, which would otherwise pin it to within one
-  # model frame of curvatures[0], and before the ceiling and jerk limit below,
-  # which still bound whatever it asks for.
-  if preload is not None:
-    safe_desired_curvature = preload(safe_desired_curvature)
 
   # The clip above only constrains movement away from the anchor; the psi
   # extrapolation can still land outside what the car can hold, so bound the
