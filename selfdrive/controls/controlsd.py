@@ -1859,6 +1859,12 @@ class Controls:
                                   dynamic_follow.stopAccelBoostEnabled)
         if self.sm.frame % 100 == 0:
             self.standstill_auto_launch = self._read_standstill_auto_launch()
+        # The launch floor follows the lead's own acceleration. radard publishes
+        # aLeadK = 0 for vision leads, so take it from the model directly.
+        model_leads = self.sm['modelV2'].leadsV3
+        launch_lead_accel = (float(model_leads[0].a[0])
+                             if len(model_leads) and model_leads[0].prob > 0.5 and
+                             len(model_leads[0].a) else 0.0)
         self.stop_accel_boost_active = self.stop_accel_boost_latch.update(
           boost_system_ready,
           dynamic_follow_valid and dynamic_follow.leadCatchupActive,
@@ -1868,7 +1874,8 @@ class Controls:
           lead_speed=dynamic_follow.leadSpeed if dynamic_follow_valid else 0.0,
           lead_relative_speed=dynamic_follow.leadRelativeSpeed if dynamic_follow_valid else 0.0,
           lead_distance=dynamic_follow.leadDistance if dynamic_follow_valid else 0.0,
-          standstill_launch_enabled=self.standstill_auto_launch)
+          standstill_launch_enabled=self.standstill_auto_launch,
+          lead_accel=launch_lead_accel)
         self.standstill_launch_active = bool(
           self.stop_accel_boost_active and self.stop_accel_boost_latch.standstill_launch)
 
@@ -1913,7 +1920,9 @@ class Controls:
               boost_floor_accel, CS.vEgo, CS.aEgo, CS.gasPressed, CS.brakePressed,
               dynamic_follow.leadDistance if dynamic_follow_valid else 0.0,
               dynamic_follow.leadSpeed if dynamic_follow_valid else 0.0,
-              str(long_plan.longitudinalPlanSource))
+              str(long_plan.longitudinalPlanSource),
+              lead_accel=self.stop_accel_boost_latch.lead_accel,
+              match_floor=self.stop_accel_boost_latch.match_floor)
             raw_long_accel = self.LoC.update(
               self.active, CS, long_plan, pid_accel_limits, t_since_plan,
               self.stop_accel_boost_active, boost_floor_accel,

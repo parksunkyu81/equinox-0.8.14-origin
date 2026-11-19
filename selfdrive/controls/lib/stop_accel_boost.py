@@ -92,6 +92,41 @@ STOP_ACCEL_BOOST_FLOOR_MIN_VREL_MS = 0.20
 STOP_ACCEL_BOOST_FLOOR_MIN_LEAD_SPEED_MS = 0.50
 STOP_ACCEL_BOOST_FLOOR_MIN_LEAD_DISTANCE_M = 2.50
 
+# Lead-matching floor (2026-11-19 redesign).
+#
+# On the 11-19 15:42 drive (17 automatic standstill launches) the floor was
+# the only thing moving the car below 10 km/h: the speed PID sat at its zero
+# limit (vPid 1-3 km/h below vEgo, P term -0.3..-0.6) because the MPC was
+# holding a ~6 m gap. The floor itself was sized by the opening rate, and the
+# opening rate stays small exactly while the car keeps up -- so the command
+# averaged 0.6-0.8 m/s^2 and the car 0.5-1.0, against a lead accelerating at
+# 0.9-1.6 m/s^2. By 10 km/h (1.9-5.0 s after moving) the lead was 9-15 m ahead
+# and doing 13-24 km/h. The planner cannot see that acceleration either:
+# radard publishes aLeadK = 0 for vision leads.
+#
+# So the floor now follows the lead's own acceleration, taken from the model
+# (modelV2.leadsV3[0].a[0], low-passed), plus a share of the opening rate so
+# a gap that has already opened is closed rather than just held. Both are
+# scaled by the remaining room over the safe gap, which goes to zero before
+# the lead is reached, and the existing closing / re-stop cancels stay.
+STOP_ACCEL_BOOST_LEAD_ACCEL_MAX = 1.5      # input clip on the model's a_lead
+STOP_ACCEL_BOOST_LEAD_ACCEL_TAU_S = 0.30   # low-pass on the model's a_lead
+STOP_ACCEL_BOOST_MATCH_VREL_GAIN = 0.30    # m/s^2 per m/s of opening
+STOP_ACCEL_BOOST_MATCH_VREL_MAX_MS = 2.0
+STOP_ACCEL_BOOST_MATCH_GAP_FULL_MARGIN_M = 2.0
+STOP_ACCEL_BOOST_MATCH_MAX = 1.30
+STOP_ACCEL_BOOST_MATCH_RISE_MS3 = 2.0
+
+# Once the floor has engaged in a launch it holds while the lead is not
+# closing, instead of while it is opening by 0.2 m/s. On the same drive the
+# command fell to exactly 0 for 0.3-0.5 s at a time in 4 of 17 launches,
+# every time vRel wobbled just under 0.2 because the car had caught up to a
+# lead still creeping at 1-2 m/s. When the floor does drop out it now eases
+# off instead of stepping to zero.
+STOP_ACCEL_BOOST_FLOOR_HOLD_VREL_MS = -0.10
+STOP_ACCEL_BOOST_FLOOR_HOLD_MIN_LEAD_ACCEL = -0.20
+STOP_ACCEL_BOOST_FLOOR_FALL_MS3 = 2.0
+
 # A driver pedal press during a confirmed lead launch is an intent to move, not
 # a request to forget the launch. Automatic pedal output remains suppressed
 # while the driver is pressing the pedal, but the controller is allowed to keep
@@ -183,6 +218,18 @@ def stop_accel_boost_pressure(v_ego, lead_distance, lead_relative_speed,
   margin = float(lead_distance) - stop_accel_boost_safe_gap(v_ego)
   room = _clip01(margin / STOP_ACCEL_BOOST_GAP_FULL_MARGIN_M)
   return min(opening, room)
+
+
+def stop_accel_boost_match_floor(v_ego, lead_distance, lead_relative_speed, lead_accel):
+  """Floor that keeps pace with a launching lead (0 without room to use it)."""
+  if float(lead_distance) <= 0.0:
+    return 0.0
+  margin = float(lead_distance) - stop_accel_boost_safe_gap(v_ego)
+  room = _clip01(margin / STOP_ACCEL_BOOST_MATCH_GAP_FULL_MARGIN_M)
+  a_lead = min(STOP_ACCEL_BOOST_LEAD_ACCEL_MAX, max(0.0, float(lead_accel)))
+  opening = min(STOP_ACCEL_BOOST_MATCH_VREL_MAX_MS, max(0.0, float(lead_relative_speed)))
+  return min(STOP_ACCEL_BOOST_MATCH_MAX,
+             room * (a_lead + STOP_ACCEL_BOOST_MATCH_VREL_GAIN * opening))
 
 
 def stop_accel_boost_factor(pressure):
@@ -302,6 +349,10 @@ class StopAccelBoostLatch:
     self.pressure = 0.0
     self.boost_factor = 1.0
     self.standstill_launch = False
+    self.floor_engaged = False
+    self.lead_accel = 0.0
+    self.match_floor = 0.0
+    self._floor_prev = 0.0
     self._v_ego = 0.0
 
   def _clear_latch(self):
@@ -313,10 +364,13 @@ class StopAccelBoostLatch:
     self.hill_low_response_elapsed = 0.0
     self.hill_extra_accel = 0.0
     self.lead_missing_elapsed = 0.0
+    self.floor_engaged = False
+    self.match_floor = 0.0
+    self._floor_prev = 0.0
 
   def update(self, system_ready, launch_detected, v_ego, brake_pressed=False,
              gas_pressed=False, lead_speed=0.0, lead_relative_speed=0.0,
-             lead_distance=0.0, standstill_launch_enabled=False):
+             lead_distance=0.0, standstill_launch_enabled=False, lead_accel=0.0):
     v_ego = float(v_ego)
     lead_speed = float(lead_speed)
     lead_relative_speed = float(lead_relative_speed)
@@ -374,11 +428,25 @@ class StopAccelBoostLatch:
       (self.latched and gas_pressed and not brake_pressed and
        v_ego < STOP_ACCEL_BOOST_MAX_SPEED_MS and handoff_lead_opening))
 
+    # Model lead acceleration, low-passed; zero without a lead.
+    lead_accel = float(lead_accel) if lead_valid else 0.0
+    alpha = self.dt / (self.dt + STOP_ACCEL_BOOST_LEAD_ACCEL_TAU_S)
+    self.lead_accel += alpha * (lead_accel - self.lead_accel)
+
+    # Enter on a clearly opening lead; once engaged in this launch, hold
+    # while the lead is merely not closing (see FLOOR_HOLD_VREL_MS).
+    # The hold is for a lead that keeps going, not one that is slowing down.
+    holding = bool(self.floor_engaged and
+                   self.lead_accel > STOP_ACCEL_BOOST_FLOOR_HOLD_MIN_LEAD_ACCEL)
+    min_vrel = (STOP_ACCEL_BOOST_FLOOR_HOLD_VREL_MS if holding
+                else STOP_ACCEL_BOOST_FLOOR_MIN_VREL_MS)
     floor_lead_opening = bool(
       lead_valid and
       lead_distance >= STOP_ACCEL_BOOST_FLOOR_MIN_LEAD_DISTANCE_M and
       lead_speed >= STOP_ACCEL_BOOST_FLOOR_MIN_LEAD_SPEED_MS and
-      lead_relative_speed >= STOP_ACCEL_BOOST_FLOOR_MIN_VREL_MS)
+      lead_relative_speed >= min_vrel)
+    self.match_floor = stop_accel_boost_match_floor(
+      v_ego, lead_distance, lead_relative_speed, self.lead_accel)
     # Below 1 km/h only with the toggle on, and only while the lead is clearly
     # pulling away. A latch that was already carrying the car keeps it until
     # the next stop: once moving, the normal >= 1 km/h band takes over.
@@ -394,6 +462,8 @@ class StopAccelBoostLatch:
     self.floor_allowed = bool(
       self.latched and not gas_pressed and not brake_pressed and floor_lead_opening and
       (in_band or self.standstill_launch))
+    if self.floor_allowed:
+      self.floor_engaged = True
 
     # Precharge only after the driver has declared launch intent and the same
     # lead is safely opening. No automatic command is emitted while gasPressed;
@@ -432,6 +502,11 @@ class StopAccelBoostLatch:
              STOP_ACCEL_BOOST_FLOOR_GAP_ACCEL * self.pressure)
     return accel * ramp * stop_accel_boost_floor_speed_scale(self._v_ego)
 
+  def _match_floor(self):
+    """Lead-matching floor, on the same ramp and speed band as the base floor."""
+    ramp = min(1.0, self.floor_elapsed / STOP_ACCEL_BOOST_FLOOR_RAMP_S)
+    return self.match_floor * ramp * stop_accel_boost_floor_speed_scale(self._v_ego)
+
   def update_hill_response(self, context_safe, a_ego):
     """Update grade compensation only while the launch floor can be emitted."""
     if self.floor_allowed and context_safe and float(a_ego) < STOP_ACCEL_HILL_RESPONSE_AEGO_MS2:
@@ -445,10 +520,23 @@ class StopAccelBoostLatch:
       self.hill_extra_accel = max(
         0.0, self.hill_extra_accel - STOP_ACCEL_HILL_EXTRA_DECAY_MS3 * self.dt)
 
-    self.floor_accel = (
-      min(STOP_ACCEL_BOOST_FLOOR_TOTAL_MAX,
-          self._base_floor() + self.hill_extra_accel)
-      if self.floor_allowed and context_safe else 0.0)
+    if self.floor_allowed and context_safe:
+      # The hill term tops up the base floor under its old 0.88 ceiling; the
+      # lead-matching floor stands on its own under STOP_ACCEL_BOOST_MATCH_MAX.
+      # The base floor keeps its proven 0.12 s ramp; anything above it from
+      # the lead-matching floor rises at MATCH_RISE_MS3 so the extra push
+      # comes in as a roll-on, not a second lurch off the line.
+      base = min(STOP_ACCEL_BOOST_FLOOR_TOTAL_MAX, self._base_floor() + self.hill_extra_accel)
+      match = min(self._match_floor(),
+                  max(base, self._floor_prev) + STOP_ACCEL_BOOST_MATCH_RISE_MS3 * self.dt)
+      self.floor_accel = max(base, match)
+    elif self.latched:
+      # Ease off rather than step to zero; every hard cancel clears the latch
+      # and so still drops the floor at once.
+      self.floor_accel = max(0.0, self._floor_prev - STOP_ACCEL_BOOST_FLOOR_FALL_MS3 * self.dt)
+    else:
+      self.floor_accel = 0.0
+    self._floor_prev = self.floor_accel
     return self.floor_accel
 
 

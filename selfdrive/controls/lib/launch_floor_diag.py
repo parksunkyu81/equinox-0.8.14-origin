@@ -56,7 +56,8 @@ class LaunchFloorDiag:
     self.ep = None
 
   def update(self, latched, active, floor_allowed, block_reasons, floor_accel,
-             v_ego, a_ego, gas_pressed, brake_pressed, lead_d, lead_v, plan_source):
+             v_ego, a_ego, gas_pressed, brake_pressed, lead_d, lead_v, plan_source,
+             lead_accel=0.0, match_floor=0.0):
     ep = self.ep
     if ep is None:
       if not latched:
@@ -69,6 +70,8 @@ class LaunchFloorDiag:
         'floor_max': 0.0, 'first_block': None, 'reasons': {}, 'sources': {},
         't_active': None, 't_floor': None, 't_move': None, 't_10kph': None,
         'a_max': 0.0, 'gas': False, 'brake': False,
+        'a_lead_max': 0.0, 'match_max': 0.0, 'drop_s': 0.0,
+        'gap_10kph': None, 'lead_v_10kph': None,
       }
     else:
       ep['t'] += self.dt
@@ -96,6 +99,14 @@ class LaunchFloorDiag:
       ep['t_move'] = round(t, 2)
     if ep['t_10kph'] is None and v_ego * 3.6 >= 10.0:
       ep['t_10kph'] = round(t, 2)
+      ep['gap_10kph'] = _f(lead_d, 1)
+      ep['lead_v_10kph'] = _f(lead_v)
+    ep['a_lead_max'] = max(ep['a_lead_max'], float(lead_accel))
+    ep['match_max'] = max(ep['match_max'], float(match_floor))
+    # Launch band with the latch emitting but no floor: the 0.3-0.5 s pedal
+    # holes the hold hysteresis is meant to remove.
+    if active and floor_accel <= 0.0 and MOVE_MS <= v_ego < 10.0 / 3.6:
+      ep['drop_s'] += self.dt
     ep['a_max'] = max(ep['a_max'], float(a_ego))
     ep['gas'] = ep['gas'] or bool(gas_pressed)
     ep['brake'] = ep['brake'] or bool(brake_pressed)
@@ -112,7 +123,8 @@ class LaunchFloorDiag:
 
     ep['end'] = end
     ep['v_end_kph'] = _f(v_ego * 3.6, 1)
-    for k in ('t', 'active_s', 'allowed_s', 'blocked_s', 'floor_on_s', 'floor_max', 'a_max'):
+    for k in ('t', 'active_s', 'allowed_s', 'blocked_s', 'floor_on_s', 'floor_max', 'a_max',
+              'a_lead_max', 'match_max', 'drop_s'):
       ep[k] = _f(ep[k])
     ep['reasons'] = {k: _f(v) for k, v in ep['reasons'].items()}
     ep['sources'] = {k: _f(v) for k, v in ep['sources'].items()}
