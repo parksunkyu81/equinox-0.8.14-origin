@@ -15,6 +15,9 @@ from selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDX
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, CONTROL_N
 from selfdrive.controls.lib.vision_lead_transition import update_vision_lead_transition
 from selfdrive.controls.lib.model_data_validation import as_finite_vector
+from selfdrive.controls.lib.follow_accel_cap import (
+  coast_decel, follow_accel_cap, EASE_MPS3 as FOLLOW_CAP_EASE_MPS3)
+from selfdrive.controls.lib.dynamic_follow.follow_gap import floor_tr, band
 from selfdrive.swaglog import cloudlog
 
 
@@ -84,6 +87,7 @@ class Planner:
     self.previous_vision_lead_present = False
     self.last_vision_lead_mono_time = 0
     self.lead_loss_blend_remaining = 0.0
+    self.follow_accel_cap = math.inf
 
     self.a_desired = init_a
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, DT_MDL)
@@ -186,6 +190,22 @@ class Planner:
           accel_limits_turns[1] = min(
             accel_limits_turns[1],
             max(0.0, self.a_desired - CLOSING_CAP_EASE_MPS3 * DT_MDL))
+
+    # Brake-minimizing follow, flowing traffic: do not build speed toward a
+    # lead that only the driver's brake could take off again, and pull gently
+    # near the target gap (follow_accel_cap.py). Eased in, never a step.
+    self.follow_accel_cap = math.inf
+    if self.CP.enableGasInterceptor:
+      lead = sm['radarState'].leadOne
+      if lead.status:
+        df = self.mpc.dynamic_follow
+        self.follow_accel_cap = follow_accel_cap(
+          v_ego, float(lead.dRel), float(lead.vRel), coast_decel(df.coast_curve, v_ego), df.lift_margin,
+          floor_tr(v_ego), band(v_ego, df.gap_scale)[2])
+        if self.follow_accel_cap < accel_limits_turns[1]:
+          accel_limits_turns[1] = max(0.0, self.follow_accel_cap,
+                                      min(accel_limits_turns[1], self.a_desired - FOLLOW_CAP_EASE_MPS3 * DT_MDL))
+          accel_limits_turns[0] = min(accel_limits_turns[0], accel_limits_turns[1])
 
     self.mpc.set_accel_limits(accel_limits_turns[0], accel_limits_turns[1])
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)

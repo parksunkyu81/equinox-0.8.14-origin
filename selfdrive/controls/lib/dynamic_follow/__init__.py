@@ -11,6 +11,7 @@ from common.params import Params
 from selfdrive.controls.lib.dynamic_follow.support import LeadData, CarData, dfData
 from selfdrive.controls.lib.dynamic_follow.follow_gap import (
   FOLLOW_LEARN_PARAM, FollowGap, MIN_FOLLOW_TR, floor_tr, read_gap_scale)
+from selfdrive.controls.lib.follow_accel_cap import default_coast_curve, read_follow_learn
 from common.data_collector import DataCollector
 
 travis = False
@@ -149,6 +150,8 @@ class DynamicFollow:
     self.model_profile = 0
     self.follow_gap = FollowGap()
     self.gap_scale = 1.0
+    self.coast_curve = default_coast_curve()
+    self.lift_margin = 1.0
     self.last_gap_scale_read = -GAP_SCALE_REFRESH_S
 
     self.sng = False
@@ -496,6 +499,9 @@ class DynamicFollow:
     if now - self.last_gap_scale_read >= GAP_SCALE_REFRESH_S:
       self.last_gap_scale_read = now
       try:
-        self.gap_scale = read_gap_scale(params.get(FOLLOW_LEARN_PARAM))
+        raw = params.get(FOLLOW_LEARN_PARAM)
+        self.gap_scale = read_gap_scale(raw)
+        # Coast decel and lift margin for the planner's follow accel cap.
+        self.coast_curve, self.lift_margin = read_follow_learn(raw)
       except Exception:
         self.gap_scale = 1.0

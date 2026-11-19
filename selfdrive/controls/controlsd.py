@@ -64,8 +64,10 @@ from selfdrive.controls.lib.comma_pedal_profile import (
 from selfdrive.controls.lib.comma_pedal_auto import CommaPedalAutoLearner
 from selfdrive.controls.lib.follow_learner import FollowLearner
 from selfdrive.controls.lib.traffic_state import JamDetector
+from selfdrive.controls.lib.follow_accel_cap import follow_accel_cap, EASE_MPS3 as FOLLOW_CAP_EASE_MPS3
 from selfdrive.controls.lib.pedal_hold_diag import PedalHoldDiag
 from selfdrive.controls.lib.dynamic_follow.follow_gap import FOLLOW_LEARN_PARAM, floor_tr
+from selfdrive.controls.lib.dynamic_follow.follow_gap import band as follow_band
 from selfdrive.process_diagnostics import (append_controls_mismatch_diagnostic,
                                           append_process_diagnostic)
 
@@ -551,6 +553,7 @@ class Controls:
         # learners do not learn from the driver's presses there.
         self.jam_detector = JamDetector()
         self.traffic_jam = False
+        self.follow_cap_limit = math.inf
         self.comma_pedal_profile = self._read_comma_pedal_profile(params)
         # Brake-minimizing follow control (follow_learner.py): coast
         # deceleration per speed, the lift margin and gap scale from the
@@ -1869,6 +1872,9 @@ class Controls:
         if not self.joystick_mode:
             # accel PID loop
             pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, CS.vEgo, self.v_cruise_kph * CV.KPH_TO_MS)
+            # Follow accel cap (follow_accel_cap.py) on the speed PID's positive
+            # limit: the plan alone does not bind, the wound-up integrator does.
+            pid_accel_limits = self._apply_follow_accel_cap(CS, pid_accel_limits)
             t_since_plan = (self.sm.frame - self.sm.rcv_frame['longitudinalPlan']) * DT_CTRL
 
             boost_floor_context_safe = boost_floor_context_allowed(
@@ -2186,6 +2192,25 @@ class Controls:
         for b in buttonEvents:
             if b.type.raw in self.button_timers:
                 self.button_timers[b.type.raw] = 1 if b.pressed else 0
+
+    def _apply_follow_accel_cap(self, CS, limits):
+        """Lower the PID's positive accel limit while following a lead in flowing
+        traffic, eased down at FOLLOW_CAP_EASE_MPS3 so the pedal never steps."""
+        target = math.inf
+        if self.CP.enableGasInterceptor:
+            lead = self.sm['radarState'].leadOne
+            if lead.status and self.sm.valid['radarState']:
+                fl = self.follow_learner
+                target = follow_accel_cap(
+                  float(CS.vEgo), float(lead.dRel), float(lead.vRel), fl.coast_decel(CS.vEgo),
+                  fl.lift_margin, floor_tr(CS.vEgo), follow_band(CS.vEgo, fl.gap_scale)[2])
+        if math.isfinite(target):
+            # Ease down from what the controller is actually sending now.
+            prev = min(self.follow_cap_limit, float(limits[1]), float(self.LoC.last_output_accel))
+            self.follow_cap_limit = max(0.0, target, prev - FOLLOW_CAP_EASE_MPS3 * DT_CTRL)
+        else:
+            self.follow_cap_limit = math.inf
+        return limits[0], min(float(limits[1]), self.follow_cap_limit)
 
     def _read_standstill_auto_launch(self):
         """Community toggle; off if the key is not built into params yet."""
