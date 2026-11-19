@@ -216,24 +216,68 @@ def speed_limit_decel_requested(speed_limit_active, speed_limit_target,
     float(speed_limit_target) < float(v_ego) - float(margin))
 
 
-def boost_floor_context_allowed(floor_allowed, *, can_valid, radar_valid,
-                                radar_error, driver_aware, curv_driving,
-                                curve_active, speed_limit_active,
-                                speed_limit_target, v_ego, fcw, plan_valid,
-                                plan_age, plan_full, plan_source_lead):
+# Plan sources that count as "the plan is following a lead". The MPC picks the
+# smallest of its lead0 / lead1 / cruise obstacles. With vision leads, lead1 is
+# the model's second hypothesis and at a stop it is almost always the same car
+# as lead0 (same distance, same speed), so the source flips between the two on
+# noise. Both are lead plans; only "cruise" is not.
+LEAD_PLAN_SOURCES = ('lead0', 'lead1')
+
+# 2026-11-19 drives: in all 10 automatic launches the floor never reached the
+# pedal -- the command climbed 0 -> 0.8 m/s^2 over ~2 s on the PID alone, the
+# car broke away only at ~0.7, and at 5 km/h with the latch on the command was
+# as low as 0.05 (floor minimum 0.40). The latch itself was active at standstill,
+# which needs a lead pulling away -- so floor_allowed was true and this gate was
+# what refused it. The rlog could not say which term; launch_floor_diag.py logs
+# that now.
+#
+# The curve terms are also relaxed here. A curve only matters to the floor if
+# it asks for a speed below where the floor can take the car: the floor fades
+# out by STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_KPH (20 km/h), and curve targets start
+# at MIN_CURVE_SPEED (30 km/h). A curve "active" flag at a junction stop was
+# blocking the launch for a slowdown that could never apply to it.
+def boost_floor_context_block_reasons(*, can_valid, radar_valid,
+                                      radar_error, driver_aware, curv_driving,
+                                      curve_active, curve_target, speed_limit_active,
+                                      speed_limit_target, v_ego, fcw, plan_valid,
+                                      plan_age, plan_full, plan_source):
+  """Names of the context terms that refuse the launch floor (empty: allowed)."""
+  reasons = []
+  if not can_valid:
+    reasons.append('can')
+  if not radar_valid:
+    reasons.append('radar_invalid')
+  if radar_error:
+    reasons.append('radar_error')
+  if not driver_aware:
+    reasons.append('driver')
+  if curv_driving or curve_active:
+    floor_reach = max(float(v_ego), STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_MS)
+    if float(curve_target) < floor_reach:
+      reasons.append('curve')
+  if speed_limit_decel_requested(speed_limit_active, speed_limit_target, v_ego):
+    reasons.append('speed_limit')
+  if fcw:
+    reasons.append('fcw')
+  if not plan_valid:
+    reasons.append('plan_invalid')
+  if not (0.0 <= float(plan_age) <= 0.25):
+    reasons.append('plan_age')
+  if not plan_full:
+    reasons.append('plan_short')
+  if str(plan_source) not in LEAD_PLAN_SOURCES:
+    reasons.append('plan_source')
+  return reasons
+
+
+def boost_floor_context_allowed(floor_allowed, **context):
   """Final non-lead safety gate for the already validated launch floor.
 
   A published speed limit must not block a launch merely because it exists;
   it blocks only when the target is actually below current speed. Lead motion,
   distance, brake and driver-gas gates are owned by StopAccelBoostLatch.
   """
-  speed_limit_decel = speed_limit_decel_requested(
-    speed_limit_active, speed_limit_target, v_ego)
-  return bool(
-    floor_allowed and can_valid and radar_valid and not radar_error and
-    driver_aware and not curv_driving and not curve_active and
-    not speed_limit_decel and not fcw and plan_valid and
-    0.0 <= float(plan_age) <= 0.25 and plan_full and plan_source_lead)
+  return bool(floor_allowed and not boost_floor_context_block_reasons(**context))
 
 
 class StopAccelBoostLatch:

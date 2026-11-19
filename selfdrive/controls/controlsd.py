@@ -40,8 +40,9 @@ from selfdrive.car.gm.values import MIN_CURVE_SPEED
 #from decimal import Decimal
 from selfdrive.controls.lib.stop_accel_boost import (
   StopAccelBoostLatch,
-  boost_floor_context_allowed,
+  boost_floor_context_block_reasons,
 )
+from selfdrive.controls.lib.launch_floor_diag import LaunchFloorDiag
 from selfdrive.controls.lib.curve_speed_limiter import (
   CurveSpeedLimiter, CURVE_SPEED_DISABLED, build_v0813_model_curve_profile, calculate_curve_speed,
   CornerAlert, model_curve_tuning_band, prepare_profile, CORNER_ALERT_MIN_SPEED_KPH,
@@ -565,6 +566,9 @@ class Controls:
         # Why the pedal sat at zero while the planner asked for accel
         # (pedal_hold_diag.py, /data/log/pedal_hold.jsonl).
         self.pedal_hold_diag = PedalHoldDiag(DT_CTRL)
+        # Why the stop-and-go launch floor did or did not reach the pedal
+        # (launch_floor_diag.py, /data/log/launch_floor.jsonl).
+        self.launch_floor_diag = LaunchFloorDiag(DT_CTRL)
         self.corner_lift_last = False
         self.corner_lift_scale_last = 1.0
         self.comma_pedal_profile_controller = CommaPedalProfileController(
@@ -1877,8 +1881,9 @@ class Controls:
             pid_accel_limits = self._apply_follow_accel_cap(CS, pid_accel_limits)
             t_since_plan = (self.sm.frame - self.sm.rcv_frame['longitudinalPlan']) * DT_CTRL
 
-            boost_floor_context_safe = boost_floor_context_allowed(
-              self.stop_accel_boost_latch.floor_allowed,
+            # Only evaluated while the latch would emit a floor; the reasons
+            # go to launch_floor_diag.py so a refused floor says why.
+            floor_block_reasons = (boost_floor_context_block_reasons(
               can_valid=CS.canValid,
               radar_valid=self.sm.valid['radarState'],
               radar_error=len(self.sm['radarState'].radarErrors) > 0,
@@ -1888,6 +1893,7 @@ class Controls:
               curve_active=(
                 self.curve_pedal_coordinator.engaged or
                 self.curve_pedal_coordinator.pedal_intervening),
+              curve_target=self.curve_plan_speed_ms,
               speed_limit_active=self.speed_limit_coast_active,
               speed_limit_target=self.speed_limit_coast_target_ms,
               v_ego=CS.vEgo,
@@ -1895,10 +1901,19 @@ class Controls:
               plan_valid=self.sm.valid['longitudinalPlan'],
               plan_age=t_since_plan,
               plan_full=len(long_plan.speeds) == CONTROL_N,
-              plan_source_lead=(
-                str(long_plan.longitudinalPlanSource) == 'lead0'))
+              plan_source=long_plan.longitudinalPlanSource)
+              if self.stop_accel_boost_latch.floor_allowed else ())
+            boost_floor_context_safe = bool(
+              self.stop_accel_boost_latch.floor_allowed and not floor_block_reasons)
             boost_floor_accel = self.stop_accel_boost_latch.update_hill_response(
               boost_floor_context_safe, CS.aEgo)
+            self.launch_floor_diag.update(
+              self.stop_accel_boost_latch.latched, self.stop_accel_boost_active,
+              self.stop_accel_boost_latch.floor_allowed, floor_block_reasons,
+              boost_floor_accel, CS.vEgo, CS.aEgo, CS.gasPressed, CS.brakePressed,
+              dynamic_follow.leadDistance if dynamic_follow_valid else 0.0,
+              dynamic_follow.leadSpeed if dynamic_follow_valid else 0.0,
+              str(long_plan.longitudinalPlanSource))
             raw_long_accel = self.LoC.update(
               self.active, CS, long_plan, pid_accel_limits, t_since_plan,
               self.stop_accel_boost_active, boost_floor_accel,
