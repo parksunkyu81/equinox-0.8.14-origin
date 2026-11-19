@@ -1092,6 +1092,7 @@ static constexpr int SPEED_BUMP_CAM_TYPE = 22;
 // TmapNda sends a fixed 150 m once a bump's distance reaches 0 (just passed).
 // It is not a real bump -- the same rule as SpeedBumpPlanner.PLACEHOLDER_DIST.
 static constexpr int BUMP_PLACEHOLDER_DIST = 150;
+static constexpr int PARKING_CAM_TYPE = 17;
 
 static QString ndaSafetyLabel(int cam_type) {
   switch (cam_type) {
@@ -2598,6 +2599,59 @@ static void drawSpeedBumpSign(QPainter &p, const QRectF &area) {
   p.restore();
 }
 
+// Parking enforcement sign (red ring and slash over a black "P", the slash
+// broken around the letter), drawn as vectors in a 512 x 512 design box
+// fitted, centred, into `area`.
+static void drawParkingSign(QPainter &p, const QRectF &area) {
+  const qreal D = 512.0;
+  const qreal s = std::min(area.width(), area.height()) / D;
+  const QColor face(0xF8, 0xF8, 0xF8);
+  const QColor red(0xFF, 0x2D, 0x2D);
+
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing, true);
+  p.translate(area.center().x() - D * s / 2, area.center().y() - D * s / 2);
+  p.scale(s, s);
+
+  // Face
+  p.setPen(Qt::NoPen);
+  p.setBrush(face);
+  p.drawEllipse(QPointF(256, 256), 226, 226);
+
+  // Slash, upper-left to lower-right. Its ends run under the ring.
+  p.setPen(QPen(red, 36, Qt::SolidLine, Qt::FlatCap));
+  p.drawLine(QPointF(112, 124), QPointF(388, 400));
+
+  // "P", fitted to its box regardless of the font's metrics. A face-coloured
+  // stroke first cuts the slash's gap around the letter.
+  QFont font("Inter");
+  font.setPixelSize(300);
+  font.setBold(true);
+  QPainterPath glyph;
+  glyph.addText(0, 0, font, "P");
+  const QRectF g = glyph.boundingRect();
+  const QRectF box(190, 140, 175, 225);
+  QTransform fit;
+  fit.translate(box.left(), box.top());
+  fit.scale(box.width() / g.width(), box.height() / g.height());
+  fit.translate(-g.left(), -g.top());
+  glyph = fit.map(glyph);
+
+  p.setPen(QPen(face, 56, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  p.setBrush(face);
+  p.drawPath(glyph);
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(0x1E, 0x1E, 0x1E));
+  p.drawPath(glyph);
+
+  // Ring last, so the slash ends and the gap stroke stay beneath it.
+  p.setPen(QPen(red, 36));
+  p.setBrush(Qt::NoBrush);
+  p.drawEllipse(QPointF(256, 256), 190, 190);
+
+  p.restore();
+}
+
 // SpeedLimit만 표시하고, Cruise/Apply(=MaxSpeed 박스)는 완전히 제거
 // + 보드 위치20% 아래 이동(클램프)
 // + roadLimit_Speed(SPEED LIMIT 박스)일 때 NDA/HDA 아이콘을 박스 위에 표시
@@ -2637,9 +2691,16 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   if (bump_dist == BUMP_PLACEHOLDER_DIST) bump_dist = 0;
   const bool show_bump = activeNDA > 0 && bump_dist > 0;
 
-  // The bump sign takes the board's place; the camera/section board returns
-  // once the bump is gone.
-  const bool show_cam_or_section = !show_bump && (limit_speed > 0 && left_dist > 0);
+  // Parking enforcement camera ahead (first SDI slot). It carries no speed
+  // limit, so it never reached the camera board before.
+  const bool show_parking = !show_bump && activeNDA > 0 &&
+                            roadLimitSpeed.getCamType() == PARKING_CAM_TYPE && camLimitSpeedLeftDist > 0;
+
+  // A sign (bump, then parking) takes the board's place; the camera/section
+  // board returns once it is gone.
+  const bool show_sign = show_bump || show_parking;
+  const int sign_dist = show_bump ? bump_dist : camLimitSpeedLeftDist;
+  const bool show_cam_or_section = !show_sign && (limit_speed > 0 && left_dist > 0);
   const bool show_road = (roadLimit_Speed > 0 && roadLimit_Speed < 200);
 
   // ============================================================
@@ -2670,13 +2731,13 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
     nda_badge_cx_ = x_start + S(210) / 2;
   }
 
-  if (!show_bump && !show_cam_or_section && !show_road) {
+  if (!show_sign && !show_cam_or_section && !show_road) {
     p.restore();
     return;
   }
 
   int needed_h = 0;
-  if (show_bump) {
+  if (show_sign) {
     needed_h = S(210) + S(110);
   } else if (show_cam_or_section) {
     const int board_w = S((limit_speed < 100) ? 210 : 230);
@@ -2698,7 +2759,7 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
     const int w = S(120);
     const int h = S(54);
     const int top_margin = S(10);
-    const int board_width = (show_bump || !show_cam_or_section) ? S(210)
+    const int board_width = (show_sign || !show_cam_or_section) ? S(210)
                                       : S((limit_speed < 100) ? 210 : 230);
     const int x_icon = x_start + (board_width - w) / 2;
     const int y_icon = std::max(0, y_start - h - top_margin);
@@ -2738,9 +2799,9 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   };
 
   // ------------------------------------------------------------
-  // 방지턱 (삼각 경고 표지 + 아래 남은 거리 pill)
+  // 방지턱 / 주차단속 (표지 + 아래 남은 거리 pill)
   // ------------------------------------------------------------
-  if (show_bump) {
+  if (show_sign) {
     const int board_width = S(210);
     const int board_height = board_width;
 
@@ -2749,9 +2810,11 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
     p.drawRoundedRect(QRectF(x_start, y_start, board_width, board_height), corner_radius, corner_radius);
 
     const int pad = S(14);
-    drawSpeedBumpSign(p, QRectF(x_start + pad, y_start + pad, board_width - 2 * pad, board_height - 2 * pad));
+    const QRectF sign_rect(x_start + pad, y_start + pad, board_width - 2 * pad, board_height - 2 * pad);
+    if (show_bump) drawSpeedBumpSign(p, sign_rect);
+    else drawParkingSign(p, sign_rect);
 
-    draw_dist_pill(board_width, board_height, bump_dist);
+    draw_dist_pill(board_width, board_height, sign_dist);
   }
 
   // ------------------------------------------------------------
