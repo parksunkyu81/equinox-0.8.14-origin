@@ -50,6 +50,7 @@ from selfdrive.controls.lib.curve_speed_limiter import (
 from selfdrive.controls.lib.curve_pedal_coordinator import CurvePedalCoordinator
 from selfdrive.controls.lib.predictive_coasting import PredictiveCoastingCoordinator
 from selfdrive.controls.lib.pre_corner_coast import PreCornerCoast
+from selfdrive.controls.lib.corner_preload import CornerPreload
 from selfdrive.controls.lib.corner_lift_speed_hold import CornerLiftSpeedHold
 from selfdrive.controls.lib.panda_safety import panda_safety_config_matches, update_panda_safety_readiness
 from selfdrive.controls.lib.process_health import (
@@ -421,6 +422,8 @@ class Controls:
         self.predictive_coasting = PredictiveCoastingCoordinator(DT_CTRL)
         self.predictive_coast_pedal_scale = 1.0
         self.pre_corner_coast = PreCornerCoast()
+        self.corner_preload = CornerPreload()
+        self.corner_preload_last = False
         self.pre_corner_lift_last = False
         self.corner_lift_speed_hold = CornerLiftSpeedHold()
         self.speed_limit_coast_active = False
@@ -762,6 +765,7 @@ class Controls:
         self.predictive_coast_pedal_scale = 1.0
         self.steer_sat_accel_hold_s = 0.0
         self.pre_corner_coast.reset()
+        self.corner_preload.reset()
         self.corner_lift_speed_hold.reset()
         self.speed_limit_coast_active = False
         self.speed_limit_coast_target_ms = 0.0
@@ -2061,11 +2065,26 @@ class Controls:
             #             CS.vEgo > self.CP.minSteerSpeed and not CS.standstill \
             #             and abs(CS.steeringAngleDeg) < self.CP.maxSteeringAngleDeg
 
+            if self.sm.updated['modelV2']:
+                self.corner_preload.update_model(self.sm['modelV2'])
+            preload_lane_change = lat_plan.laneChangeState != LaneChangeState.off
+            preload_steering_pressed = bool(CS.steeringPressed)
+
+            def corner_preload(curvature):
+                return self.corner_preload.apply(curvature, CS.vEgo, DT_CTRL, CC.latActive,
+                                                 preload_steering_pressed, preload_lane_change)
+
             self.desired_curvature, self.desired_curvature_rate = get_lag_adjusted_curvature(self.CP, CS.vEgo,
                                                                                    lat_plan.psis,
                                                                                    lat_plan.curvatures,
                                                                                    lat_plan.curvatureRates,
-                                                                                   CC.latActive)
+                                                                                   CC.latActive,
+                                                                                   preload=corner_preload)
+            if self.corner_preload.active and not self.corner_preload_last:
+                cloudlog.event('cornerPreload', vEgo=float(CS.vEgo),
+                               previewLatAccel=float(self.corner_preload.preview * CS.vEgo ** 2),
+                               extraLatAccel=float(self.corner_preload.extra_lat_accel))
+            self.corner_preload_last = self.corner_preload.active
             actuators.steer, actuators.steeringAngleDeg, lac_log = self.LaC.update(CC.latActive, CS, self.VM, params,
                                                                                    self.last_actuators,
                                                                                    self.steer_limited,
