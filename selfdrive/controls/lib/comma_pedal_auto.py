@@ -28,7 +28,11 @@ halve every HALF_LIFE_S of engaged driving, so the choice follows the drive
 as it goes. When one side has at least STEP_MIN_VOTES and STEP_SHARE of the
 votes, the profile steps one level that way and the votes reset -- they were
 cast against the old level. A step is held at least MIN_CHANGE_INTERVAL_S.
-The level is kept across drives; the votes are halved at each start.
+
+Every drive starts fresh at MID with no votes (controlsd starts the learner
+once per boot / drive). Nothing from earlier drives is carried over: on the
+11-20 drive the saved LOW from earlier days held for the whole drive, because
+a mostly jammed drive cast no votes to move it.
 
 In a traffic jam (traffic_state.JamDetector) nothing is voted and the votes
 do not fade: the driver presses the gas there to keep cut-ins out and brakes
@@ -40,7 +44,6 @@ brakes ignored), and the "more" share of 10-minute windows ranged 0.22-0.73.
 """
 
 import json
-import math
 import os
 import threading
 
@@ -59,11 +62,8 @@ HALF_LIFE_S = 600.0           # engaged driving
 STEP_MIN_VOTES = 2.5          # three recent votes (the decay shaves a little off each)
 STEP_SHARE = 0.65
 MIN_CHANGE_INTERVAL_S = 60.0
-DRIVE_START_DECAY = 0.5
 
-STATS_VERSION = 3
 DECIDE_INTERVAL_S = 1.0
-SAVE_INTERVAL_S = 60.0
 LOG_INTERVAL_S = 300.0
 
 LOG_PATH = os.getenv("COMMA_PEDAL_AUTO_LOG_PATH", "/data/log/comma_pedal_auto.jsonl")
@@ -75,16 +75,15 @@ def _write_async(fn):
 
 
 class CommaPedalAutoLearner:
-  def __init__(self, stats=None, put_fn=None):
-    """stats: the saved JSON (str/bytes) or None. put_fn(key, value) stores a param."""
+  def __init__(self, put_fn=None):
+    """put_fn(key, value) stores a param. Each instance is one drive, from MID."""
     self.put_fn = put_fn
     self.level = 'mid'
     self.more = 0.0
     self.less = 0.0
-    self._load(stats)
-    # A new drive: earlier votes count half.
-    self.more *= DRIVE_START_DECAY
-    self.less *= DRIVE_START_DECAY
+    if put_fn is not None:
+      # The UI reads this; drop the last drive's level straight away.
+      put_fn("CommaPedalAutoStatus", self.level)
 
     self._push_s = 0.0
     self._push_at_press = 0.0
@@ -94,37 +93,9 @@ class CommaPedalAutoLearner:
     self._pending_brake = None
     self._last_decide_t = -1e9
     self._last_change_t = -1e9
-    self._last_save_t = None
     self._last_log_t = None
-    self._dirty = False
     self._status = None
     self.counts = {'more': 0, 'less': 0, 'brake_ignored': 0, 'jam_skipped': 0, 'steps': 0}
-
-  # ---- persistence ----
-  def _load(self, stats):
-    if not stats:
-      return
-    try:
-      if isinstance(stats, bytes):
-        stats = stats.decode('utf8')
-      d = json.loads(stats)
-      if int(d.get('v', 1)) < STATS_VERSION:
-        # The old learner's result was pinned by one-sided feedback; start
-        # again from the middle.
-        return
-      lvl = d.get('level')
-      self.level = lvl if lvl in PROFILES else 'mid'
-      self.more = max(0.0, float(d.get('more', 0.0)))
-      self.less = max(0.0, float(d.get('less', 0.0)))
-      if not (math.isfinite(self.more) and math.isfinite(self.less)):
-        self.more = self.less = 0.0
-    except Exception:
-      self.level, self.more, self.less = 'mid', 0.0, 0.0
-
-  def to_json(self):
-    return json.dumps({'v': STATS_VERSION, 'level': self.level,
-                       'more': round(self.more, 3), 'less': round(self.less, 3)},
-                      separators=(',', ':'))
 
   @property
   def profile(self):
@@ -208,7 +179,6 @@ class CommaPedalAutoLearner:
     else:
       self.less += 1.0
     self.counts[side] += 1
-    self._dirty = True
     self._log(now, 'vote_' + side, kph=round(v * 3.6))
 
   def _ignored(self, now, pb, held, v_now):
@@ -234,7 +204,6 @@ class CommaPedalAutoLearner:
       self.more = self.less = 0.0
       self._last_change_t = now
       self.counts['steps'] += 1
-      self._dirty = True
       self._log(now, 'step', frm=old, to=self.level, more=votes[0], less=votes[1])
 
   # ---- output ----
@@ -244,20 +213,10 @@ class CommaPedalAutoLearner:
     if self.level != self._status:
       self._status = self.level
       self.put_fn("CommaPedalAutoStatus", self.level)
-    if self._last_save_t is None:
-      self._last_save_t = now
+    if self._last_log_t is None:
       self._last_log_t = now
-    if self._dirty and now - self._last_save_t >= SAVE_INTERVAL_S:
-      self._last_save_t = now
-      self._dirty = False
-      self.put_fn("CommaPedalAutoStats", self.to_json())
     if now - self._last_log_t >= LOG_INTERVAL_S:
       self._log(now, 'periodic')
-
-  def save_now(self):
-    if self.put_fn is not None:
-      self._dirty = False
-      self.put_fn("CommaPedalAutoStats", self.to_json())
 
   def _log(self, now, reason, **extra):
     self._last_log_t = now

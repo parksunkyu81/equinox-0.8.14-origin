@@ -546,9 +546,9 @@ class Controls:
         # CommaPedalResistance = auto hands the choice to CommaPedalAutoLearner
         # (comma_pedal_auto.py), which steps LOW / MID / HIGH by the driver's
         # gas presses ("more") and brake taps ("less") while openpilot is
-        # accelerating. It starts from MID and only ever picks one of the three.
-        self.comma_pedal_auto = CommaPedalAutoLearner(
-          params.get("CommaPedalAutoStats"), put_fn=put_nonblocking)
+        # accelerating. It only ever picks one of the three, and every drive
+        # (each controlsd start) begins again from MID with no votes.
+        self.comma_pedal_auto = CommaPedalAutoLearner(put_fn=put_nonblocking)
         self.comma_pedal_auto_selected = False
         # Traffic jam (60 s mean speed < 25 km/h): the follow and pedal AUTO
         # learners do not learn from the driver's presses there.
@@ -743,11 +743,9 @@ class Controls:
 
     def _read_comma_pedal_profile(self, params):
         """The profile CommaPedalResistance selects, resolving AUTO to the
-        learner's current pick. Leaving AUTO saves what it learned."""
+        learner's current pick."""
         raw = (params.get("CommaPedalResistance", encoding="utf8") or 'mid').strip().lower()
         auto = raw == 'auto'
-        if self.comma_pedal_auto_selected and not auto:
-            self.comma_pedal_auto.save_now()
         self.comma_pedal_auto_selected = auto
         return self.comma_pedal_auto.profile if auto else normalize_comma_pedal_profile(raw)
 
