@@ -45,6 +45,53 @@ FRICTION_MAX = 0.50
 # doing its job of rejecting a bad measurement.
 LAT_ACCEL_OFFSET_MAX = 0.25
 
+# Yield to a driver who steers past the plan at low speed.
+#
+# rlog 2026-11-18..20 (431 segments), 10-20 km/h: for 122 s the driver turned
+# the car further than the plan (mostly intersection turns, blinker on 55-73%,
+# wheel ~255 deg at 10-15 km/h, plan 0.55 against 1.13 m/s^2 actual) while the
+# controller pushed back with a full 1.0 request -- P alone saturates here. The
+# driver-torque cut trimmed what reached the EPS, but only once the driver put
+# in about 1.5 + 0.75 = 2.25 Nm, which is the heavy wheel they feel.
+#
+# Holding the opposing request to 0.3 in exactly those frames lowers that to
+# about 1.73 Nm and leaves 30% of today's resistance below it. Open-loop replay
+# left the under-turn corner case (plan wants more turn, driver holds back) and
+# hands-off driving untouched; scaling P, a lower kp cap, a blinker gate or a
+# lower allowance below 20 km/h each did less or cost corner assist.
+DRIVER_YIELD_MAX_SPEED = 20.0 / 3.6
+DRIVER_YIELD_TORQUE = 1.0        # Nm, same as STEER_THRESHOLD (steeringPressed)
+DRIVER_YIELD_MARGIN = 0.3        # m/s^2 past the plan before yielding
+DRIVER_YIELD_OUTPUT = 0.3        # opposing request cap, fraction of STEER_MAX
+
+
+def driver_yield_limit(v_ego, driver_torque, output_torque, desired_lat_accel, actual_lat_accel):
+  """Return the opposing-output cap when the driver steers past the plan, else None.
+
+  output_torque here is the PID output before the sign flip; it pushes lateral
+  accel toward sign(output_torque). Driver torque pushes it toward
+  -sign(driver_torque) on this car.
+  """
+  if v_ego >= DRIVER_YIELD_MAX_SPEED or abs(driver_torque) <= DRIVER_YIELD_TORQUE:
+    return None
+  if abs(output_torque) <= DRIVER_YIELD_OUTPUT:
+    return None
+  driver_dir = -1.0 if driver_torque > 0 else 1.0
+  cmd_dir = 1.0 if output_torque > 0 else -1.0
+  if driver_dir == cmd_dir:
+    return None
+  des_dir = 1.0 if desired_lat_accel >= 0 else -1.0
+  # Plan wants a turn the car is short of and the driver holds it back: keep
+  # full assist, this is the corner case the 1.5 Nm allowance was raised for.
+  if (abs(desired_lat_accel) >= 0.5 and
+      (desired_lat_accel - actual_lat_accel) * des_dir > DRIVER_YIELD_MARGIN and
+      driver_dir == -des_dir):
+    return None
+  act_dir = 1.0 if actual_lat_accel > 0 else (-1.0 if actual_lat_accel < 0 else 0.0)
+  if (actual_lat_accel - desired_lat_accel) * driver_dir > DRIVER_YIELD_MARGIN and driver_dir == act_dir:
+    return DRIVER_YIELD_OUTPUT
+  return None
+
 
 class LatControlTorque(LatControl):
   def __init__(self, CP, CI):
@@ -175,6 +222,11 @@ class LatControlTorque(LatControl):
         feedforward=feedforward,
         speed=CS.vEgo,
         freeze_integrator=freeze_integrator)
+      yield_cap = driver_yield_limit(
+        CS.vEgo, CS.steeringTorque, output_torque,
+        desired_lateral_accel, actual_lateral_accel)
+      if yield_cap is not None:
+        output_torque = clip(output_torque, -yield_cap, yield_cap)
 
       angle_steers_des = math.degrees(
         VM.get_steer_from_curvature(
