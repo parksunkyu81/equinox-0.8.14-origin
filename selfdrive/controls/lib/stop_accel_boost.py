@@ -80,7 +80,7 @@ STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_MS = STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_KPH / 3.6
 STOP_ACCEL_BOOST_FLOOR_FADE_SPEED_KPH = 12.0
 STOP_ACCEL_BOOST_FLOOR_ACCEL = 0.40
 STOP_ACCEL_BOOST_FLOOR_GAP_ACCEL = 0.385
-STOP_ACCEL_BOOST_FLOOR_RAMP_S = 0.40   # 0.12 before 2026-11-19 evening, see LAUNCH_GO_*
+STOP_ACCEL_BOOST_FLOOR_RAMP_S = 0.25   # 0.12 before 11-19 evening, 0.40 on 11-19, see LAUNCH_GO_*
 # Absolute ceiling on the floor, grade compensation included. The gap term and
 # the hill term answer the same question -- "the floor is not moving the car" --
 # from opposite ends, and stacking them at full scale would put 1.03 m/s^2 of
@@ -140,15 +140,26 @@ STOP_ACCEL_BOOST_FLOOR_HOLD_MIN_LEAD_ACCEL = -0.20
 #
 # GO: from standstill, wait until the lead has opened LAUNCH_GO_OPEN_M past
 # where the car stopped, and at least LAUNCH_GO_MIN_GAP_M -- "let it get
-# going, then go". The 0.40 s floor ramp makes the start a roll-on.
-LAUNCH_GO_OPEN_M = 1.5
-LAUNCH_GO_MIN_GAP_M = 5.0
+# going, then go". The floor ramp makes the start a roll-on.
+#
+# 2026-11-20: 1.5 m / 5.0 m / 0.40 s took ~2.5 s from the lead moving to the
+# car moving, and on the 11-20 drives the driver pressed the gas 0.2-1.0 s
+# after the lead went at every engaged stop. Measured on the 11-19 06-42 and
+# 11-20 stops, the 0.3 s-filtered standstill gap wobbles 0.2-0.6 m above its
+# minimum (rarely ~0.9), and a launching lead opens 1.0 m 0.4-1.4 s before
+# the driver (or the pre-11-19 floor) got the car moving.
+LAUNCH_GO_OPEN_M = 1.0       # 1.5 on 11-19
+LAUNCH_GO_MIN_GAP_M = 3.5    # 5.0 on 11-19
+LAUNCH_GAP_TAU_S = 0.30      # low-pass on the vision gap for GO
 # GUARD: the whole floor (base, hill and lead-matching) fades to zero as the
-# gap falls to FOLLOW_GUARD_GAP_M + FOLLOW_GUARD_TR_S * v (7.3 m at 10 km/h),
+# gap falls to FOLLOW_GUARD_GAP_M + FOLLOW_GUARD_TR_S * v (5.3 m at 10 km/h),
 # over FOLLOW_GUARD_SPAN_M. A lead that keeps pulling away keeps the full
 # floor (the 11-19 afternoon launches sat at 9-15 m by 10 km/h); a lead that
 # slows in front stops getting pushed at, smoothly instead of by a cancel.
-FOLLOW_GUARD_GAP_M = 4.5
+# 4.5 m until 2026-11-20: from standstill it zeroed the floor below 4.5 m,
+# where the car usually stops (2-4 m), and left 1/3 of it at the old 5.0 m GO
+# gap. The 11-19 brake cases (3.1-3.3 m at 4.5-8 km/h) still get zero.
+FOLLOW_GUARD_GAP_M = 2.5
 FOLLOW_GUARD_TR_S = 1.0
 FOLLOW_GUARD_SPAN_M = 1.5
 # CAP: no acceleration above this while the launch latch owns the pedal, PID
@@ -393,6 +404,7 @@ class StopAccelBoostLatch:
     self._v_ego = 0.0
     self.guard = 0.0
     self.stop_gap = 0.0
+    self.gap_filtered = 0.0
 
   def _clear_latch(self):
     self.latched = False
@@ -490,16 +502,32 @@ class StopAccelBoostLatch:
     # pulling away. A latch that was already carrying the car keeps it until
     # the next stop: once moving, the normal >= 1 km/h band takes over.
     # Where the car stopped behind the lead: the GO gap is measured from here.
-    if v_ego < STOP_ACCEL_BOOST_MIN_SPEED_MS and lead_valid and \
-       lead_speed < STANDSTILL_LAUNCH_MIN_LEAD_SPEED_MS:
-      self.stop_gap = lead_distance
-    elif v_ego >= STOP_ACCEL_BOOST_FLOOR_MAX_SPEED_MS:
+    # Until 2026-11-20 this was the raw gap of the last frame the lead read
+    # slower than 0.5 m/s. A stopped vision lead reads 0.0-0.8 m/s and its gap
+    # wobbles by +-0.7 m, so the reference kept jumping to a fresh (often the
+    # far) sample, and while the lead rolled off at ~0.5 m/s it followed the
+    # lead out: the 1.5 m was never opened and no standstill launch fired all
+    # day on 11-20 -- the driver gave up and pressed the gas every time.
+    # Now both sides use the gap low-passed over LAUNCH_GAP_TAU_S, and the
+    # reference is its minimum over this stop: the lead can only move away.
+    if lead_valid:
+      if self.gap_filtered <= 0.0:
+        self.gap_filtered = lead_distance
+      else:
+        self.gap_filtered += (self.dt / (self.dt + LAUNCH_GAP_TAU_S)) * \
+                             (lead_distance - self.gap_filtered)
+    else:
+      self.gap_filtered = 0.0
+    if v_ego >= STOP_ACCEL_BOOST_MIN_SPEED_MS:
       self.stop_gap = 0.0
+    elif self.gap_filtered > 0.0:
+      self.stop_gap = (self.gap_filtered if self.stop_gap <= 0.0
+                       else min(self.stop_gap, self.gap_filtered))
     go_gap = max(LAUNCH_GO_MIN_GAP_M, self.stop_gap + LAUNCH_GO_OPEN_M)
     self.guard = follow_guard(v_ego, lead_distance)
     self.standstill_launch = bool(
       standstill_launch_enabled and self.latched and
-      (lead_distance >= go_gap or self.standstill_launch) and
+      (self.gap_filtered >= go_gap or self.standstill_launch) and
       not gas_pressed and not brake_pressed and
       v_ego < STOP_ACCEL_BOOST_MIN_SPEED_MS and
       lead_valid and
