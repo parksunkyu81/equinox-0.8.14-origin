@@ -142,15 +142,20 @@ STOP_ACCEL_BOOST_FLOOR_HOLD_MIN_LEAD_ACCEL = -0.20
 # where the car stopped, and at least LAUNCH_GO_MIN_GAP_M -- "let it get
 # going, then go". The floor ramp makes the start a roll-on.
 #
-# 2026-11-20: 1.5 m / 5.0 m / 0.40 s took ~2.5 s from the lead moving to the
-# car moving, and on the 11-20 drives the driver pressed the gas 0.2-1.0 s
-# after the lead went at every engaged stop. Measured on the 11-19 06-42 and
-# 11-20 stops, the 0.3 s-filtered standstill gap wobbles 0.2-0.6 m above its
-# minimum (rarely ~0.9), and a launching lead opens 1.0 m 0.4-1.4 s before
-# the driver (or the pre-11-19 floor) got the car moving.
-LAUNCH_GO_OPEN_M = 1.0       # 1.5 on 11-19
+# 2026-11-20: the 0.3 s-filtered standstill gap wobbles 0.2-0.6 m above its
+# minimum (rarely ~0.9). Closed-loop replay of 43 recorded lead launches
+# (11-19 06-42 / 10-16, 11-20), car response fitted to real launches:
+#   OPEN 1.0, no hold : car moves 1.9 s after the lead, 6 need the brake
+#   OPEN 1.2, 0.3 s   : 2.2 s, 2-3 brakes
+#   OPEN 1.5, 0.3 s   : 2.5 s, 1 brake, 39/43 launched
+#   11-19 GO (raw)    : 2.6 s, 1 brake, 36/43 launched
+# Starting earlier means being closer when the lead stops again in the
+# queue, and this car cannot brake by itself, so the driver asked for the
+# 1-brake setting: same pace as 11-19, but it no longer misses launches.
+LAUNCH_GO_OPEN_M = 1.5
 LAUNCH_GO_MIN_GAP_M = 3.5    # 5.0 on 11-19
 LAUNCH_GAP_TAU_S = 0.30      # low-pass on the vision gap for GO
+LAUNCH_GO_HOLD_S = 0.30      # the opening must hold this long
 # GUARD: the whole floor (base, hill and lead-matching) fades to zero as the
 # gap falls to FOLLOW_GUARD_GAP_M + FOLLOW_GUARD_TR_S * v (5.3 m at 10 km/h),
 # over FOLLOW_GUARD_SPAN_M. A lead that keeps pulling away keeps the full
@@ -405,6 +410,7 @@ class StopAccelBoostLatch:
     self.guard = 0.0
     self.stop_gap = 0.0
     self.gap_filtered = 0.0
+    self.go_elapsed = 0.0
 
   def _clear_latch(self):
     self.latched = False
@@ -524,10 +530,16 @@ class StopAccelBoostLatch:
       self.stop_gap = (self.gap_filtered if self.stop_gap <= 0.0
                        else min(self.stop_gap, self.gap_filtered))
     go_gap = max(LAUNCH_GO_MIN_GAP_M, self.stop_gap + LAUNCH_GO_OPEN_M)
+    # The opening has to hold, not just touch: a wobble or a lead that creeps
+    # a metre and stops again is not a launch.
+    if v_ego < STOP_ACCEL_BOOST_MIN_SPEED_MS and self.gap_filtered >= go_gap:
+      self.go_elapsed += self.dt
+    else:
+      self.go_elapsed = 0.0
     self.guard = follow_guard(v_ego, lead_distance)
     self.standstill_launch = bool(
       standstill_launch_enabled and self.latched and
-      (self.gap_filtered >= go_gap or self.standstill_launch) and
+      (self.go_elapsed >= LAUNCH_GO_HOLD_S or self.standstill_launch) and
       not gas_pressed and not brake_pressed and
       v_ego < STOP_ACCEL_BOOST_MIN_SPEED_MS and
       lead_valid and
