@@ -22,10 +22,16 @@ COMMA_PEDAL_PROFILE_SLEW_PER_S = 0.16
 # ramp getting there, and that ramp is owned by the rise limiter. Without this
 # the profile changes the plateau by 18% and leaves the onset identical, which
 # is why the setting read as doing nothing.
+#
+# Raised after the 11-18/19 rlogs (364 segments, LOW one day, mostly HIGH the
+# next): below 30 km/h every level drew more gas presses than brake taps while
+# openpilot accelerated, and the delivered acceleration (p75 0.53-0.56) stayed
+# well under the ceiling (~1.0), so the ceiling was not what held it back.
+# Above 30 km/h the delivered acceleration was the same on every level.
 COMMA_PEDAL_PROFILE_RISE_SCALE = {
-  'low': 0.80,
-  'mid': 1.00,
-  'high': 1.25,
+  'low': 0.90,
+  'mid': 1.15,
+  'high': 1.40,
 }
 
 
