@@ -5,10 +5,15 @@ import math
 
 DEFAULT_COMMA_PEDAL_PROFILE = 'mid'
 COMMA_PEDAL_PROFILE_SPEED_BP_KPH = (0.0, 60.0, 100.0, 130.0)
+# Shaped by speed from the 11-18 rlogs (181 segments, all on LOW): while
+# openpilot was accelerating in flowing traffic the driver pressed the gas 5
+# times and tapped the brake 0 times below 30 km/h, 8 vs 10 at 30-50, and 0 vs
+# 6 above 50 (launch presses within 3 s of a brake release left out). So LOW
+# was too weak at low speed, right in the middle and a little strong at speed.
 COMMA_PEDAL_PROFILE_GAINS = {
-  'low': (0.85, 0.85, 0.88, 0.92),
-  'mid': (1.00, 1.00, 1.00, 1.00),
-  'high': (1.18, 1.18, 1.12, 1.08),
+  'low': (0.95, 0.85, 0.80, 0.80),
+  'mid': (1.10, 1.00, 0.95, 0.95),
+  'high': (1.25, 1.15, 1.08, 1.05),
 }
 COMMA_PEDAL_PROFILE_SLEW_PER_S = 0.16
 
