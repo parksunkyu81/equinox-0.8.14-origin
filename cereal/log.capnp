@@ -774,6 +774,13 @@ struct ControlsState @0x97ff69c53601abf1 {
   commaPedalFinalCommand @216 :Float32;
   commaPedalRiseScale @217 :Float32;
 
+  # Speed bump the planner is approaching right now (SpeedBumpPlanner.tracking).
+  # False once it judges the bump passed, so the UI drops TmapNda's late
+  # reports of a bump already behind the car. speedBumpDist is the planner's
+  # own estimate (m), used when TmapNda stops reporting before the bump.
+  speedBumpTracking @218 :Bool;
+  speedBumpDist @219 :Float32;
+
 
 
   enum OpenpilotState @0xdbe58b96d2d1ac61 {

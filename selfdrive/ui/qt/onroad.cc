@@ -1094,6 +1094,23 @@ static constexpr int SPEED_BUMP_CAM_TYPE = 22;
 static constexpr int BUMP_PLACEHOLDER_DIST = 150;
 static constexpr int PARKING_CAM_TYPE = 17;
 
+// Distance (m) of the speed bump to show, or -1 for none. A bump is shown only
+// while controlsd's SpeedBumpPlanner is approaching one, so TmapNda's late
+// reports of a bump already passed (and its 150 m placeholder) never reach
+// the screen. The number is TmapNda's own reported distance; when TmapNda has
+// dropped the bump before reaching it, the planner's estimate stands in.
+static int shownBumpDist(const SubMaster &sm) {
+  if (!sm["controlsState"].getControlsState().getSpeedBumpTracking()) return -1;
+  auto nda = sm["roadLimitSpeed"].getRoadLimitSpeed();
+  if (nda.getActive() <= 0) return -1;
+  int d = nda.getBumpLeftDist();
+  if (d <= 0 && nda.getCamType() == SPEED_BUMP_CAM_TYPE) d = nda.getCamLimitSpeedLeftDist();
+  if (d <= 0 || d == BUMP_PLACEHOLDER_DIST) {
+    d = (int)std::lround(sm["controlsState"].getControlsState().getSpeedBumpDist());
+  }
+  return std::max(0, d);
+}
+
 static QString ndaSafetyLabel(int cam_type) {
   switch (cam_type) {
     case 1: case 8: return "단속카메라";
@@ -1674,8 +1691,12 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
       QString nda_text;
       bool event = true;
-      const bool bump_placeholder = cam_type == SPEED_BUMP_CAM_TYPE && cam_dist == BUMP_PLACEHOLDER_DIST;
-      if (cam_dist > 0 && !bump_placeholder && (cam_type != 0 || cam_limit > 0)) {
+      // Bump first, and only while the planner is approaching one (see
+      // shownBumpDist). A bump in the first SDI slot otherwise shows nothing.
+      const int bump_dist = shownBumpDist(sm);
+      if (bump_dist >= 0) {
+        nda_text = ndaSafetyLabel(SPEED_BUMP_CAM_TYPE) + " " + dist_text(bump_dist);
+      } else if (cam_dist > 0 && cam_type != SPEED_BUMP_CAM_TYPE && (cam_type != 0 || cam_limit > 0)) {
         nda_text = ndaSafetyLabel(cam_type == 0 ? 1 : cam_type) + " " + dist_text(cam_dist);
       } else if (sec_limit > 0 && sec_dist > 0) {
         nda_text = "구간단속 " + dist_text(sec_dist);
@@ -2683,13 +2704,9 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
     left_dist = sectionLeftDist;
   }
 
-  // Speed bump ahead: road_speed_limiter puts the nearest bump from either
-  // SDI slot into bumpLeftDist. A sender that predates that field only has
-  // the first slot, so fall back to it when that slot is a bump (cam type 22).
-  int bump_dist = roadLimitSpeed.getBumpLeftDist();
-  if (bump_dist <= 0 && cam_is_bump) bump_dist = camLimitSpeedLeftDist;
-  if (bump_dist == BUMP_PLACEHOLDER_DIST) bump_dist = 0;
-  const bool show_bump = activeNDA > 0 && bump_dist > 0;
+  // Speed bump ahead, only while the planner is approaching one.
+  const int bump_dist = shownBumpDist(sm);
+  const bool show_bump = bump_dist >= 0;
 
   // Parking enforcement camera ahead (first SDI slot). It carries no speed
   // limit, so it never reached the camera board before.

@@ -2498,6 +2498,10 @@ class Controls:
         # read nowhere. The state they describe still exists on self.LoC and
         # self.stop_accel_boost_latch for whoever wants to look at it.
         controlsState.stopAccelBoostActive = bool(self.stop_accel_boost_active)
+        # Speed bump being approached, for the UI (see log.capnp).
+        bump_planner = get_road_speed_limiter().bump_planner
+        controlsState.speedBumpTracking = bool(bump_planner.tracking)
+        controlsState.speedBumpDist = float(bump_planner.left_dist)
         # drivingStyleAI* fields are left in the schema (removing capnp fields
         # would break replay of every log recorded before this) but nothing
         # writes them any more, so they read as their defaults.
