@@ -65,7 +65,8 @@ from selfdrive.controls.lib.comma_pedal_profile import (
 from selfdrive.controls.lib.comma_pedal_auto import CommaPedalAutoLearner
 from selfdrive.controls.lib.follow_learner import FollowLearner
 from selfdrive.controls.lib.traffic_state import JamDetector
-from selfdrive.controls.lib.follow_accel_cap import follow_accel_cap, EASE_MPS3 as FOLLOW_CAP_EASE_MPS3
+from selfdrive.controls.lib.follow_accel_cap import (
+  follow_accel_cap, hold_weight, SpeedHoldOffset, EASE_MPS3 as FOLLOW_CAP_EASE_MPS3)
 from selfdrive.controls.lib.pedal_hold_diag import PedalHoldDiag
 from selfdrive.controls.lib.dynamic_follow.follow_gap import FOLLOW_LEARN_PARAM, floor_tr
 from selfdrive.controls.lib.dynamic_follow.follow_gap import band as follow_band
@@ -555,6 +556,7 @@ class Controls:
         self.jam_detector = JamDetector()
         self.traffic_jam = False
         self.follow_cap_limit = math.inf
+        self.follow_cap_hold = SpeedHoldOffset(DT_CTRL)
         self.comma_pedal_profile = self._read_comma_pedal_profile(params)
         # Brake-minimizing follow control (follow_learner.py): coast
         # deceleration per speed, the lift margin and gap scale from the
@@ -2217,7 +2219,13 @@ class Controls:
 
     def _apply_follow_accel_cap(self, CS, limits):
         """Lower the PID's positive accel limit while following a lead in flowing
-        traffic, eased down at FOLLOW_CAP_EASE_MPS3 so the pedal never steps."""
+        traffic, eased down at FOLLOW_CAP_EASE_MPS3 so the pedal never steps.
+
+        The ceiling is acceleration above the speed-hold level, so it is added to
+        what the command spends holding speed against drag and the grade."""
+        hold = self.follow_cap_hold.update(
+          bool(self.active and not CS.gasPressed and not CS.brakePressed),
+          float(self.LoC.last_output_accel), float(CS.aEgo), float(CS.vEgo))
         target = math.inf
         if self.CP.enableGasInterceptor:
             lead = self.sm['radarState'].leadOne
@@ -2226,6 +2234,7 @@ class Controls:
                 target = follow_accel_cap(
                   float(CS.vEgo), float(lead.dRel), float(lead.vRel), fl.coast_decel(CS.vEgo),
                   fl.lift_margin, floor_tr(CS.vEgo), follow_band(CS.vEgo, fl.gap_scale)[2])
+                target += hold * hold_weight(CS.vEgo)
         if math.isfinite(target):
             # Ease down from what the controller is actually sending now.
             prev = min(self.follow_cap_limit, float(limits[1]), float(self.LoC.last_output_accel))

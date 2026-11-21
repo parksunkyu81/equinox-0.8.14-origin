@@ -31,6 +31,15 @@ the car lagged the plan (aEgo 0.25, vPid 1.3 km/h ahead) and the PID
 integrator had wound up to 0.45. At the PID limit the integrator also stops
 growing. Neither ceiling is lowered faster than EASE_MPS3, so the pedal eases
 off instead of dropping.
+
+On the PID the ceiling sits on top of the speed-hold level (SpeedHoldOffset).
+The PID's output is a pedal command in accel units, and above 60 km/h holding
+speed on the flat already costs 1.0-1.2 of it (2026-11-21 rlogs). An absolute
+1.2 ceiling therefore pinned the pedal at 0.205 with a lead 60-110 m ahead
+(17.7% of the below-cruise time over 60 km/h, aEgo +0.08) and lost speed on
+every climb, with the lead anywhere in sight (past the gentle span the
+ceiling stays at OPEN_ACCEL). It is faded in from 40 to 60 km/h
+(HOLD_FADE_KPH), so town following keeps the absolute ceiling.
 """
 import json
 import math
@@ -47,6 +56,15 @@ GENTLE_SPAN_S = 2.0
 PULL_AWAY_VREL_MS = 1.0
 EASE_MPS3 = 1.0
 A_SEARCH_MAX = 2.5
+# Speed-hold level: low-passed (PID command - aEgo), the part of the command
+# that holds speed against drag and grade instead of accelerating the car.
+HOLD_TAU_S = 3.0
+HOLD_MAX = 2.0
+HOLD_MIN_SPEED_MS = 5.0
+# Added on top of the ceiling only from 40 km/h, in full from 60 km/h. In town
+# the absolute ceiling is what kept the 11-16..18 brake presses down; it is
+# the highway, where holding speed alone uses up the 1.2, that it starved.
+HOLD_FADE_KPH = (40.0, 60.0)
 
 # Mirror of follow_learner.py: learned coast decel per speed bin, trusted from
 # COAST_TRUST_SAMPLES samples, else this default curve.
@@ -117,6 +135,30 @@ def gentle_accel(headway_s, band_top_s, v_rel):
   if v_rel >= PULL_AWAY_VREL_MS:
     return math.inf
   return float(interp(headway_s, [band_top_s, band_top_s + GENTLE_SPAN_S], [GENTLE_ACCEL, OPEN_ACCEL]))
+
+
+def hold_weight(v_ego):
+  return float(interp(float(v_ego) * 3.6, HOLD_FADE_KPH, [0.0, 1.0]))
+
+
+class SpeedHoldOffset:
+  """How much of the speed PID's command only holds speed (drag + grade).
+
+  Learned while openpilot drives the pedal itself; frozen otherwise, so a
+  driver press or a stop does not drag it around."""
+
+  def __init__(self, dt):
+    self.alpha = dt / (HOLD_TAU_S + dt)
+    self.x = 0.0
+
+  def reset(self):
+    self.x = 0.0
+
+  def update(self, learning, command, a_ego, v_ego):
+    if learning and v_ego > HOLD_MIN_SPEED_MS and math.isfinite(command) and math.isfinite(a_ego):
+      sample = clip(float(command) - float(a_ego), 0.0, HOLD_MAX)
+      self.x += self.alpha * (sample - self.x)
+    return self.x
 
 
 def follow_accel_cap(v_ego, d_rel, v_rel, coast, lift_margin, floor_tr_s, band_top_s):

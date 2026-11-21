@@ -71,7 +71,16 @@ class CarInterface(CarInterfaceBase):
        # 누적된 값을 흔히 적분 와인드업이라고 합니다. 이후 상황이 바뀌었을 때 반응이 늦거나 이상해질 수 있습니다. --> 콤마 페달 차량에서는 최저 출력을 0.0으로 제한
        # 플래너는 감속이 얼마나 필요한지 계산하지만, 콤마 페달은 브레이크를 사용할 수 없으므로 실제 PID 출력은 0까지만 내립니다.
        accel_min = 0.0 if CP.enableGasInterceptor else params.ACCEL_MIN
-       return accel_min, params.ACCEL_MAX
+       accel_max = params.ACCEL_MAX
+       if CP.enableGasInterceptor:
+         # The pedal is acc_mult (~0.17) x this command, so 2.0 capped it at
+         # 0.34 on the highway, where holding speed alone costs 0.15-0.21: at
+         # the cap the car gained only +0.19 m/s^2 and lost speed uphill
+         # (2026-11-21 rlogs). 3.0 above 70 km/h lets it reach ~0.52-0.55;
+         # the 0.85 clip and the rise limiter in carcontroller still apply.
+         # Below 50 km/h launches and jam driving are unchanged.
+         accel_max = interp(current_speed * CV.MS_TO_KPH, [50., 70.], [params.ACCEL_MAX, 3.0])
+       return accel_min, accel_max
        #v_current_kph = current_speed * CV.MS_TO_KPH
        #accel_max_bp = [10., 20., 50.]
        #accel_max_v = [0.7, 1.0, 0.95]
