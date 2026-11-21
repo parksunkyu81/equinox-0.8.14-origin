@@ -89,7 +89,16 @@ LANE_WIDTH_DECAY_S = 8.0
 SINGLE_LANE_MIN_RAW_PROB = 0.20
 SINGLE_LANE_MAX_STD = 0.90
 SINGLE_LANE_DPROB_FLOOR = 0.30
-CURVE_SINGLE_LANE_DPROB_FLOOR = 0.60
+# Was 0.60: in a curve a single weak line (prob 0.2-0.5) was trusted at 60%.
+# Those lines are the flattened far end of a lane the narrow camera is losing,
+# so their centre sits outside the bend -- 0.5-0.9 m outside the model path in
+# tight corners, where with both lines clearly visible the two agree within
+# ~0.16 m. Replaying this planner on the 2026-11-18..21 drives (192 min; live
+# setting reproduces the logged dPathPoints to 3 mm median) the floor pulled
+# the plan 0.17 m (p10 0.32) toward the outside of the bend in those frames,
+# 8% of corner time. At 0.30, the same as on a straight, the pull is 0.11 m;
+# straights are untouched and 5-6% of corner/bend frames move by > 5 cm.
+CURVE_SINGLE_LANE_DPROB_FLOOR = 0.30
 LANE_CONFIDENCE_FALL_RATE_PER_S = 1.25
 LANE_CENTER_CONTINUITY_MAX_M = 0.35
 CURVE_LANE_CENTER_CONTINUITY_MAX_M = 0.55
