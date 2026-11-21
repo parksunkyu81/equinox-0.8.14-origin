@@ -14,10 +14,12 @@ up to LOOKAHEAD_S ahead and lifts before the corner instead.
 
 Guards against it becoming annoying:
   1. False triggers on a straight road: the predicted demand must stay above
-     TRIGGER_LAT_ACCEL, in the SAME turn direction, for CONFIRM_S of fresh plan
+     trigger_lat_accel(v) (what the steering can hold at that speed, at most
+     2.0 m/s^2), in the SAME turn direction, for CONFIRM_S of fresh plan
      frames, with a valid MPC plan, lateral control engaged and no lane change.
-     2.0 m/s^2 is above the p99 (1.94) of all engaged driving on this car, so
-     ordinary curves never reach it.
+     Above ~28 km/h that is 2.0 m/s^2, above the p99 (1.94) of all engaged
+     driving. Below it the bar is the car's own limit (1.2 m/s^2 at 17 km/h),
+     a radius of 16-30 m, which only real corners reach.
   2. Lifting too early: only demand within LOOKAHEAD_S (2.0 s) counts, so the
      car does not crawl toward a corner that is still far away.
   3. Not resuming after the corner: released as soon as the corner opens up --
@@ -34,13 +36,39 @@ It only ever removes pedal; it commands no deceleration and never touches
 steering.
 """
 
+from common.numpy_fast import interp
 from selfdrive.modeld.constants import T_IDXS
 
 ENTRY_MIN_MS = 15.0 / 3.6
 KEEP_MIN_MS = 10.0 / 3.6      # once lifting, coasting below 15 km/h is fine
 MAX_MS = 60.0 / 3.6
-TRIGGER_LAT_ACCEL = 2.0       # m/s^2
+TRIGGER_LAT_ACCEL = 2.0       # m/s^2, ceiling of the speed-dependent trigger below
 RELEASE_LAT_ACCEL = 1.6       # m/s^2, "this corner is over" for re-arming
+RELEASE_TO_TRIGGER = RELEASE_LAT_ACCEL / TRIGGER_LAT_ACCEL
+
+# What the steering can actually hold, by speed. A flat 2.0 m/s^2 is more than
+# this car holds anywhere below ~28 km/h, so the lift came late or not at all in
+# exactly the tight, slow corners it exists for.
+#
+# Curvature held at full command (sent >= 0.99), hands off (|driver| < 0.5 Nm),
+# while still short of the plan by >= 0.2 m/s^2 -- rlogs 2026-11-18..21, median
+# per band. As lateral accel that is 1.2 m/s^2 at 17 km/h, 1.6 at 22, 2.0 at 27.
+#
+# Replayed over the same drives (180 min of longitudinal control, 152 s of pedal
+# applied within 4 s of a |desired| >= 1.5 m/s^2 corner): the flat trigger lifted
+# 27 times and took the pedal off for 16 s ahead of tight corners; this one
+# lifts 60 times, 27 s ahead of tight corners, onset median 22 km/h instead of
+# 28, and 83% of lifts are followed by a tight corner. Pedal removed with no
+# tight corner following: 4 s -> 16 s over the 180 min.
+AUTHORITY_BP_KPH = (12.5, 17.5, 22.5, 27.5, 32.5, 37.5, 50.0)
+AUTHORITY_CURVATURE = (0.0609, 0.0501, 0.0413, 0.0336, 0.0287, 0.0201, 0.0120)
+
+
+def trigger_lat_accel(v_ego):
+  """Demand above which the corner ahead is more than the steering can hold."""
+  v = max(0.0, float(v_ego))
+  held = v * v * interp(v * 3.6, AUTHORITY_BP_KPH, AUTHORITY_CURVATURE)
+  return min(TRIGGER_LAT_ACCEL, held)
 RELEASE_LOOKAHEAD_S = 0.5
 RELEASE_CURV_FRACTION = 0.5
 LOOKAHEAD_S = 2.0
@@ -135,9 +163,11 @@ class PreCornerCoast:
 
     peak, sign = peak_demand(v_ego, curvatures)
     self.peak = peak
+    trigger = trigger_lat_accel(v_ego)
+    release = trigger * RELEASE_TO_TRIGGER
 
     # The corner is over: allow the next one.
-    if peak < RELEASE_LAT_ACCEL:
+    if peak < release:
       self._blocked = False
 
     if self.active:
@@ -152,7 +182,7 @@ class PreCornerCoast:
       else:
         # Still approaching: release only if the predicted corner went away
         # (a prediction that did not hold up).
-        corner_over = peak < RELEASE_LAT_ACCEL
+        corner_over = peak < release
       if corner_over:
         self._release_s += PLAN_DT
         if self._release_s >= RELEASE_S - 1e-9:
@@ -164,13 +194,13 @@ class PreCornerCoast:
     if self._blocked:
       return False
 
-    if peak >= TRIGGER_LAT_ACCEL and (self._sign == 0.0 or sign == self._sign):
+    if peak >= trigger and (self._sign == 0.0 or sign == self._sign):
       self._confirm_s += PLAN_DT
       self._sign = sign
     else:
       self._confirm_s = 0.0
-      self._sign = sign if peak >= TRIGGER_LAT_ACCEL else 0.0
-      if peak >= TRIGGER_LAT_ACCEL:
+      self._sign = sign if peak >= trigger else 0.0
+      if peak >= trigger:
         self._confirm_s = PLAN_DT
 
     if self._confirm_s >= CONFIRM_S - 1e-9:
