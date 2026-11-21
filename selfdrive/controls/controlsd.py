@@ -2111,6 +2111,7 @@ class Controls:
               gas_pressed=CS.gasPressed, brake_pressed=CS.brakePressed,
               long_active=bool(self.active and self.CP.enableGasInterceptor),
               op_accel=float(actuators.accel),
+              op_hold=float(self.follow_cap_hold.x * hold_weight(CS.vEgo)),
               lead_headway_s=lead_headway_s, lead_closing=lead_closing,
               lat_accel=float(CS.yawRate) * float(CS.vEgo),
               lane_change=lat_plan.laneChangeState != LaneChangeState.off,

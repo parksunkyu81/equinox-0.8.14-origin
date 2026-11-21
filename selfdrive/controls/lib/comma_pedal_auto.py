@@ -39,6 +39,12 @@ do not fade: the driver presses the gas there to keep cut-ins out and brakes
 because the queue stops, which says nothing about how hard openpilot should
 accelerate in flowing traffic.
 
+"Accelerating" is the command above the speed-hold level (op_hold, the
+follow cap's SpeedHoldOffset, faded in from 40 to 60 km/h). Above 60 km/h the
+command spends ~1.0 just holding speed, so the raw command was always above
+PUSH_ACCEL there: a brake tap while cruising for a cut-in or a lane change
+voted "less" and could drop the drive to LOW. Below 40 km/h nothing changes.
+
 On the 11-18 drives this counted 25 "more" and 20 "less" (51 slowing / stopping
 brakes ignored), and the "more" share of 10-minute windows ranged 0.22-0.73.
 """
@@ -107,7 +113,8 @@ class CommaPedalAutoLearner:
 
   # ---- per-step update (call at ~20 Hz) ----
   def update(self, now, dt, v_ego, a_ego, gas_pressed, brake_pressed, long_active,
-             op_accel, lead_headway_s, lead_closing, lat_accel, lane_change, jam=False):
+             op_accel, lead_headway_s, lead_closing, lat_accel, lane_change, jam=False,
+             op_hold=0.0):
     gas = bool(gas_pressed)
     brake = bool(brake_pressed)
     v_ego = float(v_ego)
@@ -132,7 +139,7 @@ class CommaPedalAutoLearner:
     # How long openpilot has been accelerating on its own, with nothing that
     # would make a pedal press about something other than its strength.
     pushing = bool(long_active and not gas and not brake and
-                   float(op_accel) > PUSH_ACCEL and v_ego > PUSH_MIN_V and
+                   float(op_accel) - float(op_hold) > PUSH_ACCEL and v_ego > PUSH_MIN_V and
                    not lead_closing and abs(float(lat_accel)) <= LAT_ACCEL_MAX and
                    not lane_change)
     if pushing:
