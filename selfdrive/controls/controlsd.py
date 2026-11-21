@@ -38,7 +38,9 @@ from selfdrive.speed_bump_planner import SpeedBumpPlanner
 from selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_MIN, CONTROL_N
 from selfdrive.car.gm.values import MIN_CURVE_SPEED
 #from decimal import Decimal
+from selfdrive.modeld.constants import T_IDXS
 from selfdrive.controls.lib.stop_accel_boost import (
+  MODEL_GO_PLAN_T_S,
   StopAccelBoostLatch,
   boost_floor_context_block_reasons,
 )
@@ -1875,7 +1877,8 @@ class Controls:
           lead_relative_speed=dynamic_follow.leadRelativeSpeed if dynamic_follow_valid else 0.0,
           lead_distance=dynamic_follow.leadDistance if dynamic_follow_valid else 0.0,
           standstill_launch_enabled=self.standstill_auto_launch,
-          lead_accel=launch_lead_accel)
+          lead_accel=launch_lead_accel,
+          model_plan_speed=self._model_plan_speed(MODEL_GO_PLAN_T_S))
         self.standstill_launch_active = bool(
           self.stop_accel_boost_active and self.stop_accel_boost_latch.standstill_launch)
 
@@ -2217,6 +2220,13 @@ class Controls:
         for b in buttonEvents:
             if b.type.raw in self.button_timers:
                 self.button_timers[b.type.raw] = 1 if b.pressed else 0
+
+    def _model_plan_speed(self, t):
+        """The driving model's planned speed t seconds ahead, nan when unavailable."""
+        vx = self.sm['modelV2'].velocity.x
+        if len(vx) != len(T_IDXS) or not self.sm.valid['modelV2']:
+            return float('nan')
+        return float(np.interp(t, T_IDXS, vx))
 
     def _apply_follow_accel_cap(self, CS, limits):
         """Lower the PID's positive accel limit while following a lead in flowing

@@ -36,6 +36,7 @@ than by fixed constants:
   * The multiplier is capped in absolute terms, so it can fill in a weak launch
     request without amplifying an already strong one.
 """
+import math
 
 STOP_ACCEL_BOOST_MIN_SPEED_KPH = 1.0
 STOP_ACCEL_BOOST_MIN_SPEED_MS = STOP_ACCEL_BOOST_MIN_SPEED_KPH / 3.6
@@ -156,6 +157,23 @@ LAUNCH_GO_OPEN_M = 1.5
 LAUNCH_GO_MIN_GAP_M = 3.5    # 5.0 on 11-19
 LAUNCH_GAP_TAU_S = 0.30      # low-pass on the vision gap for GO
 LAUNCH_GO_HOLD_S = 0.30      # the opening must hold this long
+# MODEL CONFIRM: a second way to latch a standstill launch, from the driving
+# model's own plan instead of the lead track. The lead detector in
+# dynamic_follow only arms on a lead that reads stopped and steady; on
+# 2026-11-21 (08-46-57 seg 51, dusk) the stopped lead read 9.8-13.5 m and
+# 0.7-1.9 m/s while flickering to a car 30-40 m ahead, so it never armed and
+# the car sat until the driver pressed the gas 3.7 s after the lead left.
+# The model's planned speed 2 s ahead stayed <= 0.3 m/s while that lead stood
+# and passed 1.0 m/s 0.9 s after it moved. Over the 26 stops of that evening
+# it never passed 1.0 m/s while the lead stood, and the same held at 0.7 and
+# 1.5 m/s. This only latches: GO (the 1.5 m opening, the lead's speed) still
+# decides when the car moves, so every launch the lead detector already made
+# kept its exact time in replay; the 08-46-57 seg 51 stop went at 11.4 s
+# instead of the driver's press at 13.0.
+MODEL_GO_PLAN_T_S = 2.0
+MODEL_GO_PLAN_SPEED_MS = 1.0
+MODEL_GO_HOLD_S = 0.30
+MODEL_GO_CLOSING_VREL_MS = -0.30
 # GUARD: the whole floor (base, hill and lead-matching) fades to zero as the
 # gap falls to FOLLOW_GUARD_GAP_M + FOLLOW_GUARD_TR_S * v (5.3 m at 10 km/h),
 # over FOLLOW_GUARD_SPAN_M. A lead that keeps pulling away keeps the full
@@ -411,6 +429,8 @@ class StopAccelBoostLatch:
     self.stop_gap = 0.0
     self.gap_filtered = 0.0
     self.go_elapsed = 0.0
+    self.model_go_elapsed = 0.0
+    self.model_go = False
 
   def _clear_latch(self):
     self.latched = False
@@ -427,13 +447,27 @@ class StopAccelBoostLatch:
 
   def update(self, system_ready, launch_detected, v_ego, brake_pressed=False,
              gas_pressed=False, lead_speed=0.0, lead_relative_speed=0.0,
-             lead_distance=0.0, standstill_launch_enabled=False, lead_accel=0.0):
+             lead_distance=0.0, standstill_launch_enabled=False, lead_accel=0.0,
+             model_plan_speed=float('nan')):
     v_ego = float(v_ego)
     lead_speed = float(lead_speed)
     lead_relative_speed = float(lead_relative_speed)
     lead_distance = float(lead_distance)
 
     lead_valid = lead_distance > 0.0
+    # MODEL CONFIRM (see MODEL_GO_*): standstill only, toggle on, a lead far
+    # enough ahead and not closing, the model's plan wanting to go for a while.
+    plan_speed = float(model_plan_speed)
+    if (standstill_launch_enabled and math.isfinite(plan_speed) and
+        plan_speed >= MODEL_GO_PLAN_SPEED_MS and v_ego < STOP_ACCEL_BOOST_MIN_SPEED_MS and
+        not gas_pressed and not brake_pressed):
+      self.model_go_elapsed += self.dt
+    else:
+      self.model_go_elapsed = 0.0
+    self.model_go = bool(
+      self.model_go_elapsed >= MODEL_GO_HOLD_S and lead_valid and
+      lead_distance >= LAUNCH_GO_MIN_GAP_M and
+      lead_relative_speed > MODEL_GO_CLOSING_VREL_MS)
     self.pressure = stop_accel_boost_pressure(
       v_ego, lead_distance, lead_relative_speed, lead_valid)
     self.boost_factor = stop_accel_boost_factor(self.pressure)
@@ -466,7 +500,7 @@ class StopAccelBoostLatch:
       else:
         self.lead_missing_elapsed = 0.0
 
-      if launch_detected:
+      if launch_detected or self.model_go:
         # This may latch while stationary, but active remains false below 1 km/h.
         # It lets a driver-initiated launch receive boost without another delay.
         self.latched = True
