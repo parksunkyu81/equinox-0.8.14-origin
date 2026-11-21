@@ -4,16 +4,35 @@ import math
 
 
 DEFAULT_COMMA_PEDAL_PROFILE = 'mid'
-COMMA_PEDAL_PROFILE_SPEED_BP_KPH = (0.0, 60.0, 100.0, 130.0)
-# Shaped by speed from the 11-18 rlogs (181 segments, all on LOW): while
-# openpilot was accelerating in flowing traffic the driver pressed the gas 5
-# times and tapped the brake 0 times below 30 km/h, 8 vs 10 at 30-50, and 0 vs
-# 6 above 50 (launch presses within 3 s of a brake release left out). So LOW
-# was too weak at low speed, right in the middle and a little strong at speed.
+COMMA_PEDAL_PROFILE_SPEED_BP_KPH = (0.0, 30.0, 60.0, 80.0, 100.0, 130.0)
+# Gains on the planner's cruise acceleration ceiling, whose base table
+# (longitudinal_planner._A_CRUISE_MAX_V_FOLLOWING) IS the MID profile. So MID
+# is 1.0 and the other levels read directly as a share of MID. The ceilings
+# they give (m/s^2 of real acceleration, the plan's accel):
+#
+#   km/h     0     30    60    80    100   130
+#   LOW    1.15  0.90  0.68  0.50  0.38  0.32
+#   MID    1.32  1.05  0.80  0.65  0.50  0.42
+#   HIGH   1.55  1.30  1.05  0.85  0.69  0.55
+#
+# Redesigned from the 2026-11-21 evening rlogs. Below 60 km/h LOW and MID are
+# what they were (the AUTO votes there were balanced on LOW and leaned "less"
+# on MID). Above 60 km/h every level used to deliver the same: the plan did ask
+# for its ceiling (feedforward 0.52-0.71 = ceiling x gain), but the speed PID
+# sat at its old 2.0 limit and the 1.2 follow cap (aEgo ~0.4 on all levels).
+# 61e6b7eb lifted those, so the plan's ceiling is now what binds on the
+# highway, and it was low: 0.49 at 80 and 0.38 at 100 km/h on MID, a 25 s run
+# from 60 to 100. The levels are spread further apart there and HIGH sits
+# 1.24-1.4x MID from 30 km/h up, where it used to be 1.13x and read as MID.
+#
+# The profile only ever moves this plan ceiling and the rise rate below. It
+# never scales the speed PID's limit or the speed-hold level the follow cap
+# adds (61e6b7eb), so LOW holds speed up a hill exactly like HIGH; it only
+# asks for less acceleration on top of holding.
 COMMA_PEDAL_PROFILE_GAINS = {
-  'low': (0.95, 0.85, 0.80, 0.80),
-  'mid': (1.10, 1.00, 0.95, 0.95),
-  'high': (1.25, 1.15, 1.08, 1.05),
+  'low': (0.87, 0.86, 0.85, 0.77, 0.76, 0.76),
+  'mid': (1.00, 1.00, 1.00, 1.00, 1.00, 1.00),
+  'high': (1.17, 1.24, 1.31, 1.31, 1.38, 1.31),
 }
 COMMA_PEDAL_PROFILE_SLEW_PER_S = 0.16
 
