@@ -248,114 +248,58 @@ ATC_LANE_RIGHT_TYPES = ("fork right", "atc right")
 
 
 class AtcLaneGuide:
-  """Tells the driver when to change lanes for a navigation instruction.
+  """Tells the driver once when a navigation instruction wants another lane.
 
   The car never makes an ATC lane change (desire_helper.py): the driver steers
   across. controlsd runs this on every modelV2 frame and raises the prompt
-  alert while `prompt` is set:
-    - when a fork / pre-turn lane instruction comes into range and the model
-      sees a lane on that side, the prompt shows for PROMPT_S with one chime;
-    - the driver's blinker on that side means the driver is on it: silent;
-      once it goes off and the lane lines have settled (SETTLE_S), a lane still
-      there means another change is needed, and the prompt shows again;
-    - still not moved REMIND_S after a prompt: one reminder;
-    - no lane on that side for SETTLE_S: in the right lane, silent;
-    - an opposite blinker cancels it until the instruction changes.
-  At most MAX_PROMPTS per instruction, so a flickering lane line cannot nag.
-  Intersection turns ("turn left/right") get no lane prompt.
+  alert ("좌측/우측 차선으로 이동하세요") while `prompt` is set.
+
+  One prompt per instruction, PROMPT_S long with one chime, when a fork /
+  pre-turn lane instruction comes into range. It does not look at the lanes:
+  the camera cannot tell a yellow centre line from a white one, so "another
+  lane on the left" can be oncoming traffic, and a wide shoulder can read as a
+  lane on the right (2026-11-23, both rejected as a basis for prompting). It is
+  skipped if the driver's blinker is already on either side when it would
+  start, and cut short by any blinker. A new prompt needs the instruction to
+  leave the lane types (none / turn) for REARM_S first, so a distance that
+  hovers at the start of the range cannot chime twice.
   """
   PROMPT_S = 4.
-  REMIND_S = 10.
-  SETTLE_S = 2.
-  MAX_PROMPTS = 4
+  REARM_S = 5.
 
   def __init__(self):
-    self.left = SideState("left")
-    self.right = SideState("right")
-    self._reset("")
-
-  def _reset(self, atc_type):
-    self.atc_type = atc_type
-    self.state = "idle"     # idle / prompt / wait / driver / settle / cancel
+    self.prompted = False
     self.t = 0.
-    self.gone_t = 0.
-    self.reminded = False
-    self.prompts = 0
+    self.away_t = 0.
     self.prompt = BLINKER_NONE
 
-  def _geometry(self, md):
-    try:
-      lines, probs, edges = md.laneLines, md.laneLineProbs, md.roadEdges
-      if len(lines) < 4 or len(probs) < 4 or len(edges) < 2:
-        return False
-      self.left.update_lane_geometry(lines[0], probs[0], lines[1], edges[0], cur_prob=probs[1])
-      self.right.update_lane_geometry(lines[3], probs[3], lines[2], edges[1], cur_prob=probs[2])
-    except (ValueError, IndexError, TypeError, AttributeError):
-      return False
-    return True
-
-  def _start_prompt(self, want):
-    self.state = "prompt"
-    self.t = 0.
-    self.prompts += 1
-    self.prompt = want
-
-  def update(self, atc_type, md, left_blinker, right_blinker, dt=DT_MDL):
-    valid = self._geometry(md)
-    if atc_type != self.atc_type:
-      self._reset(atc_type)
-    self.prompt = BLINKER_NONE
-
+  def update(self, atc_type, left_blinker, right_blinker, dt=DT_MDL):
     if atc_type in ATC_LANE_LEFT_TYPES:
       want = BLINKER_LEFT
     elif atc_type in ATC_LANE_RIGHT_TYPES:
       want = BLINKER_RIGHT
     else:
-      self.state = "idle"
+      want = BLINKER_NONE
+
+    if want == BLINKER_NONE:
+      self.away_t += dt
+      if self.away_t >= self.REARM_S:
+        self.prompted = False
+      self.prompt = BLINKER_NONE
       return self.prompt
-    if not valid:
+    self.away_t = 0.
+
+    if left_blinker or right_blinker:
+      self.prompted = True      # the driver is on it (or chose otherwise)
+      self.prompt = BLINKER_NONE
       return self.prompt
 
-    own = left_blinker if want == BLINKER_LEFT else right_blinker
-    other = right_blinker if want == BLINKER_LEFT else left_blinker
-    lane_there = (self.left if want == BLINKER_LEFT else self.right).lane_available
-    self.t += dt
-
-    if other or self.state == "cancel":
-      self.state = "cancel"
-      return self.prompt
-    if own:
-      self.state = "driver"
+    if not self.prompted:
+      self.prompted = True
       self.t = 0.
-      return self.prompt
-    if self.state == "driver":       # blinker just went off
-      self.state = "settle"
-      self.t = 0.
-      return self.prompt
-    if self.state == "settle":
-      if self.t < self.SETTLE_S:
-        return self.prompt
-      self.state = "idle"
-      self.reminded = False
-
-    self.gone_t = 0. if lane_there else self.gone_t + dt
-    if self.state in ("prompt", "wait") and self.gone_t > self.SETTLE_S:
-      self.state = "idle"            # in the right lane now
-      self.reminded = False
-    if self.prompts >= self.MAX_PROMPTS and self.state != "prompt":
-      return self.prompt
-
-    if self.state == "idle":
-      if lane_there:
-        self._start_prompt(want)
-      return self.prompt
-    if self.state == "prompt":
-      if self.t < self.PROMPT_S:
-        self.prompt = want
-        return self.prompt
-      self.state = "wait"
-      self.t = 0.
-    if self.state == "wait" and lane_there and not self.reminded and self.t >= self.REMIND_S:
-      self.reminded = True
-      self._start_prompt(want)
+      self.prompt = want
+    elif self.prompt != BLINKER_NONE:
+      self.t += dt
+      if self.t >= self.PROMPT_S:
+        self.prompt = BLINKER_NONE
     return self.prompt
