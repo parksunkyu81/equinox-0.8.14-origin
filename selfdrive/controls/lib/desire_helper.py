@@ -28,6 +28,11 @@ ATC_LANE_CHANGE_SPEED_MIN = LANE_CHANGE_SPEED_MIN
 #     The driver turn below wants the opposite (no lane, no edge), so the two
 #     never both read true: at an intersection mouth the blinker turns.
 LANE_CHANGE_LOW_SPEED = 30 * CV.KPH_TO_MS
+# ATC lane change: the driver's blinker on the instruction's side must be seen
+# this long. A tap of the lever (the three-flash lane-change blink) shows for
+# 1.0-2.3 s in carState on this car (19 short runs, 2026-11-22 rlogs), so a
+# tap is enough.
+ATC_TAP_S = 0.5
 
 # Driver-blinker turn (no navigation). The driver's blinker alone, between 5
 # and 30 km/h, sends a turn desire once the road opens on that side: no lane and
@@ -112,11 +117,12 @@ class DesireHelper:
   A driver blinker opposite to the ATC side cancels ATC until the navigation
   instruction changes (carrot's atc_active = 2) and hands back to the legacy path.
 
-  Departure from carrot: an ATC lane change (fork / pre-turn lane) is never
-  made by the car; the FSM holds in preLaneChange and the driver changes lanes
-  by hand after controlsd's AtcLaneGuide prompt. carrot lights the lamp itself;
-  this car cannot (gm/carcontroller.py sends no turn signal), has no blind-spot
-  signal, and its camera cannot tell a centre line from a lane line. An ATC
+  Departure from carrot: an ATC lane change (fork / pre-turn lane) never starts
+  on the navigation alone. carrot lights the lamp itself; this car cannot
+  (gm/carcontroller.py sends no turn signal), has no blind-spot signal, and its
+  camera cannot tell a centre line from a lane line. From 30 km/h the driver's
+  blinker on the instruction's side -- a tap is enough -- moves the car one
+  lane; under 30 the driver changes lanes by hand. An ATC
   intersection turn still sends the turn desire, after the driver's blinker on
   the same side or a nudge of the wheel toward that side.
   """
@@ -154,6 +160,7 @@ class DesireHelper:
     self.prev_driver_enabled = False
     self.atc_owner = False         # the current maneuver belongs to the ATC path
     self.atc_turn_confirmed = False  # driver confirmed this ATC turn (blinker or nudge)
+    self.atc_tap_t = 0.              # driver's blinker on this long on the ATC path
     self.atc_blinker = BLINKER_NONE  # side ATC asks for this frame (UI / log)
     # turn latch (see TURN_DONE_*)
     self.turn_latched = TURN_NONE
@@ -504,6 +511,11 @@ class DesireHelper:
     desire_enabled = driver_enabled or atc_enabled
     blinker_state = driver_st if driver_enabled else atc_st
 
+    self.atc_tap_t = self.atc_tap_t + DT_MDL if driver_enabled else 0.
+    if driver_enabled and not self.prev_driver_enabled:
+      # A fresh blinker (tap) is the go-ahead for the next lane.
+      self.next_lane_change = False
+
     side = self._get_selected_side(blinker_state) if blinker_state in (BLINKER_LEFT, BLINKER_RIGHT) else None
     atc_lane_change_requested = atc_enabled and self.atc_type in ATC_LANE_TYPES
     # carrot lets a right fork start on its own; here any ATC request (fork,
@@ -655,14 +667,17 @@ class DesireHelper:
               # LANE_CHANGE_LOW_SPEED: only on the driver's nudge
               if v_ego < LANE_CHANGE_LOW_SPEED and not torque_applied:
                 can_start = False
-              # 2026-11-23: under a navigation instruction the car never moves
-              # across, at any speed and on either side. Whether there is a
-              # lane to move into comes from the camera, which cannot tell a
-              # yellow centre line from a white one, so the lane past the
-              # leftmost one can be oncoming traffic. controlsd's AtcLaneGuide
-              # tells the driver once per instruction and the driver changes
-              # lanes by hand; lane keeping yields to the driver's hand as usual.
-              can_start = False
+              # Under a navigation instruction the car moves across only on the
+              # driver's go-ahead: the blinker on the instruction's side (a tap
+              # of the lever is enough) seen for ATC_TAP_S, at
+              # LANE_CHANGE_LOW_SPEED or more -- one lane per tap (a fresh
+              # blinker re-arms the next). The camera cannot tell a centre line
+              # from a lane line, so the lane is never taken on its word alone:
+              # the driver has looked. Under 30 km/h, or with no blinker, the
+              # driver changes lanes by hand; lane keeping yields to the hand.
+              if not (driver_enabled and self.atc_tap_t >= ATC_TAP_S and
+                      v_ego >= LANE_CHANGE_LOW_SPEED):
+                can_start = False
               if can_start:
                 self.lane_change_state = LaneChangeState.laneChangeStarting
 

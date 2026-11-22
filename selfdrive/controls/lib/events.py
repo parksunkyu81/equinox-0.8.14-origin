@@ -526,13 +526,14 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   },
 
   # Navigation (ATC) lane change prompt, raised by controlsd while atc_desire.
-  # AtcLaneGuide has it up: once per instruction, 4 s, one chime. The car does
-  # not move across for ATC; the driver does. The names are older than the
-  # meaning and stay for log replay.
+  # AtcLaneGuide has it up: once per instruction, just before the point, 4 s,
+  # one chime. From 30 km/h a tap of the blinker moves the car one lane; under
+  # 30 the driver does (the lane band reads 자동 대기 / 직접 변경). The names
+  # are older than the meaning and stay for log replay.
   EventName.atcBlinkerLeft: {
     ET.WARNING: Alert(
       "좌측 차선으로 이동하세요",
-      "내비 안내 · 깜빡이를 켜고 직접 옮겨 주세요",
+      "내비 안내 · 깜빡이를 켜 주세요",
       AlertStatus.userPrompt, AlertSize.mid,
       Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1),
   },
@@ -540,7 +541,7 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   EventName.atcBlinkerRight: {
     ET.WARNING: Alert(
       "우측 차선으로 이동하세요",
-      "내비 안내 · 깜빡이를 켜고 직접 옮겨 주세요",
+      "내비 안내 · 깜빡이를 켜 주세요",
       AlertStatus.userPrompt, AlertSize.mid,
       Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1),
   },
