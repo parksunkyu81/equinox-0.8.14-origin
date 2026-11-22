@@ -2313,7 +2313,14 @@ void NvgWindow::drawSpeed(QPainter &p) {
   };
 
   // ✅ 패널 폭 10% 증가 (콘텐츠 폭 기준으로 같이 확대)
-  const qreal panel_content_w = 220.0 * 1.10;
+  // 2026-11-22: 20% narrower on request (bg 290 -> 232 px). The right edge
+  // stays where it was, so the wheel, the steering bar and everything else
+  // anchored to speed_panel_right_ keeps its place; only the left edge moves
+  // in (261 -> 319 on 1920 px). The widest text, the current speed at 100 px
+  // ("888" 198 px in Inter Bold, from the font's advance widths), still fits
+  // with ~17 px each side.
+  constexpr qreal PANEL_W_SCALE = 0.8;
+  const qreal panel_content_w = 220.0 * 1.10 * PANEL_W_SCALE;
   const qreal panel_content_h = bgFixed.height();
   const qreal panel_bg_w = panel_content_w * 1.2;
   const qreal panel_bg_h = panel_content_h;
