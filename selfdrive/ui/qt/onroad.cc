@@ -374,19 +374,28 @@ void OnroadAlerts::paintEvent(QPaintEvent *event) {
   // prompts, ...) is now a caption, placed right above the cruise/speed panel
   // (see setCaptionAnchor). Critical alerts and FULL
   // takeovers keep the band: those must cover the screen.
-  // ATC lane prompt (2026-11-23, on request): the text sits between the two
-  // turn-signal chevron bands at their height, the instruction's side lit in
-  // amber and the other faint, the text scaled down to fit the gap. The
-  // driver's blinker ends the prompt, so the live bands never draw over it.
+  // Lane alerts between the two turn-signal chevron bands, at their height,
+  // the text scaled down to fit the gap (2026-11-23, on request):
+  //  - the ATC lane prompt draws the chevrons itself, the instruction's side
+  //    lit amber and the other faint; the driver's blinker ends the prompt,
+  //    so the live bands never draw over it;
+  //  - the lane change lines (preLaneChangeLeft/Right, laneChange) come with
+  //    the driver's blinker on, so NvgWindow::drawTurnSignals draws the live
+  //    bands around them and only the text is drawn here.
   const bool atc_left = alert.type.startsWith("atcBlinkerLeft/");
   const bool atc_right = alert.type.startsWith("atcBlinkerRight/");
-  if (atc_left || atc_right) {
+  const bool lane_change = alert.type.startsWith("laneChange/") ||
+                           alert.type.startsWith("preLaneChangeLeft/") ||
+                           alert.type.startsWith("preLaneChangeRight/");
+  if (atc_left || atc_right || lane_change) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
     p.setRenderHint(QPainter::TextAntialiasing);
-    const QColor amber(255, 175, 0);
-    drawTurnChevrons(p, width(), height(), true, amber, atc_left ? TURN_CHEVRONS : 0);
-    drawTurnChevrons(p, width(), height(), false, amber, atc_right ? TURN_CHEVRONS : 0);
+    if (atc_left || atc_right) {
+      const QColor amber(255, 175, 0);
+      drawTurnChevrons(p, width(), height(), true, amber, atc_left ? TURN_CHEVRONS : 0);
+      drawTurnChevrons(p, width(), height(), false, amber, atc_right ? TURN_CHEVRONS : 0);
+    }
 
     const int gap_l = turnBandInner(width(), true) + 30;
     const int gap_r = turnBandInner(width(), false) - 30;
@@ -406,7 +415,9 @@ void OnroadAlerts::paintEvent(QPaintEvent *event) {
     const int h1 = s1 + 26, h2 = two ? s2 + 20 : 0;
     const QRect box(gap_l, cy - (h1 + h2) / 2 - 18, gap_w, h1 + h2 + 36);
 
-    p.setPen(QPen(QColor(0xDA, 0x6F, 0x25), 5));
+    const bool prompt = (atc_left || atc_right) ||
+                        alert.status == cereal::ControlsState::AlertStatus::USER_PROMPT;
+    p.setPen(QPen(prompt ? QColor(0xDA, 0x6F, 0x25) : QColor(0x17, 0x86, 0x44), 5));
     p.setBrush(QColor(0, 0, 0, 165));
     p.drawRoundedRect(box, 24, 24);
     p.setPen(Qt::white);
