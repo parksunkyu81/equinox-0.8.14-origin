@@ -55,6 +55,9 @@ public:
   // 자동 출발 tile: tapping it flips ActiveStopAccelBoost. Same rules as
   // hitPedalTile; refreshPedalProfile also re-reads this tile's state.
   bool hitAutoLaunchTile(const QPoint &pos) const;
+  // 페달 신호 tile as last drawn (this widget's coordinates; empty until the
+  // first HUD frame). OnroadWindow parks the record button above it.
+  QRect pedalSignalTileRect() const { return pedal_signal_tile_rect_; }
 
 protected:
   void paintGL() override;
@@ -138,6 +141,7 @@ protected:
 
   // Where the 페달 강도 tile was last drawn, and when, for hitPedalTile.
   QRect pedal_tile_rect_;
+  QRect pedal_signal_tile_rect_;
   double pedal_tile_drawn_t_ = 0;
   bool pedal_profile_refresh_ = false;
   // Where the 자동 출발 tile was last drawn, and the toggle it shows.
@@ -176,9 +180,10 @@ private:
 
   // neokii
 private:
-  ScreenRecoder* recorder;
+  ScreenRecoder* recorder = nullptr;
   std::shared_ptr<QTimer> record_timer;
   QPoint startPos;
+  void placeRecorder();
 
 private slots:
   void offroadTransition(bool offroad);

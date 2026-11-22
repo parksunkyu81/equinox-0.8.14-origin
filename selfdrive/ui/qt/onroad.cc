@@ -109,15 +109,12 @@ OnroadWindow::OnroadWindow(QWidget *parent) : QWidget(parent) {
   });
 	record_timer->start(1000/UI_FREQ);
 
-  QWidget* recorder_widget = new QWidget(this);
-  QVBoxLayout * recorder_layout = new QVBoxLayout (recorder_widget);
-  recorder_layout->setContentsMargins(0, 0, 0, 0);
+  // The record button used to sit in the top-right corner, which the thermal
+  // panel now takes (rightColumnLayout). It is a free child now, outside the
+  // layouts, parked above the 페달 신호 tile by placeRecorder() each update.
   recorder = new ScreenRecoder(this);
-  recorder_layout->addWidget(recorder);
-  recorder_layout->setAlignment(recorder, Qt::AlignRight | Qt::AlignTop);
-
-  stacked_layout->addWidget(recorder_widget);
-  recorder_widget->raise();
+  recorder->move(bdr_s, bdr_s + 80);   // until the HUD has drawn the tile
+  recorder->raise();
   alerts->raise();
 
 }
@@ -138,6 +135,27 @@ void OnroadWindow::updateState(const UIState &s) {
     // repaint border
     bg = bgColor;
     update();
+  }
+
+  placeRecorder();
+}
+
+// Record button centred over the 페달 신호 tile, its bottom the tile group's
+// own gap (19 px) above the tile, and kept 10 px inside the HUD's left edge
+// (the 190 px button is wider than the 140 px tile at x 30..170).
+void OnroadWindow::placeRecorder() {
+  if (recorder == nullptr || nvg == nullptr) return;
+  const QRect tile = nvg->pedalSignalTileRect();
+  if (tile.isEmpty()) return;
+  constexpr int GAP = 19;
+  constexpr int EDGE = 10;
+  const int bx = std::max(EDGE, tile.center().x() - recorder->width() / 2);
+  const int by = std::max(EDGE, tile.top() - GAP - recorder->height());
+  const QPoint target = nvg->mapTo(this, QPoint(bx, by));
+  if (recorder->pos() != target) {
+    recorder->move(target);
+    recorder->raise();
+    alerts->raise();
   }
 }
 
@@ -2075,6 +2093,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       // group scaled to SD 140 without one of them being retuned.
       statusRing(scol_l, speed_row_top, "페달 신호", pedal_max_str,
                  comma_pedal_ratio, "88", 0.10f, 1.40f);
+      pedal_signal_tile_rect_ = QRect(scol_l - SD / 2, speed_row_top - SD / 2, SD, SD);
       // 페달 강도 sits below 페달 상태 (swapped on request). It is matched to
       // 페달 상태 above it, so the right-hand column
       // reads as one pair: same Korean label, same tenth-of-a-block lift, and
