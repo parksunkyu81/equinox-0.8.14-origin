@@ -145,11 +145,6 @@ void OnroadWindow::updateState(const UIState &s) {
 
   placeRecorder();
 
-  const QRect panel = nvg->speedPanelRect();
-  if (!panel.isEmpty()) {
-    const QPoint tl = alerts->mapFromGlobal(nvg->mapToGlobal(panel.topLeft()));
-    alerts->setCaptionAnchor(QRect(tl, panel.size()));
-  }
 }
 
 // Record button centred over the 페달 신호 tile, its bottom the tile group's
@@ -368,12 +363,6 @@ void OnroadAlerts::paintEvent(QPaintEvent *event) {
     return;
   }
 
-  // 2026-11-23, on request: the small and mid bands covered the bottom 26-40%
-  // of the screen -- the cruise box, wheel icon and bars -- so every
-  // non-critical small/mid alert (lane change, ATC lane prompt, corner
-  // prompts, ...) is now a caption, placed right above the cruise/speed panel
-  // (see setCaptionAnchor). Critical alerts and FULL
-  // takeovers keep the band: those must cover the screen.
   // Lane alerts between the two turn-signal chevron bands, at their height,
   // the text scaled down to fit the gap (2026-11-23, on request):
   //  - the ATC lane prompt draws the chevrons itself, the instruction's side
@@ -431,56 +420,8 @@ void OnroadAlerts::paintEvent(QPaintEvent *event) {
     return;
   }
 
-  const bool caption = alert.status != cereal::ControlsState::AlertStatus::CRITICAL &&
-                       alert.size != cereal::ControlsState::AlertSize::FULL;
-  if (caption) {
-    QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing);
-    p.setRenderHint(QPainter::TextAntialiasing);
-
-    const bool two = !alert.text2.isEmpty();
-    configFont(p, "Open Sans", 70, "Bold");
-    const QFontMetrics fm1(p.font());
-    configFont(p, "Open Sans", 44, "Regular");
-    const QFontMetrics fm2(p.font());
-
-    const int max_w = std::min(width() - 2 * 485, 1100);
-    const QString t1 = fm1.elidedText(alert.text1, Qt::ElideRight, max_w - 80);
-    const QString t2 = two ? fm2.elidedText(alert.text2, Qt::ElideRight, max_w - 80) : QString();
-    const int text_w = std::max(fm1.horizontalAdvance(t1), two ? fm2.horizontalAdvance(t2) : 0);
-    const int box_w = std::min(max_w, text_w + 80);
-    const int box_h = two ? 170 : 110;
-    // 2026-11-23, on request: right above the cruise/speed panel, centred on
-    // it and kept on screen (the panel is near the left edge and narrower than
-    // the caption). Until the HUD has drawn the panel, the old upper-middle spot.
-    QRect box;
-    if (!anchor.isEmpty()) {
-      constexpr int GAP = 16;
-      constexpr int EDGE = 20;
-      const int bx = std::clamp(anchor.center().x() - box_w / 2, EDGE, std::max(EDGE, width() - EDGE - box_w));
-      const int by = std::max(EDGE, anchor.top() - GAP - box_h);
-      box = QRect(bx, by, box_w, box_h);
-    } else {
-      box = QRect((width() - box_w) / 2, two ? 190 : 230, box_w, box_h);
-    }
-
-    const bool prompt = alert.status == cereal::ControlsState::AlertStatus::USER_PROMPT;
-    const QColor accent = prompt ? QColor(0xDA, 0x6F, 0x25) : QColor(0x17, 0x86, 0x44);
-    p.setPen(QPen(accent, 6));
-    p.setBrush(QColor(0, 0, 0, 165));
-    p.drawRoundedRect(box, 28, 28);
-
-    p.setPen(Qt::white);
-    configFont(p, "Open Sans", 70, "Bold");
-    p.drawText(QRect(box.x(), box.y() + 14, box.width(), 92), Qt::AlignHCenter | Qt::AlignVCenter, t1);
-    if (two) {
-      configFont(p, "Open Sans", 44, "Regular");
-      p.setPen(QColor(255, 255, 255, 220));
-      p.drawText(QRect(box.x(), box.y() + 104, box.width(), 52), Qt::AlignHCenter | Qt::AlignVCenter, t2);
-    }
-    return;
-  }
-
+  // Every other alert keeps the original bottom band (2026-11-23, on request:
+  // the upper / above-the-panel caption of d79d099c and 0e326748 is gone).
   static std::map<cereal::ControlsState::AlertSize, const int> alert_sizes = {
     {cereal::ControlsState::AlertSize::SMALL, 271},
     {cereal::ControlsState::AlertSize::MID, 420},
@@ -2543,7 +2484,6 @@ void NvgWindow::drawSpeed(QPainter &p) {
   speed_panel_top_ = (int)panelBg.top();
   speed_panel_cx_ = (int)panelBg.center().x();
   speed_panel_right_ = (int)panelBg.right();
-  speed_panel_rect_ = panelBg.toRect();
 
   // 패널 배경 (✅ 더 투명)
   p.setPen(Qt::NoPen);
