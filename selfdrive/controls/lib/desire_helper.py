@@ -63,8 +63,8 @@ class DesireHelper:
   A driver blinker opposite to the ATC side cancels ATC until the navigation
   instruction changes (carrot's atc_active = 2) and hands back to the legacy path.
 
-  Departure from carrot: an ATC lane change (fork / pre-turn lane) never starts
-  on its own. carrot lights the lamp itself; this car cannot (gm/carcontroller.py
+  Departure from carrot: an ATC lane change (fork / pre-turn lane) or
+  intersection turn never starts on its own. carrot lights the lamp itself; this car cannot (gm/carcontroller.py
   sends no turn signal) and has no blind-spot signal, so a self-started change
   would cross lanes with no signal to the cars behind. It needs the driver's
   blinker on the same side or a nudge of the wheel toward that side.
@@ -100,6 +100,7 @@ class DesireHelper:
     self.next_lane_change = False
     self.prev_desire_enabled = False
     self.atc_owner = False          # the current maneuver belongs to the ATC path
+    self.atc_turn_confirmed = False  # driver confirmed this ATC turn (blinker or nudge)
     self.atc_blinker = BLINKER_NONE  # side ATC asks for this frame (UI / log)
     self.sides_valid = False
 
@@ -334,6 +335,7 @@ class DesireHelper:
     # Ignore one frame when the type changes
     if self.atc_type != atc_type:
       atc_desire_enabled = False
+      self.atc_turn_confirmed = False   # a new instruction needs a new confirmation
     self.atc_type = atc_type
 
     return atc_blinker_state, atc_desire_enabled
@@ -351,8 +353,10 @@ class DesireHelper:
 
     side = self._get_selected_side(blinker_state) if blinker_state in (BLINKER_LEFT, BLINKER_RIGHT) else None
     atc_lane_change_requested = atc_enabled and self.atc_type in ATC_LANE_TYPES
-    # carrot limits this to the left side; here both sides need the driver
-    # (blinker or nudge), since the car cannot light its own lamp.
+    # carrot lets a right fork start on its own; here any ATC request (fork,
+    # pre-turn lane, or a turn read as a lane change) needs the driver's
+    # blinker or nudge, since the car cannot light its own lamp.
+    atc_needs_driver = atc_enabled and not driver_enabled
     atc_lane_change_manual_only = atc_lane_change_requested and not driver_enabled
     atc_lane_change_only = atc_lane_change_requested and not driver_enabled
     # Do not treat a blocked->available retry as permission to cross solid/unknown lines.
@@ -366,7 +370,7 @@ class DesireHelper:
     if desire_enabled and side is not None:
       auto_lane_change_trigger = (
         self.auto_lane_change_enable and
-        (not atc_lane_change_manual_only) and
+        (not atc_needs_driver) and
         side.edge_available and
         (side.lane_available_trigger or side.lane_appeared) and
         (not side.side_object_detected) and
@@ -408,9 +412,16 @@ class DesireHelper:
       if atc_lane_change_manual_only and self.maneuver_type == "turn":
         self.maneuver_type = "lane_change"
 
+      # An ATC turn waits for the driver too: the blinker on that side, or a
+      # nudge toward it, which then holds until the instruction changes.
+      turn_nudge = carstate.steeringPressed and (
+        (carstate.steeringTorque > 0) if blinker_state == BLINKER_LEFT else (carstate.steeringTorque < 0))
+      if driver_enabled or turn_nudge:
+        self.atc_turn_confirmed = True
+
       if desire_enabled and self.maneuver_type == "turn" and self.enable_turn_desires:
         self.lane_change_state = LaneChangeState.off
-        if self.turn_disable_count > 0:
+        if self.turn_disable_count > 0 or not (driver_enabled or self.atc_turn_confirmed):
           self.turn_direction = TURN_NONE
           self.lane_change_direction = LaneChangeDirection.none
         else:
@@ -475,7 +486,7 @@ class DesireHelper:
                   if side.lane_change_available or atc_line_release:
                     can_start = True
                 else:
-                  if torque_applied or ((not atc_lane_change_manual_only) and (
+                  if torque_applied or ((not atc_needs_driver) and (
                     auto_lane_change_trigger or side.lane_line_info_edge_detect or block_released_auto
                   )):
                     if side.lane_change_available or atc_line_release:
