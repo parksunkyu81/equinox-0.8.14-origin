@@ -112,11 +112,13 @@ class DesireHelper:
   A driver blinker opposite to the ATC side cancels ATC until the navigation
   instruction changes (carrot's atc_active = 2) and hands back to the legacy path.
 
-  Departure from carrot: an ATC lane change (fork / pre-turn lane) or
-  intersection turn never starts on its own. carrot lights the lamp itself; this car cannot (gm/carcontroller.py
-  sends no turn signal) and has no blind-spot signal, so a self-started change
-  would cross lanes with no signal to the cars behind. It needs the driver's
-  blinker on the same side or a nudge of the wheel toward that side.
+  Departure from carrot: an ATC lane change (fork / pre-turn lane) is never
+  made by the car at all; since 2026-11-22 the FSM holds in preLaneChange and
+  the driver changes lanes by hand when controlsd's AtcLaneGuide says so.
+  carrot lights the lamp itself; this car cannot (gm/carcontroller.py sends no
+  turn signal) and has no blind-spot signal. An ATC intersection turn still
+  sends the turn desire, after the driver's blinker on the same side or a
+  nudge of the wheel toward that side.
   """
 
   def __init__(self):
@@ -653,6 +655,11 @@ class DesireHelper:
               # LANE_CHANGE_LOW_SPEED: only on the driver's nudge
               if v_ego < LANE_CHANGE_LOW_SPEED and not torque_applied:
                 can_start = False
+              # 2026-11-22: under a navigation instruction the car never moves
+              # across lanes. controlsd tells the driver when to change lanes
+              # (atc_desire.AtcLaneGuide) and the driver steers across; the
+              # lane keeping stays on and yields to the driver's hand as usual.
+              can_start = False
               if can_start:
                 self.lane_change_state = LaneChangeState.laneChangeStarting
 

@@ -15,7 +15,8 @@ from selfdrive.swaglog import cloudlog
 from selfdrive.boardd.boardd import can_list_to_can_capnp
 from selfdrive.car.car_helpers import get_car, get_startup_event, get_one_can
 from selfdrive.controls.lib.lane_planner import CAMERA_OFFSET
-from selfdrive.controls.lib.atc_desire import ATC_LEFT_TYPES, ATC_RIGHT_TYPES
+from selfdrive.controls.lib.atc_desire import ATC_LEFT_TYPES, ATC_RIGHT_TYPES, AtcLaneGuide, \
+  BLINKER_NONE, BLINKER_LEFT, BLINKER_RIGHT
 from selfdrive.controls.lib.drive_helpers import update_v_cruise, initialize_v_cruise
 from selfdrive.controls.lib.drive_helpers import get_lag_adjusted_curvature
 from selfdrive.controls.lib.straight_wobble_filter import StraightWobbleFilter
@@ -444,6 +445,8 @@ class Controls:
         # Corner-entry prompt, driven from the model curve profile in
         # cal_curve_speed and raised as an event in state_control.
         self.corner_alert = CornerAlert()
+        self.atc_lane_guide = AtcLaneGuide()
+        self.atc_lane_prompt = BLINKER_NONE
         self.curv_speed = 0.0
         self.v_cruise_kph_limit = 0
         self.applyMaxSpeed = 0
@@ -1232,15 +1235,22 @@ class Controls:
             else:
                 self.events.add(EventName.calibrationInvalid)
 
-        # Handle lane change.
-        # Under a navigation (ATC) instruction the planner sits in preLaneChange
-        # from 160-350 m before the point, waiting for the lane to open and the
-        # driver's blinker or nudge; ATC never starts on a timer. So nothing is
-        # shown while it waits -- no blinker prompt, no pre-lane-change line, no
-        # auto countdown -- and the driver is told once, with a chime, when the
-        # car actually starts across (atcLaneChangeLeft/Right).
+        # Navigation (ATC) lane changes are the driver's: the car never moves
+        # across for them (desire_helper.py). AtcLaneGuide decides when to tell
+        # the driver ("좌측/우측 차선으로 이동하세요", one chime per prompt).
         rls = get_road_speed_limiter().roadLimitSpeed
         atc_type = str(rls.atcType) if rls is not None else ""
+        if self.sm.updated['modelV2']:
+            self.atc_lane_prompt = self.atc_lane_guide.update(
+                atc_type, self.sm['modelV2'], CS.leftBlinker, CS.rightBlinker)
+        if self.atc_lane_prompt == BLINKER_LEFT:
+            self.events.add(EventName.atcBlinkerLeft)
+        elif self.atc_lane_prompt == BLINKER_RIGHT:
+            self.events.add(EventName.atcBlinkerRight)
+
+        # Handle lane change. Under an ATC instruction the planner holds in
+        # preLaneChange for the whole approach; the guide speaks for it, so the
+        # pre-lane-change line ("○측차선으로 차선을 변경합니다") stays off there.
         # "... prepare" is the instruction still too far away: DesireHelper ignores it too.
         atc_active = atc_type.startswith(ATC_LEFT_TYPES + ATC_RIGHT_TYPES) and not atc_type.endswith("prepare")
         lc_state = self.sm['lateralPlan'].laneChangeState
@@ -1258,12 +1268,7 @@ class Controls:
             else:
                 self.events.add(EventName.preLaneChangeRight)
         elif lc_state in (LaneChangeState.laneChangeStarting, LaneChangeState.laneChangeFinishing):
-            if atc_active and direction == LaneChangeDirection.left:
-                self.events.add(EventName.atcBlinkerLeft)
-            elif atc_active and direction == LaneChangeDirection.right:
-                self.events.add(EventName.atcBlinkerRight)
-            else:
-                self.events.add(EventName.laneChange)
+            self.events.add(EventName.laneChange)
 
         #if not CS.canValid:
         #    self.events.add(EventName.canError)
