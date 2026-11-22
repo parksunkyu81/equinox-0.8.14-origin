@@ -40,12 +40,13 @@ _A_CRUISE_MIN_BP = [0., 30 * CV.KPH_TO_MS, 60 * CV.KPH_TO_MS, 80 * CV.KPH_TO_MS,
 
 _A_CRUISE_MAX_V = [0.8, 0.7, 0.6, 0.5, 0.4]  # 최대 가속도를 낮추어 연비를 개선
 # The MID comma-pedal profile's ceiling; the profile gains are shares of it
-# (comma_pedal_profile.py). Below 60 km/h it is the old [1.2, 1.0, 0.8] x the
-# old MID gain; above it was 0.5 / 0.4, raised once 61e6b7eb let the plan reach
-# the road on the highway.
-_A_CRUISE_MAX_V_FOLLOWING = [1.32, 1.05, 0.80, 0.65, 0.50, 0.42]
-_A_CRUISE_MAX_BP = [0., 30 * CV.KPH_TO_MS, 60 * CV.KPH_TO_MS, 80 * CV.KPH_TO_MS, 100.0 * CV.KPH_TO_MS,
-                    130.0 * CV.KPH_TO_MS]
+# (comma_pedal_profile.py). 0-20 km/h (launches, queues) is the old [1.2, 1.0]
+# x the old MID gain; 30 and 60 km/h were lowered from 1.05 / 0.80 on
+# 2026-11-23 (see comma_pedal_profile.py); above 60 it was 0.5 / 0.4, raised
+# once 61e6b7eb let the plan reach the road on the highway.
+_A_CRUISE_MAX_V_FOLLOWING = [1.32, 1.14, 0.85, 0.72, 0.65, 0.50, 0.42]
+_A_CRUISE_MAX_BP = [0., 20 * CV.KPH_TO_MS, 30 * CV.KPH_TO_MS, 60 * CV.KPH_TO_MS, 80 * CV.KPH_TO_MS,
+                    100.0 * CV.KPH_TO_MS, 130.0 * CV.KPH_TO_MS]
 
 _A_TOTAL_MAX_V = [2.5, 3.0, 4.0]  # 회전 시 가속 제한을 낮춤
 _A_TOTAL_MAX_BP = [0., 25., 55.]
