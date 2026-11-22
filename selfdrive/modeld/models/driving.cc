@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
 
 #include <eigen3/Eigen/Dense>
@@ -41,6 +42,23 @@ constexpr const kj::ArrayPtr<const T> to_kj_array_ptr(const std::array<T, size> 
 
 void model_init(ModelState* s, cl_device_id device_id, cl_context context) {
   s->frame = new ModelFrame(device_id, context);
+#ifdef BIG_MODEL
+  // WideOptechLateral: fill big_input_imgs from the same road frame warped into
+  // the sbigmodel frame (focal 455, 59 x 31 deg) the wide branch was built for,
+  // instead of mirroring the 31 deg narrow crop into it. The lateral planner
+  // switches to the 0.9-style MPC under the same param, so the two always change
+  // together. MODELD_WIDE_FROM_ROAD=0/1 overrides the param for offline replays.
+  // Read once here: a change takes effect at the next modeld start.
+  const char *wide_env = getenv("MODELD_WIDE_FROM_ROAD");
+  const bool wide_from_road = wide_env != nullptr ? strcmp(wide_env, "1") == 0
+                                                  : Params().getBool("WideOptechLateral");
+  if (wide_from_road) {
+    s->wide_frame = new ModelFrame(device_id, context);
+    LOGW("big model wide input: sbigmodel warp of the road frame");
+  } else {
+    LOGW("big model wide input: mirror of the narrow crop");
+  }
+#endif
 
 #ifdef USE_THNEED
   s->m = std::make_unique<ThneedModel>(BIG_MODEL_PATH("thneed"),
@@ -86,7 +104,7 @@ void model_init(ModelState* s, cl_device_id device_id, cl_context context) {
 }
 
 ModelOutput* model_eval_frame(ModelState* s, cl_mem yuv_cl, int width, int height,
-                              const mat3 &transform, float *desire_in) {
+                              const mat3 &transform, const mat3 &transform_wide, float *desire_in) {
 #ifdef DESIRE
   if (desire_in != NULL) {
     for (int i = 1; i < DESIRE_LEN; i++) {
@@ -109,10 +127,18 @@ ModelOutput* model_eval_frame(ModelState* s, cl_mem yuv_cl, int width, int heigh
   // the second buffer so it reuses the warp result and only repeats the pack
   // kernel, instead of running the warp a second time as well.
   cl_mem *net_extra_cl = static_cast<cl_mem*>(s->m->getExtraBuf());
-  auto net_input_buf = s->frame->prepare(yuv_cl, width, height, transform, static_cast<cl_mem*>(s->m->getInputBuf()), net_extra_cl);
-  s->m->addImage(net_input_buf, s->frame->buf_size);
-  s->m->addExtra(net_input_buf, s->frame->buf_size);
+  if (s->wide_frame != nullptr) {
+    auto net_input_buf = s->frame->prepare(yuv_cl, width, height, transform, static_cast<cl_mem*>(s->m->getInputBuf()));
+    auto net_extra_buf = s->wide_frame->prepare(yuv_cl, width, height, transform_wide, net_extra_cl);
+    s->m->addImage(net_input_buf, s->frame->buf_size);
+    s->m->addExtra(net_extra_buf, s->wide_frame->buf_size);
+  } else {
+    auto net_input_buf = s->frame->prepare(yuv_cl, width, height, transform, static_cast<cl_mem*>(s->m->getInputBuf()), net_extra_cl);
+    s->m->addImage(net_input_buf, s->frame->buf_size);
+    s->m->addExtra(net_input_buf, s->frame->buf_size);
+  }
 #else
+  (void)transform_wide;
   auto net_input_buf = s->frame->prepare(yuv_cl, width, height, transform, static_cast<cl_mem*>(s->m->getInputBuf()));
   s->m->addImage(net_input_buf, s->frame->buf_size);
 #endif
@@ -123,6 +149,7 @@ ModelOutput* model_eval_frame(ModelState* s, cl_mem yuv_cl, int width, int heigh
 
 void model_free(ModelState* s) {
   delete s->frame;
+  delete s->wide_frame;
 }
 
 void fill_lead(cereal::ModelDataV2::LeadDataV3::Builder lead, const ModelOutputLeads &leads, int t_idx, float prob_t) {

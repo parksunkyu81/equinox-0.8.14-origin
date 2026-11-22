@@ -33,10 +33,26 @@ MAX_LANE_BLEND_DEVIATION_M = 1.50
 # very first sample, where the envelope is only the margin.
 LATERAL_ENVELOPE_MARGIN_M = 1.50
 
+# WideOptechLateral: the OPTECH-KR (optech-spst-dev) lateral planner, i.e.
+# comma's 0.9 one, driven by the 59 deg wide model input (modeld, same param).
+# Ported as it is there with its default dp_lat_lane_priority_mode off: the
+# MPC follows the model's own path (no lane blend, no camera offset) with yaw-
+# rate references, MPC speed floored at 1 m/s, and its 1e6 cost validity limit.
+# Replayed on 11-21 corner segments this was the closest of the four input x
+# planner pairings to the curvature the car drove; the straight-road jitter it
+# adds is handled by StraightWobbleFilter in get_lag_adjusted_curvature. The
+# sanity checks below (model validation, target envelope, reset on an
+# implausible plan) apply to both modes.
+V09_MIN_SPEED = 1.0
+V09_COST_INVALID = 1e6
+
+
 class LateralPlanner:
-  def __init__(self, CP):
+  def __init__(self, CP, use_v09=None):
     self.LP = LanePlanner()
     self.DH = DesireHelper()
+    # Read once, like modeld and controlsd: all three must agree for a drive.
+    self.use_v09 = Params().get_bool("WideOptechLateral") if use_v09 is None else bool(use_v09)
 
     # Vehicle model parameters used to calculate lateral movement of car
     self.factor1 = CP.wheelbase - CP.centerToFront
@@ -58,7 +74,16 @@ class LateralPlanner:
     self.y_pts = np.zeros(TRAJECTORY_SIZE)
     self.model_data_valid = False
 
-    self.lat_mpc = LateralMpc()
+    self.v_mpc = 0.0
+    if self.use_v09:
+      # Imported only here: the 0.8.13 mode must not depend on the second solver.
+      from selfdrive.controls.lib.lateral_mpc_lib_v09 import lat_mpc as lat_mpc_v09
+      self.lat_mpc = lat_mpc_v09.LateralMpc()
+      self.lat_mpc.set_weights(lat_mpc_v09.PATH_COST, lat_mpc_v09.LATERAL_MOTION_COST,
+                               lat_mpc_v09.LATERAL_ACCEL_COST, lat_mpc_v09.LATERAL_JERK_COST,
+                               lat_mpc_v09.STEERING_RATE_COST)
+    else:
+      self.lat_mpc = LateralMpc()
     self.reset_mpc(np.zeros(4))
 
   def reset_mpc(self, x0=None):
@@ -116,13 +141,18 @@ class LateralPlanner:
     # Calculate final driving path and set MPC costs
     lane_change_active = self.DH.lane_change_state != log.LateralPlan.LaneChangeState.off
 
-    # LanePlanner applies its offset in-place; a copy prevents an invalid
-    # model frame from accumulating the offset on the last valid trajectory.
-    d_path_xyz = self.LP.get_d_path(
-      v_ego, self.t_idxs, self.path_xyz.copy(),
-      measured_curvature=measured_curvature,
-      lane_change_active=lane_change_active)
-    self.lat_mpc.set_weights(MPC_COST_LAT.PATH, MPC_COST_LAT.HEADING, MPC_COST_LAT.STEER_RATE)
+    if self.use_v09:
+      # OPTECH default (lane priority mode off): the model's own path. The
+      # weights were set once in __init__ (OPTECH sets the same ones each frame).
+      d_path_xyz = self.path_xyz.copy()
+    else:
+      # LanePlanner applies its offset in-place; a copy prevents an invalid
+      # model frame from accumulating the offset on the last valid trajectory.
+      d_path_xyz = self.LP.get_d_path(
+        v_ego, self.t_idxs, self.path_xyz.copy(),
+        measured_curvature=measured_curvature,
+        lane_change_active=lane_change_active)
+      self.lat_mpc.set_weights(MPC_COST_LAT.PATH, MPC_COST_LAT.HEADING, MPC_COST_LAT.STEER_RATE)
 
     # Match the official planner: the current model/lane blend goes directly
     # to MPC. Do not retain or blend a previous path across real curve changes.
@@ -138,7 +168,7 @@ class LateralPlanner:
     # own path for the frame instead; it is the input the blend started from.
     self.plan_implausible = False
     lane_deviation = float(np.max(np.abs(d_path_xyz[:, 1] - self.path_xyz[:, 1])))
-    if lane_deviation > MAX_LANE_BLEND_DEVIATION_M:
+    if not self.use_v09 and lane_deviation > MAX_LANE_BLEND_DEVIATION_M:
       d_path_xyz = self.path_xyz.copy()
       # The car is given the model path this frame, so the lane planner's
       # output limiter must ramp from zero offset, not from the rejected one.
@@ -148,12 +178,17 @@ class LateralPlanner:
         "lane blend moved the path %.1f m from the model path (limit %.2f m)"
         % (lane_deviation, MAX_LANE_BLEND_DEVIATION_M))
 
+    # OPTECH floors the MPC speed at 1 m/s (lateral planning is not possible at 0).
+    v_mpc = max(V09_MIN_SPEED, v_ego) if self.use_v09 else v_ego
+    self.v_mpc = v_mpc
     d_path_distance = np.linalg.norm(d_path_xyz, axis=1)
-    y_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], d_path_distance, d_path_xyz[:, 1])
-    heading_pts = np.interp(
-      v_ego * self.t_idxs[:LAT_MPC_N + 1],
-      np.linalg.norm(self.path_xyz, axis=1), self.plan_yaw)
-    curv_rate_pts = np.interp(v_ego * self.t_idxs[:LAT_MPC_N + 1], np.linalg.norm(self.path_xyz, axis=1), self.plan_curv_rate)
+    path_distance = np.linalg.norm(self.path_xyz, axis=1)
+    y_pts = np.interp(v_mpc * self.t_idxs[:LAT_MPC_N + 1], d_path_distance, d_path_xyz[:, 1])
+    heading_pts = np.interp(v_mpc * self.t_idxs[:LAT_MPC_N + 1], path_distance, self.plan_yaw)
+    if self.use_v09:
+      yaw_rate_pts = np.interp(v_mpc * self.t_idxs[:LAT_MPC_N + 1], path_distance, self.plan_yaw_rate)
+    else:
+      curv_rate_pts = np.interp(v_mpc * self.t_idxs[:LAT_MPC_N + 1], path_distance, self.plan_curv_rate)
 
     # Second, independent check on the target the MPC actually receives, so a
     # bad model path is caught too and not only a bad blend. The interp above
@@ -162,7 +197,7 @@ class LateralPlanner:
     # Clip rather than reject: the near samples of an otherwise sane path stay
     # usable, and the shape is preserved wherever it is inside the envelope.
     horizon_t = np.asarray(self.t_idxs[:LAT_MPC_N + 1], dtype=float)
-    y_envelope = LATERAL_ENVELOPE_MARGIN_M + max(v_ego, 0.0) * horizon_t
+    y_envelope = LATERAL_ENVELOPE_MARGIN_M + max(v_mpc, 0.0) * horizon_t
     if np.any(np.abs(y_pts) > y_envelope):
       worst = int(np.argmax(np.abs(y_pts) - y_envelope))
       self.plan_implausible = True
@@ -178,18 +213,23 @@ class LateralPlanner:
 
     assert len(y_pts) == LAT_MPC_N + 1
     assert len(heading_pts) == LAT_MPC_N + 1
-    assert len(curv_rate_pts) == LAT_MPC_N + 1
-    lateral_factor = max(0, self.factor1 - (self.factor2 * v_ego**2))
-    p = np.array([v_ego, lateral_factor])
-    self.lat_mpc.run(self.x0,
-                     p,
-                     y_pts,
-                     heading_pts,
-                     np.zeros_like(curv_rate_pts))
+    lateral_factor = max(0, self.factor1 - (self.factor2 * v_mpc**2))
+    p = np.array([v_mpc, lateral_factor])
+    if self.use_v09:
+      assert len(yaw_rate_pts) == LAT_MPC_N + 1
+      self.lat_mpc.run(self.x0, p, y_pts, heading_pts, yaw_rate_pts)
+    else:
+      assert len(curv_rate_pts) == LAT_MPC_N + 1
+      self.lat_mpc.run(self.x0,
+                       p,
+                       y_pts,
+                       heading_pts,
+                       np.zeros_like(curv_rate_pts))
     # init state for next
     # mpc.u_sol is the desired curvature rate given x0 curv state.
     # with x0[3] = measured_curvature, this would be the actual desired rate.
     # instead, interpolate x_sol so that x0[3] is the desired curvature for lat_control.
+    # (v09: state 3 is the yaw rate; the same interpolation, as OPTECH does it.)
     self.x0[3] = interp(DT_MDL, self.t_idxs[:LAT_MPC_N + 1], self.lat_mpc.x_sol[:, 3])
 
     #  Check for infeasible MPC solution
@@ -197,12 +237,13 @@ class LateralPlanner:
     t = sec_since_boot()
     if mpc_nans or self.lat_mpc.solution_status != 0:
       self.reset_mpc()
-      self.x0[3] = measured_curvature
+      self.x0[3] = self._x0_from_curvature(measured_curvature)
       if t > self.last_cloudlog_t + 5.0:
         self.last_cloudlog_t = t
         cloudlog.warning("Lateral mpc - nan: True")
 
-    if self.lat_mpc.cost > 20000. or mpc_nans:
+    cost_invalid = V09_COST_INVALID if self.use_v09 else 20000.
+    if self.lat_mpc.cost > cost_invalid or mpc_nans:
       self.solution_invalid_cnt += 1
     else:
       self.solution_invalid_cnt = 0
@@ -219,7 +260,11 @@ class LateralPlanner:
     # next frame's x0 depends on this, so the later position is equivalent.
     if self.plan_implausible:
       self.reset_mpc()
-      self.x0[3] = measured_curvature
+      self.x0[3] = self._x0_from_curvature(measured_curvature)
+
+  def _x0_from_curvature(self, curvature):
+    """MPC state 3 for a measured curvature: the curvature, or the yaw rate for v09."""
+    return curvature * self.v_mpc if self.use_v09 else curvature
 
   def publish(self, sm, pm):
     plan_solution_valid = self.solution_invalid_cnt < 2
@@ -240,8 +285,15 @@ class LateralPlanner:
     lateralPlan.laneWidth = float(self.LP.lane_width)
     lateralPlan.dPathPoints = self.y_pts.tolist()
     lateralPlan.psis = self.lat_mpc.x_sol[0:CONTROL_N, 2].tolist()
-    lateralPlan.curvatures = self.lat_mpc.x_sol[0:CONTROL_N, 3].tolist()
-    lateralPlan.curvatureRates = [float(x) for x in self.lat_mpc.u_sol[0:CONTROL_N - 1]] + [0.0]
+    if self.use_v09:
+      # The v09 MPC state is yaw rate and its control yaw acceleration; the
+      # message carries curvature, divided by speed exactly as OPTECH does.
+      v_mpc = max(self.v_mpc, V09_MIN_SPEED)
+      lateralPlan.curvatures = (self.lat_mpc.x_sol[0:CONTROL_N, 3] / v_mpc).tolist()
+      lateralPlan.curvatureRates = [float(x) / v_mpc for x in self.lat_mpc.u_sol[0:CONTROL_N - 1]] + [0.0]
+    else:
+      lateralPlan.curvatures = self.lat_mpc.x_sol[0:CONTROL_N, 3].tolist()
+      lateralPlan.curvatureRates = [float(x) for x in self.lat_mpc.u_sol[0:CONTROL_N - 1]] + [0.0]
     lateralPlan.lProb = float(self.LP.lll_prob)
     lateralPlan.rProb = float(self.LP.rll_prob)
     lateralPlan.dProb = float(self.LP.d_prob)
@@ -250,9 +302,9 @@ class LateralPlanner:
     lateralPlan.solverExecutionTime = self.lat_mpc.solve_time
 
     lateralPlan.desire = self.DH.desire
-    # Lane lines are always used; the laneless mode was removed 2026-08-27.
-    # Kept in the message so existing log tooling keeps reading a valid field.
-    lateralPlan.useLaneLines = True
+    # The 0.8.13 planner always blends lane lines; the v09 one (WideOptechLateral)
+    # follows the model path alone.
+    lateralPlan.useLaneLines = not self.use_v09
     lateralPlan.laneChangeState = self.DH.lane_change_state
     lateralPlan.laneChangeDirection = self.DH.lane_change_direction
 

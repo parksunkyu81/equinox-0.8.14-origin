@@ -252,8 +252,10 @@ selfdrive/controls/lib/vehicle_model.py
 selfdrive/controls/lib/cluster/*
 
 selfdrive/controls/lib/lateral_mpc_lib/.gitignore
+selfdrive/controls/lib/lateral_mpc_lib_v09/.gitignore
 selfdrive/controls/lib/longitudinal_mpc_lib/.gitignore
 selfdrive/controls/lib/lateral_mpc_lib/*
+selfdrive/controls/lib/lateral_mpc_lib_v09/*
 selfdrive/controls/lib/longitudinal_mpc_lib/*
 
 selfdrive/hardware/__init__.py

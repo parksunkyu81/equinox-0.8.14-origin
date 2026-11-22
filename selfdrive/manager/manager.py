@@ -71,6 +71,9 @@ def manager_init() -> None:
     ("TorqueFriction", "120"),
     ("TorqueMaxLatAccel", "30"),
 
+    # 59 deg wide model input + 0.9-style lateral MPC (modeld, plannerd, controlsd)
+    ("WideOptechLateral", "1"),
+
     # Dynamic TR
     ("CustomTREnabled", "1"),
     ("CommaPedalResistance", "mid"),

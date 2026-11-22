@@ -17,6 +17,7 @@ from selfdrive.car.car_helpers import get_car, get_startup_event, get_one_can
 from selfdrive.controls.lib.lane_planner import CAMERA_OFFSET
 from selfdrive.controls.lib.drive_helpers import update_v_cruise, initialize_v_cruise
 from selfdrive.controls.lib.drive_helpers import get_lag_adjusted_curvature
+from selfdrive.controls.lib.straight_wobble_filter import StraightWobbleFilter
 from selfdrive.controls.lib.longcontrol import LongControl
 from selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from selfdrive.controls.lib.latcontrol_indi import LatControlINDI
@@ -382,6 +383,11 @@ class Controls:
 
         self.LoC = LongControl(self.CP)
         self.VM = VehicleModel(self.CP)
+        # WideOptechLateral (59 deg model input + 0.9-style lateral MPC, see
+        # lateral_planner.py) moves the demand more on straights; this smooths
+        # those small moves. Read once, like modeld and plannerd do.
+        self.wide_optech_lateral = self.params.get_bool("WideOptechLateral")
+        self.straight_wobble_filter = StraightWobbleFilter() if self.wide_optech_lateral else None
 
         if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
             self.LaC = LatControlAngle(self.CP, self.CI)
@@ -2068,7 +2074,9 @@ class Controls:
                                                                                    lat_plan.psis,
                                                                                    lat_plan.curvatures,
                                                                                    lat_plan.curvatureRates,
-                                                                                   CC.latActive)
+                                                                                   CC.latActive,
+                                                                                   self.straight_wobble_filter,
+                                                                                   self.sm.updated['lateralPlan'])
             actuators.steer, actuators.steeringAngleDeg, lac_log = self.LaC.update(CC.latActive, CS, self.VM, params,
                                                                                    self.last_actuators,
                                                                                    self.steer_limited,

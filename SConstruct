@@ -430,6 +430,7 @@ SConscript(['selfdrive/modeld/SConscript'])
 
 SConscript(['selfdrive/controls/lib/cluster/SConscript'])
 SConscript(['selfdrive/controls/lib/lateral_mpc_lib/SConscript'])
+SConscript(['selfdrive/controls/lib/lateral_mpc_lib_v09/SConscript'])
 SConscript(['selfdrive/controls/lib/longitudinal_mpc_lib/SConscript'])
 
 SConscript(['selfdrive/boardd/SConscript'])

@@ -15,7 +15,8 @@
 
 ExitHandler do_exit;
 
-mat3 update_calibration(cereal::LiveCalibrationData::Reader live_calib, bool wide_camera) {
+mat3 update_calibration(cereal::LiveCalibrationData::Reader live_calib, bool wide_camera,
+                        bool sbigmodel_frame = false) {
   /*
      import numpy as np
      from common.transformations.model import medmodel_frame_from_road_frame
@@ -26,6 +27,14 @@ mat3 update_calibration(cereal::LiveCalibrationData::Reader live_calib, bool wid
      0.00000000e+00, 0.00000000e+00, 1.00000000e+00,
     -1.09890110e-03, 0.00000000e+00, 2.81318681e-01,
     -1.84808520e-20, 9.00738606e-04, -4.28751576e-02).finished();
+  // Same recipe with sbigmodel_frame_from_road_frame (focal 455, 512x256): the
+  // 59 x 31 deg frame the big model's second image input was built for.
+  // Computed on the device with common.transformations.model; the medmodel
+  // matrix above comes out of the same code to the last printed digit.
+  static const auto ground_from_sbigmodel_frame = (Eigen::Matrix<float, 3, 3>() <<
+     0.00000000e+00, 0.00000000e+00, 1.00000000e+00,
+    -2.19780220e-03, 0.00000000e+00, 5.62637363e-01,
+     0.00000000e+00, 1.80147721e-03, -2.73464241e-01).finished();
 
   const auto cam_intrinsics = Eigen::Matrix<float, 3, 3, Eigen::RowMajor>(wide_camera ? ecam_intrinsic_matrix.v : fcam_intrinsic_matrix.v);
   static const mat3 yuv_transform = get_model_yuv_transform();
@@ -42,7 +51,8 @@ mat3 update_calibration(cereal::LiveCalibrationData::Reader live_calib, bool wid
   camera_frame_from_ground.col(1) = camera_frame_from_road_frame.col(1);
   camera_frame_from_ground.col(2) = camera_frame_from_road_frame.col(3);
 
-  auto warp_matrix = camera_frame_from_ground * ground_from_medmodel_frame;
+  auto warp_matrix = camera_frame_from_ground *
+                     (sbigmodel_frame ? ground_from_sbigmodel_frame : ground_from_medmodel_frame);
   mat3 transform = {};
   for (int i=0; i<3*3; i++) {
     transform.v[i] = warp_matrix(i / 3, i % 3);
@@ -63,6 +73,7 @@ void run_model(ModelState &model, VisionIpcClient &vipc_client, bool wide_camera
   uint32_t run_count = 0;
 
   mat3 model_transform = {};
+  mat3 model_transform_wide = {};
   bool live_calib_seen = false;
 
   while (!do_exit) {
@@ -76,6 +87,7 @@ void run_model(ModelState &model, VisionIpcClient &vipc_client, bool wide_camera
     frame_id = sm["roadCameraState"].getRoadCameraState().getFrameId();
     if (sm.updated("liveCalibration")) {
       model_transform = update_calibration(sm["liveCalibration"].getLiveCalibration(), wide_camera);
+      model_transform_wide = update_calibration(sm["liveCalibration"].getLiveCalibration(), wide_camera, true);
       live_calib_seen = true;
     }
 
@@ -86,7 +98,7 @@ void run_model(ModelState &model, VisionIpcClient &vipc_client, bool wide_camera
 
     double mt1 = millis_since_boot();
     ModelOutput *model_output = model_eval_frame(&model, buf->buf_cl, buf->width, buf->height,
-                                                 model_transform, vec_desire);
+                                                 model_transform, model_transform_wide, vec_desire);
     double mt2 = millis_since_boot();
     float model_execution_time = (mt2 - mt1) / 1000.0;
 

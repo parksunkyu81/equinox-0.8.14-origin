@@ -261,6 +261,9 @@ static_assert(NET_OUTPUT_SIZE == 6472, "v0.8.13 supercombo total output size cha
 // TODO: convert remaining arrays to std::array and update model runners
 struct ModelState {
   ModelFrame *frame;
+  // Second warp for the big model's wide input (sbigmodel frame); only set when
+  // WideOptechLateral is on, otherwise the wide input mirrors the narrow one.
+  ModelFrame *wide_frame = nullptr;
   std::array<float, NET_OUTPUT_SIZE> output = {};
   std::unique_ptr<RunModel> m;
 #ifdef DESIRE
@@ -274,7 +277,7 @@ struct ModelState {
 
 void model_init(ModelState* s, cl_device_id device_id, cl_context context);
 ModelOutput *model_eval_frame(ModelState* s, cl_mem yuv_cl, int width, int height,
-                              const mat3 &transform, float *desire_in);
+                              const mat3 &transform, const mat3 &transform_wide, float *desire_in);
 void model_free(ModelState* s);
 void model_publish(PubMaster &pm, uint32_t vipc_frame_id, uint32_t frame_id, float frame_drop,
                    const ModelOutput &net_outputs, uint64_t timestamp_eof,

@@ -252,7 +252,8 @@ def _log_curvature_limit(requested, limited, v_ego):
   _curvature_limited_frames += 1
 
 
-def get_lag_adjusted_curvature(CP, v_ego, psis, curvatures, curvature_rates, lat_active=True):
+def get_lag_adjusted_curvature(CP, v_ego, psis, curvatures, curvature_rates, lat_active=True,
+                               wobble_filter=None, new_plan=False):
   if len(psis) != CONTROL_N:
     psis = [0.0]*CONTROL_N
     curvatures = [0.0]*CONTROL_N
@@ -285,6 +286,14 @@ def get_lag_adjusted_curvature(CP, v_ego, psis, curvatures, curvature_rates, lat
   # result itself.
   limited_curvature = limit_curvature(safe_desired_curvature, v_ego)
   _log_curvature_limit(safe_desired_curvature, limited_curvature, v_ego)
+
+  # WideOptechLateral: smooth small straight-road moves of the bounded target
+  # (StraightWobbleFilter). Before the rate limit below, so that limit stays the
+  # last stage, and on a value that only changes when a new plan arrives, so the
+  # 20 Hz step it was tuned at is exact. Replay-checked to give the same result
+  # as filtering after the limit.
+  if wobble_filter is not None:
+    limited_curvature = wobble_filter.update(v_ego, limited_curvature, lat_active, new_plan)
 
   # How fast the bounded target may move, frame to frame. Applied last, so it
   # also bounds the approach to the ceiling above: this is the final thing
