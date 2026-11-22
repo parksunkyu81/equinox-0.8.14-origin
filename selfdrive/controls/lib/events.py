@@ -525,14 +525,16 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
       Priority.LOW, VisualAlert.none, AudibleAlert.none, .1, alert_rate=0.75),
   },
 
-  # Navigation (ATC) lane change: the driver changes lanes by hand; the car
-  # does not move across for it. Raised by controlsd while atc_desire.
-  # AtcLaneGuide has a prompt up (4 s per prompt, the chime once as it comes
-  # up). The names are older than the meaning and stay for log replay.
+  # Navigation (ATC) lane change prompt, raised by controlsd while atc_desire.
+  # AtcLaneGuide has one up (4 s per prompt, the chime once as it comes up).
+  # After the blinker the car moves across at 30 km/h or more; under 30 the
+  # driver does (the lane band reads 자동 대기 / 직접 변경). One wording for
+  # both, so a speed crossing 30 mid-prompt does not re-chime. The names are
+  # older than the meaning and stay for log replay.
   EventName.atcBlinkerLeft: {
     ET.WARNING: Alert(
       "좌측 차선으로 이동하세요",
-      "내비 안내 · 깜빡이를 켜고 직접 옮겨 주세요",
+      "내비 안내 · 깜빡이를 켜 주세요",
       AlertStatus.userPrompt, AlertSize.mid,
       Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1),
   },
@@ -540,7 +542,7 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
   EventName.atcBlinkerRight: {
     ET.WARNING: Alert(
       "우측 차선으로 이동하세요",
-      "내비 안내 · 깜빡이를 켜고 직접 옮겨 주세요",
+      "내비 안내 · 깜빡이를 켜 주세요",
       AlertStatus.userPrompt, AlertSize.mid,
       Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1),
   },

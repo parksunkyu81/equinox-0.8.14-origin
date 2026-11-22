@@ -3084,14 +3084,16 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
     label = "차선변경 중";
   } else if (armed) {
     color = QColor(255, 175, 0);
-    // Under a navigation (ATC) instruction the car never moves across
-    // (desire_helper.py): the driver does. Elsewhere: under 30 km/h the
-    // automatic start is off (desire_helper LANE_CHANGE_LOW_SPEED).
+    // Under 30 km/h (desire_helper LANE_CHANGE_LOW_SPEED): with a navigation
+    // (ATC) instruction the driver moves across by hand, otherwise a nudge
+    // starts it. From 30: the car moves across on the blinker -- after 1 s,
+    // and for ATC once the lane is open.
     const QString atc = QString::fromUtf8(sm["roadLimitSpeed"].getRoadLimitSpeed().getAtcType().cStr());
     const bool atc_lane = (atc.startsWith("fork ") || atc.startsWith("atc ") || atc.startsWith("turn ")) &&
                           !atc.contains("prepare");
-    if (atc_lane) label = "직접 변경";
-    else label = (lp.getAutoLaneChangeEnabled() && car_state.getVEgo() >= 30 / 3.6f) ? "자동 대기" : "핸들 밀기";
+    const bool fast = car_state.getVEgo() >= 30 / 3.6f;
+    if (atc_lane) label = fast ? "자동 대기" : "직접 변경";
+    else label = (lp.getAutoLaneChangeEnabled() && fast) ? "자동 대기" : "핸들 밀기";
   } else {
     // planner isn't arming: not engaged, or under LANE_CHANGE_SPEED_MIN
     color = QColor(210, 210, 210);
