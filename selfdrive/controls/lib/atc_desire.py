@@ -248,24 +248,27 @@ ATC_LANE_RIGHT_TYPES = ("fork right", "atc right")
 
 
 class AtcLaneGuide:
-  """Tells the driver once when a navigation instruction wants another lane.
+  """Tells the driver once, just before the point, which way the navigation goes.
 
-  The car never makes an ATC lane change (desire_helper.py): the driver steers
-  across. controlsd runs this on every modelV2 frame and raises the prompt
-  alert ("좌측/우측 차선으로 이동하세요") while `prompt` is set.
+  The car never makes an ATC lane change (desire_helper.py): the driver steers.
+  controlsd runs this on every modelV2 frame and raises the prompt alert
+  ("좌측/우측 차선으로 이동하세요") while `prompt` is set.
 
-  One prompt per instruction, PROMPT_S long with one chime, when a fork /
-  pre-turn lane instruction comes into range. It does not look at the lanes:
-  the camera cannot tell a yellow centre line from a white one, so "another
-  lane on the left" can be oncoming traffic, and a wide shoulder can read as a
-  lane on the right (2026-11-23, both rejected as a basis for prompting). It is
-  skipped if the driver's blinker is already on either side when it would
-  start, and cut short by any blinker. A new prompt needs the instruction to
-  leave the lane types (none / turn) for REARM_S first, so a distance that
-  hovers at the start of the range cannot chime twice.
+  One prompt per instruction (turn, pre-turn lane or fork), PROMPT_S long with
+  one chime, when the point is PROMPT_AHEAD_S away at the current speed, but
+  never further than PROMPT_MAX_M nor closer than PROMPT_MIN_M: about 45-50 m
+  before an intersection in town (the turn stage), 100-130 m before a fork at
+  60-80 km/h. Not on the straight road far before the point (2026-11-23, on
+  request: the prompt at the start of the 160-350 m range came too early).
+  It does not look at the lanes: the camera cannot tell a yellow centre line
+  from a white one. Skipped if a blinker is already on, cut short by any
+  blinker, re-armed only after the instruction has been gone REARM_S.
   """
   PROMPT_S = 4.
   REARM_S = 5.
+  PROMPT_AHEAD_S = 6.
+  PROMPT_MIN_M = 45.
+  PROMPT_MAX_M = 150.
 
   def __init__(self):
     self.prompted = False
@@ -273,13 +276,16 @@ class AtcLaneGuide:
     self.away_t = 0.
     self.prompt = BLINKER_NONE
 
-  def update(self, atc_type, left_blinker, right_blinker, dt=DT_MDL):
-    if atc_type in ATC_LANE_LEFT_TYPES:
-      want = BLINKER_LEFT
-    elif atc_type in ATC_LANE_RIGHT_TYPES:
-      want = BLINKER_RIGHT
-    else:
-      want = BLINKER_NONE
+  def trigger_m(self, v_ego):
+    return min(self.PROMPT_MAX_M, max(self.PROMPT_MIN_M, v_ego * self.PROMPT_AHEAD_S))
+
+  def update(self, atc_type, dist_m, v_ego, left_blinker, right_blinker, dt=DT_MDL):
+    want = BLINKER_NONE
+    if not atc_type.endswith("prepare"):
+      if atc_type.startswith(ATC_LEFT_TYPES):
+        want = BLINKER_LEFT
+      elif atc_type.startswith(ATC_RIGHT_TYPES):
+        want = BLINKER_RIGHT
 
     if want == BLINKER_NONE:
       self.away_t += dt
@@ -290,14 +296,16 @@ class AtcLaneGuide:
     self.away_t = 0.
 
     if left_blinker or right_blinker:
-      self.prompted = True      # the driver is on it (or chose otherwise)
+      if self.prompt != BLINKER_NONE or 0. < dist_m <= self.trigger_m(v_ego):
+        self.prompted = True    # the driver is on it (or chose otherwise)
       self.prompt = BLINKER_NONE
       return self.prompt
 
     if not self.prompted:
-      self.prompted = True
-      self.t = 0.
-      self.prompt = want
+      if 0. < dist_m <= self.trigger_m(v_ego):
+        self.prompted = True
+        self.t = 0.
+        self.prompt = want
     elif self.prompt != BLINKER_NONE:
       self.t += dt
       if self.t >= self.PROMPT_S:

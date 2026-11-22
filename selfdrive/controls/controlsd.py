@@ -1237,13 +1237,14 @@ class Controls:
 
         # Navigation (ATC) lane changes are the driver's: the car never moves
         # across for them (desire_helper.py). AtcLaneGuide tells the driver once
-        # per instruction ("좌측/우측 차선으로 이동하세요", one chime); stepped on
-        # modelV2 frames for its 20 Hz timers.
+        # per instruction, just before the turn or fork point ("좌측/우측 차선으로
+        # 이동하세요", one chime); stepped on modelV2 frames for its 20 Hz timers.
         rls = get_road_speed_limiter().roadLimitSpeed
         atc_type = str(rls.atcType) if rls is not None else ""
         if self.sm.updated['modelV2']:
             self.atc_lane_prompt = self.atc_lane_guide.update(
-                atc_type, CS.leftBlinker, CS.rightBlinker)
+                atc_type, float(rls.xDistToTurn) if rls is not None else 0., CS.vEgo,
+                CS.leftBlinker, CS.rightBlinker)
         if self.atc_lane_prompt == BLINKER_LEFT:
             self.events.add(EventName.atcBlinkerLeft)
         elif self.atc_lane_prompt == BLINKER_RIGHT:
