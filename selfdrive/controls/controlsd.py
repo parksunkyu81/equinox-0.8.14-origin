@@ -15,7 +15,7 @@ from selfdrive.swaglog import cloudlog
 from selfdrive.boardd.boardd import can_list_to_can_capnp
 from selfdrive.car.car_helpers import get_car, get_startup_event, get_one_can
 from selfdrive.controls.lib.lane_planner import CAMERA_OFFSET
-from selfdrive.controls.lib.atc_desire import AtcBlinkerPrompt, BLINKER_NONE, BLINKER_LEFT, BLINKER_RIGHT
+from selfdrive.controls.lib.atc_desire import AtcBlinkerPrompt, BLINKER_NONE
 from selfdrive.controls.lib.drive_helpers import update_v_cruise, initialize_v_cruise
 from selfdrive.controls.lib.drive_helpers import get_lag_adjusted_curvature
 from selfdrive.controls.lib.straight_wobble_filter import StraightWobbleFilter
@@ -1241,10 +1241,9 @@ class Controls:
             str(rls.atcType) if rls is not None else "",
             CS.leftBlinker, CS.rightBlinker, CS.steeringPressed, CS.steeringTorque,
             CS.vEgo)
-        if atc_prompt == BLINKER_LEFT:
-            self.events.add(EventName.atcBlinkerLeft)
-        elif atc_prompt == BLINKER_RIGHT:
-            self.events.add(EventName.atcBlinkerRight)
+        # 2026-11-22, on request: the atcBlinkerLeft/Right alert ("좌측/우측
+        # 깜빡이를 켜주세요") is no longer raised. The prompt state still runs and
+        # still keeps the pre-lane-change line off while navigation asks.
 
         # Handle lane change
         if atc_prompt != BLINKER_NONE:
@@ -1255,7 +1254,7 @@ class Controls:
                     (CS.rightBlindspot and direction == LaneChangeDirection.right):
                 self.events.add(EventName.laneChangeBlocked)
             elif self.sm['lateralPlan'].autoLaneChangeEnabled and self.sm['lateralPlan'].autoLaneChangeTimer > 0:
-                self.events.add(EventName.autoLaneChange)
+                pass  # 2026-11-22, on request: no autoLaneChange countdown alert
             else:
                 if direction == LaneChangeDirection.left:
                     self.events.add(EventName.preLaneChangeLeft)
