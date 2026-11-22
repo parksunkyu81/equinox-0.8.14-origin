@@ -2048,6 +2048,15 @@ struct RoadLimitSpeed {
     # 6 TG, 7 U-turn, 8 arrive, -1 none) and the counted-down distance [m].
     xTurnInfo @15 :Int16;
     xDistToTurn @16 :Float32;
+    # Turn-info box on the onroad screen (carrot hud_renderer port), from
+    # TmapNda's apilot: guidance text, metres / seconds left to the
+    # destination (0 = no route), the first SDI item described in Korean
+    # (carrot _get_sdi_descr) and the road name when the phone sends one.
+    tbtMainText @17 :Text;
+    goPosDist @18 :Int32;
+    goPosTime @19 :Int32;
+    sdiDescr @20 :Text;
+    posRoadName @21 :Text;
 
     struct RestArea {
       image @0 :Text;

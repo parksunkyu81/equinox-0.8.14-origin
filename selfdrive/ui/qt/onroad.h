@@ -90,6 +90,14 @@ protected:
   QPixmap ic_lkas;
   QPixmap ic_wheel;
 
+  // AutoTurnControl turn-info box (carrot hud_renderer _draw_turn_info_hud).
+  QPixmap ic_nav_turn_l;
+  QPixmap ic_nav_turn_r;
+  QPixmap ic_nav_fork_l;
+  QPixmap ic_nav_fork_r;
+  QPixmap ic_nav_uturn;
+  void drawTurnInfo(QPainter &p);
+
   void drawMaxSpeed(QPainter &p);
   void drawSpeed(QPainter &p);
   void drawBottomIcons(QPainter &p);

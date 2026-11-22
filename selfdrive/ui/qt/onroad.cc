@@ -377,6 +377,21 @@ void NvgWindow::initializeGL() {
     ic_wheel = QPixmap("../assets/img_chffr_wheel.png").scaled(wheel_icon_size, wheel_icon_size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
   }
 
+  // Turn-info box icons (the mapbox navigation set already in assets/).
+  // carrot draws turn_l / turn_r / lane_change_l / lane_change_r / turn_u.
+  {
+    constexpr int TURN_ICON = 140;
+    auto nav = [](const char *name) {
+      return QPixmap(QString("../assets/navigation/%1.png").arg(name))
+               .scaled(TURN_ICON, TURN_ICON, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    };
+    ic_nav_turn_l = nav("direction_turn_left");
+    ic_nav_turn_r = nav("direction_turn_right");
+    ic_nav_fork_l = nav("direction_fork_slight_left");
+    ic_nav_fork_r = nav("direction_fork_slight_right");
+    ic_nav_uturn = nav("direction_turn_uturn");
+  }
+
 }
 
 void NvgWindow::updateFrameMat(int w, int h) {
@@ -761,6 +776,7 @@ void NvgWindow::drawHud(QPainter &p) {
   drawSpeedLimit(p);
   drawThermal(p);
   drawTurnSignals(p);
+  drawTurnInfo(p);
   //drawGpsStatus(p);
 
   if(s->show_debug && width() > 1200)
@@ -3037,6 +3053,134 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
     p.setPen(color);
     p.drawText(QRect(band_x, cy + ch + 30, band_w, 60), Qt::AlignCenter, label);
   }
+
+  p.restore();
+}
+
+// Text with a dark drop shadow (carrot draws its HUD text with a border and a
+// shadow). y is the baseline; centre = true centres it on x.
+static void drawShadowText(QPainter &p, qreal x, qreal y, const QString &text,
+                           const QColor &color, bool centre) {
+  if (text.isEmpty()) return;
+  const qreal w = centre ? QFontMetricsF(p.font()).horizontalAdvance(text) : 0.;
+  const QPointF pos(x - w / 2., y);
+  p.setPen(QColor(0, 0, 0, 200));
+  p.drawText(pos + QPointF(3, 3), text);
+  p.setPen(color);
+  p.drawText(pos, text);
+}
+
+// AutoTurnControl turn-info box: carrot hud_renderer.py _draw_turn_info_hud()
+// (carrot-wip 77dd3335), same 790 x 300 box, contents and offsets. Placed at
+// the top right instead of carrot's bottom right, which here holds the icon
+// rows and the thermal / status column; the right blinker band sits at mid
+// height. Data: road_speed_limiter.py -> roadLimitSpeed.
+// Differences: the ATC backdrop is drawn only while ATC acts ("none" is
+// truthy in carrot and paints it solid green even with ATC off), and a
+// cancelled fork is grey. Shown only while a route is being guided, like carrot.
+void NvgWindow::drawTurnInfo(QPainter &p) {
+  const SubMaster &sm = *(uiState()->sm);
+  if (sm.rcv_frame("roadLimitSpeed") == 0 ||
+      nanos_since_boot() - sm.rcv_time("roadLimitSpeed") > 1000000000ULL) {
+    return;   // road_speed_limiter not publishing: never show a frozen box
+  }
+  const auto nda = sm["roadLimitSpeed"].getRoadLimitSpeed();
+  const int go_dist = nda.getGoPosDist();
+  const int go_time = nda.getGoPosTime();
+  if (!(go_dist > 0 && go_time > 0)) return;
+
+  constexpr int BOX_H = 300;
+  const int box_right = width() - 255;          // clear of the thermal / status column
+  const int box_left_min = width() / 2 + 120;   // clear of the speed panel
+  const int box_w = std::min(790, box_right - box_left_min);
+  if (box_w < 660) return;                      // carrot skips narrow screens too
+  const int tbt_x = box_right - box_w;
+  const int box_y = 30;
+  const int tbt_y = box_y + 60;                 // carrot: box top = tbt_y - 60
+
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing);
+  p.setOpacity(1.0);
+
+  p.setPen(QPen(QColor(255, 255, 255), 2));
+  p.setBrush(QColor(0, 0, 0, 120));
+  p.drawRoundedRect(QRectF(tbt_x, box_y, box_w, BOX_H), 30, 30);
+
+  const QColor white(255, 255, 255);
+
+  // guidance text
+  configFont(p, "Open Sans", 40, "Bold");
+  drawShadowText(p, tbt_x + 20, tbt_y - 22, QString::fromUtf8(nda.getTbtMainText().cStr()), white, false);
+
+  // turn icon, ATC state backdrop, distance
+  const int turn_info = nda.getXTurnInfo();
+  if (turn_info > 0) {
+    const int bx = tbt_x + 100;
+    const int by = tbt_y + 85;
+
+    const QString atc = QString::fromUtf8(nda.getAtcType().cStr());
+    if (!atc.isEmpty() && !atc.startsWith("none")) {
+      QColor fill(0, 228, 48);                                       // acting
+      if (atc.contains("prepare")) fill = QColor(0, 255, 0, 100);    // not yet in range
+      else if (atc.contains("canceled")) fill = QColor(150, 150, 150, 170);
+      p.setPen(QPen(QColor(0, 0, 0), 1));
+      p.setBrush(fill);
+      p.drawRoundedRect(QRectF(bx - 80, by - 90, 160, 230), 15, 15);
+    }
+
+    const QPixmap *icon = nullptr;
+    switch (turn_info) {
+      case 1: icon = &ic_nav_turn_l; break;
+      case 2: icon = &ic_nav_turn_r; break;
+      case 3: icon = &ic_nav_fork_l; break;
+      case 4: icon = &ic_nav_fork_r; break;
+      case 7: icon = &ic_nav_uturn; break;
+      default: break;
+    }
+    if (icon != nullptr && !icon->isNull()) {
+      p.drawPixmap(bx - icon->width() / 2, by - icon->height() / 2, *icon);
+    } else {
+      const QString t = turn_info == 6 ? QString("TG")
+                      : turn_info == 8 ? QString("목적지")
+                      : QString("감속:%1").arg(turn_info);
+      configFont(p, "Open Sans", 35, "Bold");
+      drawShadowText(p, bx, by + 12, t, white, true);
+    }
+
+    const int dist = (int)nda.getXDistToTurn();
+    if (dist > 0) {
+      const QString d = dist < 1000 ? QString("%1 m").arg(dist)
+                                    : QString("%1 km").arg(dist / 1000.0, 0, 'f', 1);
+      configFont(p, "Open Sans", 40, "Bold");
+      drawShadowText(p, bx, by + 110, d, white, true);
+    }
+  }
+
+  // camera description (green tag) or road name
+  const QString sdi = QString::fromUtf8(nda.getSdiDescr().cStr());
+  const QString road = QString::fromUtf8(nda.getPosRoadName().cStr());
+  configFont(p, "Open Sans", 40, "Bold");
+  const int label_x = tbt_x + 200;
+  const int label_base = tbt_y + 192;
+  if (!sdi.isEmpty()) {
+    const QFontMetrics fm(p.font());
+    const int tw = std::min(fm.horizontalAdvance(sdi), box_w - 220);
+    const int th = fm.height();
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(0, 228, 48));
+    p.drawRoundedRect(QRectF(label_x - 10, label_base - fm.ascent() - 4, tw + 20, th + 8), 10, 10);
+    drawShadowText(p, label_x, label_base, fm.elidedText(sdi, Qt::ElideRight, tw), white, false);
+  } else if (!road.isEmpty()) {
+    drawShadowText(p, label_x, label_base, road, white, false);
+  }
+
+  // arrival time and distance left
+  const QDateTime eta = QDateTime::currentDateTimeUtc().toOffsetFromUtc(9 * 3600).addSecs(go_time);
+  configFont(p, "Open Sans", 50, "Bold");
+  drawShadowText(p, tbt_x + 190, tbt_y + 70,
+                 QString("도착: %1분(%2)").arg(go_time / 60.0, 0, 'f', 1).arg(eta.toString("HH:mm")),
+                 white, false);
+  drawShadowText(p, tbt_x + 310, tbt_y + 120, QString("%1km").arg(go_dist / 1000.0, 0, 'f', 1), white, false);
 
   p.restore();
 }

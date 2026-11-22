@@ -422,6 +422,71 @@ LOOP_TIMEOUT_S = 0.05
 SDP_INTERVAL_S = 1.0
 
 
+# carrot_serv.py CarrotServ._get_sdi_descr() Korean table (nSdiType -> text).
+SDI_DESCR_KO = {
+  75: "후면 과속 단속", 76: "후면 신호·과속 단속",
+  0: "신호과속", 1: "과속 (고정식)", 2: "구간단속 시작", 3: "구간단속 끝", 4: "구간단속중",
+  5: "꼬리물기단속카메라", 6: "신호 단속", 7: "과속 (이동식)", 8: "고정식 과속위험 구간(박스형)",
+  9: "버스전용차로구간", 10: "가변 차로 단속", 11: "갓길 감시 지점", 12: "끼어들기 금지",
+  13: "교통정보 수집지점", 14: "방범용cctv", 15: "과적차량 위험구간", 16: "적재 불량 단속",
+  17: "주차단속 지점", 18: "일방통행도로", 19: "철길 건널목", 20: "어린이 보호구역(스쿨존 시작 구간)",
+  21: "어린이 보호구역(스쿨존 끝 구간)", 22: "과속방지턱", 23: "lpg충전소", 24: "터널 구간",
+  25: "휴게소", 26: "톨게이트", 27: "안개주의 지역", 28: "유해물질 지역", 29: "사고다발",
+  30: "급커브지역", 31: "급커브구간1", 32: "급경사구간", 33: "야생동물 교통사고 잦은 구간",
+  34: "우측시야불량지점", 35: "시야불량지점", 36: "좌측시야불량지점", 37: "신호위반다발구간",
+  38: "과속운행다발구간", 39: "교통혼잡지역", 40: "방향별차로선택지점", 41: "무단횡단사고다발지점",
+  42: "갓길 사고 다발 지점", 43: "과속 사발 다발 지점", 44: "졸음 사고 다발 지점", 45: "사고다발지점",
+  46: "보행자 사고다발지점", 47: "차량도난사고 상습발생지점", 48: "낙석주의지역", 49: "결빙주의지역",
+  50: "병목지점", 51: "합류 도로", 52: "추락주의지역", 53: "지하차도 구간",
+  54: "주택밀집지역(교통진정지역)", 55: "인터체인지", 56: "분기점", 57: "휴게소(lpg충전가능)",
+  58: "교량", 59: "제동장치사고다발지점", 60: "중앙선침범사고다발지점", 61: "통행위반사고다발지점",
+  62: "목적지 건너편 안내", 63: "졸음 쉼터 안내", 64: "노후경유차단속", 65: "터널내 차로변경단속",
+  66: "",
+}
+
+
+def _apilot_int(apilot, key, default=0):
+  try:
+    return int(apilot.get(key, default))
+  except (TypeError, ValueError):
+    return default
+
+
+def _apilot_text(apilot, key):
+  v = apilot.get(key)
+  if v is None:
+    return ""
+  v = str(v)
+  return "" if v == "null" else v[:100]
+
+
+class NaviInfo:
+  """What the onroad turn-info box shows besides the turn itself (carrot carrotMan fields)."""
+
+  def __init__(self):
+    self.clear()
+
+  def clear(self):
+    self.tbt_main_text = ""
+    self.go_pos_dist = 0
+    self.go_pos_time = 0
+    self.sdi_descr = ""
+    self.pos_road_name = ""
+
+  def update(self, apilot):
+    # carrot reads these in the same GuidePoint block as the TBT fields.
+    if not isinstance(apilot, dict) or "nRoadLimitSpeed" not in apilot:
+      return
+    self.tbt_main_text = _apilot_text(apilot, "szTBTMainText")
+    self.go_pos_dist = _apilot_int(apilot, "nGoPosDist")
+    self.go_pos_time = _apilot_int(apilot, "nGoPosTime")
+    self.pos_road_name = _apilot_text(apilot, "szPosRoadName")
+    sdi_type = _apilot_int(apilot, "nSdiType", -1)
+    sdi_dist = _apilot_int(apilot, "nSdiDist")
+    # carrot: _get_sdi_descr(-1 if nSdiType == 0 and nSdiDist == 0 else nSdiType)
+    self.sdi_descr = SDI_DESCR_KO.get(-1 if sdi_type == 0 and sdi_dist == 0 else sdi_type, "")
+
+
 class AtcRunner:
   """Feeds AutoTurnControl from TmapNda packets and carState, and logs it.
 
@@ -432,8 +497,9 @@ class AtcRunner:
   """
 
   def __init__(self, params=None, log_path=ATC_LOG_PATH):
-    from selfdrive.controls.lib.auto_turn_control import AutoTurnControl
+    from selfdrive.controls.lib.auto_turn_control import AutoTurnControl, STALE_S
     self.atc = AutoTurnControl()
+    self.atc_stale_s = STALE_S
     self.params = params if params is not None else Params()
     self.carstate_sock = messaging.sub_sock('carState', conflate=True)
     self.v_ego = 0.
@@ -446,6 +512,7 @@ class AtcRunner:
     self.log_t = -1e9
     self.prev_key = None
     self.cap_kph = 250.
+    self.navi = NaviInfo()
 
   def _read_params(self, now):
     if now - self.params_t < ATC_PARAMS_INTERVAL_S:
@@ -486,6 +553,9 @@ class AtcRunner:
     self._read_carstate(now)
     if apilot is not None:
       self.atc.update_tbt(apilot, now)
+      self.navi.update(apilot)
+    if now - self.atc.last_packet_t > self.atc_stale_s:
+      self.navi.clear()
     dt = 0. if self.last_t is None else clip(now - self.last_t, 0., 0.5)
     self.last_t = now
     self.cap_kph = self.atc.update(now, self.v_ego, self.v_ego * dt,
@@ -501,6 +571,12 @@ class AtcRunner:
     msg.atcTargetDist = target_dist
     msg.xTurnInfo = int(atc.xTurnInfo)
     msg.xDistToTurn = float(atc.xDistToTurn)
+    navi = self.navi
+    msg.tbtMainText = navi.tbt_main_text
+    msg.goPosDist = int(clip(navi.go_pos_dist, 0, 2**31 - 1))
+    msg.goPosTime = int(clip(navi.go_pos_time, 0, 2**31 - 1))
+    msg.sdiDescr = navi.sdi_descr
+    msg.posRoadName = navi.pos_road_name
 
   def _log(self, now):
     atc = self.atc
