@@ -3353,8 +3353,12 @@ void NvgWindow::drawThermal(QPainter &p) {
   // The panel sits directly above the brake / ACC status block, which itself
   // stands on the turn-info box (rightColumnLayout). Its background ends at
   // thermal_bottom. It used to sit at the bottom with the block on top of it.
+  // Floor 10, not 80: the HUD is 1040 tall inside the 20 px status border, and
+  // at 80 the panel's background ran ~10 px down into the status discs below
+  // (bottom 378 vs their top 368). The clock it once kept clear of is on the
+  // left. Now the background spans about 37..349.
   const int y_calc = rightColumnLayout(width(), height()).thermal_bottom - pad - total_h;
-  const int y = y_calc > 80 ? y_calc : 80;
+  const int y = y_calc > 10 ? y_calc : 10;
 
   // Publish the panel's box: the status block takes its right edge from it
   // (see the members' comment in onroad.h).
