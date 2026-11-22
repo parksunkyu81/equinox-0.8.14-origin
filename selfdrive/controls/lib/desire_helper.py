@@ -1,3 +1,5 @@
+import math
+
 from cereal import log
 from common.realtime import DT_MDL
 from common.conversions import Conversions as CV
@@ -44,6 +46,23 @@ DESIRES = {
 TURN_LEFT, TURN_RIGHT, TURN_NONE = Desire.turnLeft, Desire.turnRight, Desire.none
 
 ATC_LANE_TYPES = ("fork left", "fork right", "atc left", "atc right")
+
+# Turn latch. Once a turn desire starts it stays on until the car has turned.
+# carrot dropped it when the wheel passed 80 deg and the model's yaw rate was
+# falling, i.e. at the apex, and the navigation moves on to the next
+# instruction a few metres past the turn point, which also ended it: replaying
+# 2026-11-22--01-11-43 (12 intersection turns) the desire lasted ~2 s per turn.
+# Heading is integrated from the wheel angle (Equinox geometry; carState.yawRate
+# reads 0 for whole segments on this car).
+TURN_LATCH_WHEELBASE = 2.72
+TURN_LATCH_STEER_RATIO = 16.8
+TURN_DONE_HEADING_DEG = 45.   # turned at least this much ...
+TURN_DONE_WHEEL_DEG = 45.     # ... and the wheel is unwinding below this
+TURN_DONE_MAX_HEADING_DEG = 100.  # or turned this much, whatever the wheel
+TURN_ABORT_DIST_M = 120.      # still not turned this far after the start (approach <= 60 m + arc)
+TURN_ABORT_WRONG_DEG = 30.    # turned this much the other way
+TURN_ABORT_SPEED = 40 * CV.KPH_TO_MS
+TURN_REARM_S = 10.            # after a finished turn, no new turn desire for this long
 
 
 class DesireHelper:
@@ -102,6 +121,11 @@ class DesireHelper:
     self.atc_owner = False          # the current maneuver belongs to the ATC path
     self.atc_turn_confirmed = False  # driver confirmed this ATC turn (blinker or nudge)
     self.atc_blinker = BLINKER_NONE  # side ATC asks for this frame (UI / log)
+    # turn latch (see TURN_DONE_*)
+    self.turn_latched = TURN_NONE
+    self.turn_heading_deg = 0.      # turned toward the latched side so far
+    self.turn_dist_m = 0.
+    self.turn_end_reason = ""
     self.sides_valid = False
 
   # ─────────────────────────────────────────────
@@ -136,6 +160,8 @@ class DesireHelper:
         self.prev_one_blinker = False
       self.prev_desire_enabled = False
       self._update_legacy(carstate, active, lane_change_prob, one_blinker)
+
+    self._apply_turn_latch(carstate, active, driver_st)
 
     if self.sides_valid:
       # carrot commits every frame: lane_change_available_released is an edge.
@@ -281,20 +307,65 @@ class DesireHelper:
     try:
       desire_state = modeldata.meta.desireState
       self.turn_desire_state = len(desire_state) > 2 and (desire_state[1] + desire_state[2]) > 0.1
-      z = modeldata.orientationRate.z
-      if len(z) > 15:
-        orientation_rate = abs(z[5])
-        orientation_rate_future = abs(z[15])
-      else:
-        orientation_rate = orientation_rate_future = 0.
     except (AttributeError, IndexError, TypeError):
       self.turn_desire_state = False
-      orientation_rate = orientation_rate_future = 0.
 
-    if self.maneuver_type == "turn" and abs(carstate.steeringAngleDeg) > 80 and orientation_rate_future < orientation_rate:
-      self.turn_disable_count = int(10.0 / DT_MDL)
-    else:
-      self.turn_disable_count = max(0, self.turn_disable_count - 1)
+    # carrot set turn_disable_count here when the wheel passed 80 deg with the
+    # model's yaw rate falling -- the apex, mid-turn. The turn latch now ends
+    # the turn and sets it (_apply_turn_latch).
+    self.turn_disable_count = max(0, self.turn_disable_count - 1)
+
+  def _apply_turn_latch(self, carstate, active, driver_st):
+    """Hold a started turn desire until the car has turned (TURN_DONE_*)."""
+    if self.turn_latched == TURN_NONE:
+      if self.turn_direction == TURN_NONE:
+        return
+      self.turn_latched = self.turn_direction
+      self.turn_heading_deg = 0.
+      self.turn_dist_m = 0.
+      self.turn_end_reason = ""
+
+    left = self.turn_latched == TURN_LEFT
+    v = max(0., carstate.vEgo)
+    k = math.tan(math.radians(carstate.steeringAngleDeg) / TURN_LATCH_STEER_RATIO) / TURN_LATCH_WHEELBASE
+    self.turn_heading_deg += math.degrees(k * v * DT_MDL) * (1. if left else -1.)
+    self.turn_dist_m += v * DT_MDL
+
+    opposite_blinker = driver_st == (BLINKER_RIGHT if left else BLINKER_LEFT)
+    opposite_press = carstate.steeringPressed and (
+      carstate.steeringTorque < 0 if left else carstate.steeringTorque > 0)
+    wheel_toward = carstate.steeringAngleDeg * (1. if left else -1.)
+
+    reason = ""
+    if self.turn_heading_deg >= TURN_DONE_MAX_HEADING_DEG or (
+        self.turn_heading_deg >= TURN_DONE_HEADING_DEG and wheel_toward < TURN_DONE_WHEEL_DEG):
+      reason = "done"
+    elif not active:
+      reason = "inactive"
+    elif opposite_blinker or opposite_press:
+      reason = "cancel"
+    elif v > TURN_ABORT_SPEED:
+      reason = "speed"
+    elif self.turn_heading_deg <= -TURN_ABORT_WRONG_DEG:
+      reason = "wrong way"
+    elif self.turn_dist_m > TURN_ABORT_DIST_M and self.turn_heading_deg < TURN_DONE_HEADING_DEG:
+      reason = "distance"
+
+    if reason:
+      self.turn_end_reason = reason
+      self.turn_latched = TURN_NONE
+      self.turn_direction = TURN_NONE
+      self.lane_change_direction = LaneChangeDirection.none
+      if reason == "done":
+        self.turn_disable_count = int(TURN_REARM_S / DT_MDL)
+      return
+
+    # still turning: keep the desire whatever the navigation or the FSM say
+    self.turn_direction = self.turn_latched
+    self.maneuver_type = "turn"
+    self.lane_change_state = LaneChangeState.off
+    self.lane_change_direction = LaneChangeDirection.left if left else LaneChangeDirection.right
+    self.atc_owner = True
 
   def _get_selected_side(self, blinker_state):
     return self.left if blinker_state == BLINKER_LEFT else self.right
