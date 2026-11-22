@@ -3089,13 +3089,24 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
   const int go_time = nda.getGoPosTime();
   if (!(go_dist > 0 && go_time > 0)) return;
 
+  // On the EON's 1920 x 1080 the top band is empty apart from the clock at
+  // the top left: the speed panel, the limit board and both tile blocks sit
+  // in the lower half. So the box hangs in the top-right corner, right edge
+  // flush with the status block / thermal panel (x 1899), bottom kept clear of
+  // that block's top (y 402 at the current sizes), which drawBottomIcons
+  // derives from the thermal panel the same way.
+  constexpr int BOX_W = 790;
   constexpr int BOX_H = 300;
-  const int box_right = width() - 255;          // clear of the thermal / status column
-  const int box_left_min = width() / 2 + 120;   // clear of the speed panel
-  const int box_w = std::min(790, box_right - box_left_min);
+  constexpr int STATUS_SD = 140, STATUS_GAP_Y = 12, STATUS_PANEL_GAP = 19;   // drawBottomIcons
+  const int box_right = thermal_panel_right_ > 0 ? thermal_panel_right_ : width() - 21;
+  const int box_w = std::min(BOX_W, box_right - 40);
   if (box_w < 660) return;                      // carrot skips narrow screens too
   const int tbt_x = box_right - box_w;
-  const int box_y = 30;
+  int box_y = 80;                               // below the clock's line (baseline 55)
+  if (thermal_panel_top_ > 0) {
+    const int status_top = thermal_panel_top_ - STATUS_PANEL_GAP - 2 * STATUS_SD - STATUS_GAP_Y;
+    box_y = std::max(10, std::min(box_y, status_top - 20 - BOX_H));
+  }
   const int tbt_y = box_y + 60;                 // carrot: box top = tbt_y - 60
 
   p.save();
