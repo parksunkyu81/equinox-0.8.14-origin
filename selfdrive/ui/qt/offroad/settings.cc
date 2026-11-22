@@ -804,6 +804,14 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                             "../assets/offroad/icon_road.png",
                                             this));
 
+  // modeld, plannerd and controlsd read it once when they start, i.e. at the
+  // start of a drive, so a change takes effect from the next drive.
+  toggles.append(new ParamControl("WideOptechLateral",
+                                            "59° 넓은 화면 + OPTECH 경로 계획",
+                                            "모델에 59° 넓은 화면을 함께 넣고, 경로 계획을 OPTECH(0.9) 방식으로 합니다. 직선 흔들림 보정과 30 km/h 이하 저속 보정이 함께 켜집니다. 끄면 예전 방식(좁은 화면 + 기존 경로 계획)으로 돌아갑니다. 다음 주행부터 적용됩니다.",
+                                            "../assets/offroad/icon_road.png",
+                                            this));
+
   /*toggles.append(new ParamControl("E2ELong",
                                           "Enable E2E Long",
                                           "Activate E2E Long. It may work unexpectedly. Be careful.",
