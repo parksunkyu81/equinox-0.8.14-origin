@@ -22,6 +22,24 @@ LANE_CHANGE_SPEED_MIN = 30 * CV.KPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
 ATC_LANE_CHANGE_SPEED_MIN = LANE_CHANGE_SPEED_MIN
 
+# Driver-blinker turn (no navigation). The driver's blinker alone, between 5
+# and 30 km/h, sends a turn desire once the road opens on that side: no lane and
+# no road edge there, open space beyond 4 m, for 0.25 s. carrot's
+# classify_maneuver_type was too loose without a navigation instruction: in the
+# outermost lane "no next lane" scores on its own, and replaying 2026-11-22
+# (21 driver blinker episodes) it fired in 7 that were not turns (a lane change
+# at 19-30 km/h, creeping in a queue); this gate fired in none of them and in 7
+# of the 9 real turns (5 of 6 right turns before the wheel moved; left turns face
+# the oncoming lanes, so their side rarely opens). Starts only while rolling, so
+# a blinker held at a red light does not spend the model's one-frame desire
+# pulse before the car moves, and not once the wheel is already well into the turn.
+DRIVER_TURN_SPEED_MIN = 5 * CV.KPH_TO_MS
+DRIVER_TURN_SPEED_MAX = LANE_CHANGE_SPEED_MIN
+DRIVER_TURN_EDGE_FAR_M = 4.
+DRIVER_TURN_OPEN_FRAMES = 5
+DRIVER_TURN_MAX_WHEEL_DEG = 90.
+DRIVER_TURN_BLINKER_OFF_S = 0.5   # blinker back off (lever self-cancel): turn over
+
 DESIRES = {
   LaneChangeDirection.none: {
     LaneChangeState.off: Desire.none,
@@ -70,7 +88,9 @@ class DesireHelper:
 
   Two paths share one lane-change state:
     - the driver's blinker alone: the original 0.8.14 logic (_update_legacy),
-      unchanged;
+      unchanged, for lane changes from 30 km/h; below that, a turn desire when
+      the road opens on that side (_update_driver_turn, DRIVER_TURN_*), held by
+      the turn latch until the turn is done or the blinker goes off;
     - an AutoTurnControl request (navigation turn / fork / pre-turn lane
       change), alone or with the driver's blinker on the same side: carrot's
       DesireHelper logic (_update_atc), ported from carrotpilot carrot-wip
@@ -129,6 +149,10 @@ class DesireHelper:
     self.turn_dist_m = 0.
     self.turn_end_reason = ""
     self.sides_valid = False
+    # driver-blinker turn (see DRIVER_TURN_*)
+    self.turn_by_driver = False     # the latched turn came from the driver's blinker alone
+    self.driver_turn_open = 0       # frames the blinker side has read as open road
+    self.driver_turn_off_t = 0.     # blinker off this long during a driver turn
 
   # ─────────────────────────────────────────────
   # entry
@@ -148,13 +172,16 @@ class DesireHelper:
     atc_st, atc_enabled = self._update_atc_blinker(atc_type, driver_st)
     self.atc_blinker = atc_st
 
-    use_atc = atc_st != BLINKER_NONE or (self.atc_owner and driver_st == BLINKER_NONE)
+    # A driver turn keeps the legacy path until it ends; ATC waits.
+    use_atc = not self.turn_by_driver and (
+      atc_st != BLINKER_NONE or (self.atc_owner and driver_st == BLINKER_NONE))
     if use_atc:
+      self.driver_turn_open = 0
       self._update_atc(carstate, active, lane_change_prob, driver_st, atc_st, atc_enabled)
       self.atc_owner = (self.lane_change_state != LaneChangeState.off or
                         self.turn_direction != TURN_NONE)
     else:
-      if self.atc_owner:
+      if self.atc_owner and not self.turn_by_driver:
         # Driver took over with the other blinker (or ATC ended mid-way under a
         # driver blinker): drop the ATC maneuver and let the legacy path start fresh.
         self._reset_maneuver()
@@ -163,6 +190,7 @@ class DesireHelper:
       self.prev_desire_enabled = False
       self.prev_driver_enabled = False
       self._update_legacy(carstate, active, lane_change_prob, one_blinker)
+      self._update_driver_turn(carstate, active, driver_st)
 
     self._apply_turn_latch(carstate, active, driver_st)
 
@@ -172,6 +200,26 @@ class DesireHelper:
       self.right.commit_last()
     self.prev_one_blinker = one_blinker
     self._finish_desire()
+
+  def _update_driver_turn(self, carstate, active, driver_st):
+    """Start a turn desire from the driver's blinker alone (DRIVER_TURN_*)."""
+    if self.turn_by_driver or self.turn_latched != TURN_NONE:
+      return
+    left = driver_st == BLINKER_LEFT
+    side = self.left if left else (self.right if driver_st == BLINKER_RIGHT else None)
+    open_now = (side is not None and active and self.lane_change_enabled and self.sides_valid and
+                self.lane_change_state == LaneChangeState.off and self.turn_disable_count == 0 and
+                DRIVER_TURN_SPEED_MIN <= carstate.vEgo < DRIVER_TURN_SPEED_MAX and
+                not side.lane_available and not side.edge_available and
+                side.dist_to_edge_far > DRIVER_TURN_EDGE_FAR_M)
+    self.driver_turn_open = self.driver_turn_open + 1 if open_now else 0
+    wheel_toward = carstate.steeringAngleDeg * (1. if left else -1.)
+    if self.driver_turn_open >= DRIVER_TURN_OPEN_FRAMES and wheel_toward < DRIVER_TURN_MAX_WHEEL_DEG:
+      self.turn_direction = TURN_LEFT if left else TURN_RIGHT
+      self.lane_change_direction = LaneChangeDirection.left if left else LaneChangeDirection.right
+      self.turn_by_driver = True
+      self.driver_turn_off_t = 0.
+      self.driver_turn_open = 0
 
   def _reset_maneuver(self):
     self.lane_change_state = LaneChangeState.off
@@ -338,11 +386,14 @@ class DesireHelper:
     opposite_press = carstate.steeringPressed and (
       carstate.steeringTorque < 0 if left else carstate.steeringTorque > 0)
     wheel_toward = carstate.steeringAngleDeg * (1. if left else -1.)
+    self.driver_turn_off_t = self.driver_turn_off_t + DT_MDL if driver_st == BLINKER_NONE else 0.
 
     reason = ""
     if self.turn_heading_deg >= TURN_DONE_MAX_HEADING_DEG or (
         self.turn_heading_deg >= TURN_DONE_HEADING_DEG and wheel_toward < TURN_DONE_WHEEL_DEG):
       reason = "done"
+    elif self.turn_by_driver and self.driver_turn_off_t > DRIVER_TURN_BLINKER_OFF_S:
+      reason = "blinker off"
     elif not active:
       reason = "inactive"
     elif opposite_blinker or opposite_press:
@@ -361,6 +412,7 @@ class DesireHelper:
       self.lane_change_direction = LaneChangeDirection.none
       if reason == "done":
         self.turn_disable_count = int(TURN_REARM_S / DT_MDL)
+      self.turn_by_driver = False
       return
 
     # still turning: keep the desire whatever the navigation or the FSM say
@@ -368,7 +420,7 @@ class DesireHelper:
     self.maneuver_type = "turn"
     self.lane_change_state = LaneChangeState.off
     self.lane_change_direction = LaneChangeDirection.left if left else LaneChangeDirection.right
-    self.atc_owner = True
+    self.atc_owner = not self.turn_by_driver
 
   def _get_selected_side(self, blinker_state):
     return self.left if blinker_state == BLINKER_LEFT else self.right
