@@ -1239,7 +1239,8 @@ class Controls:
         rls = get_road_speed_limiter().roadLimitSpeed
         atc_prompt = self.atc_blinker_prompt.update(
             str(rls.atcType) if rls is not None else "",
-            CS.leftBlinker, CS.rightBlinker, CS.steeringPressed, CS.steeringTorque)
+            CS.leftBlinker, CS.rightBlinker, CS.steeringPressed, CS.steeringTorque,
+            CS.vEgo)
         if atc_prompt == BLINKER_LEFT:
             self.events.add(EventName.atcBlinkerLeft)
         elif atc_prompt == BLINKER_RIGHT:

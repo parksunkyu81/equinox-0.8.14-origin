@@ -253,15 +253,32 @@ class AtcBlinkerPrompt:
   blinker on. Mirrors the DesireHelper gates: the prompt stops once the driver
   signals that side or nudges the wheel toward it, and an opposite blinker or
   nudge cancels it until the instruction changes.
+
+  A lane-change request (fork / pre-turn lane) is only shown at
+  LANE_PROMPT_ON_KPH or more: below the lane-change minimum the car would not
+  move over, so the driver changes lanes by hand. It hides again under
+  LANE_PROMPT_OFF_KPH, so a speed hovering at 30 does not re-chime. Turns are
+  shown at any speed (the turn desire has no minimum).
   """
+  LANE_PROMPT_ON_KPH = 30.   # = desire_helper.LANE_CHANGE_SPEED_MIN
+  LANE_PROMPT_OFF_KPH = 28.
+
   def __init__(self):
     self.atc_type = ""
     self.done = False   # confirmed or cancelled for the current instruction
+    self.lane_speed_ok = False
 
-  def update(self, atc_type, left_blinker, right_blinker, steering_pressed, steering_torque):
+  def update(self, atc_type, left_blinker, right_blinker, steering_pressed, steering_torque, v_ego=None):
     if atc_type != self.atc_type:
       self.atc_type = atc_type
       self.done = False
+
+    if v_ego is not None:
+      kph = v_ego * 3.6
+      if kph >= self.LANE_PROMPT_ON_KPH:
+        self.lane_speed_ok = True
+      elif kph < self.LANE_PROMPT_OFF_KPH:
+        self.lane_speed_ok = False
 
     if atc_type in ATC_LEFT_TYPES:
       want = BLINKER_LEFT
@@ -276,4 +293,8 @@ class AtcBlinkerPrompt:
       if left_blinker or right_blinker or steering_torque != 0:
         self.done = True
 
-    return BLINKER_NONE if self.done else want
+    if self.done:
+      return BLINKER_NONE
+    if v_ego is not None and atc_type not in ("turn left", "turn right") and not self.lane_speed_ok:
+      return BLINKER_NONE
+    return want

@@ -118,7 +118,9 @@ class DesireHelper:
     self.auto_lane_change_enable = False
     self.next_lane_change = False
     self.prev_desire_enabled = False
-    self.atc_owner = False          # the current maneuver belongs to the ATC path
+    self.prev_atc_below_speed = False   # last ATC frame was under ATC_LANE_CHANGE_SPEED_MIN
+    self.prev_driver_enabled = False
+    self.atc_owner = False         # the current maneuver belongs to the ATC path
     self.atc_turn_confirmed = False  # driver confirmed this ATC turn (blinker or nudge)
     self.atc_blinker = BLINKER_NONE  # side ATC asks for this frame (UI / log)
     # turn latch (see TURN_DONE_*)
@@ -159,6 +161,7 @@ class DesireHelper:
         self.atc_owner = False
         self.prev_one_blinker = False
       self.prev_desire_enabled = False
+      self.prev_driver_enabled = False
       self._update_legacy(carstate, active, lane_change_prob, one_blinker)
 
     self._apply_turn_latch(carstate, active, driver_st)
@@ -505,7 +508,15 @@ class DesireHelper:
         self.turn_direction = TURN_NONE
 
         if self.lane_change_state == LaneChangeState.off:
-          if desire_enabled and not self.prev_desire_enabled and not below_lane_change_speed and side is not None:
+          # carrot enters only on the request's first frame. An ATC request stays
+          # on for the whole instruction, so once the car dipped under the
+          # minimum speed (the turn slowdown, or traffic) the change never came
+          # back, and re-blinking did not help either. Also enter when the
+          # speed comes back up or the driver puts the blinker on.
+          speed_back = self.prev_atc_below_speed and not below_lane_change_speed
+          driver_on = driver_enabled and not self.prev_driver_enabled
+          entry = not self.prev_desire_enabled or speed_back or driver_on
+          if desire_enabled and entry and not below_lane_change_speed and side is not None:
             self.lane_change_state = LaneChangeState.preLaneChange
             self.lane_change_ll_prob = 1.0
             # Not the last lane on that side: no automatic ATC lane change
@@ -588,6 +599,8 @@ class DesireHelper:
       self.lane_change_timer += DT_MDL
 
     self.prev_desire_enabled = desire_enabled
+    self.prev_atc_below_speed = below_lane_change_speed
+    self.prev_driver_enabled = driver_enabled
 
     # Opposite steering torque cancels
     steering_pressed_cancel = carstate.steeringPressed and (
