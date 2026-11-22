@@ -78,6 +78,12 @@ OnroadWindow::OnroadWindow(QWidget *parent) : QWidget(parent) {
   QStackedLayout *road_view_layout = new QStackedLayout;
   road_view_layout->setStackingMode(QStackedLayout::StackAll);
   nvg = new NvgWindow(VISION_STREAM_RGB_BACK, this);
+  // CameraViewWidget::mouseReleaseEvent accepts every release (emit clicked),
+  // so a tap on the HUD never reached OnroadWindow::mouseReleaseEvent: the
+  // tile taps and the sidebar toggle all died. The full-size recorder_widget
+  // used to sit on top and hide this until e24148e1 removed it. Taps go
+  // straight through to OnroadWindow now; its hit tests map into nvg itself.
+  nvg->setAttribute(Qt::WA_TransparentForMouseEvents, true);
   road_view_layout->addWidget(nvg);
 
   QWidget * split_wrapper = new QWidget;
