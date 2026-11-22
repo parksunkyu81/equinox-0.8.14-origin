@@ -29,11 +29,16 @@ class OnroadAlerts : public QWidget {
 public:
   OnroadAlerts(QWidget *parent = 0) : QWidget(parent) {};
   void updateAlert(const Alert &a, const QColor &color);
+  // Speed panel in this widget's coordinates; the caption is drawn above it.
+  void setCaptionAnchor(const QRect &r) {
+    if (r != anchor) { anchor = r; update(); }
+  }
 
 protected:
   void paintEvent(QPaintEvent*) override;
 
 private:
+  QRect anchor;
   QColor bg;
   Alert alert = {};
 };
@@ -58,6 +63,9 @@ public:
   // 페달 신호 tile as last drawn (this widget's coordinates; empty until the
   // first HUD frame). OnroadWindow parks the record button above it.
   QRect pedalSignalTileRect() const { return pedal_signal_tile_rect_; }
+  // Cruise / speed panel as last drawn (this widget's coordinates; empty until
+  // the first HUD frame). The alert caption sits right above it.
+  QRect speedPanelRect() const { return speed_panel_rect_; }
 
 protected:
   void paintGL() override;
@@ -132,6 +140,7 @@ protected:
   int speed_panel_top_ = 0;
   int speed_panel_cx_ = 0;
   int speed_panel_right_ = 0;
+  QRect speed_panel_rect_;
 
   // Where the NDA/HDA badge sits above the speed-limit board. drawSpeedLimit
   // publishes it before its own early return, so the pedal tiles stacked above

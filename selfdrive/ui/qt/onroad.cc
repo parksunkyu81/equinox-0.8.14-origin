@@ -144,6 +144,12 @@ void OnroadWindow::updateState(const UIState &s) {
   }
 
   placeRecorder();
+
+  const QRect panel = nvg->speedPanelRect();
+  if (!panel.isEmpty()) {
+    const QPoint tl = alerts->mapFromGlobal(nvg->mapToGlobal(panel.topLeft()));
+    alerts->setCaptionAnchor(QRect(tl, panel.size()));
+  }
 }
 
 // Record button centred over the 페달 신호 tile, its bottom the tile group's
@@ -321,9 +327,8 @@ void OnroadAlerts::paintEvent(QPaintEvent *event) {
   // 2026-11-23, on request: the small and mid bands covered the bottom 26-40%
   // of the screen -- the cruise box, wheel icon and bars -- so every
   // non-critical small/mid alert (lane change, ATC lane prompt, corner
-  // prompts, ...) is now a caption in the empty upper middle of the view,
-  // above the lane-change chevrons (y 462-578) and clear of the tile columns
-  // (x < 485 and x > 1615 on the 1880 x 1040 HUD). Critical alerts and FULL
+  // prompts, ...) is now a caption, placed right above the cruise/speed panel
+  // (see setCaptionAnchor). Critical alerts and FULL
   // takeovers keep the band: those must cover the screen.
   const bool caption = alert.status != cereal::ControlsState::AlertStatus::CRITICAL &&
                        alert.size != cereal::ControlsState::AlertSize::FULL;
@@ -344,8 +349,19 @@ void OnroadAlerts::paintEvent(QPaintEvent *event) {
     const int text_w = std::max(fm1.horizontalAdvance(t1), two ? fm2.horizontalAdvance(t2) : 0);
     const int box_w = std::min(max_w, text_w + 80);
     const int box_h = two ? 170 : 110;
-    const int box_y = two ? 190 : 230;
-    const QRect box((width() - box_w) / 2, box_y, box_w, box_h);
+    // 2026-11-23, on request: right above the cruise/speed panel, centred on
+    // it and kept on screen (the panel is near the left edge and narrower than
+    // the caption). Until the HUD has drawn the panel, the old upper-middle spot.
+    QRect box;
+    if (!anchor.isEmpty()) {
+      constexpr int GAP = 16;
+      constexpr int EDGE = 20;
+      const int bx = std::clamp(anchor.center().x() - box_w / 2, EDGE, std::max(EDGE, width() - EDGE - box_w));
+      const int by = std::max(EDGE, anchor.top() - GAP - box_h);
+      box = QRect(bx, by, box_w, box_h);
+    } else {
+      box = QRect((width() - box_w) / 2, two ? 190 : 230, box_w, box_h);
+    }
 
     const bool prompt = alert.status == cereal::ControlsState::AlertStatus::USER_PROMPT;
     const QColor accent = prompt ? QColor(0xDA, 0x6F, 0x25) : QColor(0x17, 0x86, 0x44);
@@ -2426,6 +2442,7 @@ void NvgWindow::drawSpeed(QPainter &p) {
   speed_panel_top_ = (int)panelBg.top();
   speed_panel_cx_ = (int)panelBg.center().x();
   speed_panel_right_ = (int)panelBg.right();
+  speed_panel_rect_ = panelBg.toRect();
 
   // 패널 배경 (✅ 더 투명)
   p.setPen(Qt::NoPen);
