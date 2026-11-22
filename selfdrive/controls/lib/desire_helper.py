@@ -62,6 +62,12 @@ class DesireHelper:
       -- none exist on this car.
   A driver blinker opposite to the ATC side cancels ATC until the navigation
   instruction changes (carrot's atc_active = 2) and hands back to the legacy path.
+
+  Departure from carrot: an ATC lane change (fork / pre-turn lane) never starts
+  on its own. carrot lights the lamp itself; this car cannot (gm/carcontroller.py
+  sends no turn signal) and has no blind-spot signal, so a self-started change
+  would cross lanes with no signal to the cars behind. It needs the driver's
+  blinker on the same side or a nudge of the wheel toward that side.
   """
 
   def __init__(self):
@@ -345,11 +351,9 @@ class DesireHelper:
 
     side = self._get_selected_side(blinker_state) if blinker_state in (BLINKER_LEFT, BLINKER_RIGHT) else None
     atc_lane_change_requested = atc_enabled and self.atc_type in ATC_LANE_TYPES
-    atc_lane_change_manual_only = (
-      atc_lane_change_requested and
-      not driver_enabled and
-      self.atc_type in ("fork left", "atc left")
-    )
+    # carrot limits this to the left side; here both sides need the driver
+    # (blinker or nudge), since the car cannot light its own lamp.
+    atc_lane_change_manual_only = atc_lane_change_requested and not driver_enabled
     atc_lane_change_only = atc_lane_change_requested and not driver_enabled
     # Do not treat a blocked->available retry as permission to cross solid/unknown lines.
     atc_lane_change_retry_line_blocked = (
@@ -399,6 +403,11 @@ class DesireHelper:
         self.maneuver_type = new_type
 
       # ─ TURN mode ─
+      # A fork / lane request read as a turn at low speed must not steer across
+      # without the driver either.
+      if atc_lane_change_manual_only and self.maneuver_type == "turn":
+        self.maneuver_type = "lane_change"
+
       if desire_enabled and self.maneuver_type == "turn" and self.enable_turn_desires:
         self.lane_change_state = LaneChangeState.off
         if self.turn_disable_count > 0:
