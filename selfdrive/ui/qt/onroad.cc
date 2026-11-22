@@ -2111,18 +2111,16 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       pedal_tile_rect_ = QRect(scol_r - SD / 2, speed_row - SD / 2, SD, SD);
       pedal_tile_drawn_t_ = millis_since_boot();
 
-      // 자동 출발, right of 페달 상태 on the top row. Shows and, on a tap,
-      // flips the Community "Activate stop accel boost" toggle
+      // 자동 출발, right of 페달 강도 on its row (below 조향 신호). Shows and,
+      // on a tap, flips the Community "Activate stop accel boost" toggle
       // (ActiveStopAccelBoost). Matched to 페달 강도: same size_ref and scale.
-      // It sat on the lower row (right of 페달 강도) until 2026-11-22, where
-      // the left blinker's chevrons (x 360..510, y 462..578 on the 1880 x
-      // 1040 HUD) ran over it (338..478 x 455..595). On the top row it ends
-      // at y 443, 19 px above them.
+      // On the 1880 x 1040 HUD it spans 338..478 x 455..595; the left blinker
+      // band starts right of it (drawTurnSignals).
       const int auto_launch_x = scol_r + SD + SGAP_X;
-      statusCircle(auto_launch_x, speed_row_top, "자동 출발", auto_launch_on_ ? "ON" : "OFF",
+      statusCircle(auto_launch_x, speed_row, "자동 출발", auto_launch_on_ ? "ON" : "OFF",
                    auto_launch_on_ ? QColor(120, 255, 120, 220) : QColor(254, 32, 32, 220),
                    "HIGH", 1.17f, 0.10f);
-      auto_launch_tile_rect_ = QRect(auto_launch_x - SD / 2, speed_row_top - SD / 2, SD, SD);
+      auto_launch_tile_rect_ = QRect(auto_launch_x - SD / 2, speed_row - SD / 2, SD, SD);
       auto_launch_tile_drawn_t_ = millis_since_boot();
 
       statusCircle(scol_l, speed_row,
@@ -3093,7 +3091,12 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
   // left and the thermal tiles on the right, which both hug the edges.
   const int band_w = 240;
   const int band_gap = 400;   // inner edge of the band, out from screen centre
-  const int band_x = left ? width() / 2 - band_gap - band_w : width() / 2 + band_gap;
+  // The left band sits 130 px further in (2026-11-22, on request), so its
+  // outermost chevron starts 12 px right of the 자동 출발 tile (338..478 x
+  // 455..595 on the 1880 x 1040 HUD): chevrons 490..640. The right band is
+  // unchanged.
+  constexpr int LEFT_BAND_SHIFT = 130;
+  const int band_x = left ? width() / 2 - band_gap - band_w + LEFT_BAND_SHIFT : width() / 2 + band_gap;
   const int cy = height() / 2;
   const int dir = left ? -1 : 1;
   p.save();
@@ -3127,7 +3130,10 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
   if (!label.isEmpty()) {
     configFont(p, "Open Sans", 40, "Bold");
     p.setPen(color);
-    p.drawText(QRect(band_x, cy + ch + 30, band_w, 60), Qt::AlignCenter, label);
+    // Left: above the chevrons. Below them (y 608..668) the shifted band's
+    // label would land on the cruise panel's top edge (x 300..532 from y 638).
+    const int label_y = left ? cy - ch - 30 - 60 : cy + ch + 30;
+    p.drawText(QRect(band_x, label_y, band_w, 60), Qt::AlignCenter, label);
   }
 
   p.restore();
