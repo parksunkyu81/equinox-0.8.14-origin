@@ -310,6 +310,50 @@ void OnroadWindow::paintEvent(QPaintEvent *event) {
 
 // ***** onroad widgets *****
 
+// Turn-signal chevron bands, shared by NvgWindow::drawTurnSignals and the ATC
+// lane prompt in OnroadAlerts (both widgets fill the same stacked layout).
+// Placed where the old pixmap indicator sat: vertically centred, and inboard
+// rather than pinned to the screen edge. Still clear of the speed box on the
+// left and the thermal tiles on the right, which both hug the edges. The left
+// band sits 130 px further in (2026-11-22, on request), so its outermost
+// chevron starts 12 px right of the 자동 출발 tile (338..478 x 455..595 on the
+// 1880 x 1040 HUD): chevrons 490..640. The right band is unchanged.
+static constexpr int TURN_BAND_W = 240;
+static constexpr int TURN_BAND_GAP = 400;      // inner edge of the band, out from screen centre
+static constexpr int TURN_LEFT_BAND_SHIFT = 130;
+static constexpr int TURN_CHEVRONS = 3;
+static constexpr int TURN_CHEVRON_STEP = 56;
+static constexpr int TURN_CHEVRON_W = 38;
+static constexpr int TURN_CHEVRON_H = 58;
+
+static int turnBandX(int w, bool left) {
+  return left ? w / 2 - TURN_BAND_GAP - TURN_BAND_W + TURN_LEFT_BAND_SHIFT : w / 2 + TURN_BAND_GAP;
+}
+
+// x of the innermost chevron's back edge (the end nearest the screen centre)
+static int turnBandInner(int w, bool left) {
+  const int band_x = turnBandX(w, left);
+  return left ? band_x + TURN_BAND_W - 30 : band_x + 30;
+}
+
+// Three chevrons pointing outward; the first `lit` (inside-out) full colour,
+// the rest faint.
+static void drawTurnChevrons(QPainter &p, int w, int h, bool left, const QColor &color, int lit) {
+  const int cy = h / 2;
+  const int dir = left ? -1 : 1;
+  const int inner = turnBandInner(w, left);
+  for (int i = 0; i < TURN_CHEVRONS; i++) {
+    const int x = inner + dir * i * TURN_CHEVRON_STEP;
+    QColor c = color;
+    c.setAlpha(i < lit ? 255 : 50);
+    QPainterPath chevron;
+    chevron.moveTo(x, cy - TURN_CHEVRON_H);
+    chevron.lineTo(x + dir * TURN_CHEVRON_W, cy);
+    chevron.lineTo(x, cy + TURN_CHEVRON_H);
+    p.strokePath(chevron, QPen(c, 22, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  }
+}
+
 // OnroadAlerts
 void OnroadAlerts::updateAlert(const Alert &a, const QColor &color) {
   if (!alert.equal(a) || color != bg) {
@@ -330,6 +374,52 @@ void OnroadAlerts::paintEvent(QPaintEvent *event) {
   // prompts, ...) is now a caption, placed right above the cruise/speed panel
   // (see setCaptionAnchor). Critical alerts and FULL
   // takeovers keep the band: those must cover the screen.
+  // ATC lane prompt (2026-11-23, on request): the text sits between the two
+  // turn-signal chevron bands at their height, the instruction's side lit in
+  // amber and the other faint, the text scaled down to fit the gap. The
+  // driver's blinker ends the prompt, so the live bands never draw over it.
+  const bool atc_left = alert.type.startsWith("atcBlinkerLeft/");
+  const bool atc_right = alert.type.startsWith("atcBlinkerRight/");
+  if (atc_left || atc_right) {
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setRenderHint(QPainter::TextAntialiasing);
+    const QColor amber(255, 175, 0);
+    drawTurnChevrons(p, width(), height(), true, amber, atc_left ? TURN_CHEVRONS : 0);
+    drawTurnChevrons(p, width(), height(), false, amber, atc_right ? TURN_CHEVRONS : 0);
+
+    const int gap_l = turnBandInner(width(), true) + 30;
+    const int gap_r = turnBandInner(width(), false) - 30;
+    const int gap_w = gap_r - gap_l;
+    const int cy = height() / 2;
+
+    auto fitted = [&](const QString &text, int size, const QString &style) {
+      for (; size > 28; size -= 2) {
+        configFont(p, "Open Sans", size, style);
+        if (QFontMetrics(p.font()).horizontalAdvance(text) <= gap_w - 40) break;
+      }
+      return size;
+    };
+    const bool two = !alert.text2.isEmpty();
+    const int s1 = fitted(alert.text1, 64, "Bold");
+    const int s2 = two ? fitted(alert.text2, 38, "Regular") : 0;
+    const int h1 = s1 + 26, h2 = two ? s2 + 20 : 0;
+    const QRect box(gap_l, cy - (h1 + h2) / 2 - 18, gap_w, h1 + h2 + 36);
+
+    p.setPen(QPen(QColor(0xDA, 0x6F, 0x25), 5));
+    p.setBrush(QColor(0, 0, 0, 165));
+    p.drawRoundedRect(box, 24, 24);
+    p.setPen(Qt::white);
+    configFont(p, "Open Sans", s1, "Bold");
+    p.drawText(QRect(box.x(), box.y() + 18, box.width(), h1), Qt::AlignCenter, alert.text1);
+    if (two) {
+      configFont(p, "Open Sans", s2, "Regular");
+      p.setPen(QColor(255, 255, 255, 220));
+      p.drawText(QRect(box.x(), box.y() + 18 + h1, box.width(), h2), Qt::AlignCenter, alert.text2);
+    }
+    return;
+  }
+
   const bool caption = alert.status != cereal::ControlsState::AlertStatus::CRITICAL &&
                        alert.size != cereal::ControlsState::AlertSize::FULL;
   if (caption) {
@@ -3165,19 +3255,11 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
     label = (uiState()->status == STATUS_ENGAGED && car_state.getVEgo() < 10 / 3.6f) ? "10km/h+" : "";
   }
 
-  // Placed where the old pixmap indicator sat: vertically centred, and inboard
-  // rather than pinned to the screen edge. Still clear of the speed box on the
-  // left and the thermal tiles on the right, which both hug the edges.
-  const int band_w = 240;
-  const int band_gap = 400;   // inner edge of the band, out from screen centre
-  // The left band sits 130 px further in (2026-11-22, on request), so its
-  // outermost chevron starts 12 px right of the 자동 출발 tile (338..478 x
-  // 455..595 on the 1880 x 1040 HUD): chevrons 490..640. The right band is
-  // unchanged.
-  constexpr int LEFT_BAND_SHIFT = 130;
-  const int band_x = left ? width() / 2 - band_gap - band_w + LEFT_BAND_SHIFT : width() / 2 + band_gap;
+  // Geometry: TURN_BAND_* / TURN_CHEVRON_* above OnroadAlerts.
+  const int band_w = TURN_BAND_W;
+  const int band_x = turnBandX(width(), left);
   const int cy = height() / 2;
-  const int dir = left ? -1 : 1;
+  const int ch = TURN_CHEVRON_H;
   p.save();
   p.setRenderHint(QPainter::Antialiasing);
   p.setOpacity(1.0);
@@ -3186,25 +3268,11 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
   // unobstructed where the indicator overlaps it.
 
   // Three chevrons firing inside-out, the way a sequential turn signal does.
-  const int n = 3;
-  const int step = 56;
-  const int cw = 38;
-  const int ch = 58;
+  const int n = TURN_CHEVRONS;
   const double period = changing ? 460.0 : 800.0;
   const double phase = fmod(millis_since_boot(), period) / period;
   const int lit = phase < 0.82 ? (int)(phase / 0.82 * n) + 1 : 0;
-  const int inner = left ? band_x + band_w - 30 : band_x + 30;
-
-  for (int i = 0; i < n; i++) {
-    const int x = inner + dir * i * step;
-    QColor c = color;
-    c.setAlpha(i < lit ? 255 : 50);
-    QPainterPath chevron;
-    chevron.moveTo(x, cy - ch);
-    chevron.lineTo(x + dir * cw, cy);
-    chevron.lineTo(x, cy + ch);
-    p.strokePath(chevron, QPen(c, 22, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-  }
+  drawTurnChevrons(p, width(), height(), left, color, lit);
 
   if (!label.isEmpty()) {
     configFont(p, "Open Sans", 40, "Bold");
