@@ -50,6 +50,8 @@ CAM_REACH_S = 6.
 CAM_START_MARGIN_KPH = 3.
 CAM_RELEASE_MARGIN_KPH = 10.
 CAM_HOLD_S = 10.
+# AutoTurnControl cap floor [km/h] = controlsd V_CRUISE_MIN (see _atc_limit).
+ATC_FLOOR_KPH = 20.
 
 UDP_RECV_BUFFER = 65535      # TmapNda는 road_limit + apilot(전체 TBT/SDI)을 한 패킷으로 보내 2KB를 넘을 수 있음
 SPEED_BUMP_CAM_TYPE = 22
@@ -190,6 +192,7 @@ class RoadLimitSpeedServer:
     self.last_exception = None
     self.lock = threading.Lock()
     self.remote_addr = None
+    self.apilot = None   # latest TmapNda apilot not yet consumed by main()
 
     self.remote_gps_addr = None
     self.last_time_location = 0
@@ -304,10 +307,10 @@ class RoadLimitSpeedServer:
     except:
       pass
 
-  def udp_recv(self, sock):
+  def udp_recv(self, sock, timeout=1.):
     ret = False
     try:
-      ready = select.select([sock], [], [], 1.)
+      ready = select.select([sock], [], [], timeout)
       ret = bool(ready[0])
       if ret:
         data, self.remote_addr = sock.recvfrom(UDP_RECV_BUFFER)
@@ -359,6 +362,11 @@ class RoadLimitSpeedServer:
           if 'road_limit' in json_obj:
             self.json_road_limit = normalize_road_limit(json_obj['road_limit'], json_obj.get('apilot'))
             self.last_updated = sec_since_boot()
+            # TmapNda's apilot is the JSON it sends carrotpilot on 7706 (TBT included):
+            # handed to AutoTurnControl by main().
+            apilot = json_obj.get('apilot')
+            if isinstance(apilot, dict):
+              self.apilot = apilot
 
         finally:
           self.lock.release()
@@ -403,9 +411,135 @@ class RoadLimitSpeedServer:
     return default
 
 
+ATC_LOG_PATH = os.getenv("AUTO_TURN_LOG_PATH", "/data/log/auto_turn.jsonl")
+ATC_LOG_INTERVAL_S = 1.0
+ATC_LOG_MAX_BYTES = 2 * 1024 * 1024
+ATC_PARAMS_INTERVAL_S = 1.0
+# The loop used to block up to 1 s on the socket and publish once per packet.
+# ATC counts the distance to the turn down between packets and its speed cap
+# and lane-change type must follow that, so the loop now runs at 20 Hz.
+LOOP_TIMEOUT_S = 0.05
+SDP_INTERVAL_S = 1.0
+
+
+class AtcRunner:
+  """Feeds AutoTurnControl from TmapNda packets and carState, and logs it.
+
+  roadLimitSpeed is not in the rlog, so without a log nothing would show what
+  the navigation asked for at a turn. One JSON line on every change of
+  atcType / xTurnInfo, and one a second while a turn is pending. Background
+  thread append, a few lines a minute: nothing measurable.
+  """
+
+  def __init__(self, params=None, log_path=ATC_LOG_PATH):
+    from selfdrive.controls.lib.auto_turn_control import AutoTurnControl
+    self.atc = AutoTurnControl()
+    self.params = params if params is not None else Params()
+    self.carstate_sock = messaging.sub_sock('carState', conflate=True)
+    self.v_ego = 0.
+    self.steering_pressed = False
+    self.steering_torque = 0.
+    self.carstate_t = -1e9
+    self.last_t = None
+    self.params_t = -1e9
+    self.log_path = log_path
+    self.log_t = -1e9
+    self.prev_key = None
+    self.cap_kph = 250.
+
+  def _read_params(self, now):
+    if now - self.params_t < ATC_PARAMS_INTERVAL_S:
+      return
+    self.params_t = now
+    from selfdrive.controls.lib import auto_turn_control as atc_mod
+
+    def get_int(key, default):
+      try:
+        v = self.params.get(key)
+        return int(v) if v is not None and len(v) else default
+      except (TypeError, ValueError):
+        return default
+    self.atc.set_params(get_int("AutoTurnControl", atc_mod.DEFAULT_MODE),
+                        get_int("AutoTurnControlSpeedTurn", atc_mod.DEFAULT_SPEED_TURN),
+                        get_int("AutoTurnControlTurnEnd", atc_mod.DEFAULT_TURN_END),
+                        get_int("AutoNaviSpeedDecelRate", atc_mod.DEFAULT_DECEL_RATE))
+
+  def _read_carstate(self, now):
+    try:
+      dat = messaging.recv_sock(self.carstate_sock, wait=False)
+    except Exception:
+      dat = None
+    if dat is not None:
+      cs = dat.carState
+      self.v_ego = float(cs.vEgo)
+      self.steering_pressed = bool(cs.steeringPressed)
+      self.steering_torque = float(cs.steeringTorque)
+      self.carstate_t = now
+    elif now - self.carstate_t > 1.:
+      # No carState (offroad / controls down): nothing moves, no override.
+      self.v_ego = 0.
+      self.steering_pressed = False
+      self.steering_torque = 0.
+
+  def update(self, now, apilot):
+    self._read_params(now)
+    self._read_carstate(now)
+    if apilot is not None:
+      self.atc.update_tbt(apilot, now)
+    dt = 0. if self.last_t is None else clip(now - self.last_t, 0., 0.5)
+    self.last_t = now
+    self.cap_kph = self.atc.update(now, self.v_ego, self.v_ego * dt,
+                                   self.steering_pressed, self.steering_torque)
+    self._log(now)
+
+  def fill(self, msg):
+    atc = self.atc
+    msg.atcType = atc.atcType
+    msg.atcDesiredSpeed = float(self.cap_kph) if self.cap_kph < 250. else 0.
+    target_kph, target_dist = atc.speed_target()
+    msg.atcTargetSpeed = target_kph
+    msg.atcTargetDist = target_dist
+    msg.xTurnInfo = int(atc.xTurnInfo)
+    msg.xDistToTurn = float(atc.xDistToTurn)
+
+  def _log(self, now):
+    atc = self.atc
+    key = (atc.atcType, atc.xTurnInfo)
+    changed = key != self.prev_key
+    self.prev_key = key
+    pending = atc.xTurnInfo > 0 and atc.atcType not in ("none",)
+    if not (changed or (pending and now - self.log_t >= ATC_LOG_INTERVAL_S)):
+      return
+    self.log_t = now
+    target_kph, target_dist = atc.speed_target()
+    line = json.dumps({
+      't': round(now, 2), 'event': 'change' if changed else 'tick',
+      'mode': atc.autoTurnControl, 'kph': round(self.v_ego * 3.6, 1),
+      'tbt_type': atc.nTBTTurnType, 'tbt_dist': atc.nTBTDist,
+      'tbt_next_type': atc.nTBTTurnTypeNext, 'road_limit': atc.nRoadLimitSpeed,
+      'turn_info': atc.xTurnInfo, 'dist': round(float(atc.xDistToTurn), 1),
+      'atc': atc.atcType, 'cap_kph': None if self.cap_kph >= 250. else round(self.cap_kph, 1),
+      'target_kph': round(target_kph, 1), 'target_dist': round(target_dist, 1),
+      'steer_pressed': self.steering_pressed,
+    }, separators=(',', ':'))
+    path = self.log_path
+
+    def write():
+      try:
+        if os.path.exists(path) and os.path.getsize(path) > ATC_LOG_MAX_BYTES:
+          os.replace(path, path + ".1")
+        with open(path, 'a') as f:
+          f.write(line + "\n")
+      except Exception:
+        pass
+    threading.Thread(target=write, daemon=True).start()
+
+
 def main():
   server = RoadLimitSpeedServer()
   roadLimitSpeed = messaging.pub_sock('roadLimitSpeed')
+  atc_runner = AtcRunner()
+  last_sdp_t = -1e9
 
   with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
     try:
@@ -419,7 +553,15 @@ def main():
 
       while True:
 
-        server.udp_recv(sock)
+        server.udp_recv(sock, LOOP_TIMEOUT_S)
+
+        now = sec_since_boot()
+        with server.lock:
+          apilot, server.apilot = server.apilot, None
+        try:
+          atc_runner.update(now, apilot)
+        except Exception as e:
+          print("road_speed_limiter: ATC update failed:", e)
 
         dat = messaging.new_message()
         dat.init('roadLimitSpeed')
@@ -451,8 +593,17 @@ def main():
         except:
           pass
 
+        try:
+          atc_runner.fill(dat.roadLimitSpeed)
+        except Exception as e:
+          print("road_speed_limiter: ATC fill failed:", e)
+
         roadLimitSpeed.send(dat.to_bytes())
-        server.send_sdp(sock)
+        # Was once per loop, i.e. once per packet or per 1 s timeout; the loop
+        # is 20 Hz now, so keep the reply to the phone at 1 Hz.
+        if now - last_sdp_t >= SDP_INTERVAL_S:
+          last_sdp_t = now
+          server.send_sdp(sock)
         server.check()
 
     except Exception as e:
@@ -533,6 +684,7 @@ class RoadSpeedLimiter:
     self.bump_planner = SpeedBumpPlanner()
     self.speed_bump_active = False
     self.bump_log = BumpLog()
+    self.atc_slowing_down = False
 
   def recv(self):
     try:
@@ -605,6 +757,13 @@ class RoadSpeedLimiter:
           cluster_speed, is_metric, cam_type, cam_limit_speed, cam_limit_speed_left_dist,
           section_limit_speed, section_left_dist, camSpeedFactor, MIN_LIMIT, MAX_LIMIT, log)
 
+      # AutoTurnControl turn slowdown: the lower of it and the camera/section cap wins.
+      atc_result = self._atc_limit(is_metric, cluster_speed, log)
+      if atc_result is not None and (cam_result[0] <= 0 or atc_result[0] < cam_result[0]):
+        if self.slowing_down and cam_result[0] > 0:
+          self.slowing_down = False   # camera hands over to ATC
+        cam_result = atc_result
+
       if self.speed_bump_active:
         kph_to_clu = 1. if is_metric else CV.KPH_TO_MPH
         bump_apply = bump_target_kph * kph_to_clu
@@ -623,6 +782,29 @@ class RoadSpeedLimiter:
     self.slowing_down = False
     self.speed_bump_active = False
     return 0, 0, 0, False, log
+
+  def _atc_limit(self, is_metric, cluster_speed, log):
+    """AutoTurnControl speed cap as a get_max_speed() result, or None.
+
+    The cap is carrot's distance curve (calculate_current_speed). controlsd
+    ignores any limit under V_CRUISE_MIN (20 km/h), so a cap that falls below
+    it (U-turn / arrival target 1 km/h, or a turn speed under 20) would be
+    dropped and the car would speed back up near the point. It is held at
+    ATC_FLOOR_KPH instead, like the camera floor.
+    """
+    rls = self.roadLimitSpeed
+    cap_kph = float(getattr(rls, 'atcDesiredSpeed', 0.) or 0.)
+    if not (0. < cap_kph < 250.):
+      self.atc_slowing_down = False
+      return None
+    kph_to_clu = 1. if is_metric else CV.KPH_TO_MPH
+    cap_clu = max(cap_kph, ATC_FLOOR_KPH) * kph_to_clu
+    target_clu = max(float(rls.atcTargetSpeed), ATC_FLOOR_KPH) * kph_to_clu
+    dist = max(1, int(rls.atcTargetDist))
+    first_started = not self.atc_slowing_down and cap_clu < cluster_speed
+    if cap_clu < cluster_speed:
+      self.atc_slowing_down = True
+    return cap_clu, target_clu, dist, first_started, log
 
   @staticmethod
   def _camera_target(limit, factor, is_metric):

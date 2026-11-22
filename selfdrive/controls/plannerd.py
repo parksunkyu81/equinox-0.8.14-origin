@@ -27,8 +27,12 @@ def plannerd_thread(sm=None, pm=None):
   last_exception_log = {"lateral": 0.0, "longitudinal": 0.0}
 
   if sm is None:
-    sm = messaging.SubMaster(['carState', 'controlsState', 'radarState', 'modelV2', 'liveLocationKalman'],
-                             poll=['radarState', 'modelV2'], ignore_avg_freq=['radarState'])
+    # roadLimitSpeed carries the AutoTurnControl type (road_speed_limiter.py);
+    # it is not polled and the lateral planner checks its age itself.
+    sm = messaging.SubMaster(['carState', 'controlsState', 'radarState', 'modelV2', 'liveLocationKalman',
+                              'roadLimitSpeed'],
+                             poll=['radarState', 'modelV2'], ignore_avg_freq=['radarState', 'roadLimitSpeed'],
+                             ignore_alive=['roadLimitSpeed'])
 
   if pm is None:
     pm = messaging.PubMaster(['longitudinalPlan', 'lateralPlan'])

@@ -2034,6 +2034,21 @@ struct RoadLimitSpeed {
     # behind a camera or school zone used to arrive late). 0 = none.
     bumpLeftDist @10 :Int16;
 
+    # AutoTurnControl (selfdrive/controls/lib/auto_turn_control.py, carrot port).
+    # atcType: "none", "turn left/right", "atc left/right", "fork left/right",
+    # "straight", each optionally + " prepare" / " canceled". Already "none"
+    # when the mode leaves lateral off.
+    atcType @11 :Text;
+    # Speed cap from the turn slowdown [km/h]; 0 = none (or mode leaves speed off).
+    atcDesiredSpeed @12 :Float32;
+    # Target speed at the turn's speed point [km/h] and metres to that point.
+    atcTargetSpeed @13 :Float32;
+    atcTargetDist @14 :Float32;
+    # carrot xTurnInfo (1 L turn, 2 R turn, 3 L fork, 4 R fork, 5 rotary,
+    # 6 TG, 7 U-turn, 8 arrive, -1 none) and the counted-down distance [m].
+    xTurnInfo @15 :Int16;
+    xDistToTurn @16 :Float32;
+
     struct RestArea {
       image @0 :Text;
       title @1 :Text;

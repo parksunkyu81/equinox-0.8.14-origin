@@ -216,6 +216,12 @@ std::unordered_map<std::string, uint32_t> keys = {
     {"WideCameraOnly", PERSISTENT},
     {"WideOptechLateral", PERSISTENT},
 
+    // AutoTurnControl (carrot port): road_speed_limiter.py reads them every second.
+    {"AutoTurnControl", PERSISTENT},
+    {"AutoTurnControlSpeedTurn", PERSISTENT},
+    {"AutoTurnControlTurnEnd", PERSISTENT},
+    {"AutoNaviSpeedDecelRate", PERSISTENT},
+
     {"TorqueFriction", PERSISTENT},
     {"TorqueMaxLatAccel", PERSISTENT},
     {"TorqueResponseBins", PERSISTENT | DONT_LOG},

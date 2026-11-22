@@ -709,6 +709,33 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
       background-color: #393939;
       selection-background-color: #555555;
     }
+    #atcTitle {
+      font-size: 45px;
+      color: #dddddd;
+      padding: 20px 20px 0px 20px;
+    }
+    #atcDescr {
+      font-size: 35px;
+      color: #aaaaaa;
+      padding: 0px 20px 20px 20px;
+    }
+    #atcCombo {
+      min-width: 420px;
+      min-height: 100px;
+      font-size: 42px;
+      padding: 10px 25px;
+      color: #dddddd;
+      background-color: #444444;
+      border: 0px;
+      border-radius: 20px;
+    }
+    #atcCombo QAbstractItemView {
+      font-size: 42px;
+      min-height: 400px;
+      color: #dddddd;
+      background-color: #393939;
+      selection-background-color: #555555;
+    }
   )");
 
   QList<ParamControl*> toggles;
@@ -836,6 +863,85 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
     }
     toggleLayout->addWidget(toggle);
   }
+
+  // AutoTurnControl (carrot port): one select box per setting, with a Korean
+  // explanation. road_speed_limiter.py re-reads these every second, so a
+  // change applies while driving.
+  auto addAtcSelect = [=](const char *param, const QString &title, const QString &descr,
+                          const QList<QPair<int, QString>> &options, int fallback) {
+    QLabel *titleLabel = new QLabel(title, homeWidget);
+    titleLabel->setObjectName("atcTitle");
+    titleLabel->setWordWrap(true);
+    titleLabel->setMinimumWidth(0);
+    titleLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+
+    QComboBox *combo = new QComboBox(homeWidget);
+    combo->setObjectName("atcCombo");
+    for (const auto &opt : options) {
+      combo->addItem(opt.second, opt.first);
+    }
+    bool ok = false;
+    int value = QString::fromStdString(Params().get(param)).toInt(&ok);
+    if (!ok) value = fallback;
+    int index = combo->findData(value);
+    if (index < 0) {
+      // A value set elsewhere that is not in the list: keep it selectable.
+      combo->addItem(QString::number(value), value);
+      index = combo->count() - 1;
+    }
+    combo->setCurrentIndex(index);
+    std::string key = param;
+    connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), [=](int i) {
+      if (i >= 0) Params().put(key, std::to_string(combo->itemData(i).toInt()));
+    });
+
+    QHBoxLayout *row = new QHBoxLayout();
+    row->setContentsMargins(0, 0, 0, 0);
+    row->addWidget(titleLabel, 1);
+    row->addWidget(combo, 0);
+
+    QLabel *descrLabel = new QLabel(descr, homeWidget);
+    descrLabel->setObjectName("atcDescr");
+    descrLabel->setWordWrap(true);
+
+    toggleLayout->addWidget(horizontal_line());
+    toggleLayout->addLayout(row);
+    toggleLayout->addWidget(descrLabel);
+  };
+
+  addAtcSelect("AutoTurnControl", "자동 회전 제어 (내비 연동)",
+               "TmapNda에서 카카오 지도로 길안내할 때, 안내에 맞춰 차선을 바꾸고 교차로에서 돌고 속도를 줄입니다. "
+               "티맵 화면 안내에서는 회전 정보가 오지 않아 동작하지 않습니다.\n"
+               "· 회전 지점 160~350 m 전(도로 제한속도에 따라)부터 동작합니다.\n"
+               "· 오른쪽: 맨 오른쪽 차선에서 진출 차로가 새로 생기면 스스로 옮깁니다. 그 밖에는 핸들을 살짝 밀어야 합니다.\n"
+               "· 왼쪽: 언제나 핸들을 살짝 밀어야 옮깁니다.\n"
+               "· 반대쪽 깜빡이를 켜거나 핸들을 반대로 밀면 취소됩니다.\n"
+               "· 이 차는 10 km/h 아래에서 조향이 꺼지고 조향 힘이 300에서 막혀, 급한 교차로 회전은 직접 도와야 할 수 있습니다.",
+               {{0, "0: 끔"}, {1, "1: 차선변경·회전만"}, {2, "2: 차선변경·회전 + 감속"}, {3, "3: 감속만"}}, 0);
+
+  QList<QPair<int, QString>> turnSpeedOptions = {{0, "감속 안 함"}};
+  for (int v = 5; v <= 100; v += 5) turnSpeedOptions.push_back({v, QString("%1 km/h").arg(v)});
+  addAtcSelect("AutoTurnControlSpeedTurn", "회전 목표 속도",
+               "교차로 좌·우회전 지점에서 맞출 속도입니다 (기본 20 km/h). 갈림길·진출로는 그 도로의 제한속도를 씁니다. "
+               "20 km/h보다 낮게 골라도 실제 감속은 20 km/h까지만 합니다 (크루즈 최저 속도).",
+               turnSpeedOptions, 20);
+
+  QList<QPair<int, QString>> turnEndOptions;
+  for (int v = 0; v <= 30; v++) turnEndOptions.push_back({v, QString("%1초 전").arg(v)});
+  addAtcSelect("AutoTurnControlTurnEnd", "목표 속도 도달 시점",
+               "회전 지점 몇 초 전까지 목표 속도가 되게 할지 정합니다 (기본 6초). 클수록 일찍 줄입니다.",
+               turnEndOptions, 6);
+
+  QList<QPair<int, QString>> decelOptions;
+  for (int v = 10; v <= 300; v += 10) {
+    QString text = QString("%1 m/s²").arg(v / 100.0, 0, 'f', 2);
+    if (v == 20) text += " (권장)";
+    decelOptions.push_back({v, text});
+  }
+  addAtcSelect("AutoNaviSpeedDecelRate", "회전 감속 세기",
+               "회전 전에 속도를 줄이는 기울기입니다. 이 차는 브레이크 없이 타력으로만 줄이고, 타력 감속은 0.17~0.20 m/s²라서 "
+               "0.20을 권장합니다. 크게 하면 늦게 줄이기 시작해 빠른 속도로 회전 지점에 닿습니다 (당근 기본값 1.20은 브레이크를 쓰는 차 기준).",
+               decelOptions, 20);
 
   // Not a ParamControl, so it goes in by hand rather than through the list
   // above: this one opens a view instead of flipping a stored setting.
