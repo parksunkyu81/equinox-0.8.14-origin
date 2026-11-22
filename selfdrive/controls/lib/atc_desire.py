@@ -12,10 +12,9 @@ Ported from carrotpilot (ajouatom/openpilot, branch carrot-wip, commit
     The Equinox has no blind-spot signal either (gm/carstate.py never sets
     left/rightBlindspot), so the hold is wired but idle.
 """
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from collections import deque
-
-import numpy as np
 
 from common.realtime import DT_MDL
 from selfdrive.modeld.constants import T_IDXS
@@ -47,15 +46,31 @@ class ExistCounter:
     return self.counter
 
 
+def _t_weights(t):
+  i = min(max(bisect_right(T_IDXS, t) - 1, 0), len(T_IDXS) - 2)
+  return i, (t - T_IDXS[i]) / (T_IDXS[i + 1] - T_IDXS[i])
+
+# Lane width is read at 1 s and 2 s on the model's fixed time grid. np.interp
+# turned the whole 33-point capnp list into an array on every call: ~100 us
+# each on the EON, 8 per model frame (0.9 of the 1.0 ms _process_sides took,
+# with or without ATC). The two neighbouring points give the same value.
+_T1 = _t_weights(1.0)
+_T2 = _t_weights(2.0)
+
+
+def _y_at(y, iw):
+  i, w = iw
+  return y[i] * (1. - w) + y[i + 1] * w
+
+
 def calculate_lane_width(lane, lane_prob, current_lane, road_edge):
-  t = 1.0
-  current_lane_y = np.interp(t, T_IDXS, current_lane.y)
-  lane_y = np.interp(t, T_IDXS, lane.y)
+  current_lane_y = _y_at(current_lane.y, _T1)
+  lane_y = _y_at(lane.y, _T1)
   distance_to_lane = abs(current_lane_y - lane_y)
 
-  road_edge_y = np.interp(t, T_IDXS, road_edge.y)
+  road_edge_y = _y_at(road_edge.y, _T1)
   distance_to_road_edge = abs(current_lane_y - road_edge_y)
-  distance_to_road_edge_far = abs(current_lane_y - np.interp(2.0, T_IDXS, road_edge.y))
+  distance_to_road_edge_far = abs(current_lane_y - _y_at(road_edge.y, _T2))
 
   lane_valid = lane_prob > 0.5
   return min(distance_to_lane, distance_to_road_edge), distance_to_road_edge, distance_to_road_edge_far, lane_valid

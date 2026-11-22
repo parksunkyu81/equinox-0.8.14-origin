@@ -21,7 +21,6 @@ carrot's, unchanged. What differs is only the plumbing:
 """
 import math
 
-import numpy as np
 
 # carrot_serv.py _update_tbt(): nTBTTurnType -> (navType, navModifier, xTurnInfo)
 # xTurnInfo: 1 left turn, 2 right turn, 3 left fork/ramp, 4 right fork/ramp,
@@ -123,6 +122,16 @@ def calculate_current_speed(left_dist, safe_speed_kph, safe_time, safe_decel_rat
   else:
     speed_mps = math.sqrt(temp)
   return max(safe_speed_kph, min(250, speed_mps * 3.6))
+
+
+def _interp(x, xp, fp):
+  """np.interp for a scalar on a short table; np.interp costs ~44 us on the EON."""
+  if x <= xp[0]:
+    return float(fp[0])
+  for i in range(1, len(xp)):
+    if x <= xp[i]:
+      return fp[i - 1] + (fp[i] - fp[i - 1]) * (x - xp[i - 1]) / (xp[i] - xp[i - 1])
+  return float(fp[-1])
 
 
 def _int(v, default):
@@ -304,8 +313,8 @@ class AutoTurnControl:
     straight_dist_for_speed = self.autoTurnControlTurnEnd * straight_speed / 3.6
     fork_dist_for_speed = self.autoTurnControlTurnEnd * fork_speed / 3.6  # 5
     stop_dist_for_speed = 5
-    start_fork_dist = np.interp(self.nRoadLimitSpeed, [30, 50, 100], [160, 200, 350])
-    start_turn_dist = np.interp(self.nTBTNextRoadWidth, [5, 10], [43, 60])
+    start_fork_dist = _interp(self.nRoadLimitSpeed, (30, 50, 100), (160, 200, 350))
+    start_turn_dist = _interp(self.nTBTNextRoadWidth, (5, 10), (43, 60))
     turn_info_mapping = {
       1: {"type": "turn left", "speed": turn_speed, "dist": turn_dist_for_speed, "start": start_fork_dist},
       2: {"type": "turn right", "speed": turn_speed, "dist": turn_dist_for_speed, "start": start_fork_dist},
