@@ -77,7 +77,7 @@ def manager_init() -> None:
     # AutoTurnControl (carrot port). carrot's defaults, except the decel rate:
     # this car only coasts (0.17-0.20 m/s^2), carrot's 120 = 1.2 m/s^2 assumes brakes.
     ("AutoTurnControl", "0"),
-    ("AutoTurnControlSpeedTurn", "20"),
+    ("AutoTurnControlSpeedTurn", "15"),
     ("AutoTurnControlTurnEnd", "6"),
     ("AutoNaviSpeedDecelRate", "20"),
 

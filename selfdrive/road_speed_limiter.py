@@ -53,7 +53,7 @@ CAM_HOLD_S = 10.
 # AutoTurnControl cap floor [km/h] = controlsd V_CRUISE_MIN (see _atc_limit).
 ATC_FLOOR_KPH = 20.
 # A turn whose own target lies between this and ATC_FLOOR_KPH (the intersection
-# turn, auto_turn_control.TURN_SPEED_KPH) is floored here instead,
+# turn set to 15-19 km/h, auto_turn_control.TURN_SPEED_MIN_KPH) is floored here instead,
 # and controlsd lets it under V_CRUISE_MIN like a speed bump. U-turn / arrival
 # targets (1 km/h) still stop at ATC_FLOOR_KPH.
 ATC_LOW_FLOOR_KPH = 15.

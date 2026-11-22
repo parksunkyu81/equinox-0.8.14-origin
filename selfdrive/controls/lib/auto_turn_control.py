@@ -78,19 +78,20 @@ TURN_TYPE_MAPPING = {
 
 # carrot_settings.json / params_keys.h defaults
 DEFAULT_MODE = 0            # AutoTurnControl: 0 off, 1 lane/turn, 2 lane/turn + speed, 3 speed
-DEFAULT_SPEED_TURN = 20     # AutoTurnControlSpeedTurn [km/h]
+DEFAULT_SPEED_TURN = 15     # AutoTurnControlSpeedTurn [km/h] (carrot: 20)
 DEFAULT_TURN_END = 6        # AutoTurnControlTurnEnd [s]
 # AutoNaviSpeedDecelRate [0.01 m/s^2]. carrot's default is 120 (1.2 m/s^2), set
 # for cars that brake. This car slows by coasting only: the learned coast decel
 # is 0.17-0.20 m/s^2 at 50-60 km/h (road_speed_limiter.py CAM_DECEL_MS2), so a
 # 1.2 curve starts far too late and the car reaches the turn fast. 20 = 0.20.
 DEFAULT_DECEL_RATE = 20
-# Intersection turns (left and right) are held to this, lower than
-# AutoTurnControlSpeedTurn. A 90-degree corner of ~10 m radius needs ~250-300
-# deg of wheel, and at the 300 torque cap openpilot alone reaches ~260 deg only
-# at 11-15 km/h (~170 deg at 20-25). Left turns are usually wider, but tight
-# ones need the same margin. Never above the param.
-TURN_SPEED_KPH = 15
+# Intersection turns (left and right) slow to AutoTurnControlSpeedTurn, the
+# "회전 목표 속도" setting; 0 = no slowdown. The default is 15: a 90-degree
+# corner of ~10 m radius needs ~250-300 deg of wheel, and at the 300 torque cap
+# openpilot alone reaches ~260 deg only at 11-15 km/h (~170 deg at 20-25).
+# Settings under this are raised to it: LKAS drops out below 10 km/h, so a
+# lower target would leave the car unsteered mid-turn.
+TURN_SPEED_MIN_KPH = 15
 # The navigation's turn point is about the middle of the intersection, and the
 # cap used to end there, so the car sped up while still turning and lost wheel.
 # The turn cap is held for this many metres past the point -- the rest of the
@@ -250,7 +251,7 @@ class AutoTurnControl:
     atc_desired_next, _, self.atcSpeedNext, self.atcDistNext = self._update_auto_turn(
       v_ego_kph, self.xTurnInfoNext, self.xDistToTurnNext, steering_pressed, steering_torque, False)
 
-    if self.turn_hold_m > 0.:
+    if self.turn_hold_m > 0. and self._turn_speed() > 0.:
       atc_desired = min(atc_desired, self._turn_speed())
 
     if self.autoTurnControl not in [2, 3]:    # auto turn speed control
@@ -264,7 +265,9 @@ class AutoTurnControl:
     return min(atc_desired, atc_desired_next)
 
   def _turn_speed(self):
-    return float(min(self.autoTurnControlSpeedTurn, TURN_SPEED_KPH))
+    """Intersection-turn target [km/h] from the setting; 0 = no slowdown."""
+    v = self.autoTurnControlSpeedTurn
+    return float(max(v, TURN_SPEED_MIN_KPH)) if v > 0 else 0.
 
   def _update_turn_hold(self, delta_dist):
     """Keep the intersection-turn cap for TURN_HOLD_M past the turn point.
@@ -293,7 +296,7 @@ class AutoTurnControl:
   def _update_auto_turn(self, v_ego_kph, x_turn_info, x_dist_to_turn, steering_pressed, steering_torque,
                         check_steer=False):
     """CarrotServ.update_auto_turn(), unchanged apart from the map switch (not ported)."""
-    turn_speed = min(self.autoTurnControlSpeedTurn, TURN_SPEED_KPH)  # intersection turns
+    turn_speed = self._turn_speed()  # intersection turns
     straight_speed = self.autoTurnControlSpeedTurn
     fork_speed = self.nRoadLimitSpeed
     stop_speed = 1

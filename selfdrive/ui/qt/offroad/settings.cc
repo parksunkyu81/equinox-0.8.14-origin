@@ -920,11 +920,17 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                {{0, "0: 끔"}, {1, "1: 차선변경·회전만"}, {2, "2: 차선변경·회전 + 감속"}, {3, "3: 감속만"}}, 0);
 
   QList<QPair<int, QString>> turnSpeedOptions = {{0, "감속 안 함"}};
-  for (int v = 5; v <= 100; v += 5) turnSpeedOptions.push_back({v, QString("%1 km/h").arg(v)});
+  for (int v = 15; v <= 100; v += 5) {
+    QString text = QString("%1 km/h").arg(v);
+    if (v == 15) text += " (권장)";
+    turnSpeedOptions.push_back({v, text});
+  }
   addAtcSelect("AutoTurnControlSpeedTurn", "회전 목표 속도",
-               "교차로 좌·우회전 지점에서 맞출 속도입니다 (기본 20 km/h). 갈림길·진출로는 그 도로의 제한속도를 씁니다. "
-               "20 km/h보다 낮게 골라도 실제 감속은 20 km/h까지만 합니다 (크루즈 최저 속도).",
-               turnSpeedOptions, 20);
+               "교차로 좌·우회전 때 맞출 속도입니다 (기본 15 km/h). 회전 지점 앞에서 이 속도가 되고, "
+               "지점을 20 m 지날 때까지 유지합니다. 갈림길·진출로는 그 도로의 제한속도를 씁니다.\n"
+               "· 이 차는 15 km/h에서 핸들을 약 260°, 20~25 km/h에서는 약 170°까지만 돌릴 수 있습니다.\n"
+               "· 15 km/h보다 낮게는 줄이지 않습니다 (10 km/h 아래에서 조향이 꺼짐).",
+               turnSpeedOptions, 15);
 
   QList<QPair<int, QString>> turnEndOptions;
   for (int v = 0; v <= 30; v++) turnEndOptions.push_back({v, QString("%1초 전").arg(v)});
