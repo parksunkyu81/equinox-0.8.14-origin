@@ -525,21 +525,24 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
       Priority.LOW, VisualAlert.none, AudibleAlert.none, .1, alert_rate=0.75),
   },
 
-  # Navigation asks for a lane change / turn. ATC will not move on its own
-  # (desire_helper.py): the driver signals, then the change goes ahead.
+  # A navigation (ATC) lane change that has really started moving across.
+  # Raised by controlsd only in laneChangeStarting/Finishing under an ATC
+  # instruction; the chime plays once as the alert comes up. (Until 2026-11-22
+  # these names asked for the blinker as soon as the instruction arrived,
+  # 160-350 m early; the names stay for replay of older logs.)
   EventName.atcBlinkerLeft: {
     ET.WARNING: Alert(
-      "좌측 깜빡이를 켜주세요",
-      "내비 안내: 좌측 차선변경·회전",
-      AlertStatus.userPrompt, AlertSize.mid,
+      "좌측으로 차선을 변경합니다",
+      "내비 안내",
+      AlertStatus.normal, AlertSize.mid,
       Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1),
   },
 
   EventName.atcBlinkerRight: {
     ET.WARNING: Alert(
-      "우측 깜빡이를 켜주세요",
-      "내비 안내: 우측 차선변경·회전",
-      AlertStatus.userPrompt, AlertSize.mid,
+      "우측으로 차선을 변경합니다",
+      "내비 안내",
+      AlertStatus.normal, AlertSize.mid,
       Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1),
   },
 

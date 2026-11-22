@@ -334,7 +334,11 @@ class LateralPlanner:
     lateralPlan.laneChangeDirection = self.DH.lane_change_direction
 
     lateralPlan.autoLaneChangeEnabled = self.DH.auto_lane_change_enabled
-    lateralPlan.autoLaneChangeTimer = int(AUTO_LCA_START_TIME) - int(self.DH.auto_lane_change_timer)
+    # The countdown belongs to the driver-blinker path only. The ATC path never
+    # advances auto_lane_change_timer and never starts on a timer, so it used to
+    # publish a stuck "1 s" for the whole ATC wait.
+    lateralPlan.autoLaneChangeTimer = 0 if self.DH.atc_owner else \
+      int(AUTO_LCA_START_TIME) - int(self.DH.auto_lane_change_timer)
 
     lateralPlan.totalCameraOffset = float(self.LP.total_camera_offset)
     # Compatibility diagnostics. The official-style planner no longer blocks

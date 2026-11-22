@@ -15,7 +15,7 @@ from selfdrive.swaglog import cloudlog
 from selfdrive.boardd.boardd import can_list_to_can_capnp
 from selfdrive.car.car_helpers import get_car, get_startup_event, get_one_can
 from selfdrive.controls.lib.lane_planner import CAMERA_OFFSET
-from selfdrive.controls.lib.atc_desire import AtcBlinkerPrompt, BLINKER_NONE
+from selfdrive.controls.lib.atc_desire import ATC_LEFT_TYPES, ATC_RIGHT_TYPES
 from selfdrive.controls.lib.drive_helpers import update_v_cruise, initialize_v_cruise
 from selfdrive.controls.lib.drive_helpers import get_lag_adjusted_curvature
 from selfdrive.controls.lib.straight_wobble_filter import StraightWobbleFilter
@@ -444,7 +444,6 @@ class Controls:
         # Corner-entry prompt, driven from the model curve profile in
         # cal_curve_speed and raised as an event in state_control.
         self.corner_alert = CornerAlert()
-        self.atc_blinker_prompt = AtcBlinkerPrompt()
         self.curv_speed = 0.0
         self.v_cruise_kph_limit = 0
         self.applyMaxSpeed = 0
@@ -1233,36 +1232,38 @@ class Controls:
             else:
                 self.events.add(EventName.calibrationInvalid)
 
-        # Navigation lane change / turn: ask the driver for the blinker. While it
-        # is up it replaces the pre-lane-change line, which would read as if the
-        # car were already changing lanes on its own.
+        # Handle lane change.
+        # Under a navigation (ATC) instruction the planner sits in preLaneChange
+        # from 160-350 m before the point, waiting for the lane to open and the
+        # driver's blinker or nudge; ATC never starts on a timer. So nothing is
+        # shown while it waits -- no blinker prompt, no pre-lane-change line, no
+        # auto countdown -- and the driver is told once, with a chime, when the
+        # car actually starts across (atcLaneChangeLeft/Right).
         rls = get_road_speed_limiter().roadLimitSpeed
-        atc_prompt = self.atc_blinker_prompt.update(
-            str(rls.atcType) if rls is not None else "",
-            CS.leftBlinker, CS.rightBlinker, CS.steeringPressed, CS.steeringTorque,
-            CS.vEgo)
-        # 2026-11-22, on request: the atcBlinkerLeft/Right alert ("좌측/우측
-        # 깜빡이를 켜주세요") is no longer raised. The prompt state still runs and
-        # still keeps the pre-lane-change line off while navigation asks.
-
-        # Handle lane change
-        if atc_prompt != BLINKER_NONE:
-            pass
-        elif self.sm['lateralPlan'].laneChangeState == LaneChangeState.preLaneChange:
-            direction = self.sm['lateralPlan'].laneChangeDirection
+        atc_type = str(rls.atcType) if rls is not None else ""
+        # "... prepare" is the instruction still too far away: DesireHelper ignores it too.
+        atc_active = atc_type.startswith(ATC_LEFT_TYPES + ATC_RIGHT_TYPES) and not atc_type.endswith("prepare")
+        lc_state = self.sm['lateralPlan'].laneChangeState
+        direction = self.sm['lateralPlan'].laneChangeDirection
+        if lc_state == LaneChangeState.preLaneChange:
             if (CS.leftBlindspot and direction == LaneChangeDirection.left) or \
                     (CS.rightBlindspot and direction == LaneChangeDirection.right):
                 self.events.add(EventName.laneChangeBlocked)
+            elif atc_active:
+                pass
             elif self.sm['lateralPlan'].autoLaneChangeEnabled and self.sm['lateralPlan'].autoLaneChangeTimer > 0:
                 pass  # 2026-11-22, on request: no autoLaneChange countdown alert
+            elif direction == LaneChangeDirection.left:
+                self.events.add(EventName.preLaneChangeLeft)
             else:
-                if direction == LaneChangeDirection.left:
-                    self.events.add(EventName.preLaneChangeLeft)
-                else:
-                    self.events.add(EventName.preLaneChangeRight)
-        elif self.sm['lateralPlan'].laneChangeState in (LaneChangeState.laneChangeStarting,
-                                                        LaneChangeState.laneChangeFinishing):
-            self.events.add(EventName.laneChange)
+                self.events.add(EventName.preLaneChangeRight)
+        elif lc_state in (LaneChangeState.laneChangeStarting, LaneChangeState.laneChangeFinishing):
+            if atc_active and direction == LaneChangeDirection.left:
+                self.events.add(EventName.atcBlinkerLeft)
+            elif atc_active and direction == LaneChangeDirection.right:
+                self.events.add(EventName.atcBlinkerRight)
+            else:
+                self.events.add(EventName.laneChange)
 
         #if not CS.canValid:
         #    self.events.add(EventName.canError)
