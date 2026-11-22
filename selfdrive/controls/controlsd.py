@@ -1014,7 +1014,7 @@ class Controls:
         self.speed_bump_active = bool(road_speed_limiter.speed_bump_active)
         # 방지턱을 지나 제한이 풀린 순간: 원래 속도로 즉시 돌아간다 (update_max_speed 참고).
         self.speed_bump_released = bool(was_bump_active and not self.speed_bump_active)
-        # ATC 우회전(15km/h): 방지턱처럼 V_CRUISE_MIN 아래 제한을 허용한다. 필터는 그대로 탄다.
+        # ATC 교차로 회전(15km/h): 방지턱처럼 V_CRUISE_MIN 아래 제한을 허용한다. 필터는 그대로 탄다.
         self.atc_low_active = bool(getattr(road_speed_limiter, 'atc_low_active', False))
 
         # print("apply_limit_speed : ", apply_limit_speed)
@@ -1081,7 +1081,7 @@ class Controls:
         max_speed_log = ""
 
         if apply_limit_speed >= self.kph_to_clu(V_CRUISE_MIN) or \
-                ((self.speed_bump_active or self.atc_low_active) and apply_limit_speed > 0):  # 크루즈 최저 속도보다 큰 경우 설정 (방지턱·ATC 우회전은 예외)
+                ((self.speed_bump_active or self.atc_low_active) and apply_limit_speed > 0):  # 크루즈 최저 속도보다 큰 경우 설정 (방지턱·ATC 교차로 회전은 예외)
 
             # 크루즈 초기 설정 속도 (PSK)
             # controls.v_cruise_kph : 크루즈 설정 속도
@@ -2468,7 +2468,7 @@ class Controls:
         if self.speed_bump_active:
             min_set_kph = SpeedBumpPlanner.BUMP_SPEED_KPH
         elif self.atc_low_active:
-            min_set_kph = ATC_LOW_FLOOR_KPH   # ATC 우회전: 15km/h
+            min_set_kph = ATC_LOW_FLOOR_KPH   # ATC 교차로 회전: 15km/h
         else:
             min_set_kph = MIN_SET_SPEED_KPH
         controlsState.applyMaxSpeed = float(

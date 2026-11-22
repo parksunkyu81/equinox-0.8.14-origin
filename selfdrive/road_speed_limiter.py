@@ -53,7 +53,7 @@ CAM_HOLD_S = 10.
 # AutoTurnControl cap floor [km/h] = controlsd V_CRUISE_MIN (see _atc_limit).
 ATC_FLOOR_KPH = 20.
 # A turn whose own target lies between this and ATC_FLOOR_KPH (the intersection
-# right turn, auto_turn_control.RIGHT_TURN_SPEED_KPH) is floored here instead,
+# turn, auto_turn_control.TURN_SPEED_KPH) is floored here instead,
 # and controlsd lets it under V_CRUISE_MIN like a speed bump. U-turn / arrival
 # targets (1 km/h) still stop at ATC_FLOOR_KPH.
 ATC_LOW_FLOOR_KPH = 15.
@@ -588,7 +588,7 @@ class AtcRunner:
     key = (atc.atcType, atc.xTurnInfo)
     changed = key != self.prev_key
     self.prev_key = key
-    pending = (atc.xTurnInfo > 0 and atc.atcType not in ("none",)) or atc.right_turn_hold_m > 0.
+    pending = (atc.xTurnInfo > 0 and atc.atcType not in ("none",)) or atc.turn_hold_m > 0.
     if not (changed or (pending and now - self.log_t >= ATC_LOG_INTERVAL_S)):
       return
     self.log_t = now
@@ -602,7 +602,7 @@ class AtcRunner:
       'atc': atc.atcType, 'cap_kph': None if self.cap_kph >= 250. else round(self.cap_kph, 1),
       'target_kph': round(target_kph, 1), 'target_dist': round(target_dist, 1),
       'steer_pressed': self.steering_pressed,
-      'right_hold_m': round(atc.right_turn_hold_m, 1),
+      'turn_hold_m': round(atc.turn_hold_m, 1),
     }, separators=(',', ':'))
     path = self.log_path
 
@@ -767,7 +767,7 @@ class RoadSpeedLimiter:
     self.speed_bump_active = False
     self.bump_log = BumpLog()
     self.atc_slowing_down = False
-    # ATC limit below V_CRUISE_MIN is in force (right turn); controlsd reads it.
+    # ATC limit below V_CRUISE_MIN is in force (intersection turn); controlsd reads it.
     self.atc_low_active = False
 
   def recv(self):
@@ -880,7 +880,7 @@ class RoadSpeedLimiter:
     it (U-turn / arrival target 1 km/h, or a turn speed under 20) would be
     dropped and the car would speed back up near the point. It is held at
     ATC_FLOOR_KPH instead, like the camera floor -- or at the turn's own
-    target when that is ATC_LOW_FLOOR_KPH or more (right turn, 15 km/h).
+    target when that is ATC_LOW_FLOOR_KPH or more (intersection turn, 15 km/h).
     """
     rls = self.roadLimitSpeed
     cap_kph = float(getattr(rls, 'atcDesiredSpeed', 0.) or 0.)

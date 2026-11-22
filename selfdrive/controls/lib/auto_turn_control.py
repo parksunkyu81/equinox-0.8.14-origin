@@ -85,20 +85,20 @@ DEFAULT_TURN_END = 6        # AutoTurnControlTurnEnd [s]
 # is 0.17-0.20 m/s^2 at 50-60 km/h (road_speed_limiter.py CAM_DECEL_MS2), so a
 # 1.2 curve starts far too late and the car reaches the turn fast. 20 = 0.20.
 DEFAULT_DECEL_RATE = 20
-# Intersection right turns are held to this, lower than AutoTurnControlSpeedTurn.
-# A 90-degree corner of ~10 m radius needs ~250-300 deg of wheel, and at the
-# 300 torque cap openpilot alone reaches ~260 deg only at 11-15 km/h (~170 deg
-# at 20-25). Left turns keep the param: they are wider. Never above the param.
-RIGHT_TURN_SPEED_KPH = 15
+# Intersection turns (left and right) are held to this, lower than
+# AutoTurnControlSpeedTurn. A 90-degree corner of ~10 m radius needs ~250-300
+# deg of wheel, and at the 300 torque cap openpilot alone reaches ~260 deg only
+# at 11-15 km/h (~170 deg at 20-25). Left turns are usually wider, but tight
+# ones need the same margin. Never above the param.
+TURN_SPEED_KPH = 15
 # The navigation's turn point is about the middle of the intersection, and the
-# cap used to end there, so the car sped up while still turning and lost wheel
-# (~170 deg at 20-25 km/h against ~260 at 15). The right-turn cap is held for
-# this many metres past the point -- the rest of a ~10 m radius corner and the
-# exit. Counted from the car's own travel, because the navigation moves on to
-# the next instruction once the point is passed.
-RIGHT_TURN_HOLD_M = 20.
-# The hold arms only on the final approach to a right turn.
-RIGHT_TURN_ARM_M = 30.
+# cap used to end there, so the car sped up while still turning and lost wheel.
+# The turn cap is held for this many metres past the point -- the rest of the
+# corner and the exit. Counted from the car's own travel, because the
+# navigation moves on to the next instruction once the point is passed.
+TURN_HOLD_M = 20.
+# The hold arms only on the final approach to a turn.
+TURN_ARM_M = 30.
 
 NO_LIMIT_KPH = 250.
 ATC_SAFE_SEC = 2.0          # update_auto_turn(): safe_sec = 2.0
@@ -167,10 +167,10 @@ class AutoTurnControl:
     self.atc_desired = NO_LIMIT_KPH       # after the mode switch
     self.atc_desired_next = NO_LIMIT_KPH
 
-    # right-turn hold past the turn point
-    self.right_turn_armed = False
-    self.right_turn_last_dist = 0.
-    self.right_turn_hold_m = 0.
+    # intersection-turn hold past the turn point
+    self.turn_armed = 0              # xTurnInfo of the armed turn (1 / 2), 0 = none
+    self.turn_last_dist = 0.
+    self.turn_hold_m = 0.
 
   def set_params(self, mode, speed_turn, turn_end, decel_rate):
     self.autoTurnControl = int(mode)
@@ -242,7 +242,7 @@ class AutoTurnControl:
       self.xDistToTurnNext = 0
       self.xTurnInfoNext = -1
 
-    self._update_right_turn_hold(delta_dist)
+    self._update_turn_hold(delta_dist)
 
     v_ego_kph = v_ego * 3.6
     atc_desired, self.atcType, self.atcSpeed, self.atcDist = self._update_auto_turn(
@@ -250,8 +250,8 @@ class AutoTurnControl:
     atc_desired_next, _, self.atcSpeedNext, self.atcDistNext = self._update_auto_turn(
       v_ego_kph, self.xTurnInfoNext, self.xDistToTurnNext, steering_pressed, steering_torque, False)
 
-    if self.right_turn_hold_m > 0.:
-      atc_desired = min(atc_desired, self._right_turn_speed())
+    if self.turn_hold_m > 0.:
+      atc_desired = min(atc_desired, self._turn_speed())
 
     if self.autoTurnControl not in [2, 3]:    # auto turn speed control
       atc_desired = atc_desired_next = NO_LIMIT_KPH
@@ -263,50 +263,50 @@ class AutoTurnControl:
     self.atc_desired_next = atc_desired_next
     return min(atc_desired, atc_desired_next)
 
-  def _right_turn_speed(self):
-    return float(min(self.autoTurnControlSpeedTurn, RIGHT_TURN_SPEED_KPH))
+  def _turn_speed(self):
+    return float(min(self.autoTurnControlSpeedTurn, TURN_SPEED_KPH))
 
-  def _update_right_turn_hold(self, delta_dist):
-    """Keep the right-turn cap for RIGHT_TURN_HOLD_M past the turn point.
+  def _update_turn_hold(self, delta_dist):
+    """Keep the intersection-turn cap for TURN_HOLD_M past the turn point.
 
-    Armed while a right turn is under RIGHT_TURN_ARM_M ahead. The point counts
-    as reached when the distance goes to 0 or below, or the instruction is
-    replaced (another type, or the distance jumps back up); whatever distance
-    was still left is added to the hold.
+    Armed while a left or right turn is under TURN_ARM_M ahead. The point
+    counts as reached when the distance goes to 0 or below, or the instruction
+    is replaced (another type, or the distance jumps back up); whatever
+    distance was still left is added to the hold.
     """
-    if self.right_turn_hold_m > 0.:
-      self.right_turn_hold_m = max(0., self.right_turn_hold_m - delta_dist)
+    if self.turn_hold_m > 0.:
+      self.turn_hold_m = max(0., self.turn_hold_m - delta_dist)
 
-    right_ahead = self.xTurnInfo == 2 and 0. < self.xDistToTurn < RIGHT_TURN_ARM_M
-    if self.right_turn_armed:
-      reached = (self.xTurnInfo != 2 or self.xDistToTurn <= 0. or
-                 self.xDistToTurn > self.right_turn_last_dist + 5.)
+    if self.turn_armed:
+      same = self.xTurnInfo == self.turn_armed
+      reached = (not same or self.xDistToTurn <= 0. or
+                 self.xDistToTurn > self.turn_last_dist + 5.)
       if reached:
-        self.right_turn_armed = False
-        self.right_turn_hold_m = RIGHT_TURN_HOLD_M + max(0., self.right_turn_last_dist)
-        if self.xTurnInfo == 2 and self.xDistToTurn <= 0.:
-          self.right_turn_hold_m = max(0., RIGHT_TURN_HOLD_M + self.xDistToTurn)
-    if right_ahead:
-      self.right_turn_armed = True
-      self.right_turn_last_dist = float(self.xDistToTurn)
+        self.turn_armed = 0
+        self.turn_hold_m = TURN_HOLD_M + max(0., self.turn_last_dist)
+        if same and self.xDistToTurn <= 0.:
+          self.turn_hold_m = max(0., TURN_HOLD_M + self.xDistToTurn)
+    if self.xTurnInfo in (1, 2) and 0. < self.xDistToTurn < TURN_ARM_M:
+      self.turn_armed = self.xTurnInfo
+      self.turn_last_dist = float(self.xDistToTurn)
 
   def _update_auto_turn(self, v_ego_kph, x_turn_info, x_dist_to_turn, steering_pressed, steering_torque,
                         check_steer=False):
     """CarrotServ.update_auto_turn(), unchanged apart from the map switch (not ported)."""
-    turn_speed = self.autoTurnControlSpeedTurn
-    right_turn_speed = min(turn_speed, RIGHT_TURN_SPEED_KPH)
+    turn_speed = min(self.autoTurnControlSpeedTurn, TURN_SPEED_KPH)  # intersection turns
+    straight_speed = self.autoTurnControlSpeedTurn
     fork_speed = self.nRoadLimitSpeed
     stop_speed = 1
     turn_dist_for_speed = self.autoTurnControlTurnEnd * turn_speed / 3.6  # 5
-    right_turn_dist_for_speed = self.autoTurnControlTurnEnd * right_turn_speed / 3.6
+    straight_dist_for_speed = self.autoTurnControlTurnEnd * straight_speed / 3.6
     fork_dist_for_speed = self.autoTurnControlTurnEnd * fork_speed / 3.6  # 5
     stop_dist_for_speed = 5
     start_fork_dist = np.interp(self.nRoadLimitSpeed, [30, 50, 100], [160, 200, 350])
     start_turn_dist = np.interp(self.nTBTNextRoadWidth, [5, 10], [43, 60])
     turn_info_mapping = {
       1: {"type": "turn left", "speed": turn_speed, "dist": turn_dist_for_speed, "start": start_fork_dist},
-      2: {"type": "turn right", "speed": right_turn_speed, "dist": right_turn_dist_for_speed, "start": start_fork_dist},
-      5: {"type": "straight", "speed": turn_speed, "dist": turn_dist_for_speed, "start": start_turn_dist},
+      2: {"type": "turn right", "speed": turn_speed, "dist": turn_dist_for_speed, "start": start_fork_dist},
+      5: {"type": "straight", "speed": straight_speed, "dist": straight_dist_for_speed, "start": start_turn_dist},
       3: {"type": "fork left", "speed": fork_speed, "dist": fork_dist_for_speed, "start": start_fork_dist},
       4: {"type": "fork right", "speed": fork_speed, "dist": fork_dist_for_speed, "start": start_fork_dist},
       6: {"type": "straight", "speed": fork_speed, "dist": fork_dist_for_speed, "start": start_fork_dist},
@@ -358,8 +358,8 @@ class AutoTurnControl:
 
   def speed_target(self):
     """(target speed at the point [km/h], metres to that point) of whichever turn sets the cap."""
-    if self.right_turn_hold_m > 0.:
-      return self._right_turn_speed(), 0.
+    if self.turn_hold_m > 0.:
+      return self._turn_speed(), 0.
     if self.atc_desired_next < self.atc_desired:
       return float(self.atcSpeedNext), max(0., float(self.xDistToTurnNext) - float(self.atcDistNext))
     return float(self.atcSpeed), max(0., float(self.xDistToTurn) - float(self.atcDist))
