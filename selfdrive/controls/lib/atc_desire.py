@@ -55,6 +55,10 @@ def _t_weights(t):
 # each on the EON, 8 per model frame (0.9 of the 1.0 ms _process_sides took,
 # with or without ATC). The two neighbouring points give the same value.
 _T1 = _t_weights(1.0)
+# SideState.room: the road edge this far from our lane line (1 s and 2 s
+# ahead) means a lane fits on that side. In the rightmost lane on the
+# 2026-11-22--22-42-17 drive the edge read 1.3-3.0 m.
+EDGE_ROOM_M = 3.5
 _T2 = _t_weights(2.0)
 
 
@@ -94,10 +98,17 @@ class SideState:
   lane_exist_count: ExistCounter = field(default_factory=lambda: ExistCounter(0.2))
   lane_width_count: ExistCounter = field(default_factory=lambda: ExistCounter(0.2))
   edge_count: ExistCounter = field(default_factory=lambda: ExistCounter(0.2))
+  edge_room_count: ExistCounter = field(default_factory=lambda: ExistCounter(0.2))
 
   # availability
   lane_available: bool = False
   edge_available: bool = False
+  # Room for the car on this side, for the ATC tap lane change: a confident
+  # outer lane line (prob > 0.5) a lane width away, or the road edge at least
+  # EDGE_ROOM_M from our lane line. lane_available alone also trusts the
+  # outer line's position when the model gives it ~0 probability, and
+  # edge_available counts a 2.5 m shoulder as room.
+  room: bool = False
 
   # smoothing
   lane_width_queue: deque = field(default_factory=lambda: deque(maxlen=int(1.0 / DT_MDL)))
@@ -154,6 +165,10 @@ class SideState:
     available_count = int(0.2 / DT_MDL)
     self.lane_available = self.lane_width_count.counter > available_count
     self.edge_available = (self.edge_count.counter > available_count) and (self.dist_to_edge_far > min_lane_width)
+
+    self.edge_room_count.update(self.dist_to_edge > EDGE_ROOM_M and self.dist_to_edge_far > EDGE_ROOM_M)
+    self.room = ((self.lane_available and self.lane_exist_count.counter > available_count) or
+                 self.edge_room_count.counter > available_count)
 
     self.cur_prob = float(cur_prob)
     self.current_lane_missing = self.cur_prob < 0.3

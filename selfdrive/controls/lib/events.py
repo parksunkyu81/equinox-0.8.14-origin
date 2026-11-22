@@ -527,8 +527,9 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
 
   # Navigation (ATC) lane change prompt, raised by controlsd while atc_desire.
   # AtcLaneGuide has it up: once per instruction, just before the point, 4 s,
-  # one chime. From 30 km/h a tap of the blinker moves the car one lane; under
-  # 30 the driver does (the lane band reads 자동 대기 / 직접 변경). The names
+  # one chime. From 15 km/h a tap of the blinker moves the car one lane when
+  # there is room; under 15 the driver does (the lane band reads 자동 대기 /
+  # 직접 변경). The names
   # are older than the meaning and stay for log replay.
   EventName.atcBlinkerLeft: {
     ET.WARNING: Alert(

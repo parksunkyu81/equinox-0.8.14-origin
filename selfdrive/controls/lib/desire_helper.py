@@ -33,6 +33,9 @@ LANE_CHANGE_LOW_SPEED = 30 * CV.KPH_TO_MS
 # 1.0-2.3 s in carState on this car (19 short runs, 2026-11-22 rlogs), so a
 # tap is enough.
 ATC_TAP_S = 0.5
+# The ATC tap works from this speed (2026-11-23: was LANE_CHANGE_LOW_SPEED,
+# 30 km/h; the pre-turn lane changes on the 22-42-17 drive came at 13-23 km/h).
+ATC_TAP_SPEED_MIN = 15 * CV.KPH_TO_MS
 
 # Driver-blinker turn (no navigation). The driver's blinker alone, between 5
 # and 30 km/h, sends a turn desire once the road opens on that side: no lane and
@@ -120,9 +123,9 @@ class DesireHelper:
   Departure from carrot: an ATC lane change (fork / pre-turn lane) never starts
   on the navigation alone. carrot lights the lamp itself; this car cannot
   (gm/carcontroller.py sends no turn signal), has no blind-spot signal, and its
-  camera cannot tell a centre line from a lane line. From 30 km/h the driver's
+  camera cannot tell a centre line from a lane line. From 15 km/h the driver's
   blinker on the instruction's side -- a tap is enough -- moves the car one
-  lane; under 30 the driver changes lanes by hand. An ATC
+  lane when there is room there; under 15 the driver changes lanes by hand. An ATC
   intersection turn still sends the turn desire, after the driver's blinker on
   the same side or a nudge of the wheel toward that side.
   """
@@ -161,6 +164,7 @@ class DesireHelper:
     self.atc_owner = False         # the current maneuver belongs to the ATC path
     self.atc_turn_confirmed = False  # driver confirmed this ATC turn (blinker or nudge)
     self.atc_tap_t = 0.              # driver's blinker on this long on the ATC path
+    self.atc_tap_used = False        # this tap already moved the car one lane
     self.atc_blinker = BLINKER_NONE  # side ATC asks for this frame (UI / log)
     # turn latch (see TURN_DONE_*)
     self.turn_latched = TURN_NONE
@@ -515,6 +519,7 @@ class DesireHelper:
     if driver_enabled and not self.prev_driver_enabled:
       # A fresh blinker (tap) is the go-ahead for the next lane.
       self.next_lane_change = False
+      self.atc_tap_used = False
 
     side = self._get_selected_side(blinker_state) if blinker_state in (BLINKER_LEFT, BLINKER_RIGHT) else None
     atc_lane_change_requested = atc_enabled and self.atc_type in ATC_LANE_TYPES
@@ -664,21 +669,20 @@ class DesireHelper:
                   )):
                     if side.lane_change_available or atc_line_release:
                       can_start = True
-              # LANE_CHANGE_LOW_SPEED: only on the driver's nudge
-              if v_ego < LANE_CHANGE_LOW_SPEED and not torque_applied:
-                can_start = False
               # Under a navigation instruction the car moves across only on the
-              # driver's go-ahead: the blinker on the instruction's side (a tap
-              # of the lever is enough) seen for ATC_TAP_S, at
-              # LANE_CHANGE_LOW_SPEED or more -- one lane per tap (a fresh
-              # blinker re-arms the next). The camera cannot tell a centre line
-              # from a lane line, so the lane is never taken on its word alone:
-              # the driver has looked. Under 30 km/h, or with no blinker, the
-              # driver changes lanes by hand; lane keeping yields to the hand.
-              if not (driver_enabled and self.atc_tap_t >= ATC_TAP_S and
-                      v_ego >= LANE_CHANGE_LOW_SPEED):
-                can_start = False
+              # driver's go-ahead, decided here and nowhere else: the blinker on
+              # the instruction's side (a tap of the lever is enough) seen for
+              # ATC_TAP_S, from ATC_TAP_SPEED_MIN, with room on that side
+              # (SideState.room: a confident lane line, or the road edge a lane
+              # away) and nothing seen there -- one lane per tap (a fresh
+              # blinker re-arms the next). No nudge is asked for at any speed:
+              # the navigation asked and the driver looked and signalled.
+              # Otherwise the driver changes lanes by hand; lane keeping yields.
+              can_start = (driver_enabled and not self.atc_tap_used and
+                           self.atc_tap_t >= ATC_TAP_S and v_ego >= ATC_TAP_SPEED_MIN and
+                           side.room and not side.side_object_detected and not bsd_active)
               if can_start:
+                self.atc_tap_used = True
                 self.lane_change_state = LaneChangeState.laneChangeStarting
 
         elif self.lane_change_state == LaneChangeState.laneChangeStarting:
