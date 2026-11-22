@@ -142,6 +142,10 @@ struct CarEvent @0x9b1657f34caf3ad3 {
     curveEntry @118;
     laneConfidenceLow @119;
     turnCommitActive @120;
+    # Navigation (AutoTurnControl) wants a lane change / turn and is waiting
+    # for the driver's blinker: the car cannot light its own lamp.
+    atcBlinkerLeft @121;
+    atcBlinkerRight @122;
   }
 }
 

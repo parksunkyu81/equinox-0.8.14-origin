@@ -15,6 +15,7 @@ from selfdrive.swaglog import cloudlog
 from selfdrive.boardd.boardd import can_list_to_can_capnp
 from selfdrive.car.car_helpers import get_car, get_startup_event, get_one_can
 from selfdrive.controls.lib.lane_planner import CAMERA_OFFSET
+from selfdrive.controls.lib.atc_desire import AtcBlinkerPrompt, BLINKER_NONE, BLINKER_LEFT, BLINKER_RIGHT
 from selfdrive.controls.lib.drive_helpers import update_v_cruise, initialize_v_cruise
 from selfdrive.controls.lib.drive_helpers import get_lag_adjusted_curvature
 from selfdrive.controls.lib.straight_wobble_filter import StraightWobbleFilter
@@ -442,6 +443,7 @@ class Controls:
         # Corner-entry prompt, driven from the model curve profile in
         # cal_curve_speed and raised as an event in state_control.
         self.corner_alert = CornerAlert()
+        self.atc_blinker_prompt = AtcBlinkerPrompt()
         self.curv_speed = 0.0
         self.v_cruise_kph_limit = 0
         self.applyMaxSpeed = 0
@@ -1227,8 +1229,22 @@ class Controls:
             else:
                 self.events.add(EventName.calibrationInvalid)
 
+        # Navigation lane change / turn: ask the driver for the blinker. While it
+        # is up it replaces the pre-lane-change line, which would read as if the
+        # car were already changing lanes on its own.
+        rls = get_road_speed_limiter().roadLimitSpeed
+        atc_prompt = self.atc_blinker_prompt.update(
+            str(rls.atcType) if rls is not None else "",
+            CS.leftBlinker, CS.rightBlinker, CS.steeringPressed, CS.steeringTorque)
+        if atc_prompt == BLINKER_LEFT:
+            self.events.add(EventName.atcBlinkerLeft)
+        elif atc_prompt == BLINKER_RIGHT:
+            self.events.add(EventName.atcBlinkerRight)
+
         # Handle lane change
-        if self.sm['lateralPlan'].laneChangeState == LaneChangeState.preLaneChange:
+        if atc_prompt != BLINKER_NONE:
+            pass
+        elif self.sm['lateralPlan'].laneChangeState == LaneChangeState.preLaneChange:
             direction = self.sm['lateralPlan'].laneChangeDirection
             if (CS.leftBlindspot and direction == LaneChangeDirection.left) or \
                     (CS.rightBlindspot and direction == LaneChangeDirection.right):

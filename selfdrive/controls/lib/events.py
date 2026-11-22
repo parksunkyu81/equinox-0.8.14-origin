@@ -525,6 +525,24 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
       Priority.LOW, VisualAlert.none, AudibleAlert.none, .1, alert_rate=0.75),
   },
 
+  # Navigation asks for a lane change / turn. ATC will not move on its own
+  # (desire_helper.py): the driver signals, then the change goes ahead.
+  EventName.atcBlinkerLeft: {
+    ET.WARNING: Alert(
+      "좌측 깜빡이를 켜주세요",
+      "내비 안내: 좌측 차선변경·회전",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1),
+  },
+
+  EventName.atcBlinkerRight: {
+    ET.WARNING: Alert(
+      "우측 깜빡이를 켜주세요",
+      "내비 안내: 우측 차선변경·회전",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1),
+  },
+
   EventName.laneChangeBlocked: {
     ET.WARNING: Alert(
       #"Car Detected in Blindspot",

@@ -224,3 +224,41 @@ def classify_maneuver_type(blinker_state: int, carstate, side: SideState, turn_d
       return "turn"
     return old_type
   return "lane_change"
+
+
+ATC_LEFT_TYPES = ("turn left", "fork left", "atc left")
+ATC_RIGHT_TYPES = ("turn right", "fork right", "atc right")
+
+
+class AtcBlinkerPrompt:
+  """Which side controlsd should ask the driver to signal for (BLINKER_NONE = no alert).
+
+  ATC never moves the car across on its own (desire_helper.py), so when the
+  navigation asks for a lane change or turn the driver is told to put the
+  blinker on. Mirrors the DesireHelper gates: the prompt stops once the driver
+  signals that side or nudges the wheel toward it, and an opposite blinker or
+  nudge cancels it until the instruction changes.
+  """
+  def __init__(self):
+    self.atc_type = ""
+    self.done = False   # confirmed or cancelled for the current instruction
+
+  def update(self, atc_type, left_blinker, right_blinker, steering_pressed, steering_torque):
+    if atc_type != self.atc_type:
+      self.atc_type = atc_type
+      self.done = False
+
+    if atc_type in ATC_LEFT_TYPES:
+      want = BLINKER_LEFT
+    elif atc_type in ATC_RIGHT_TYPES:
+      want = BLINKER_RIGHT
+    else:
+      return BLINKER_NONE
+
+    if left_blinker or right_blinker or steering_pressed:
+      # same side confirms, opposite side cancels; either way the prompt is over
+      # (a plain grip with no clear direction does not count)
+      if left_blinker or right_blinker or steering_torque != 0:
+        self.done = True
+
+    return BLINKER_NONE if self.done else want
