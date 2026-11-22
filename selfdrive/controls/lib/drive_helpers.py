@@ -6,6 +6,7 @@ from common.conversions import Conversions as CV
 from selfdrive.modeld.constants import T_IDXS
 from selfdrive.ntune import ntune_common_get
 from selfdrive.swaglog import cloudlog
+from selfdrive.controls.lib.straight_wobble_filter import wide_low_speed_gain
 from selfdrive.controls.lib.v0813_lateral_compat import compensated_steer_delay
 
 # 경고: 이 값은 모델의 훈련 분포를 기반으로 결정되었으며,
@@ -287,12 +288,15 @@ def get_lag_adjusted_curvature(CP, v_ego, psis, curvatures, curvature_rates, lat
   limited_curvature = limit_curvature(safe_desired_curvature, v_ego)
   _log_curvature_limit(safe_desired_curvature, limited_curvature, v_ego)
 
-  # WideOptechLateral: smooth small straight-road moves of the bounded target
-  # (StraightWobbleFilter). Before the rate limit below, so that limit stays the
-  # last stage, and on a value that only changes when a new plan arrives, so the
-  # 20 Hz step it was tuned at is exact. Replay-checked to give the same result
-  # as filtering after the limit.
+  # WideOptechLateral (wobble_filter is only passed in that mode): first restore
+  # the low-speed demand the 59 deg input loses (wide_low_speed_gain, re-bounded
+  # by the ceiling), then smooth small straight-road moves (StraightWobbleFilter).
+  # Both sit before the rate limit below, so that limit stays the last stage, and
+  # act on a value that only changes when a new plan arrives, so the 20 Hz step
+  # they were tuned at is exact. Replay-checked to give the same result as
+  # filtering after the limit.
   if wobble_filter is not None:
+    limited_curvature = limit_curvature(limited_curvature * wide_low_speed_gain(v_ego), v_ego)
     limited_curvature = wobble_filter.update(v_ego, limited_curvature, lat_active, new_plan)
 
   # How fast the bounded target may move, frame to frame. Applied last, so it

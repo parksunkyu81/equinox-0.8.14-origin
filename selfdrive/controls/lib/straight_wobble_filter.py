@@ -32,6 +32,31 @@ CHANGE_D0 = 0.04      # m/s^2 away from the filtered value: full smoothing below
 CHANGE_D1 = 0.20      # m/s^2: passes at once above
 MIN_SPEED = 1.0       # m/s, curvature <-> lateral accel conversion floor
 
+# Low-speed demand gain, also WideOptechLateral only. The 59 deg input reads tight
+# low-speed bends smaller than the mirrored one did (model 1.26 -> 0.95 of the
+# curvature driven at 12-30 kph), so the demand there fell 14% (2.44 -> 2.11 m/s^2).
+# Below 30 kph the low-speed factor in latcontrol_torque amplifies that, and the
+# car is torque-limited there: recomputing the logged torque controller with the
+# new demand (lowspeed_torque_check.py) dropped below the 300 cap in 15% of
+# tight-corner frames, 17% lost more than 30 units, mean applied torque -9.4%.
+# 1.20 below 30 kph, ramping to 1.0 at 35 (lowspeed_gain_tune.py) brings the
+# demand back to today's (new/now 1.00, 1.02, 1.02 at 12-25, 25-30, 30-35 kph),
+# loss > 30 units 2.3% of frames, mean torque +0.7%; 35 kph and up unchanged.
+LOW_SPEED_GAIN = 1.20
+LOW_SPEED_GAIN_FULL_KPH = 30.0
+LOW_SPEED_GAIN_END_KPH = 35.0
+
+
+def wide_low_speed_gain(v_ego):
+  """Demand multiplier for WideOptechLateral: LOW_SPEED_GAIN below 30 kph, 1.0 from 35 kph."""
+  kph = max(0.0, float(v_ego)) * 3.6
+  if kph <= LOW_SPEED_GAIN_FULL_KPH:
+    return LOW_SPEED_GAIN
+  if kph >= LOW_SPEED_GAIN_END_KPH:
+    return 1.0
+  frac = (kph - LOW_SPEED_GAIN_FULL_KPH) / (LOW_SPEED_GAIN_END_KPH - LOW_SPEED_GAIN_FULL_KPH)
+  return LOW_SPEED_GAIN + (1.0 - LOW_SPEED_GAIN) * frac
+
 
 class StraightWobbleFilter:
   """Steps once per lateral plan (20 Hz, the rate it was tuned at) and holds in between.
