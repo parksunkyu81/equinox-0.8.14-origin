@@ -1158,6 +1158,27 @@ static QString ndaSafetyLabel(int cam_type) {
   }
 }
 
+// Right-hand column, laid out bottom up (2026-11-22, on request):
+//   1. the turn-info box in carrot's spot (hud_renderer: tbt_x = w - 800,
+//      box 790 x 300 ending 10 px above the bottom), raised by INFO_CLEAR so
+//      the CPU / LatA line along the bottom (baseline h - 15) stays readable;
+//   2. the brake / ACC / auto-hold / LKAS status block above it, with the
+//      confidence gauge beside its brake / auto-hold column;
+//   3. the temperature panel above that.
+// One function so drawThermal, drawBottomIcons and drawTurnInfo agree.
+RightColumnLayout rightColumnLayout(int w, int h) {
+  constexpr int BOX_W = 790, BOX_H = 300;
+  constexpr int INFO_CLEAR = 50;
+  constexpr int GAP = 20;
+  constexpr int STATUS_SD = 140, STATUS_GAP_Y = 12, STATUS_PANEL_GAP = 19;
+  RightColumnLayout l;
+  l.turn_box = QRect(w - 800, h - 10 - BOX_H - INFO_CLEAR, BOX_W, BOX_H);
+  l.status_bottom = l.turn_box.top() - GAP;
+  const int status_top = l.status_bottom - (2 * STATUS_SD + STATUS_GAP_Y);
+  l.thermal_bottom = status_top - STATUS_PANEL_GAP;
+  return l;
+}
+
 void NvgWindow::drawBottomIcons(QPainter &p) {
   const SubMaster &sm = *(uiState()->sm);
   auto car_state = sm["carState"].getCarState();
@@ -1202,17 +1223,21 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // visual edge: at a 16 px gap measured from the endpoint the cap actually
   // overlapped the wheel by 7 px.
   constexpr int BAR_CAP = 60 / 2;   // BAR_W / 2 in drawSteerGauge
-  const int bar_right = icon_start_x + (icon_step * 5) + radius / 2;
+  // The bar's right end stops short of the turn-info box, which now takes
+  // carrot's bottom-right spot (rightColumnLayout). Always, not only while the
+  // box shows, so the bar never changes length mid-drive.
+  constexpr int BAR_BOX_GAP = 20;
+  const int bar_right = std::min(icon_start_x + (icon_step * 5) + radius / 2,
+                                 rightColumnLayout(width(), height()).turn_box.left() - BAR_BOX_GAP - BAR_CAP);
   const int wheel_cx = (speed_panel_right_ > 0
                         ? speed_panel_right_ + WHEEL_GAP + wheel_d / 2
                         : icon_start_x);
   const int bar_left = wheel_cx + wheel_d / 2 + WHEEL_GAP + BAR_CAP;
-  drawSteerGauge(p, (bar_left + bar_right) / 2, bar_cy, bar_right - bar_left);
-
-  // Confidence gauge sits beside the ACC/LKAS column (icon_step * 5),
-  // spanning the same vertical extent as that stacked pair.
-  drawConfidenceGauge(p, icon_start_x + (icon_step * 6),
-                      y2 - radius / 2, y1 + radius / 2);
+  if (bar_right > bar_left) {
+    drawSteerGauge(p, (bar_left + bar_right) / 2, bar_cy, bar_right - bar_left);
+  }
+  // The confidence gauge moved beside the brake / auto-hold column (see the
+  // status block below).
 
   float cur_speed = std::max(0.0, car_state.getVEgo() * MS_TO_KPH);
   // The old shared str / str2 / textColor scratch locals are gone: every tile
@@ -1768,9 +1793,9 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // The wheel is deliberately not part of this -- it is drawn from its own
     // wheel_d above and keeps the size it has, which the discs now match.
     //
-    // At 140 the right-hand block runs 1605..1899. That is 20 px into the
-    // confidence gauge's column, which it still does not overlap vertically:
-    // the block's bottom is 694 and the gauge starts at 730.
+    // At 140 the right-hand block runs 1605..1899 x 408..700 on 1920 x 1080,
+    // with the thermal panel above it and the turn-info box below
+    // (rightColumnLayout), and the confidence gauge on its left.
     constexpr int SD = 140;        // status circle diameter (116 * 1.2)
     constexpr int SGAP_X = 14;     // horizontal gap between the two columns
     constexpr int SGAP_Y = 12;     // vertical gap between the two rows
@@ -1982,8 +2007,21 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // Anchored from the bottom so the block always grows away from the panel.
     // Two rows of icon/state pairs; the pedal tiles moved over to the speed
     // panel's group, where they sit with the other pedal readings.
-    const int row_b = thermal_panel_top_ - PANEL_GAP - SD / 2;
+    // The block now sits on top of the turn-info box with the thermal panel
+    // above it (rightColumnLayout); it used to stand on the thermal panel.
+    const int row_b = rightColumnLayout(width(), height()).status_bottom - SD / 2;
     const int row_t = row_b - SD - SGAP_Y;
+
+    // Confidence gauge beside the brake / auto-hold column, spanning the
+    // block's height. drawConfidenceGauge grows the span it is given by 1.2
+    // about its centre, so it is handed the block height / 1.2.
+    {
+      constexpr int GAUGE_GAP = 12;
+      constexpr int GAUGE_HALF_W = (64 + 10) / 2;   // BALL_D + BALL_PEN in drawConfidenceGauge
+      const int mid = (row_t + row_b) / 2;
+      const int half = (2 * SD + SGAP_Y) * 5 / 12;  // block height / 2 / 1.2
+      drawConfidenceGauge(p, col_l - SD / 2 - GAUGE_GAP - GAUGE_HALF_W, mid - half, mid + half);
+    }
 
     statusIcon(col_l, row_t, ic_brake, brake_valid);
     if (autohold >= 0) {
@@ -3016,7 +3054,11 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
   // rather than pinned to the screen edge. Still clear of the speed box on the
   // left and the thermal tiles on the right, which both hug the edges.
   const int band_w = 240;
-  const int band_gap = 400;   // inner edge of the band, out from screen centre
+  // Inner edge of the band, out from screen centre. 400 until 2026-11-22: the
+  // confidence gauge now stands left of the brake / auto-hold column (from
+  // x 1519 on 1920 px, y 408..700), and at 400 the right band's third chevron
+  // and its label (to x 1600, y 688) ran into it. At 320 the label ends ~1500.
+  const int band_gap = 320;
   const int band_x = left ? width() / 2 - band_gap - band_w : width() / 2 + band_gap;
   const int cy = height() / 2;
   const int dir = left ? -1 : 1;
@@ -3071,10 +3113,9 @@ static void drawShadowText(QPainter &p, qreal x, qreal y, const QString &text,
 }
 
 // AutoTurnControl turn-info box: carrot hud_renderer.py _draw_turn_info_hud()
-// (carrot-wip 77dd3335), same 790 x 300 box, contents and offsets. Placed at
-// the top right instead of carrot's bottom right, which here holds the icon
-// rows and the thermal / status column; the right blinker band sits at mid
-// height. Data: road_speed_limiter.py -> roadLimitSpeed.
+// (carrot-wip 77dd3335), same 790 x 300 box, contents and offsets, in
+// carrot's bottom-right spot (see rightColumnLayout).
+// Data: road_speed_limiter.py -> roadLimitSpeed.
 // Differences: the ATC backdrop is drawn only while ATC acts ("none" is
 // truthy in carrot and paints it solid green even with ATC off), and a
 // cancelled fork is grey. Shown only while a route is being guided, like carrot.
@@ -3089,24 +3130,14 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
   const int go_time = nda.getGoPosTime();
   if (!(go_dist > 0 && go_time > 0)) return;
 
-  // On the EON's 1920 x 1080 the top band is empty apart from the clock at
-  // the top left: the speed panel, the limit board and both tile blocks sit
-  // in the lower half. So the box hangs in the top-right corner, right edge
-  // flush with the status block / thermal panel (x 1899), bottom kept clear of
-  // that block's top (y 402 at the current sizes), which drawBottomIcons
-  // derives from the thermal panel the same way.
-  constexpr int BOX_W = 790;
-  constexpr int BOX_H = 300;
-  constexpr int STATUS_SD = 140, STATUS_GAP_Y = 12, STATUS_PANEL_GAP = 19;   // drawBottomIcons
-  const int box_right = thermal_panel_right_ > 0 ? thermal_panel_right_ : width() - 21;
-  const int box_w = std::min(BOX_W, box_right - 40);
-  if (box_w < 660) return;                      // carrot skips narrow screens too
-  const int tbt_x = box_right - box_w;
-  int box_y = 80;                               // below the clock's line (baseline 55)
-  if (thermal_panel_top_ > 0) {
-    const int status_top = thermal_panel_top_ - STATUS_PANEL_GAP - 2 * STATUS_SD - STATUS_GAP_Y;
-    box_y = std::max(10, std::min(box_y, status_top - 20 - BOX_H));
-  }
+  if (width() < 1200) return;                   // carrot skips narrow screens too
+  // carrot's spot (rightColumnLayout): x = w - 800, raised 50 px off carrot's
+  // bottom so the CPU / LatA line underneath stays readable.
+  const QRect box = rightColumnLayout(width(), height()).turn_box;
+  const int box_w = box.width();
+  const int BOX_H = box.height();
+  const int tbt_x = box.left();
+  const int box_y = box.top();
   const int tbt_y = box_y + 60;                 // carrot: box top = tbt_y - 60
 
   p.save();
@@ -3276,23 +3307,14 @@ void NvgWindow::drawThermal(QPainter &p) {
   const int x_calc = width() - tile_w - 35;
   const int x = x_calc > 35 ? x_calc : 35;
 
-  // 하단 기준선은 디버그 텍스트의 baseline(paintGL에서 rect().height() - 15에
-  // 그림)이고, 배경은 타일보다 pad 만큼 더 내려가므로 그만큼 빼 준다.
-  // 디버그 텍스트는 왼쪽(left + 20)에서 시작하고 이 패널은 오른쪽 끝에
-  // 붙으므로 같은 높이에 있어도 가로로 겹치지 않는다.
-  constexpr int debug_text_up = 15;
-  // The whole thermal group -- this panel and the status tiles drawBottomIcons
-  // stacks on top of it -- now sits 15% of the panel's own height above that
-  // bottom line, so the two no longer share it. Against the height rather than
-  // a pixel count so it keeps its proportion if the fonts change. Only the
-  // panel moves here; the tiles follow because they anchor off the box
-  // published below.
-  const int group_lift = (total_h + pad * 2) * 3 / 20;
-  const int y_calc = rect().bottom() - debug_text_up - pad - total_h - group_lift;
+  // The panel sits directly above the brake / ACC status block, which itself
+  // stands on the turn-info box (rightColumnLayout). Its background ends at
+  // thermal_bottom. It used to sit at the bottom with the block on top of it.
+  const int y_calc = rightColumnLayout(width(), height()).thermal_bottom - pad - total_h;
   const int y = y_calc > 80 ? y_calc : 80;
 
-  // Publish the panel's box for the status column drawBottomIcons stacks on
-  // top of it (see the members' comment in onroad.h).
+  // Publish the panel's box: the status block takes its right edge from it
+  // (see the members' comment in onroad.h).
   thermal_panel_top_ = y - pad;
   thermal_panel_cx_ = x + tile_w / 2;
   thermal_panel_right_ = x + tile_w + pad;
