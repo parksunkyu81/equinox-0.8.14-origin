@@ -90,6 +90,15 @@ DEFAULT_DECEL_RATE = 20
 # 300 torque cap openpilot alone reaches ~260 deg only at 11-15 km/h (~170 deg
 # at 20-25). Left turns keep the param: they are wider. Never above the param.
 RIGHT_TURN_SPEED_KPH = 15
+# The navigation's turn point is about the middle of the intersection, and the
+# cap used to end there, so the car sped up while still turning and lost wheel
+# (~170 deg at 20-25 km/h against ~260 at 15). The right-turn cap is held for
+# this many metres past the point -- the rest of a ~10 m radius corner and the
+# exit. Counted from the car's own travel, because the navigation moves on to
+# the next instruction once the point is passed.
+RIGHT_TURN_HOLD_M = 20.
+# The hold arms only on the final approach to a right turn.
+RIGHT_TURN_ARM_M = 30.
 
 NO_LIMIT_KPH = 250.
 ATC_SAFE_SEC = 2.0          # update_auto_turn(): safe_sec = 2.0
@@ -157,6 +166,11 @@ class AutoTurnControl:
     self.atcDistNext = 0.
     self.atc_desired = NO_LIMIT_KPH       # after the mode switch
     self.atc_desired_next = NO_LIMIT_KPH
+
+    # right-turn hold past the turn point
+    self.right_turn_armed = False
+    self.right_turn_last_dist = 0.
+    self.right_turn_hold_m = 0.
 
   def set_params(self, mode, speed_turn, turn_end, decel_rate):
     self.autoTurnControl = int(mode)
@@ -228,11 +242,16 @@ class AutoTurnControl:
       self.xDistToTurnNext = 0
       self.xTurnInfoNext = -1
 
+    self._update_right_turn_hold(delta_dist)
+
     v_ego_kph = v_ego * 3.6
     atc_desired, self.atcType, self.atcSpeed, self.atcDist = self._update_auto_turn(
       v_ego_kph, self.xTurnInfo, self.xDistToTurn, steering_pressed, steering_torque, True)
     atc_desired_next, _, self.atcSpeedNext, self.atcDistNext = self._update_auto_turn(
       v_ego_kph, self.xTurnInfoNext, self.xDistToTurnNext, steering_pressed, steering_torque, False)
+
+    if self.right_turn_hold_m > 0.:
+      atc_desired = min(atc_desired, self._right_turn_speed())
 
     if self.autoTurnControl not in [2, 3]:    # auto turn speed control
       atc_desired = atc_desired_next = NO_LIMIT_KPH
@@ -243,6 +262,33 @@ class AutoTurnControl:
     self.atc_desired = atc_desired
     self.atc_desired_next = atc_desired_next
     return min(atc_desired, atc_desired_next)
+
+  def _right_turn_speed(self):
+    return float(min(self.autoTurnControlSpeedTurn, RIGHT_TURN_SPEED_KPH))
+
+  def _update_right_turn_hold(self, delta_dist):
+    """Keep the right-turn cap for RIGHT_TURN_HOLD_M past the turn point.
+
+    Armed while a right turn is under RIGHT_TURN_ARM_M ahead. The point counts
+    as reached when the distance goes to 0 or below, or the instruction is
+    replaced (another type, or the distance jumps back up); whatever distance
+    was still left is added to the hold.
+    """
+    if self.right_turn_hold_m > 0.:
+      self.right_turn_hold_m = max(0., self.right_turn_hold_m - delta_dist)
+
+    right_ahead = self.xTurnInfo == 2 and 0. < self.xDistToTurn < RIGHT_TURN_ARM_M
+    if self.right_turn_armed:
+      reached = (self.xTurnInfo != 2 or self.xDistToTurn <= 0. or
+                 self.xDistToTurn > self.right_turn_last_dist + 5.)
+      if reached:
+        self.right_turn_armed = False
+        self.right_turn_hold_m = RIGHT_TURN_HOLD_M + max(0., self.right_turn_last_dist)
+        if self.xTurnInfo == 2 and self.xDistToTurn <= 0.:
+          self.right_turn_hold_m = max(0., RIGHT_TURN_HOLD_M + self.xDistToTurn)
+    if right_ahead:
+      self.right_turn_armed = True
+      self.right_turn_last_dist = float(self.xDistToTurn)
 
   def _update_auto_turn(self, v_ego_kph, x_turn_info, x_dist_to_turn, steering_pressed, steering_torque,
                         check_steer=False):
@@ -312,6 +358,8 @@ class AutoTurnControl:
 
   def speed_target(self):
     """(target speed at the point [km/h], metres to that point) of whichever turn sets the cap."""
+    if self.right_turn_hold_m > 0.:
+      return self._right_turn_speed(), 0.
     if self.atc_desired_next < self.atc_desired:
       return float(self.atcSpeedNext), max(0., float(self.xDistToTurnNext) - float(self.atcDistNext))
     return float(self.atcSpeed), max(0., float(self.xDistToTurn) - float(self.atcDist))

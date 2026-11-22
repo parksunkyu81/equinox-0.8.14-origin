@@ -588,7 +588,7 @@ class AtcRunner:
     key = (atc.atcType, atc.xTurnInfo)
     changed = key != self.prev_key
     self.prev_key = key
-    pending = atc.xTurnInfo > 0 and atc.atcType not in ("none",)
+    pending = (atc.xTurnInfo > 0 and atc.atcType not in ("none",)) or atc.right_turn_hold_m > 0.
     if not (changed or (pending and now - self.log_t >= ATC_LOG_INTERVAL_S)):
       return
     self.log_t = now
@@ -602,6 +602,7 @@ class AtcRunner:
       'atc': atc.atcType, 'cap_kph': None if self.cap_kph >= 250. else round(self.cap_kph, 1),
       'target_kph': round(target_kph, 1), 'target_dist': round(target_dist, 1),
       'steer_pressed': self.steering_pressed,
+      'right_hold_m': round(atc.right_turn_hold_m, 1),
     }, separators=(',', ':'))
     path = self.log_path
 
