@@ -1209,7 +1209,9 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // The bar alone then drops a further tenth of the pitch (on request); the
   // wheel stays on wheel_row_cy, the line both used to share.
   const int wheel_row_cy = y2 + row_drop;
-  const int bar_cy = wheel_row_cy + (y1 - y2) / 10;
+  // The bar's centre line is the wheel's own centre (wheel_cy below, 865 on
+  // 1080 px), so the two read as one unit. It used to sit 7 px higher.
+  const int bar_cy = wheel_row_cy + (y1 - y2) * 3 / 20;
 
   constexpr int WHEEL_GAP = 22;
   // The wheel is the one tile that is not part of a grid of equals -- it sits
@@ -1227,17 +1229,28 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // carrot's bottom-right spot (rightColumnLayout). Always, not only while the
   // box shows, so the bar never changes length mid-drive.
   constexpr int BAR_BOX_GAP = 20;
-  const int bar_right = std::min(icon_start_x + (icon_step * 5) + radius / 2,
-                                 rightColumnLayout(width(), height()).turn_box.left() - BAR_BOX_GAP - BAR_CAP);
+  const int bar_right_full = std::min(icon_start_x + (icon_step * 5) + radius / 2,
+                                      rightColumnLayout(width(), height()).turn_box.left() - BAR_BOX_GAP - BAR_CAP);
   const int wheel_cx = (speed_panel_right_ > 0
                         ? speed_panel_right_ + WHEEL_GAP + wheel_d / 2
                         : icon_start_x);
   const int bar_left = wheel_cx + wheel_d / 2 + WHEEL_GAP + BAR_CAP;
+  // Half the length it had (on request, 2026-11-22): 307 -> 153 px between
+  // the cap centres on 1920 px, still starting WHEEL_GAP right of the wheel.
+  const int bar_right = bar_left + (bar_right_full - bar_left) / 2;
   if (bar_right > bar_left) {
     drawSteerGauge(p, (bar_left + bar_right) / 2, bar_cy, bar_right - bar_left);
   }
-  // The confidence gauge moved beside the brake / auto-hold column (see the
-  // status block below).
+
+  // Confidence gauge right of the steering bar, centred on the wheel's line,
+  // with the extent it had in the bottom icon rows (y2 - radius/2 ..
+  // y1 + radius/2, drawn 1.2x about its centre).
+  {
+    constexpr int GAUGE_GAP = 22;
+    constexpr int GAUGE_HALF_W = (64 + 10) / 2;   // BALL_D + BALL_PEN in drawConfidenceGauge
+    const int half = ((y1 + radius / 2) - (y2 - radius / 2)) / 2;
+    drawConfidenceGauge(p, bar_right + BAR_CAP + GAUGE_GAP + GAUGE_HALF_W, bar_cy - half, bar_cy + half);
+  }
 
   float cur_speed = std::max(0.0, car_state.getVEgo() * MS_TO_KPH);
   // The old shared str / str2 / textColor scratch locals are gone: every tile
@@ -1795,7 +1808,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     //
     // At 140 the right-hand block runs 1605..1899 x 408..700 on 1920 x 1080,
     // with the thermal panel above it and the turn-info box below
-    // (rightColumnLayout), and the confidence gauge on its left.
+    // (rightColumnLayout).
     constexpr int SD = 140;        // status circle diameter (116 * 1.2)
     constexpr int SGAP_X = 14;     // horizontal gap between the two columns
     constexpr int SGAP_Y = 12;     // vertical gap between the two rows
@@ -2011,17 +2024,6 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // above it (rightColumnLayout); it used to stand on the thermal panel.
     const int row_b = rightColumnLayout(width(), height()).status_bottom - SD / 2;
     const int row_t = row_b - SD - SGAP_Y;
-
-    // Confidence gauge beside the brake / auto-hold column, spanning the
-    // block's height. drawConfidenceGauge grows the span it is given by 1.2
-    // about its centre, so it is handed the block height / 1.2.
-    {
-      constexpr int GAUGE_GAP = 12;
-      constexpr int GAUGE_HALF_W = (64 + 10) / 2;   // BALL_D + BALL_PEN in drawConfidenceGauge
-      const int mid = (row_t + row_b) / 2;
-      const int half = (2 * SD + SGAP_Y) * 5 / 12;  // block height / 2 / 1.2
-      drawConfidenceGauge(p, col_l - SD / 2 - GAUGE_GAP - GAUGE_HALF_W, mid - half, mid + half);
-    }
 
     statusIcon(col_l, row_t, ic_brake, brake_valid);
     if (autohold >= 0) {
@@ -3054,11 +3056,7 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
   // rather than pinned to the screen edge. Still clear of the speed box on the
   // left and the thermal tiles on the right, which both hug the edges.
   const int band_w = 240;
-  // Inner edge of the band, out from screen centre. 400 until 2026-11-22: the
-  // confidence gauge now stands left of the brake / auto-hold column (from
-  // x 1519 on 1920 px, y 408..700), and at 400 the right band's third chevron
-  // and its label (to x 1600, y 688) ran into it. At 320 the label ends ~1500.
-  const int band_gap = 320;
+  const int band_gap = 400;   // inner edge of the band, out from screen centre
   const int band_x = left ? width() / 2 - band_gap - band_w : width() / 2 + band_gap;
   const int cy = height() / 2;
   const int dir = left ? -1 : 1;
