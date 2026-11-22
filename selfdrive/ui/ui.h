@@ -33,6 +33,8 @@ struct Alert {
   QString type;
   cereal::ControlsState::AlertSize size;
   AudibleAlert sound;
+  // Not part of equal(): soundd keys its sounds on the fields above.
+  cereal::ControlsState::AlertStatus status = cereal::ControlsState::AlertStatus::NORMAL;
 
   bool equal(const Alert &a2) {
     return text1 == a2.text1 && text2 == a2.text2 && type == a2.type && sound == a2.sound;
@@ -43,7 +45,7 @@ struct Alert {
     if (sm.updated("controlsState")) {
       return {cs.getAlertText1().cStr(), cs.getAlertText2().cStr(),
               cs.getAlertType().cStr(), cs.getAlertSize(),
-              cs.getAlertSound()};
+              cs.getAlertSound(), cs.getAlertStatus()};
     } else if ((sm.frame - started_frame) > 5 * UI_FREQ) {
       const int CONTROLS_TIMEOUT = 5;
       const int controls_missing = (nanos_since_boot() - sm.rcv_time("controlsState")) / 1e9;
