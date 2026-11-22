@@ -145,6 +145,13 @@ class LateralPlanner:
       # OPTECH default (lane priority mode off): the model's own path. The
       # weights were set once in __init__ (OPTECH sets the same ones each frame).
       d_path_xyz = self.path_xyz.copy()
+      # The lane blend is discarded, but run it anyway: it is what keeps
+      # LP.d_prob current, and the onroad confidence gauge reads dProb. Skipping
+      # it froze the gauge at its first value.
+      self.LP.get_d_path(
+        v_ego, self.t_idxs, self.path_xyz.copy(),
+        measured_curvature=measured_curvature,
+        lane_change_active=lane_change_active)
     else:
       # LanePlanner applies its offset in-place; a copy prevents an invalid
       # model frame from accumulating the offset on the last valid trajectory.
@@ -317,8 +324,10 @@ class LateralPlanner:
     lateralPlan.pathStabilityActive = False
     lateralPlan.pathWobbleRangeM = 0.0
     lateralPlan.pathWobbleFlips = 0
-    lateralPlan.laneCenterCorrectionM = float(self.LP.lane_center_correction_m)
-    lateralPlan.laneCenterCorrectionActive = bool(self.LP.lane_center_correction_active)
+    # The v09 planner computes the lane blend only for dProb and never steers
+    # to it, so it applies no lane-centre correction.
+    lateralPlan.laneCenterCorrectionM = 0.0 if self.use_v09 else float(self.LP.lane_center_correction_m)
+    lateralPlan.laneCenterCorrectionActive = False if self.use_v09 else bool(self.LP.lane_center_correction_active)
     # modelPathQuality*, modelNearCurvature, curveTemporalStored and
     # curveTemporalHoldAgeS went with the curve lane fallback and its readiness
     # monitor; the schema keeps the fields, which now read as their defaults.
