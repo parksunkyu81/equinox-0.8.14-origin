@@ -3256,13 +3256,18 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
   const int label_x = tbt_x + 200;
   const int label_base = tbt_y + 192;
   if (!sdi.isEmpty()) {
-    const QFontMetrics fm(p.font());
-    const int tw = std::min(fm.horizontalAdvance(sdi), box_w - 220);
-    const int th = fm.height();
+    // Elide against the room left in the box (pill ends 10 px inside its right
+    // edge), then size the pill to what is drawn. Eliding to the text's own
+    // rounded advance cut short labels ("사고다…") with half the box empty.
+    const QFontMetricsF fm(p.font());
+    const qreal avail = box_w - (label_x - tbt_x) - 20;
+    const QString shown = fm.elidedText(sdi, Qt::ElideRight, avail);
+    const qreal tw = fm.horizontalAdvance(shown);
+    const qreal th = fm.height();
     p.setPen(Qt::NoPen);
     p.setBrush(QColor(0, 228, 48));
     p.drawRoundedRect(QRectF(label_x - 10, label_base - fm.ascent() - 4, tw + 20, th + 8), 10, 10);
-    drawShadowText(p, label_x, label_base, fm.elidedText(sdi, Qt::ElideRight, tw), white, false);
+    drawShadowText(p, label_x, label_base, shown, white, false);
   } else if (!road.isEmpty()) {
     drawShadowText(p, label_x, label_base, road, white, false);
   }
