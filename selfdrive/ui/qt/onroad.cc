@@ -3084,12 +3084,13 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
     label = "차선변경 중";
   } else if (armed) {
     color = QColor(255, 175, 0);
-    label = lp.getAutoLaneChangeEnabled() ? "자동 대기" : "핸들 밀기";
+    // under 30 km/h the automatic start is off (desire_helper LANE_CHANGE_LOW_SPEED)
+    label = (lp.getAutoLaneChangeEnabled() && car_state.getVEgo() >= 30 / 3.6f) ? "자동 대기" : "핸들 밀기";
   } else {
     // planner isn't arming: not engaged, or under LANE_CHANGE_SPEED_MIN
     color = QColor(210, 210, 210);
-    // 30 = desire_helper.py LANE_CHANGE_SPEED_MIN (carrot's value)
-    label = (uiState()->status == STATUS_ENGAGED && car_state.getVEgo() < 30 / 3.6f) ? "30km/h+" : "";
+    // 10 = desire_helper.py LANE_CHANGE_SPEED_MIN
+    label = (uiState()->status == STATUS_ENGAGED && car_state.getVEgo() < 10 / 3.6f) ? "10km/h+" : "";
   }
 
   // Placed where the old pixmap indicator sat: vertically centred, and inboard

@@ -257,11 +257,11 @@ class AtcBlinkerPrompt:
   A lane-change request (fork / pre-turn lane) is only shown at
   LANE_PROMPT_ON_KPH or more: below the lane-change minimum the car would not
   move over, so the driver changes lanes by hand. It hides again under
-  LANE_PROMPT_OFF_KPH, so a speed hovering at 30 does not re-chime. Turns are
+  LANE_PROMPT_OFF_KPH, so a speed hovering at the minimum does not re-chime. Turns are
   shown at any speed (the turn desire has no minimum).
   """
-  LANE_PROMPT_ON_KPH = 30.   # = desire_helper.LANE_CHANGE_SPEED_MIN
-  LANE_PROMPT_OFF_KPH = 28.
+  LANE_PROMPT_ON_KPH = 10.   # = desire_helper.LANE_CHANGE_SPEED_MIN
+  LANE_PROMPT_OFF_KPH = 8.
 
   def __init__(self):
     self.atc_type = ""

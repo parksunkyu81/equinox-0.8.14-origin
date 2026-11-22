@@ -14,13 +14,20 @@ LaneChangeState = log.LateralPlan.LaneChangeState
 LaneChangeDirection = log.LateralPlan.LaneChangeDirection
 Desire = log.LateralPlan.Desire
 
-# carrot's minimum (desire_lib/constants.py LANE_CHANGE_SPEED_MIN), for the
-# driver blinker and AutoTurnControl alike: navigation lane changes happen in
-# town, before turns and exits. Was 50 km/h (comma's value) until 2026-11-22.
-# Turns have no minimum.
-LANE_CHANGE_SPEED_MIN = 30 * CV.KPH_TO_MS
+# Lane change minimum, for the driver blinker and AutoTurnControl alike. Was 50
+# km/h (comma's value), then 30 (carrot's) until 2026-11-22; 10 is where LKAS
+# itself stops on this car. Turns have no minimum.
+LANE_CHANGE_SPEED_MIN = 10 * CV.KPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
 ATC_LANE_CHANGE_SPEED_MIN = LANE_CHANGE_SPEED_MIN
+# Under 30 km/h a blinker is as often a turn or a merge in a queue as a lane
+# change, and the car has no blind-spot signal, so a low-speed lane change:
+#   - starts only on the driver's nudge toward that side, never on the
+#     automatic timer (AutoLaneChangeEnabled) or on the blinker alone (ATC);
+#   - needs room on that side (a lane, or a road edge more than a lane away).
+#     The driver turn below wants the opposite (no lane, no edge), so the two
+#     never both read true: at an intersection mouth the blinker turns.
+LANE_CHANGE_LOW_SPEED = 30 * CV.KPH_TO_MS
 
 # Driver-blinker turn (no navigation). The driver's blinker alone, between 5
 # and 30 km/h, sends a turn desire once the road opens on that side: no lane and
@@ -33,8 +40,10 @@ ATC_LANE_CHANGE_SPEED_MIN = LANE_CHANGE_SPEED_MIN
 # the oncoming lanes, so their side rarely opens). Starts only while rolling, so
 # a blinker held at a red light does not spend the model's one-frame desire
 # pulse before the car moves, and not once the wheel is already well into the turn.
+# It may take over a low-speed lane change still waiting for the nudge
+# (preLaneChange), never one already moving.
 DRIVER_TURN_SPEED_MIN = 5 * CV.KPH_TO_MS
-DRIVER_TURN_SPEED_MAX = LANE_CHANGE_SPEED_MIN
+DRIVER_TURN_SPEED_MAX = LANE_CHANGE_LOW_SPEED
 DRIVER_TURN_EDGE_FAR_M = 4.
 DRIVER_TURN_OPEN_FRAMES = 5
 DRIVER_TURN_MAX_WHEEL_DEG = 90.
@@ -88,9 +97,10 @@ class DesireHelper:
 
   Two paths share one lane-change state:
     - the driver's blinker alone: the original 0.8.14 logic (_update_legacy),
-      unchanged, for lane changes from 30 km/h; below that, a turn desire when
-      the road opens on that side (_update_driver_turn, DRIVER_TURN_*), held by
-      the turn latch until the turn is done or the blinker goes off;
+      for lane changes from 10 km/h (nudge and room on that side under 30,
+      LANE_CHANGE_LOW_SPEED); and under 30, a turn desire when the road opens
+      on that side (_update_driver_turn, DRIVER_TURN_*), held by the turn latch
+      until the turn is done or the blinker goes off;
     - an AutoTurnControl request (navigation turn / fork / pre-turn lane
       change), alone or with the driver's blinker on the same side: carrot's
       DesireHelper logic (_update_atc), ported from carrotpilot carrot-wip
@@ -208,7 +218,8 @@ class DesireHelper:
     left = driver_st == BLINKER_LEFT
     side = self.left if left else (self.right if driver_st == BLINKER_RIGHT else None)
     open_now = (side is not None and active and self.lane_change_enabled and self.sides_valid and
-                self.lane_change_state == LaneChangeState.off and self.turn_disable_count == 0 and
+                self.lane_change_state in (LaneChangeState.off, LaneChangeState.preLaneChange) and
+                self.turn_disable_count == 0 and
                 DRIVER_TURN_SPEED_MIN <= carstate.vEgo < DRIVER_TURN_SPEED_MAX and
                 not side.lane_available and not side.edge_available and
                 side.dist_to_edge_far > DRIVER_TURN_EDGE_FAR_M)
@@ -217,6 +228,8 @@ class DesireHelper:
     if self.driver_turn_open >= DRIVER_TURN_OPEN_FRAMES and wheel_toward < DRIVER_TURN_MAX_WHEEL_DEG:
       self.turn_direction = TURN_LEFT if left else TURN_RIGHT
       self.lane_change_direction = LaneChangeDirection.left if left else LaneChangeDirection.right
+      # Drop a waiting lane change; the legacy path re-arms only on a new blinker.
+      self.lane_change_state = LaneChangeState.off
       self.turn_by_driver = True
       self.driver_turn_off_t = 0.
       self.driver_turn_open = 0
@@ -247,11 +260,22 @@ class DesireHelper:
         self.desire = Desire.none
 
   # ─────────────────────────────────────────────
-  # legacy (0.8.14) driver-blinker path, unchanged
+  # legacy (0.8.14) driver-blinker path; under LANE_CHANGE_LOW_SPEED the
+  # start needs the nudge and room on that side
   # ─────────────────────────────────────────────
+  def _low_speed_room(self, carstate):
+    """Under LANE_CHANGE_LOW_SPEED: a lane or a road edge a lane away on the change side."""
+    if carstate.vEgo >= LANE_CHANGE_LOW_SPEED:
+      return True
+    if not self.sides_valid or self.lane_change_direction == LaneChangeDirection.none:
+      return False
+    side = self.left if self.lane_change_direction == LaneChangeDirection.left else self.right
+    return side.lane_available or side.edge_available
+
   def _update_legacy(self, carstate, active, lane_change_prob, one_blinker):
     v_ego = carstate.vEgo
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN
+    low_speed = v_ego < LANE_CHANGE_LOW_SPEED
 
     if (not active) or (self.lane_change_timer > LANE_CHANGE_TIME_MAX) or (not one_blinker) or (not self.lane_change_enabled):
       self.lane_change_state = LaneChangeState.off
@@ -260,8 +284,9 @@ class DesireHelper:
       torque_applied = carstate.steeringPressed and \
                        ((carstate.steeringTorque > 0 and self.lane_change_direction == LaneChangeDirection.left) or
                         (carstate.steeringTorque < 0 and self.lane_change_direction == LaneChangeDirection.right)) or \
-                        self.auto_lane_change_enabled and \
+                        self.auto_lane_change_enabled and not low_speed and \
                        (AUTO_LCA_START_TIME+0.25) > self.auto_lane_change_timer > AUTO_LCA_START_TIME
+      torque_applied = torque_applied and self._low_speed_room(carstate)
 
       blindspot_detected = ((carstate.leftBlindspot and self.lane_change_direction == LaneChangeDirection.left) or
                             (carstate.rightBlindspot and self.lane_change_direction == LaneChangeDirection.right))
@@ -625,6 +650,9 @@ class DesireHelper:
                   )):
                     if side.lane_change_available or atc_line_release:
                       can_start = True
+              # LANE_CHANGE_LOW_SPEED: only on the driver's nudge
+              if v_ego < LANE_CHANGE_LOW_SPEED and not torque_applied:
+                can_start = False
               if can_start:
                 self.lane_change_state = LaneChangeState.laneChangeStarting
 
