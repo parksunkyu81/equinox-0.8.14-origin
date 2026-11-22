@@ -1159,20 +1159,22 @@ static QString ndaSafetyLabel(int cam_type) {
 }
 
 // Right-hand column, laid out bottom up (2026-11-22, on request):
-//   1. the turn-info box in carrot's spot (hud_renderer: tbt_x = w - 800,
-//      box 790 x 300 ending 10 px above the bottom), raised by INFO_CLEAR so
-//      the CPU / LatA line along the bottom (baseline h - 15) stays readable;
+//   1. the turn-info box in carrot's corner (hud_renderer: right edge 10 px
+//      off the screen edge, 300 tall), raised by INFO_CLEAR so the CPU / LatA
+//      line along the bottom (baseline h - 15) stays readable. Narrowed from
+//      carrot's 790 to 639 (x 1271..1910 on 1920 px) to leave room for the
+//      half-length steering bar and the confidence gauge left of it;
 //   2. the brake / ACC / auto-hold / LKAS status block above it, with the
 //      confidence gauge beside its brake / auto-hold column;
 //   3. the temperature panel above that.
 // One function so drawThermal, drawBottomIcons and drawTurnInfo agree.
 RightColumnLayout rightColumnLayout(int w, int h) {
-  constexpr int BOX_W = 790, BOX_H = 300;
+  constexpr int BOX_W = 639, BOX_H = 300;
   constexpr int INFO_CLEAR = 50;
   constexpr int GAP = 20;
   constexpr int STATUS_SD = 140, STATUS_GAP_Y = 12, STATUS_PANEL_GAP = 19;
   RightColumnLayout l;
-  l.turn_box = QRect(w - 800, h - 10 - BOX_H - INFO_CLEAR, BOX_W, BOX_H);
+  l.turn_box = QRect(w - 10 - BOX_W, h - 10 - BOX_H - INFO_CLEAR, BOX_W, BOX_H);
   l.status_bottom = l.turn_box.top() - GAP;
   const int status_top = l.status_bottom - (2 * STATUS_SD + STATUS_GAP_Y);
   l.thermal_bottom = status_top - STATUS_PANEL_GAP;
@@ -1225,19 +1227,25 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // visual edge: at a 16 px gap measured from the endpoint the cap actually
   // overlapped the wheel by 7 px.
   constexpr int BAR_CAP = 60 / 2;   // BAR_W / 2 in drawSteerGauge
-  // The bar's right end stops short of the turn-info box, which now takes
-  // carrot's bottom-right spot (rightColumnLayout). Always, not only while the
-  // box shows, so the bar never changes length mid-drive.
-  constexpr int BAR_BOX_GAP = 20;
-  const int bar_right_full = std::min(icon_start_x + (icon_step * 5) + radius / 2,
-                                      rightColumnLayout(width(), height()).turn_box.left() - BAR_BOX_GAP - BAR_CAP);
+  // The bar and the gauge after it keep clear of the turn-info box always, not
+  // only while the box shows, so nothing changes length mid-drive.
+  constexpr int GAUGE_GAP = 22;
+  constexpr int GAUGE_HALF_W = (64 + 10) / 2;   // BALL_D + BALL_PEN in drawConfidenceGauge
+  constexpr int GAUGE_BOX_GAP = 20;
   const int wheel_cx = (speed_panel_right_ > 0
                         ? speed_panel_right_ + WHEEL_GAP + wheel_d / 2
                         : icon_start_x);
   const int bar_left = wheel_cx + wheel_d / 2 + WHEEL_GAP + BAR_CAP;
-  // Half the length it had (on request, 2026-11-22): 307 -> 153 px between
-  // the cap centres on 1920 px, still starting WHEEL_GAP right of the wheel.
-  const int bar_right = bar_left + (bar_right_full - bar_left) / 2;
+  // Half the length the bar had before the turn-info box arrived (on request,
+  // 2026-11-22): its right cap centre was at the end of the icon row (1488 on
+  // 1920 px), 725 px from bar_left; now 362, ink 733..1155. Still starting
+  // WHEEL_GAP right of the wheel. Capped so the gauge after it stays
+  // GAUGE_BOX_GAP clear of the turn-info box, which rightColumnLayout narrows
+  // to make exactly this room (both land on 1125 at the current sizes).
+  const int bar_right_orig = icon_start_x + (icon_step * 5) + radius / 2;
+  const int bar_right_max = rightColumnLayout(width(), height()).turn_box.left()
+                            - GAUGE_BOX_GAP - 2 * GAUGE_HALF_W - GAUGE_GAP - BAR_CAP;
+  const int bar_right = std::min(bar_left + (bar_right_orig - bar_left) / 2, bar_right_max);
   if (bar_right > bar_left) {
     drawSteerGauge(p, (bar_left + bar_right) / 2, bar_cy, bar_right - bar_left);
   }
@@ -1246,8 +1254,6 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // with the extent it had in the bottom icon rows (y2 - radius/2 ..
   // y1 + radius/2, drawn 1.2x about its centre).
   {
-    constexpr int GAUGE_GAP = 22;
-    constexpr int GAUGE_HALF_W = (64 + 10) / 2;   // BALL_D + BALL_PEN in drawConfidenceGauge
     const int half = ((y1 + radius / 2) - (y2 - radius / 2)) / 2;
     drawConfidenceGauge(p, bar_right + BAR_CAP + GAUGE_GAP + GAUGE_HALF_W, bar_cy - half, bar_cy + half);
   }
@@ -3111,8 +3117,8 @@ static void drawShadowText(QPainter &p, qreal x, qreal y, const QString &text,
 }
 
 // AutoTurnControl turn-info box: carrot hud_renderer.py _draw_turn_info_hud()
-// (carrot-wip 77dd3335), same 790 x 300 box, contents and offsets, in
-// carrot's bottom-right spot (see rightColumnLayout).
+// (carrot-wip 77dd3335): carrot's contents and offsets in its bottom-right
+// corner, the box narrowed from 790 to 639 (see rightColumnLayout).
 // Data: road_speed_limiter.py -> roadLimitSpeed.
 // Differences: the ATC backdrop is drawn only while ATC acts ("none" is
 // truthy in carrot and paints it solid green even with ATC off), and a
@@ -3129,7 +3135,7 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
   if (!(go_dist > 0 && go_time > 0)) return;
 
   if (width() < 1200) return;                   // carrot skips narrow screens too
-  // carrot's spot (rightColumnLayout): x = w - 800, raised 50 px off carrot's
+  // carrot's corner (rightColumnLayout): 639 wide, raised 50 px off carrot's
   // bottom so the CPU / LatA line underneath stays readable.
   const QRect box = rightColumnLayout(width(), height()).turn_box;
   const int box_w = box.width();
@@ -3148,9 +3154,14 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
 
   const QColor white(255, 255, 255);
 
-  // guidance text
+  // guidance text (elided: the box is narrower than carrot's)
   configFont(p, "Open Sans", 40, "Bold");
-  drawShadowText(p, tbt_x + 20, tbt_y - 22, QString::fromUtf8(nda.getTbtMainText().cStr()), white, false);
+  {
+    const QFontMetrics fm(p.font());
+    drawShadowText(p, tbt_x + 20, tbt_y - 22,
+                   fm.elidedText(QString::fromUtf8(nda.getTbtMainText().cStr()), Qt::ElideRight, box_w - 40),
+                   white, false);
+  }
 
   // turn icon, ATC state backdrop, distance
   const int turn_info = nda.getXTurnInfo();
@@ -3215,11 +3226,19 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
   }
 
   // arrival time and distance left
+  // carrot draws these at 50 px; in the 639 px box the arrival line steps
+  // down until it ends 24 px inside the right edge (a 3-digit minute count
+  // is the long case), and the distance uses the same size.
   const QDateTime eta = QDateTime::currentDateTimeUtc().toOffsetFromUtc(9 * 3600).addSecs(go_time);
-  configFont(p, "Open Sans", 50, "Bold");
-  drawShadowText(p, tbt_x + 190, tbt_y + 70,
-                 QString("도착: %1분(%2)").arg(go_time / 60.0, 0, 'f', 1).arg(eta.toString("HH:mm")),
-                 white, false);
+  const QString eta_text = QString("도착: %1분(%2)").arg(go_time / 60.0, 0, 'f', 1).arg(eta.toString("HH:mm"));
+  const int eta_avail = box_w - 190 - 24;
+  int eta_size = 50;
+  for (; eta_size > 34; eta_size -= 2) {
+    configFont(p, "Open Sans", eta_size, "Bold");
+    if (QFontMetrics(p.font()).horizontalAdvance(eta_text) <= eta_avail) break;
+  }
+  configFont(p, "Open Sans", eta_size, "Bold");
+  drawShadowText(p, tbt_x + 190, tbt_y + 70, eta_text, white, false);
   drawShadowText(p, tbt_x + 310, tbt_y + 120, QString("%1km").arg(go_dist / 1000.0, 0, 'f', 1), white, false);
 
   p.restore();
