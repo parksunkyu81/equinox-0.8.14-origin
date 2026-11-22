@@ -12,13 +12,13 @@ LaneChangeState = log.LateralPlan.LaneChangeState
 LaneChangeDirection = log.LateralPlan.LaneChangeDirection
 Desire = log.LateralPlan.Desire
 
-LANE_CHANGE_SPEED_MIN = 50 * CV.KPH_TO_MS
+# carrot's minimum (desire_lib/constants.py LANE_CHANGE_SPEED_MIN), for the
+# driver blinker and AutoTurnControl alike: navigation lane changes happen in
+# town, before turns and exits. Was 50 km/h (comma's value) until 2026-11-22.
+# Turns have no minimum.
+LANE_CHANGE_SPEED_MIN = 30 * CV.KPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
-
-# AutoTurnControl lane changes use carrot's minimum (desire_lib/constants.py),
-# not the 50 km/h of the driver-blinker path above: navigation lane changes
-# happen in town, before turns and exits. Turns have no minimum.
-ATC_LANE_CHANGE_SPEED_MIN = 30 * CV.KPH_TO_MS
+ATC_LANE_CHANGE_SPEED_MIN = LANE_CHANGE_SPEED_MIN
 
 DESIRES = {
   LaneChangeDirection.none: {

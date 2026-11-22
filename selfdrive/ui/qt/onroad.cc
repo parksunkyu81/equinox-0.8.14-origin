@@ -2992,7 +2992,8 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
   } else {
     // planner isn't arming: not engaged, or under LANE_CHANGE_SPEED_MIN
     color = QColor(210, 210, 210);
-    label = (uiState()->status == STATUS_ENGAGED && car_state.getVEgo() < 50 / 3.6f) ? "50km/h+" : "";
+    // 30 = desire_helper.py LANE_CHANGE_SPEED_MIN (carrot's value)
+    label = (uiState()->status == STATUS_ENGAGED && car_state.getVEgo() < 30 / 3.6f) ? "30km/h+" : "";
   }
 
   // Placed where the old pixmap indicator sat: vertically centred, and inboard
