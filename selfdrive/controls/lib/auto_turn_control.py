@@ -85,6 +85,11 @@ DEFAULT_TURN_END = 6        # AutoTurnControlTurnEnd [s]
 # is 0.17-0.20 m/s^2 at 50-60 km/h (road_speed_limiter.py CAM_DECEL_MS2), so a
 # 1.2 curve starts far too late and the car reaches the turn fast. 20 = 0.20.
 DEFAULT_DECEL_RATE = 20
+# Intersection right turns are held to this, lower than AutoTurnControlSpeedTurn.
+# A 90-degree corner of ~10 m radius needs ~250-300 deg of wheel, and at the
+# 300 torque cap openpilot alone reaches ~260 deg only at 11-15 km/h (~170 deg
+# at 20-25). Left turns keep the param: they are wider. Never above the param.
+RIGHT_TURN_SPEED_KPH = 15
 
 NO_LIMIT_KPH = 250.
 ATC_SAFE_SEC = 2.0          # update_auto_turn(): safe_sec = 2.0
@@ -243,16 +248,18 @@ class AutoTurnControl:
                         check_steer=False):
     """CarrotServ.update_auto_turn(), unchanged apart from the map switch (not ported)."""
     turn_speed = self.autoTurnControlSpeedTurn
+    right_turn_speed = min(turn_speed, RIGHT_TURN_SPEED_KPH)
     fork_speed = self.nRoadLimitSpeed
     stop_speed = 1
     turn_dist_for_speed = self.autoTurnControlTurnEnd * turn_speed / 3.6  # 5
+    right_turn_dist_for_speed = self.autoTurnControlTurnEnd * right_turn_speed / 3.6
     fork_dist_for_speed = self.autoTurnControlTurnEnd * fork_speed / 3.6  # 5
     stop_dist_for_speed = 5
     start_fork_dist = np.interp(self.nRoadLimitSpeed, [30, 50, 100], [160, 200, 350])
     start_turn_dist = np.interp(self.nTBTNextRoadWidth, [5, 10], [43, 60])
     turn_info_mapping = {
       1: {"type": "turn left", "speed": turn_speed, "dist": turn_dist_for_speed, "start": start_fork_dist},
-      2: {"type": "turn right", "speed": turn_speed, "dist": turn_dist_for_speed, "start": start_fork_dist},
+      2: {"type": "turn right", "speed": right_turn_speed, "dist": right_turn_dist_for_speed, "start": start_fork_dist},
       5: {"type": "straight", "speed": turn_speed, "dist": turn_dist_for_speed, "start": start_turn_dist},
       3: {"type": "fork left", "speed": fork_speed, "dist": fork_dist_for_speed, "start": start_fork_dist},
       4: {"type": "fork right", "speed": fork_speed, "dist": fork_dist_for_speed, "start": start_fork_dist},

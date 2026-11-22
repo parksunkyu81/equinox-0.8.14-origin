@@ -52,6 +52,11 @@ CAM_RELEASE_MARGIN_KPH = 10.
 CAM_HOLD_S = 10.
 # AutoTurnControl cap floor [km/h] = controlsd V_CRUISE_MIN (see _atc_limit).
 ATC_FLOOR_KPH = 20.
+# A turn whose own target lies between this and ATC_FLOOR_KPH (the intersection
+# right turn, auto_turn_control.RIGHT_TURN_SPEED_KPH) is floored here instead,
+# and controlsd lets it under V_CRUISE_MIN like a speed bump. U-turn / arrival
+# targets (1 km/h) still stop at ATC_FLOOR_KPH.
+ATC_LOW_FLOOR_KPH = 15.
 
 UDP_RECV_BUFFER = 65535      # TmapNda는 road_limit + apilot(전체 TBT/SDI)을 한 패킷으로 보내 2KB를 넘을 수 있음
 SPEED_BUMP_CAM_TYPE = 22
@@ -761,6 +766,8 @@ class RoadSpeedLimiter:
     self.speed_bump_active = False
     self.bump_log = BumpLog()
     self.atc_slowing_down = False
+    # ATC limit below V_CRUISE_MIN is in force (right turn); controlsd reads it.
+    self.atc_low_active = False
 
   def recv(self):
     try:
@@ -780,6 +787,7 @@ class RoadSpeedLimiter:
 
     log = ""
     self.recv()
+    self.atc_low_active = False
 
     if self.roadLimitSpeed is None:
       return 0, 0, 0, False, ""
@@ -839,6 +847,8 @@ class RoadSpeedLimiter:
         if self.slowing_down and cam_result[0] > 0:
           self.slowing_down = False   # camera hands over to ATC
         cam_result = atc_result
+        kph_to_clu = 1. if is_metric else CV.KPH_TO_MPH
+        self.atc_low_active = atc_result[0] < ATC_FLOOR_KPH * kph_to_clu
 
       if self.speed_bump_active:
         kph_to_clu = 1. if is_metric else CV.KPH_TO_MPH
@@ -847,6 +857,7 @@ class RoadSpeedLimiter:
         if 0 < cam_result[0] < bump_apply:
           return cam_result
         self.slowing_down = False
+        self.atc_low_active = False
         return bump_apply, SpeedBumpPlanner.BUMP_SPEED_KPH * kph_to_clu, \
                self.bump_planner.left_dist, not was_bump_active, log
       return cam_result
@@ -857,6 +868,7 @@ class RoadSpeedLimiter:
 
     self.slowing_down = False
     self.speed_bump_active = False
+    self.atc_low_active = False
     return 0, 0, 0, False, log
 
   def _atc_limit(self, is_metric, cluster_speed, log):
@@ -866,7 +878,8 @@ class RoadSpeedLimiter:
     ignores any limit under V_CRUISE_MIN (20 km/h), so a cap that falls below
     it (U-turn / arrival target 1 km/h, or a turn speed under 20) would be
     dropped and the car would speed back up near the point. It is held at
-    ATC_FLOOR_KPH instead, like the camera floor.
+    ATC_FLOOR_KPH instead, like the camera floor -- or at the turn's own
+    target when that is ATC_LOW_FLOOR_KPH or more (right turn, 15 km/h).
     """
     rls = self.roadLimitSpeed
     cap_kph = float(getattr(rls, 'atcDesiredSpeed', 0.) or 0.)
@@ -874,8 +887,10 @@ class RoadSpeedLimiter:
       self.atc_slowing_down = False
       return None
     kph_to_clu = 1. if is_metric else CV.KPH_TO_MPH
-    cap_clu = max(cap_kph, ATC_FLOOR_KPH) * kph_to_clu
-    target_clu = max(float(rls.atcTargetSpeed), ATC_FLOOR_KPH) * kph_to_clu
+    target_kph = float(rls.atcTargetSpeed)
+    floor_kph = target_kph if ATC_LOW_FLOOR_KPH <= target_kph < ATC_FLOOR_KPH else ATC_FLOOR_KPH
+    cap_clu = max(cap_kph, floor_kph) * kph_to_clu
+    target_clu = max(target_kph, floor_kph) * kph_to_clu
     dist = max(1, int(rls.atcTargetDist))
     first_started = not self.atc_slowing_down and cap_clu < cluster_speed
     if cap_clu < cluster_speed:
