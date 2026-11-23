@@ -118,6 +118,18 @@ class LateralPlanner:
     except (KeyError, AttributeError, TypeError):
       return ""
 
+  @staticmethod
+  def _atc_dist(sm):
+    """Navigation distance to the AutoTurnControl point [m]; 0 when stale or absent."""
+    try:
+      if 'roadLimitSpeed' not in sm.data or sm.rcv_time['roadLimitSpeed'] <= 0.:
+        return 0.
+      if sec_since_boot() - sm.rcv_time['roadLimitSpeed'] > ATC_MSG_TIMEOUT_S:
+        return 0.
+      return float(sm['roadLimitSpeed'].xDistToTurn)
+    except (KeyError, AttributeError, TypeError, ValueError):
+      return 0.
+
   def update(self, sm):
     car_state = sm['carState']
     v_ego = car_state.vEgo
@@ -149,7 +161,7 @@ class LateralPlanner:
     # Lane change logic
     lane_change_prob = self.LP.l_lane_change_prob + self.LP.r_lane_change_prob
     self.DH.update(sm['carState'], sm['controlsState'].active, lane_change_prob,
-                   modeldata=md, atc_type=self._atc_type(sm))
+                   modeldata=md, atc_type=self._atc_type(sm), atc_dist=self._atc_dist(sm))
 
     # Turn off lanes during lane change
     if self.DH.desire == log.LateralPlan.Desire.laneChangeRight or self.DH.desire == log.LateralPlan.Desire.laneChangeLeft:

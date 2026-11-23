@@ -98,6 +98,12 @@ TURN_ABORT_DIST_M = 120.      # still not turned this far after the start (appro
 TURN_ABORT_WRONG_DEG = 30.    # turned this much the other way
 TURN_ABORT_SPEED = 40 * CV.KPH_TO_MS
 TURN_REARM_S = 10.            # after a finished turn, no new turn desire for this long
+# ATC turn stage: with the driver's blinker on the turn's side and the point
+# this close, it is a turn whatever the road edge reads. 2026-11-22--22-42-17
+# at 1453.5 s: a T-junction left turn 25.7 m ahead; the cross road was not in
+# view yet (left edge < 4 m), so the blinker armed a lane change and the turn
+# desire never came; the model only bent the path by itself 2 s later.
+ATC_TURN_FORCE_M = 30.
 
 
 class DesireHelper:
@@ -163,6 +169,9 @@ class DesireHelper:
     self.prev_driver_enabled = False
     self.atc_owner = False         # the current maneuver belongs to the ATC path
     self.atc_turn_confirmed = False  # driver confirmed this ATC turn (blinker or nudge)
+    self.atc_dist = 0.               # navigation distance to the point [m] (0: unknown)
+    self.atc_side = BLINKER_NONE     # side of the current instruction
+    self.atc_stale_blinker = BLINKER_NONE  # driver blinker already on when it started
     self.atc_tap_t = 0.              # driver's blinker on this long on the ATC path
     self.atc_tap_used = False        # this tap already moved the car one lane
     self.atc_blinker = BLINKER_NONE  # side ATC asks for this frame (UI / log)
@@ -180,7 +189,8 @@ class DesireHelper:
   # ─────────────────────────────────────────────
   # entry
   # ─────────────────────────────────────────────
-  def update(self, carstate, active, lane_change_prob, modeldata=None, atc_type=""):
+  def update(self, carstate, active, lane_change_prob, modeldata=None, atc_type="", atc_dist=0.):
+    self.atc_dist = float(atc_dist)
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
     driver_st = (BLINKER_LEFT if carstate.leftBlinker else 0) | (BLINKER_RIGHT if carstate.rightBlinker else 0)
 
@@ -470,6 +480,22 @@ class DesireHelper:
   def _update_atc_blinker(self, atc_type, driver_blinker_state):
     atc_blinker_state = BLINKER_NONE
 
+    # A blinker already on when an instruction (or its side) starts belongs to
+    # the previous maneuver -- the lever often stays on after a turn -- so it
+    # does not cancel the new one; it only keeps ATC quiet until it goes off.
+    # 2026-11-22--22-42-17: the right blinker left on from the 1410 s right
+    # turn was still on when "atc left" began at 1437 s and cancelled the
+    # whole left-turn instruction (three left blinker episodes, no desire).
+    side = (BLINKER_LEFT if atc_type in ("turn left", "fork left", "atc left") else
+            BLINKER_RIGHT if atc_type in ("turn right", "fork right", "atc right") else BLINKER_NONE)
+    if side != BLINKER_NONE and side != self.atc_side:
+      self.atc_stale_blinker = driver_blinker_state
+      if self.atc_active == 2:
+        self.atc_active = 0   # an earlier cancel does not carry over to a new instruction
+    self.atc_side = side
+    if driver_blinker_state == BLINKER_NONE:
+      self.atc_stale_blinker = BLINKER_NONE
+
     if atc_type in ("turn left", "turn right"):
       if self.atc_active != 2:
         atc_blinker_state = BLINKER_LEFT if atc_type == "turn left" else BLINKER_RIGHT
@@ -482,10 +508,12 @@ class DesireHelper:
     else:
       self.atc_active = 0
 
-    # Opposite driver blinker: ATC off
+    # Opposite driver blinker: ATC off -- for good if the driver put it on
+    # during this instruction, only while it stays on if it was left over.
     if driver_blinker_state != BLINKER_NONE and atc_blinker_state != BLINKER_NONE and driver_blinker_state != atc_blinker_state:
       atc_blinker_state = BLINKER_NONE
-      self.atc_active = 2
+      if driver_blinker_state != self.atc_stale_blinker:
+        self.atc_active = 2
 
     atc_desire_enabled = atc_blinker_state in (BLINKER_LEFT, BLINKER_RIGHT)
 
@@ -581,6 +609,16 @@ class DesireHelper:
       # without the driver either.
       if atc_lane_change_manual_only and self.maneuver_type == "turn":
         self.maneuver_type = "lane_change"
+
+      # Close to an ATC turn point with the driver's blinker on that side, a
+      # waiting (or not yet armed) lane change becomes the turn (ATC_TURN_FORCE_M).
+      # Nothing has moved yet in preLaneChange, so nothing is cut short.
+      atc_turn_side = (BLINKER_LEFT if self.atc_type == "turn left" else
+                       BLINKER_RIGHT if self.atc_type == "turn right" else BLINKER_NONE)
+      if (atc_turn_side != BLINKER_NONE and driver_st == atc_turn_side and
+          0. < self.atc_dist <= ATC_TURN_FORCE_M and
+          self.lane_change_state in (LaneChangeState.off, LaneChangeState.preLaneChange)):
+        self.maneuver_type = "turn"
 
       # An ATC turn waits for the driver too: the blinker on that side, or a
       # nudge toward it, which then holds until the instruction changes.
