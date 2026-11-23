@@ -2,22 +2,22 @@
 
 방지턱 하나의 흐름 (phase):
   idle      방지턱 없음. 제한 없음.
-  approach  TmapNda가 방지턱을 알려줌(이벤트 detect). 미리 페달을 떼서 타력으로 최대한 줄인다:
+  approach  TmapNda가 방지턱을 알려줌(이벤트 detect). 미리 페달을 떼서 타력으로 줄인다:
             목표 = 지금부터 타력만으로 SLOW_DIST_M 지점에 BUMP_SPEED_KPH가 되는 속도
-            (실측 타력 감속 COAST_DECEL로 계산). 20km/h면 약 120m, 30km/h면 약 200m 전부터
-            페달을 뗀다. TmapNda는 보통 40~120m 앞에서 알려주므로 대부분 인식 즉시 뗀다.
-  slow      방지턱 SLOW_DIST_M(20m) 안(이벤트 slow): 목표 BUMP_SPEED_KPH(10km/h).
-            이 차는 브레이크를 못 쓰므로 남은 감속은 운전자가 브레이크를 살짝 밟아 맞춘다.
-  between   방지턱을 넘음(이벤트 pass). 지금 속도(최대 BETWEEN_MIN_KPH)에서 RAMP_KPH_S로 올리되
-            BETWEEN_SPEED_KPH(20km/h)를 넘지 않는다. 사이 구간은 BETWEEN_MIN_KPH(17)~20km/h로
-            지나고, 다음 방지턱 20m 지점에 17km/h로 닿게 한다(운전자 브레이크 약 0.3~0.4 m/s²).
-              * 다음 방지턱이 아직 안 보이면 17km/h에서 기다린다(대개 25m 앞에서야 보인다).
-              * 다음 방지턱이 NEAR_NEXT_M 안에서 보이면(detect) 20km/h 상한과 '20m 지점에
-                17km/h' 타력 목표 중 낮은 쪽으로 다가가고, 그 방지턱 20m 안에서 다시 slow.
-              * NEXT_WAIT_M 동안 다음 방지턱이 안 보이거나 멀면 제한을 푼다(이벤트 release).
-            TmapNda는 넘은 뒤 다음 항목으로 바뀌는 데 0.5~4초 걸린다(2026-11-17 주행).
-            예전(10km/h 목표로 다가가고 10부터 다시 올림)에는 사이 구간이 10~14km/h여서
-            운전자가 가속 페달을 직접 밟았다(2026-11-17 07:12 주행).
+            (실측 타력 감속 COAST_DECEL로 계산). 30km/h면 약 120m 전부터 페달을 뗀다.
+  slow      방지턱 SLOW_DIST_M(20m) 안(이벤트 slow): 목표 BUMP_SPEED_KPH(20km/h).
+  between   방지턱을 넘음(이벤트 pass). 목표를 BETWEEN_SPEED_KPH(20km/h)로 그대로 유지한다.
+            방지턱 속도와 사이 속도가 같아서 연달아 있는 방지턱은 20km/h 한 속도로 이어
+            넘는다(줄였다 올렸다 하지 않는다).
+              * 다음 방지턱이 NEAR_NEXT_M 안에서 보이면(detect) 20km/h를 유지한 채 다가가고,
+                그 방지턱 20m 안에서 다시 slow.
+              * NEXT_WAIT_M(25m) 동안 다음 방지턱이 안 보이거나 멀면 마지막 방지턱으로 보고
+                제한을 푼다(이벤트 release). controlsd는 해제 순간 원래 크루즈 설정 속도로
+                바로 돌아간다(가속 세기는 종방향 플래너와 페달 프로필이 정한다).
+            TmapNda는 넘은 뒤 다음 방지턱을 늦게 알린다: 2026-11 로그(방지턱 202개 통과)에서
+            다음 방지턱 보고가 들어온 109건 중 15m 안 87건, 25m 안 97건, 그 뒤는 40m 이상
+            떨어진 별개 방지턱이었다. 15m에서 풀면 다음 방지턱 앞에서 가속했다 다시 줄였다.
+            예전 설계(2026-11-23까지): 방지턱 10km/h, 사이 17~20km/h, 대기 15m.
 
 이번 프레임에 일어난 이벤트는 self.events에 담긴다 (speed_bump.jsonl에 그대로 기록).
 
@@ -67,15 +67,15 @@ def coast_start_kph(end_kph, dist_m, table=COAST_DECEL):
 
 
 class SpeedBumpPlanner:
-  BUMP_SPEED_KPH = 10.
+  BUMP_SPEED_KPH = 20.
   SLOW_DIST_M = 20.        # 방지턱 이 거리 안에서 목표 BUMP_SPEED_KPH
   COAST_DECEL = COAST_DECEL
   # 페달을 떼고 실제로 줄기 시작하기까지의 지연 보상: 이만큼 앞 위치 기준으로 목표 계산
   LOOKAHEAD_S = 1.0
-  BETWEEN_SPEED_KPH = 20.  # 방지턱 사이 상한
-  BETWEEN_MIN_KPH = 17.    # 방지턱 사이에서 다음 방지턱 20m 지점까지 지킬 속도
-  RAMP_KPH_S = 3.0         # 넘은 뒤 20km/h까지 초당 3km/h
-  NEXT_WAIT_M = 15.        # 넘은 뒤 다음 방지턱 보고를 기다리는 거리. 없으면 release.
+  BETWEEN_SPEED_KPH = 20.  # 방지턱 사이 상한 (= 방지턱 속도: 연달아 있으면 한 속도로 넘는다)
+  BETWEEN_MIN_KPH = 20.    # 방지턱 사이에서 다음 방지턱 20m 지점까지 지킬 속도
+  RAMP_KPH_S = 3.0         # 넘은 뒤 BETWEEN_SPEED_KPH까지 초당 3km/h (두 값이 같으면 쓰이지 않음)
+  NEXT_WAIT_M = 25.        # 넘은 뒤 다음 방지턱 보고를 기다리는 거리. 없으면 release (마지막 방지턱).
   NEAR_NEXT_M = 120.       # 다음 방지턱이 이 안이면 방지턱 사이(between)로 이어 간다
   # 보고된 거리는 얼마간 전 위치 기준이다 (GPS 지연 + TMAP 갱신 1Hz + TmapNda 전송 2Hz).
   # 통과 판단에만 이만큼의 주행거리를 빼 준다 (2026-11-16 분석).
@@ -122,7 +122,7 @@ class SpeedBumpPlanner:
 
   @property
   def active(self):
-    """제한을 걸고 있는가 (controlsd가 10km/h 아래 목표를 허용하고 필터 없이 따른다)."""
+    """제한을 걸고 있는가 (controlsd가 방지턱 목표를 필터 없이 바로 따른다)."""
     return self.phase != 'idle'
 
   @property
@@ -179,14 +179,14 @@ class SpeedBumpPlanner:
     target = None
     if self.tracking:
       # 미리 페달 떼기: 응답 지연만큼 앞 위치 기준.
-      # 방지턱 사이에서는 20m 지점에 BETWEEN_MIN_KPH(17)로 닿게만 줄인다.
+      # 방지턱 사이에서는 20m 지점에 BETWEEN_MIN_KPH로 닿게만 줄인다.
       end_kph = self.BETWEEN_MIN_KPH if self.between else self.BUMP_SPEED_KPH
       target = coast_start_kph(end_kph, self.est_dist - v_ego_ms * self.LOOKAHEAD_S - self.SLOW_DIST_M,
                                self.COAST_DECEL)
     if self.between:
       if target is None:
         # 다음 방지턱이 아직 안 보임: TmapNda는 넘은 뒤 0.5~4초 늦게 다음 방지턱을 알려
-        # 대개 25m 앞에서야 보인다. 그때 20km/h면 브레이크가 세지므로 17km/h에서 기다린다.
+        # 대개 25~45m 앞에서야 보인다. 그동안 BETWEEN_MIN_KPH에서 기다린다.
         target = min(self.ramp_kph, self.BETWEEN_MIN_KPH)
       else:
         target = min(target, self.ramp_kph)
@@ -243,7 +243,7 @@ class SpeedBumpPlanner:
         self.passed_pos = self.odo + self.est_dist
         self.candidate = None
         self.between = True
-        # 지금 속도에서부터 올린다(17km/h까지만): 10부터 다시 올리면 따라잡는 2~3초 동안
+        # 지금 속도에서부터 올린다(BETWEEN_MIN_KPH까지만): 방지턱 속도부터 다시 올리면 따라잡는 2~3초 동안
         # 페달이 떨어져 14 -> 12km/h로 처졌다 (2026-11-17 주행).
         self.ramp_kph = min(max(self.BUMP_SPEED_KPH, v_ego_ms / KPH_TO_MS), self.BETWEEN_MIN_KPH)
         self.between_start_odo = self.odo

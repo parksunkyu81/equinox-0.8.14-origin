@@ -761,8 +761,8 @@ class RoadSpeedLimiter:
     self.sock = messaging.sub_sock("roadLimitSpeed")
     self.roadLimitSpeed = None
 
-    # 방지턱: 50m 전까지 10km/h, 통과 후 해제. controlsd가 speed_bump_active를 보고
-    # V_CRUISE_MIN(20km/h) 아래 목표를 허용한다.
+    # 방지턱: 20m 전부터 20km/h, 마지막 방지턱을 넘고 25m 뒤 해제. controlsd가 speed_bump_active를 보고
+    # 목표를 V_CRUISE_MIN 예외로 받는다.
     self.bump_planner = SpeedBumpPlanner()
     self.speed_bump_active = False
     self.bump_log = BumpLog()

@@ -1011,7 +1011,7 @@ class Controls:
 
         apply_limit_speed, road_limit_speed, left_dist, first_started, max_speed_log = \
             road_speed_limiter_get_max_speed(v_ego_clu, self.is_metric)
-        # 방지턱 감속 중: V_CRUISE_MIN(20km/h) 아래 목표(10km/h)를 허용하고, 필터 없이 바로 반영한다.
+        # 방지턱 감속 중: 방지턱 목표(BUMP_SPEED_KPH)를 V_CRUISE_MIN 예외로 받고, 필터 없이 바로 반영한다.
         was_bump_active = self.speed_bump_active
         self.speed_bump_active = bool(road_speed_limiter.speed_bump_active)
         # 방지턱을 지나 제한이 풀린 순간: 원래 속도로 즉시 돌아간다 (update_max_speed 참고).
@@ -2472,7 +2472,7 @@ class Controls:
 
         # Cruise SET
         # kph [applyMaxSpeed, cruiseMaxSpeed]
-        # 방지턱 감속 중에는 하한을 MIN_SET_SPEED_KPH(20) 대신 방지턱 속도(10)로 낮춘다.
+        # 방지턱 감속 중에는 하한을 MIN_SET_SPEED_KPH 대신 방지턱 속도(BUMP_SPEED_KPH)로 둔다.
         if self.speed_bump_active:
             min_set_kph = SpeedBumpPlanner.BUMP_SPEED_KPH
         elif self.atc_low_active:
