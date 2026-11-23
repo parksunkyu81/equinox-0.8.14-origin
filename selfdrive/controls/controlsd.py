@@ -94,6 +94,8 @@ TURN_SLOW_KPH = 10.
 # How long "핸들을 잡아 주세요" stays under the turn message after the steering
 # saturation prompt would have fired (it replaces steerSaturated in a turn).
 TURN_SAT_HOLD_S = 1.5
+# The turn desire as controlsd sees it is held this long over a gap.
+TURN_DESIRE_HOLD_S = 0.3
 # Under TURN_SLOW_KPH the message shows only while the car is moving and the
 # wheel is turned that way, i.e. the turn itself, not the wait before it.
 TURN_MOVING_KPH = 2.
@@ -524,6 +526,8 @@ class Controls:
         self.steer_limited = False
         self.steer_sat_elapsed = 0.0
         self.turn_sat_hold_s = 0.0   # "핸들을 잡아 주세요" under the turn message
+        self.turn_desire_side = log.LateralPlan.Desire.none
+        self.turn_desire_hold_s = 0.0
         self.steer_sat_clear_elapsed = 0.0
         # Time left on the pedal hold. Set at the end of one control step and read
         # at the start of the next, since the steering result is not known yet
@@ -2212,7 +2216,14 @@ class Controls:
         # an actual deviation still raises it immediately.
         steer_saturated_now = bool(lac_log.active and lac_log.saturated and
                                    not CS.steeringPressed)
-        turning = lat_plan.desire in (log.LateralPlan.Desire.turnLeft, log.LateralPlan.Desire.turnRight)
+        # Held TURN_DESIRE_HOLD_S over a short gap: the turn desire re-pulse
+        # (desire_helper TURN_REPULSE_*) drops it to none for 0.1 s.
+        if lat_plan.desire in (log.LateralPlan.Desire.turnLeft, log.LateralPlan.Desire.turnRight):
+            self.turn_desire_side = lat_plan.desire
+            self.turn_desire_hold_s = TURN_DESIRE_HOLD_S
+        else:
+            self.turn_desire_hold_s = max(0.0, self.turn_desire_hold_s - DT_CTRL)
+        turning = self.turn_desire_hold_s > 0.
         if steer_saturated_now:
             self.steer_sat_elapsed += DT_CTRL
             self.steer_sat_clear_elapsed = 0.0
@@ -2254,7 +2265,7 @@ class Controls:
         # Only while the car is turning: the desire stays out while it waits
         # at a light or creeps in the turn queue (2026-11-23--08-45-38: 133 s
         # and 44 s, 80-93% of it under 10 km/h), which is no "회전 중".
-        turn_left = lat_plan.desire == log.LateralPlan.Desire.turnLeft
+        turn_left = self.turn_desire_side == log.LateralPlan.Desire.turnLeft
         wheel_toward = CS.steeringAngleDeg * (1. if turn_left else -1.)
         turning_now = turning and (CS.vEgo >= TURN_SLOW_KPH * CV.KPH_TO_MS or
                                    (CS.vEgo > TURN_MOVING_KPH * CV.KPH_TO_MS and

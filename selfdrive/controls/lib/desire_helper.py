@@ -111,6 +111,21 @@ TURN_REARM_S = 10.            # after a finished turn, no new turn desire for th
 # the late turns and only reaches further toward driveways before the point.
 ATC_TURN_FORCE_M = 40.
 
+# Turn desire re-pulse. modeld hands the model a desire only on its rising
+# edge (driving.cc: "desire input is just a pulse"), and the model forgets it
+# while the car waits: on the 2026-11-22/23 drives, 9 turns held the desire
+# 17-124 s at a standstill, and at the launch the model's turn probability had
+# fallen from 0.25-0.95 to 0.00-0.36, its path pointing straight in 8. So while
+# stopped with a turn desire out, and once more as the car moves off after at
+# least TURN_REPULSE_STOP_S, the published desire drops to none for
+# TURN_REPULSE_GAP_FRAMES model frames, which modeld turns into a fresh pulse.
+# The latch and every other state keep the turn; only the output blinks.
+TURN_REPULSE_STOP_V = 1. * CV.KPH_TO_MS
+TURN_REPULSE_LAUNCH_V = 2. * CV.KPH_TO_MS
+TURN_REPULSE_STOP_S = 3.
+TURN_REPULSE_PERIOD_S = 2.5
+TURN_REPULSE_GAP_FRAMES = 2
+
 
 class DesireHelper:
   """Lane change / turn desire.
@@ -191,6 +206,10 @@ class DesireHelper:
     self.turn_by_driver = False     # the latched turn came from the driver's blinker alone
     self.driver_turn_open = 0       # frames the blinker side has read as open road
     self.driver_turn_off_t = 0.     # blinker off this long during a driver turn
+    # turn desire re-pulse (TURN_REPULSE_*)
+    self.turn_stop_t = 0.
+    self.turn_repulse_clock = 0.
+    self.turn_repulse_left = 0
 
   # ─────────────────────────────────────────────
   # entry
@@ -239,6 +258,7 @@ class DesireHelper:
       self.right.commit_last()
     self.prev_one_blinker = one_blinker
     self._finish_desire()
+    self._turn_repulse(carstate)
 
   def _update_driver_turn(self, carstate, active, driver_st):
     """Start a turn desire from the driver's blinker alone (DRIVER_TURN_*)."""
@@ -262,6 +282,32 @@ class DesireHelper:
       self.turn_by_driver = True
       self.driver_turn_off_t = 0.
       self.driver_turn_open = 0
+
+  def _turn_repulse(self, carstate):
+    """Blink a held turn desire to none so modeld re-pulses it (TURN_REPULSE_*)."""
+    if self.desire not in (Desire.turnLeft, Desire.turnRight):
+      self.turn_stop_t = 0.
+      self.turn_repulse_clock = 0.
+      self.turn_repulse_left = 0
+      return
+    v = carstate.vEgo
+    fire = False
+    if v < TURN_REPULSE_STOP_V:
+      self.turn_stop_t += DT_MDL
+      self.turn_repulse_clock += DT_MDL
+      if self.turn_repulse_clock >= TURN_REPULSE_PERIOD_S:
+        self.turn_repulse_clock = 0.
+        fire = True
+    elif v >= TURN_REPULSE_LAUNCH_V:
+      if self.turn_stop_t >= TURN_REPULSE_STOP_S:
+        fire = True   # moving off after the wait
+      self.turn_stop_t = 0.
+      self.turn_repulse_clock = 0.
+    if fire:
+      self.turn_repulse_left = TURN_REPULSE_GAP_FRAMES
+    if self.turn_repulse_left > 0:
+      self.turn_repulse_left -= 1
+      self.desire = Desire.none
 
   def _reset_maneuver(self):
     self.lane_change_state = LaneChangeState.off

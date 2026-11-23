@@ -199,7 +199,10 @@ class LateralPlanner:
         measured_curvature=measured_curvature,
         lane_change_active=lane_change_active)
       self.v09_center_corr_m = 0.0
-      if self.DH.desire == log.LateralPlan.Desire.none and not lane_change_active:
+      # turn_direction too: the turn desire re-pulse blinks DH.desire to none
+      # for a frame or two in the middle of a turn.
+      if (self.DH.desire == log.LateralPlan.Desire.none and not lane_change_active and
+          self.DH.turn_direction == log.LateralPlan.Desire.none):
         centre = lane_path[:, 1] - (self.path_xyz[:, 1] + self.LP.path_offset)
         if np.all(np.isfinite(centre)):
           d_path_xyz[:, 1] += V09_LANE_CENTER_GAIN * centre
