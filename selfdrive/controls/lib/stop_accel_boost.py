@@ -174,6 +174,19 @@ MODEL_GO_PLAN_T_S = 2.0
 MODEL_GO_PLAN_SPEED_MS = 1.0
 MODEL_GO_HOLD_S = 0.30
 MODEL_GO_CLOSING_VREL_MS = -0.30
+# PLAN GATE: the car only starts by itself from standstill if the model's plan
+# has also wanted to move recently. Its v(2 s) must have stayed >= this for
+# PLAN_GATE_HOLD_S within the last PLAN_GATE_WINDOW_S.
+# 2026-11-23 (00-58-55, 878 s and 1022 s): two standstill launches behind a
+# stopped delivery motorcycle. The small target's vision gap wobbled 7-12 m
+# and its speed read up to 0.6 m/s, so GO (1.5 m opening, 0.5 m/s) fired on
+# noise and the driver braked within ~1 s. The plan stayed at ~0.1 m/s in
+# both. Over all 55 standstill launches of 11-22/11-23 this gate blocks those
+# two and no other (every good launch had >= 0.43 m/s in the last second; a
+# 0.5 threshold would also have blocked one good launch).
+PLAN_GATE_SPEED_MS = 0.30
+PLAN_GATE_HOLD_S = 0.20
+PLAN_GATE_WINDOW_S = 1.0
 # GUARD: the whole floor (base, hill and lead-matching) fades to zero as the
 # gap falls to FOLLOW_GUARD_GAP_M + FOLLOW_GUARD_TR_S * v (5.3 m at 10 km/h),
 # over FOLLOW_GUARD_SPAN_M. A lead that keeps pulling away keeps the full
@@ -431,6 +444,9 @@ class StopAccelBoostLatch:
     self.go_elapsed = 0.0
     self.model_go_elapsed = 0.0
     self.model_go = False
+    self.plan_gate_elapsed = 0.0
+    self.plan_gate_since_ok = float('inf')
+    self.plan_gate_ok = False
 
   def _clear_latch(self):
     self.latched = False
@@ -468,6 +484,16 @@ class StopAccelBoostLatch:
       self.model_go_elapsed >= MODEL_GO_HOLD_S and lead_valid and
       lead_distance >= LAUNCH_GO_MIN_GAP_M and
       lead_relative_speed > MODEL_GO_CLOSING_VREL_MS)
+    # PLAN GATE (see PLAN_GATE_*): a missing plan counts as "not wanting to go".
+    if math.isfinite(plan_speed) and plan_speed >= PLAN_GATE_SPEED_MS:
+      self.plan_gate_elapsed += self.dt
+    else:
+      self.plan_gate_elapsed = 0.0
+    if self.plan_gate_elapsed >= PLAN_GATE_HOLD_S:
+      self.plan_gate_since_ok = 0.0
+    else:
+      self.plan_gate_since_ok += self.dt
+    self.plan_gate_ok = self.plan_gate_since_ok <= PLAN_GATE_WINDOW_S
     self.pressure = stop_accel_boost_pressure(
       v_ego, lead_distance, lead_relative_speed, lead_valid)
     self.boost_factor = stop_accel_boost_factor(self.pressure)
@@ -573,7 +599,7 @@ class StopAccelBoostLatch:
     self.guard = follow_guard(v_ego, lead_distance)
     self.standstill_launch = bool(
       standstill_launch_enabled and self.latched and
-      (self.go_elapsed >= LAUNCH_GO_HOLD_S or self.standstill_launch) and
+      ((self.go_elapsed >= LAUNCH_GO_HOLD_S and self.plan_gate_ok) or self.standstill_launch) and
       not gas_pressed and not brake_pressed and
       v_ego < STOP_ACCEL_BOOST_MIN_SPEED_MS and
       lead_valid and
