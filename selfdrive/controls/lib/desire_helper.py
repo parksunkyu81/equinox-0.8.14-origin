@@ -103,7 +103,13 @@ TURN_REARM_S = 10.            # after a finished turn, no new turn desire for th
 # at 1453.5 s: a T-junction left turn 25.7 m ahead; the cross road was not in
 # view yet (left edge < 4 m), so the blinker armed a lane change and the turn
 # desire never came; the model only bent the path by itself 2 s later.
-ATC_TURN_FORCE_M = 30.
+# 30 -> 40 m on 2026-11-24 after replaying 32 driven ATC turns (five drives,
+# 11-22 22-42-17 .. 11-23 08-45-38) at 0/20/30/40/50 m: most turns get the
+# desire ~4 s ahead from the road opening anyway; 40 m moved the latest 10%
+# from 2.9 to 3.7 s ahead (four turns 0.7-1.5 s earlier), while the desire
+# time before the road opened stayed 4.2 -> 4.3 s. 50 m gained no more on
+# the late turns and only reaches further toward driveways before the point.
+ATC_TURN_FORCE_M = 40.
 
 
 class DesireHelper:
