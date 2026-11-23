@@ -45,6 +45,16 @@ LATERAL_ENVELOPE_MARGIN_M = 1.50
 # implausible plan) apply to both modes.
 V09_MIN_SPEED = 1.0
 V09_COST_INVALID = 1e6
+# v09 (OPTECH) follows the model's own path, which carries no lane centring:
+# on 2026-11-23--01-36-34 the car sat 0.29 m inside left curves and 0.41 m
+# inside right ones (29% of curve time > 0.4 m off), and when it was 0.5 m off
+# the path at 10 m still pointed 0.23 m to the same side, so it took 1.6-4 s
+# (median 2.3 s) to come back. This share of LanePlanner's lane-centre
+# correction is added to the model path: replayed on that drive the residual
+# at 10 m falls to 0.12 m; on straights the correction averages -0.03 m. The
+# correction keeps LanePlanner's confidence weighting (d_prob), clamps (0.25 m
+# near, 1.0 m at 20 m) and 2 m/s slew limit; none during a turn or lane change.
+V09_LANE_CENTER_GAIN = 0.5
 
 # road_speed_limiter publishes roadLimitSpeed (with atcType) at 20 Hz.
 ATC_MSG_TIMEOUT_S = 0.5
@@ -53,6 +63,7 @@ ATC_MSG_TIMEOUT_S = 0.5
 class LateralPlanner:
   def __init__(self, CP, use_v09=None):
     self.LP = LanePlanner()
+    self.v09_center_corr_m = 0.0   # lane centring added to the v09 path at 20 m [m]
     self.DH = DesireHelper()
     # Read once, like modeld and controlsd: all three must agree for a drive.
     self.use_v09 = Params().get_bool("WideOptechLateral") if use_v09 is None else bool(use_v09)
@@ -175,13 +186,20 @@ class LateralPlanner:
       # OPTECH default (lane priority mode off): the model's own path. The
       # weights were set once in __init__ (OPTECH sets the same ones each frame).
       d_path_xyz = self.path_xyz.copy()
-      # The lane blend is discarded, but run it anyway: it is what keeps
-      # LP.d_prob current, and the onroad confidence gauge reads dProb. Skipping
-      # it froze the gauge at its first value.
-      self.LP.get_d_path(
+      # The lane blend also keeps LP.d_prob current for the onroad confidence
+      # gauge (dProb). A share of its centring is added to the model path
+      # (V09_LANE_CENTER_GAIN), measured from the model path plus LanePlanner's
+      # own path offset so that offset is not brought in.
+      lane_path = self.LP.get_d_path(
         v_ego, self.t_idxs, self.path_xyz.copy(),
         measured_curvature=measured_curvature,
         lane_change_active=lane_change_active)
+      self.v09_center_corr_m = 0.0
+      if self.DH.desire == log.LateralPlan.Desire.none and not lane_change_active:
+        centre = lane_path[:, 1] - (self.path_xyz[:, 1] + self.LP.path_offset)
+        if np.all(np.isfinite(centre)):
+          d_path_xyz[:, 1] += V09_LANE_CENTER_GAIN * centre
+          self.v09_center_corr_m = float(V09_LANE_CENTER_GAIN * np.interp(20.0, self.path_xyz[:, 0], centre))
     else:
       # LanePlanner applies its offset in-place; a copy prevents an invalid
       # model frame from accumulating the offset on the last valid trajectory.
@@ -205,7 +223,7 @@ class LateralPlanner:
     # own path for the frame instead; it is the input the blend started from.
     self.plan_implausible = False
     lane_deviation = float(np.max(np.abs(d_path_xyz[:, 1] - self.path_xyz[:, 1])))
-    if not self.use_v09 and lane_deviation > MAX_LANE_BLEND_DEVIATION_M:
+    if lane_deviation > MAX_LANE_BLEND_DEVIATION_M:
       d_path_xyz = self.path_xyz.copy()
       # The car is given the model path this frame, so the lane planner's
       # output limiter must ramp from zero offset, not from the rejected one.
@@ -360,8 +378,12 @@ class LateralPlanner:
     lateralPlan.pathWobbleFlips = 0
     # The v09 planner computes the lane blend only for dProb and never steers
     # to it, so it applies no lane-centre correction.
-    lateralPlan.laneCenterCorrectionM = 0.0 if self.use_v09 else float(self.LP.lane_center_correction_m)
-    lateralPlan.laneCenterCorrectionActive = False if self.use_v09 else bool(self.LP.lane_center_correction_active)
+    if self.use_v09:
+      lateralPlan.laneCenterCorrectionM = float(self.v09_center_corr_m)
+      lateralPlan.laneCenterCorrectionActive = abs(self.v09_center_corr_m) > 0.01
+    else:
+      lateralPlan.laneCenterCorrectionM = float(self.LP.lane_center_correction_m)
+      lateralPlan.laneCenterCorrectionActive = bool(self.LP.lane_center_correction_active)
     # modelPathQuality*, modelNearCurvature, curveTemporalStored and
     # curveTemporalHoldAgeS went with the curve lane fallback and its readiness
     # monitor; the schema keeps the fields, which now read as their defaults.
