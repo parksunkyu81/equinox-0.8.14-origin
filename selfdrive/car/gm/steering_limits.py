@@ -6,10 +6,17 @@ GM_MIN_STEER_SPEED_MS = GM_MIN_STEER_SPEED_KPH / 3.6
 
 
 # Strong low/mid-speed steering response for Equinox, then taper back for
-# highway stability. Steering becomes active from 10 kph, peaks through
-# 30-40 kph, and progressively returns to the stable 7/17 envelope by 70 kph.
+# highway stability. Steering becomes active from 10 kph, holds the panda's
+# rate ceiling (GM_MAX_RATE_UP 14) from 10 to 40 kph, and progressively
+# returns to the stable 7/17 envelope by 70 kph.
+#
+# 10 and 20 kph were 11 and 13 until 2026-11-24. In 37 intersection turns on
+# the 2026-11-23 drives, 27-40% of the steering-active turn time had the torque
+# held back by this rise rate, 42 s of the 49 s rising at 10-20 kph: 0 -> 300
+# took ~0.55 s there, now ~0.43 s. The 300 ceiling, the fall rate and the
+# driver-torque cut are unchanged, so only the turn-in comes earlier.
 STEER_DELTA_BP_KPH = (0.0, 10.0, 20.0, 30.0, 40.0, 45.0, 60.0, 70.0, 130.0)
-STEER_DELTA_UP_V = (7.0, 11.0, 13.0, 14.0, 14.0, 13.0, 9.0, 7.0, 7.0)
+STEER_DELTA_UP_V = (7.0, 14.0, 14.0, 14.0, 14.0, 13.0, 9.0, 7.0, 7.0)
 STEER_DELTA_DOWN_V = (17.0, 18.0, 19.0, 20.0, 20.0, 19.0, 18.0, 17.0, 17.0)
 
 STEER_DELTA_UP_MAX = 14.0
