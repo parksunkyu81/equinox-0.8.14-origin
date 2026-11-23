@@ -54,7 +54,11 @@ V09_COST_INVALID = 1e6
 # at 10 m falls to 0.12 m; on straights the correction averages -0.03 m. The
 # correction keeps LanePlanner's confidence weighting (d_prob), clamps (0.25 m
 # near, 1.0 m at 20 m) and 2 m/s slew limit; none during a turn or lane change.
-V09_LANE_CENTER_GAIN = 0.5
+# 0.5 -> 0.8 on 2026-11-24: four drives at 0.5 (6.8 min with both lines sure)
+# against four without it -- straights over 0.4 m off 4.2% -> 1.7%, offset std
+# 0.19 -> 0.145 m, recovery median 1.9 -> 1.4 s -- but with the car 0.46 m off
+# it pulled only 0.11 m toward the centre at 20 m (0.06 straight, 0.18 curves).
+V09_LANE_CENTER_GAIN = 0.8
 
 # road_speed_limiter publishes roadLimitSpeed (with atcType) at 20 Hz.
 ATC_MSG_TIMEOUT_S = 0.5
