@@ -65,8 +65,9 @@ protected:
   void showEvent(QShowEvent *event) override;
   void updateFrameMat(int w, int h) override;
   void drawLaneLines(QPainter &painter, const UIState *s);
+  // danger: 0 safe (cyan corners), 1 close (orange), 2 too close (red).
   void drawLead(QPainter &painter, const cereal::ModelDataV2::LeadDataV3::Reader &lead_data,
-                const QPointF &vd, bool is_radar, const QString &info_text = {});
+                const QPointF &vd, const QString &info_text = {}, int danger = 0);
   inline QColor redColor(int alpha = 255) { return QColor(201, 34, 49, alpha); }
   inline QColor whiteColor(int alpha = 255) { return QColor(255, 255, 255, alpha); }
   inline QColor blackColor(int alpha = 255) { return QColor(0, 0, 0, alpha); }

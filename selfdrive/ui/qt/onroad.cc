@@ -305,13 +305,28 @@ void OnroadWindow::paintEvent(QPaintEvent *event) {
 
 // ***** onroad widgets *****
 
+// Bottom row (speed-limit board, speed panel, wheel / steering bar /
+// confidence gauge, turn-info box) sits this much lower than it used to: the
+// CPU / LatA line that it kept clear of moved up next to the clock
+// (2026-11-24, on request). 43 rather than the line's full 50 px so the
+// lowest box, the wheel's angle badge, still ends 10 px off the HUD's bottom.
+static constexpr int BOTTOM_ROW_DROP = 43;
+
+// Speed-limit board and the speed panel right of it. The board keeps half its
+// old 30 px margin off the left edge and the panel half its old gap to the
+// board (2026-11-24, on request). Everything anchored to the panel's right
+// edge (wheel, steering bar, confidence gauge) moves with it.
+static constexpr int SPEED_BOARD_X = 15;
+static constexpr int SPEED_BOARD_W = 210;
+static constexpr int SPEED_BOARD_PANEL_GAP = 15;
+
 // Turn-signal chevron bands, shared by NvgWindow::drawTurnSignals and the ATC
 // lane prompt in OnroadAlerts (both widgets fill the same stacked layout).
 // Placed where the old pixmap indicator sat: vertically centred, and inboard
 // rather than pinned to the screen edge. Still clear of the speed box on the
 // left and the thermal tiles on the right, which both hug the edges. The left
 // band sits 130 px further in (2026-11-22, on request), so its outermost
-// chevron starts 12 px right of the 자동 출발 tile (338..478 x 455..595 on the
+// chevron starts 12 px right of the 자동 출발 tile (338..478 x 498..638 on the
 // 1880 x 1040 HUD): chevrons 490..640. The right band is unchanged.
 static constexpr int TURN_BAND_W = 240;
 static constexpr int TURN_BAND_GAP = 400;      // inner edge of the band, out from screen centre
@@ -682,65 +697,59 @@ void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
 }
 
 
+// Lead marker: four corner brackets around the lead car with the distance /
+// speed / gap readout in a small pill inside the bottom edge (2026-11-24, on
+// request; it replaced the red chevron and the big readout box under it).
+// The corner colour carries the danger level drawHud works out: cyan safe,
+// orange close, red too close, each a little thicker than the last.
 void NvgWindow::drawLead(QPainter &painter, const cereal::ModelDataV2::LeadDataV3::Reader &lead_data,
-                         const QPointF &vd, bool is_radar, const QString &info_text) {
-  const float speedBuff = 10.;
-  const float leadBuff = 40.;
-  const float d_rel = lead_data.getX()[0];
-  const float v_rel = lead_data.getV()[0];
+                         const QPointF &vd, const QString &info_text, int danger) {
+  // Box sized from the model's own distance and the same focal scale the
+  // road is projected with (ZOOM / fx, see updateFrameMat), so it shrinks as
+  // the car pulls away: a car is ~1.9 m wide and ~1.5 m tall, plus a margin.
+  const float d_rel = std::max(lead_data.getX()[0], 1.0f);
+  const float zoom = uiState()->wide_camera ? ZOOM * 0.5f : ZOOM;
+  const float bw = std::clamp(zoom * 2.4f / d_rel, 90.0f, 760.0f);
+  const float bh = std::clamp(zoom * 1.9f / d_rel, 70.0f, 600.0f);
+  // vd is the lead's rear projected a little above the road (ui.cc), where
+  // the old chevron's tip sat; the car's wheels are a fifth of the box below.
+  const float cx = std::clamp((float)vd.x(), bw / 2, width() - bw / 2);
+  const float bottom = std::fmin(height() - 8.0f, (float)vd.y() + bh * 0.2f);
+  const float top = bottom - bh;
+  const float left = cx - bw / 2, right = cx + bw / 2;
 
-  float fillAlpha = 0;
-  if (d_rel < leadBuff) {
-    fillAlpha = 255 * (1.0 - (d_rel / leadBuff));
-    if (v_rel < 0) {
-      fillAlpha += 255 * (-1 * (v_rel / speedBuff));
-    }
-    fillAlpha = (int)(fmin(fillAlpha, 255));
-  }
+  static const QColor kColors[3] = {QColor(0, 220, 230), QColor(255, 150, 0), QColor(255, 45, 45)};
+  static const int kWidths[3] = {7, 8, 10};
+  danger = std::clamp(danger, 0, 2);
+  const float arm = std::clamp(std::min(bw, bh) * 0.22f, 18.0f, 60.0f);
 
-  float sz = std::clamp((25 * 30) / (d_rel / 3 + 30), 15.0f, 30.0f) * 2.35;
-  float x = std::clamp((float)vd.x(), 0.f, width() - sz / 2);
-  float y = std::fmin(height() - sz * .6, (float)vd.y());
-
-  float g_xo = sz / 5;
-  float g_yo = sz / 10;
-
-  QPointF glow[] = {{x + (sz * 1.35) + g_xo, y + sz + g_yo}, {x, y - g_yo}, {x - (sz * 1.35) - g_xo, y + sz + g_yo}};
-  painter.setBrush(is_radar ? QColor(86, 121, 216, 255) : QColor(218, 202, 37, 255));
-  painter.drawPolygon(glow, std::size(glow));
-
-  // chevron
-  QPointF chevron[] = {{x + (sz * 1.25), y + sz}, {x, y}, {x - (sz * 1.25), y + sz}};
-  painter.setBrush(redColor(fillAlpha));
-  painter.drawPolygon(chevron, std::size(chevron));
+  painter.save();
+  QPainterPath corners;
+  corners.moveTo(left, top + arm);     corners.lineTo(left, top);     corners.lineTo(left + arm, top);
+  corners.moveTo(right - arm, top);    corners.lineTo(right, top);    corners.lineTo(right, top + arm);
+  corners.moveTo(left, bottom - arm);  corners.lineTo(left, bottom);  corners.lineTo(left + arm, bottom);
+  corners.moveTo(right - arm, bottom); corners.lineTo(right, bottom); corners.lineTo(right, bottom - arm);
+  painter.setBrush(Qt::NoBrush);
+  painter.strokePath(corners, QPen(kColors[danger], kWidths[danger], Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 
   if (!info_text.isEmpty()) {
-    painter.save();
-    // +20% overall on 2026-08-27: the font and the padding both, so the box
-    // grows with the text instead of tightening around it. 36 -> 43 px, and the
-    // padding scaled to match (32 -> 38, 20 -> 24). The rounded-rect radius
-    // below follows for the same reason.
-    configFont(painter, "Open Sans", 43, "Bold");
+    // Small, inside the bottom edge. Its width is the text's, not the box's:
+    // a far lead's box is narrower than the readout, and the pill then sticks
+    // out on both sides rather than shrinking the text below reading size.
+    configFont(painter, "Open Sans", 24, "Bold");
     QFontMetrics metrics(painter.font());
-    const int text_width = metrics.horizontalAdvance(info_text) + 38;
-    const int text_height = metrics.height() + 24;
-    QRect text_rect(static_cast<int>(x - text_width / 2), static_cast<int>(y + sz + 12),
-                    text_width, text_height);
-    if (text_rect.bottom() > height() - 12) {
-      text_rect.moveBottom(static_cast<int>(y - 12));
-    }
-    text_rect.moveLeft(std::clamp(text_rect.left(), 12, width() - text_rect.width() - 12));
+    const int pill_w = metrics.horizontalAdvance(info_text) + 28;
+    const int pill_h = metrics.height() + 10;
+    QRect pill(static_cast<int>(cx - pill_w / 2.0f), static_cast<int>(bottom - 8 - pill_h), pill_w, pill_h);
+    pill.moveLeft(std::clamp(pill.left(), 12, std::max(12, width() - pill.width() - 12)));
 
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(0, 0, 0, 160));
-    painter.drawRoundedRect(text_rect, 10, 10);
-    // Green, matching the diagnostic readout along the bottom edge -- both are
-    // live numbers read off the system rather than driving instructions, and
-    // the white it replaced was the same colour as the alert text.
-    painter.setPen(QColor(0, 255, 0, 255));
-    painter.drawText(text_rect, Qt::AlignCenter, info_text);
-    painter.restore();
+    painter.setBrush(QColor(0, 0, 0, 165));
+    painter.drawRoundedRect(pill, pill_h / 2.0, pill_h / 2.0);
+    painter.setPen(QColor(255, 255, 255, 240));
+    painter.drawText(pill, Qt::AlignCenter, info_text);
   }
+  painter.restore();
 }
 
 void NvgWindow::paintGL() {
@@ -871,6 +880,16 @@ void NvgWindow::drawHud(QPainter &p) {
     p.setPen(QColor(255, 255, 255, 220));
     p.drawText(bdr_s, 55, cached_ts);
   }
+  // Where the CPU / LatA line starts: just right of the clock, on its
+  // baseline (2026-11-24, on request; it used to run along the bottom edge).
+  // Measured from an all-8s template so the line never shifts as the time
+  // ticks.
+  static const int info_x = [] {
+    QFont f("Open Sans");
+    f.setPixelSize(40);
+    f.setStyleName("Bold");
+    return bdr_s + QFontMetrics(f).horizontalAdvance("8888-88-88 88:88:88") + 30;
+  }();
 
   UIState *s = uiState();
 
@@ -896,11 +915,58 @@ void NvgWindow::drawHud(QPainter &p) {
                         d_rel, v_lead * MS_TO_KPH);
     }
   }
+  // Danger level for the lead's corner colour: 0 cyan, 1 orange, 2 red.
+  // Two measures, whichever is worse:
+  //  - time gap (distance / own speed): under 1.2 s orange, under 0.8 s red.
+  //    1.2 rather than the textbook 2 s because the planner itself follows at
+  //    about TR 1.45 -- a stricter line would paint normal following orange;
+  //  - time to collision while closing in: under 4 s orange, under 2.5 s red,
+  //    so a lead braking hard turns the box before the gap itself shrinks.
+  // Near standstill (< 1 m/s) queueing close is normal: orange only inside
+  // 2 m. A drop to a safer colour must hold 0.5 s, so the colour does not
+  // flicker on a threshold; a rise shows at once.
+  int lead_danger = 0;
+  {
+    static int shown_level = 0;
+    static double hold_since = 0;
+    int raw = 0;
+    bool have = false;
+    float d = 0.0f, v_lead = 0.0f;
+    if (lead_one.getStatus()) {
+      d = lead_one.getDRel();
+      v_lead = lead_one.getVLead();
+      have = true;
+    } else if (leads[0].getProb() > .5) {
+      d = leads[0].getX()[0];
+      v_lead = leads[0].getV()[0];
+      have = true;
+    }
+    if (have) {
+      const float v_ego = std::max(car_state.getVEgo(), 0.0f);
+      d = std::max(d, 0.0f);
+      const float closing = v_ego - v_lead;
+      const float ttc = closing > 0.5f ? d / closing : 1e3f;
+      if (v_ego > 1.0f) {
+        const float gap = d / v_ego;
+        if (gap < 0.8f || ttc < 2.5f) raw = 2;
+        else if (gap < 1.2f || ttc < 4.0f) raw = 1;
+      } else if (d < 2.0f) {
+        raw = 1;
+      }
+    }
+    const double now = millis_since_boot();
+    if (raw >= shown_level || now - hold_since >= 500.0) {
+      shown_level = raw;
+      hold_since = now;
+    }
+    lead_danger = shown_level;
+  }
+
   if (leads[0].getProb() > .5) {
-    drawLead(p, leads[0], s->scene.lead_vertices[0], s->scene.lead_radar[0], lead_info);
+    drawLead(p, leads[0], s->scene.lead_vertices[0], lead_info, lead_danger);
   }
   if (leads[1].getProb() > .5 && (std::abs(leads[1].getX()[0] - leads[0].getX()[0]) > 3.0)) {
-    drawLead(p, leads[1], s->scene.lead_vertices[1], s->scene.lead_radar[1]);
+    drawLead(p, leads[1], s->scene.lead_vertices[1]);
   }
 
   //drawMaxSpeed(p);
@@ -948,9 +1014,9 @@ void NvgWindow::drawHud(QPainter &p) {
     controls_state.getFriction(),
     controls_state.getSteerRatio(),
   };
-  // The size this line has always been drawn at, and the floor below which it
-  // stops being readable at arm's length.
-  constexpr int INFO_FONT_MAX = 43;
+  // The clock's own size as the ceiling, so the two read as one header line,
+  // and the floor below which it stops being readable at arm's length.
+  constexpr int INFO_FONT_MAX = 40;
   constexpr int INFO_FONT_MIN = 24;
   constexpr int INFO_MARGIN = 20;
   static QString infoText;
@@ -987,7 +1053,7 @@ void NvgWindow::drawHud(QPainter &p) {
     // here rather than per repaint: it is only worth measuring when the string
     // it measures has changed.
     configFont(p, "Open Sans", INFO_FONT_MAX, "Regular");
-    const int avail = rect().width() - 2 * INFO_MARGIN;
+    const int avail = rect().width() - INFO_MARGIN - info_x;
     const int full_w = QFontMetrics(p.font()).horizontalAdvance(infoText);
     infoFontSize = (full_w > avail && full_w > 0)
                      ? std::max(INFO_FONT_MIN, INFO_FONT_MAX * avail / full_w)
@@ -1008,7 +1074,7 @@ void NvgWindow::drawHud(QPainter &p) {
   // info
   configFont(p, "Open Sans", infoFontSize, "Regular");
   p.setPen(QColor(0, 255, 0, 255));
-  p.drawText(rect().left() + INFO_MARGIN, rect().height() - 15, infoText);
+  p.drawText(info_x, 55, infoText);
 
 
   drawBottomIcons(p);
@@ -1300,9 +1366,14 @@ static QString ndaSafetyLabel(int cam_type) {
 //      confidence gauge beside its brake / auto-hold column;
 //   3. the temperature panel above that.
 // One function so drawThermal, drawBottomIcons and drawTurnInfo agree.
+//
+// 2026-11-24: the box is 699 wide (x 1171..1870 on the 1880 px HUD), taking
+// the 60 px the bottom row gave up when the speed panel moved left, and it
+// drops by BOTTOM_ROW_DROP now that the CPU line is no longer under it. The
+// status block and the thermal panel above it follow, as before.
 RightColumnLayout rightColumnLayout(int w, int h) {
-  constexpr int BOX_W = 639, BOX_H = 300;
-  constexpr int INFO_CLEAR = 50;
+  constexpr int BOX_W = 699, BOX_H = 300;
+  constexpr int INFO_CLEAR = 50 - BOTTOM_ROW_DROP;
   constexpr int GAP = 20;
   constexpr int STATUS_SD = 140, STATUS_GAP_Y = 12, STATUS_PANEL_GAP = 19;
   RightColumnLayout l;
@@ -1327,7 +1398,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
   // Keep the inter-row gap at half of its former 50 px value.
   int x = icon_start_x;
-  const int y1 = rect().bottom() - footer_h / 2 - 10;
+  const int y1 = rect().bottom() - footer_h / 2 - 10 + BOTTOM_ROW_DROP;
   const int y2 = y1 - radius - row_gap;
 
   // Wheel then steering bar, both on the upper row. The wheel is placed off
@@ -2460,19 +2531,14 @@ void NvgWindow::drawSpeed(QPainter &p) {
   const qreal panel_bg_w = panel_content_w * 1.2;
   const qreal panel_bg_h = panel_content_h;
 
-  // 가운데(좌측 패널 ↔ 메인 속도 박스) 가로 여백
-  const int baseGap = 24;
-  const int extraGapX = 14;
-  const int gap = baseGap + extraGapX;
+  // How far below the reference box the panel sits: the bottom row's shared
+  // drop (see BOTTOM_ROW_DROP).
+  const qreal group_drop = BOTTOM_ROW_DROP;
 
-  // How far below the reference box the panel sits. It used to be a tenth of
-  // the panel's own height; raised by that tenth, so it is now flush with the
-  // box. Kept as a fraction of the height rather than a pixel count so it
-  // stays the one number to adjust and keeps its proportion if the fonts
-  // change.
-  const qreal group_drop = panel_content_h * 0.0;
-
-  QRectF panelBg(bgFixed.left() - gap - panel_bg_w,
+  // The left edge is pinned to the speed-limit board rather than derived from
+  // the reference box: SPEED_BOARD_PANEL_GAP right of the board (x 240 on the
+  // 1880 px HUD). The reference box is still what sets the panel's height.
+  QRectF panelBg(SPEED_BOARD_X + SPEED_BOARD_W + SPEED_BOARD_PANEL_GAP,
                  bgFixed.top() + group_drop,
                  panel_bg_w,
                  panel_bg_h);
@@ -2931,13 +2997,14 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   auto S = [&](int v) -> int { return (int)std::lround(v * k); };
 
   // ---- layout base ----
-  const int x_start = 30;             // 위치는 유지
+  const int x_start = SPEED_BOARD_X;
   const int base_y_start = 70;        // 위치는 유지
   const int corner_radius = S(32);
   const QColor bgColor(0, 0, 0, 166);
 
   // ---- 20% 아래로 이동 (화면 하단 넘어가면 clamp) + 현재 보이던 위치에서 400 더 내리는 것----
-  const int desired_shift = (int)std::lround(height() * 0.20f) + 400;
+  // + BOTTOM_ROW_DROP with the rest of the bottom row.
+  const int desired_shift = (int)std::lround(height() * 0.20f) + 400 + BOTTOM_ROW_DROP;
 
   // Publish where the NDA/HDA badge sits, for the pedal tiles drawBottomIcons
   // stacks above it (see the members' comment in onroad.h). Always measured
@@ -2961,7 +3028,7 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   if (show_sign) {
     needed_h = S(210) + S(110);
   } else if (show_cam_or_section) {
-    const int board_w = S((limit_speed < 100) ? 210 : 230);
+    const int board_w = S(SPEED_BOARD_W);
     // 원형 표지(보드) + 아래 거리 pill 여유
     needed_h = board_w + S(110);
   } else { // show_road
@@ -2980,8 +3047,7 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
     const int w = S(120);
     const int h = S(54);
     const int top_margin = S(10);
-    const int board_width = (show_sign || !show_cam_or_section) ? S(210)
-                                      : S((limit_speed < 100) ? 210 : 230);
+    const int board_width = S(SPEED_BOARD_W);
     const int x_icon = x_start + (board_width - w) / 2;
     const int y_icon = std::max(0, y_start - h - top_margin);
 
@@ -3042,7 +3108,7 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   // CAM/SECTION 제한속도 (원형 표지 + 아래 거리 pill)
   // ------------------------------------------------------------
   else if (show_cam_or_section) {
-    const int board_width = S((limit_speed < 100) ? 210 : 230);
+    const int board_width = S(SPEED_BOARD_W);
     const int board_height = board_width;
 
     // background
@@ -3067,7 +3133,10 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
     // speed text
     p.setPen(QPen(Qt::black, padding));
     str.sprintf("%d", limit_speed);
-    configFont(p, "Inter", S(70), "Bold");
+    // The board no longer widens to 230 for a three-digit limit -- the speed
+    // panel is only SPEED_BOARD_PANEL_GAP to its right now -- so the number
+    // shrinks instead to stay inside the red ring.
+    configFont(p, "Inter", S(limit_speed < 100 ? 70 : 58), "Bold");
 
     QRect text_rect = getRect(p, Qt::AlignCenter, str);
     QRect b_rect = board_rect;
@@ -3233,8 +3302,12 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
     p.setPen(color);
     // Left: above the chevrons. Below them (y 608..668) the shifted band's
     // label would land on the cruise panel's top edge (x 300..532 from y 638).
+    // The left label is also centred 60 px inboard: with the tile group lowered
+    // (2026-11-24) the 조향 신호 ring reaches x 478 at that height, and the
+    // band's own centre would put a wide label's start on it.
     const int label_y = left ? cy - ch - 30 - 60 : cy + ch + 30;
-    p.drawText(QRect(band_x, label_y, band_w, 60), Qt::AlignCenter, label);
+    const int label_x = left ? band_x + 60 : band_x;
+    p.drawText(QRect(label_x, label_y, band_w, 60), Qt::AlignCenter, label);
   }
 
   p.restore();
@@ -3272,8 +3345,9 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
   if (!(go_dist > 0 && go_time > 0)) return;
 
   if (width() < 1200) return;                   // carrot skips narrow screens too
-  // carrot's corner (rightColumnLayout): 639 wide, raised 50 px off carrot's
-  // bottom so the CPU / LatA line underneath stays readable.
+  // carrot's corner (rightColumnLayout): 699 wide, 10 px off the right edge
+  // and 17 px off the bottom. Every font is up a step from carrot's on
+  // request (2026-11-24); the offsets below are re-spaced for them.
   const QRect box = rightColumnLayout(width(), height()).turn_box;
   const int box_w = box.width();
   const int BOX_H = box.height();
@@ -3292,10 +3366,10 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
   const QColor white(255, 255, 255);
 
   // guidance text (elided: the box is narrower than carrot's)
-  configFont(p, "Open Sans", 40, "Bold");
+  configFont(p, "Open Sans", 52, "Bold");
   {
     const QFontMetrics fm(p.font());
-    drawShadowText(p, tbt_x + 20, tbt_y - 22,
+    drawShadowText(p, tbt_x + 20, tbt_y - 8,
                    fm.elidedText(QString::fromUtf8(nda.getTbtMainText().cStr()), Qt::ElideRight, box_w - 40),
                    white, false);
   }
@@ -3304,7 +3378,7 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
   const int turn_info = nda.getXTurnInfo();
   if (turn_info > 0) {
     const int bx = tbt_x + 100;
-    const int by = tbt_y + 85;
+    const int by = tbt_y + 95;   // 10 lower than carrot: the guidance line grew
 
     const QString atc = QString::fromUtf8(nda.getAtcType().cStr());
     if (!atc.isEmpty() && !atc.startsWith("none")) {
@@ -3313,7 +3387,7 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
       else if (atc.contains("canceled")) fill = QColor(150, 150, 150, 170);
       p.setPen(QPen(QColor(0, 0, 0), 1));
       p.setBrush(fill);
-      p.drawRoundedRect(QRectF(bx - 80, by - 90, 160, 230), 15, 15);
+      p.drawRoundedRect(QRectF(bx - 80, by - 85, 160, 222), 15, 15);
     }
 
     const QPixmap *icon = nullptr;
@@ -3331,25 +3405,25 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
       const QString t = turn_info == 6 ? QString("TG")
                       : turn_info == 8 ? QString("목적지")
                       : QString("감속:%1").arg(turn_info);
-      configFont(p, "Open Sans", 35, "Bold");
-      drawShadowText(p, bx, by + 12, t, white, true);
+      configFont(p, "Open Sans", 42, "Bold");
+      drawShadowText(p, bx, by + 14, t, white, true);
     }
 
     const int dist = (int)nda.getXDistToTurn();
     if (dist > 0) {
       const QString d = dist < 1000 ? QString("%1 m").arg(dist)
                                     : QString("%1 km").arg(dist / 1000.0, 0, 'f', 1);
-      configFont(p, "Open Sans", 40, "Bold");
-      drawShadowText(p, bx, by + 110, d, white, true);
+      configFont(p, "Open Sans", 52, "Bold");
+      drawShadowText(p, bx, by + 115, d, white, true);
     }
   }
 
   // camera description (green tag) or road name
   const QString sdi = QString::fromUtf8(nda.getSdiDescr().cStr());
   const QString road = QString::fromUtf8(nda.getPosRoadName().cStr());
-  configFont(p, "Open Sans", 40, "Bold");
+  configFont(p, "Open Sans", 50, "Bold");
   const int label_x = tbt_x + 200;
-  const int label_base = tbt_y + 192;
+  const int label_base = tbt_y + 210;
   if (!sdi.isEmpty()) {
     // Elide against the room left in the box (pill ends 10 px inside its right
     // edge), then size the pill to what is drawn. Eliding to the text's own
@@ -3368,20 +3442,22 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
   }
 
   // arrival time and distance left
-  // carrot draws these at 50 px; in the 639 px box the arrival line steps
-  // down until it ends 24 px inside the right edge (a 3-digit minute count
-  // is the long case), and the distance uses the same size.
+  // The arrival line steps down from 56 px until it ends 24 px inside the
+  // right edge (a 3-digit minute count is the long case; in the 699 px box
+  // it settles near 46). The distance left is not tied to it any more: it is
+  // short, so it keeps 56 px.
   const QDateTime eta = QDateTime::currentDateTimeUtc().toOffsetFromUtc(9 * 3600).addSecs(go_time);
   const QString eta_text = QString("도착: %1분(%2)").arg(go_time / 60.0, 0, 'f', 1).arg(eta.toString("HH:mm"));
-  const int eta_avail = box_w - 190 - 24;
-  int eta_size = 50;
+  const int eta_avail = box_w - 195 - 24;
+  int eta_size = 56;
   for (; eta_size > 34; eta_size -= 2) {
     configFont(p, "Open Sans", eta_size, "Bold");
     if (QFontMetrics(p.font()).horizontalAdvance(eta_text) <= eta_avail) break;
   }
   configFont(p, "Open Sans", eta_size, "Bold");
-  drawShadowText(p, tbt_x + 190, tbt_y + 70, eta_text, white, false);
-  drawShadowText(p, tbt_x + 310, tbt_y + 120, QString("%1km").arg(go_dist / 1000.0, 0, 'f', 1), white, false);
+  drawShadowText(p, tbt_x + 195, tbt_y + 74, eta_text, white, false);
+  configFont(p, "Open Sans", 56, "Bold");
+  drawShadowText(p, tbt_x + 310, tbt_y + 140, QString("%1km").arg(go_dist / 1000.0, 0, 'f', 1), white, false);
 
   p.restore();
 }
@@ -3433,116 +3509,92 @@ void NvgWindow::drawThermal(QPainter &p) {
   }
 
   // =========================
-  // 레이아웃(세로형 + 오른쪽 아래 디버그 표시 위쪽)
+  // Layout: one horizontal strip of three tiles (2026-11-24, on request; it
+  // used to be a 213 x 309 column). It is exactly as wide as the brake / ACC /
+  // auto-hold / LKAS block below it -- right edge 21 px off the screen edge,
+  // 2 x 140 + 14 wide -- and stands STATUS_PANEL_GAP above that block
+  // (rightColumnLayout's thermal_bottom), so the right-hand column reads as
+  // one stack: thermal, status, turn-info box.
   // =========================
-  const int tile_w = 185;
-  // Space between one tile's label and the next tile's reading. The layout
-  // this replaced left 38 px here; halved from the 32 px first tried, since
-  // that band was the most visibly empty part of the panel.
-  const int gap = 16;
+  constexpr int RIGHT_MARGIN = 21;
+  constexpr int STRIP_W = 2 * 140 + 14;
   const int pad = 14;
+  const int col_w = (STRIP_W - pad * 2) / 3;
+  const int value_label_gap = 10;
 
-  // Size each tile to the glyphs' actual ink, not to the font's line box.
-  // Open Sans reports ascent 1.07em + descent 0.29em, but every string here
-  // is digits/caps with no descender, so its ink is only cap height
-  // (~0.71em). Laying out by line box therefore left ~45% of each tile
-  // structurally empty, which is what made the panel look padded out.
-  //
-  // Measured from fixed reference strings, never from the live values, so a
-  // changing reading (9% -> 100%, 5C -> 45C) can never change the tile
-  // height and shift the whole panel. "8" covers digits, "°" and "%" the
-  // tallest symbols the value line can show; labels are all caps.
-  const int value_label_gap = 20;
-  configFont(p, "Open Sans", 56, "Bold");
+  // Size the value font so the widest reading ("100%") fits its column with a
+  // few px to spare; measured from fixed reference strings, never the live
+  // values, so a changing reading can never resize the strip.
+  int value_pt = 34;
+  for (; value_pt > 20; value_pt--) {
+    configFont(p, "Open Sans", value_pt, "Bold");
+    if (QFontMetrics(p.font()).tightBoundingRect("100%").width() <= col_w - 6) break;
+  }
+  constexpr int LABEL_PT = 22;
+  // Ink heights, not line boxes: every string here is digits / caps with no
+  // descender (see the note this replaced in git history).
+  configFont(p, "Open Sans", value_pt, "Bold");
   const int val_ink_h = QFontMetrics(p.font()).tightBoundingRect("8°%").height();
-  configFont(p, "Open Sans", 31, "Bold");
+  configFont(p, "Open Sans", LABEL_PT, "Bold");
   const int lab_ink_h = QFontMetrics(p.font()).tightBoundingRect("A").height();
 
-  const int tile_h = val_ink_h + value_label_gap + lab_ink_h;
-  const int total_w = tile_w;
-  const int total_h = tile_h * 3 + gap * 2;
-
-  // 오른쪽 여백 기준 고정. 작은 해상도에서는 최소 x=35 보장.
-  const int x_calc = width() - tile_w - 35;
-  const int x = x_calc > 35 ? x_calc : 35;
-
-  // The panel sits directly above the brake / ACC status block, which itself
-  // stands on the turn-info box (rightColumnLayout). Its background ends at
-  // thermal_bottom. It used to sit at the bottom with the block on top of it.
-  // Floor 10, not 80: the HUD is 1040 tall inside the 20 px status border, and
-  // at 80 the panel's background ran ~10 px down into the status discs below
-  // (bottom 378 vs their top 368). The clock it once kept clear of is on the
-  // left. Now the background spans about 37..349.
-  const int y_calc = rightColumnLayout(width(), height()).thermal_bottom - pad - total_h;
-  const int y = y_calc > 10 ? y_calc : 10;
+  const int total_h = pad * 2 + val_ink_h + value_label_gap + lab_ink_h;
+  const int right = width() - RIGHT_MARGIN;
+  const int left = right - STRIP_W;
+  const int top = std::max(10, rightColumnLayout(width(), height()).thermal_bottom - total_h);
 
   // Publish the panel's box: the status block takes its right edge from it
   // (see the members' comment in onroad.h).
-  thermal_panel_top_ = y - pad;
-  thermal_panel_cx_ = x + tile_w / 2;
-  thermal_panel_right_ = x + tile_w + pad;
+  thermal_panel_top_ = top;
+  thermal_panel_cx_ = left + STRIP_W / 2;
+  thermal_panel_right_ = right;
 
-  // ✅ 배경: 투명 검정 + 라운드
-  QRect bg_rect(x - pad, y - pad, total_w + pad * 2, total_h + pad * 2);
   p.setPen(Qt::NoPen);
   p.setBrush(QColor(0, 0, 0, 150));
-  p.drawRoundedRect(bg_rect, 18, 18);
+  p.drawRoundedRect(QRect(left, top, STRIP_W, total_h), 14, 14);
 
-  // Draw each string from its own ink box rather than centring it in a rect:
-  // the rect form re-introduces exactly the line-box padding the tile heights
-  // above were sized to remove. Baselines sit at the bottom of each reference
-  // ink block (valid because none of these strings has a descender), and the
-  // horizontal centre uses the string's own ink width so the digits look
-  // optically centred rather than advance-centred.
-  // content_lift raises both of a tile's lines together, so one tile can be
-  // nudged without moving its slot or the two tiles below it. The pair keeps
-  // its own value_label_gap; only the block's position in the slot changes.
-  auto drawTile = [&](int ty, const QString &value, const QString &label,
-                      const QColor &valColor, int content_lift = 0) {
-    configFont(p, "Open Sans", 56, "Bold");
+  // Faint dividers between the three columns.
+  p.setPen(QPen(QColor(255, 255, 255, 38), 2));
+  for (int i = 1; i < 3; i++) {
+    const int dx = left + pad + col_w * i;
+    p.drawLine(dx, top + 11, dx, top + total_h - 11);
+  }
+
+  const int value_base = top + pad + val_ink_h;
+  const int label_base = value_base + value_label_gap + lab_ink_h;
+  // Each string centred on its column by its own ink, so digits look optically
+  // centred rather than advance-centred.
+  auto drawTile = [&](int col, const QString &value, const QString &label, const QColor &valColor) {
+    const int cx = left + pad + col_w * col + col_w / 2;
+    configFont(p, "Open Sans", value_pt, "Bold");
     const QRect vi = QFontMetrics(p.font()).tightBoundingRect(value);
     p.setPen(valColor);
-    p.drawText(x + (tile_w - vi.width()) / 2 - vi.left(), ty + val_ink_h - content_lift, value);
+    p.drawText(cx - vi.width() / 2 - vi.left(), value_base, value);
 
-    configFont(p, "Open Sans", 31, "Bold");
+    configFont(p, "Open Sans", LABEL_PT, "Bold");
     const QRect li = QFontMetrics(p.font()).tightBoundingRect(label);
     p.setPen(QColor(0, 255, 0, 220));
-    p.drawText(x + (tile_w - li.width()) / 2 - li.left(),
-               ty + val_ink_h + value_label_gap + lab_ink_h - content_lift, label);
+    p.drawText(cx - li.width() / 2 - li.left(), label_base, label);
   };
 
-  // =========================
-  // BAT
-  // =========================
+  // BAT (coloured by the CPU temperature, as before)
   QString batStr;
   batStr.sprintf("%d%%", deviceState.getBatteryPercent());
-
   int r = interp<float>(cpuTemp, {50.f, 90.f}, {200.f, 255.f}, false);
   int g = interp<float>(cpuTemp, {50.f, 90.f}, {255.f, 200.f}, false);
-  // Battery tile's reading and label both sit a twentieth of the tile pitch
-  // above their slot. Against the pitch rather than a pixel count so it keeps
-  // its proportion if the fonts or the gap change.
-  drawTile(y, batStr, "BAT.L", QColor(r, g, 200, 220), (tile_h + gap) / 20);
+  drawTile(0, batStr, "BAT", QColor(r, g, 200, 220));
 
-  // =========================
   // CPU
-  // =========================
   QString cpuStr;
   cpuStr.sprintf("%.0f°C", cpuTemp);
+  drawTile(1, cpuStr, "CPU", QColor(r, g, 200, 220));
 
-  r = interp<float>(cpuTemp, {50.f, 90.f}, {200.f, 255.f}, false);
-  g = interp<float>(cpuTemp, {50.f, 90.f}, {255.f, 200.f}, false);
-  drawTile(y + (tile_h + gap), cpuStr, "CPU", QColor(r, g, 200, 220));
-
-  // =========================
-  // AMBIENT
-  // =========================
+  // AMB (ambient)
   QString ambStr;
   ambStr.sprintf("%.0f°C", ambientTemp);
-
   r = interp<float>(ambientTemp, {35.f, 60.f}, {200.f, 255.f}, false);
   g = interp<float>(ambientTemp, {35.f, 60.f}, {255.f, 200.f}, false);
-  drawTile(y + (tile_h + gap) * 2, ambStr, "AMBIENT", QColor(r, g, 200, 220));
+  drawTile(2, ambStr, "AMB", QColor(r, g, 200, 220));
 
   p.restore();
 }
@@ -3586,7 +3638,8 @@ void NvgWindow::drawDebugText(QPainter &p) {
   const SubMaster &sm = *(uiState()->sm);
   QString str, temp;
 
-  int y = 80;
+  // Starts under the clock / CPU header line (baseline 55).
+  int y = 130;
   const int height = 60;
 
   const int text_x = width()/2 + 200;
