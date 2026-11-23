@@ -274,6 +274,11 @@ ATC_LANE_RIGHT_TYPES = ("fork right", "atc right")
 PROMPT_AUTO, PROMPT_TURN, PROMPT_MANUAL = "auto", "turn", "manual"
 PROMPT_STATE = {"kind": PROMPT_MANUAL}
 PROMPT_AUTO_SPEED_MIN = 15. / 3.6   # = desire_helper.ATC_TAP_SPEED_MIN
+# A turn instruction ("atc left/right" is its lane stage) this close to the
+# point is the turn: the prompt comes at ~45 m, and the navigation's turn
+# stage only starts at 43-60 m, so on the 2026-11-23 drives most turn prompts
+# came up as "차선으로 이동하세요" instead of "회전 준비".
+PROMPT_TURN_M = 60.
 
 
 class AtcLaneGuide:
@@ -292,12 +297,12 @@ class AtcLaneGuide:
   It does not look at the lanes: the camera cannot tell a yellow centre line
   from a white one. Shown even when the driver's blinker on the instruction's
   side is already on (2026-11-23, on request: 9 of 24 instructions had no
-  prompt for that reason); cut short only when the driver puts that blinker
-  on while it is up. Re-armed after the instruction has been gone
+  prompt for that reason), and always for the full PROMPT_S (on request: a
+  blinker put on right after it came up hid it after 1.2-1.8 s). Re-armed after the instruction has been gone
   REARM_S, and at once when a new one starts: the side changes, or the
   distance jumps back up by NEW_INSTR_JUMP_M (2026-11-23--01-36-34: a left
   turn right after a right turn, and a right turn right after a left, got no
-  prompt). A blinker on the other side never cuts it.
+  prompt).
   """
   PROMPT_S = 4.
   REARM_S = 5.
@@ -318,8 +323,6 @@ class AtcLaneGuide:
     self.prompt = BLINKER_NONE
     self.last_want = BLINKER_NONE
     self.last_dist = 0.
-    self.prev_left = False
-    self.prev_right = False
 
   def _geometry(self, md):
     try:
@@ -332,8 +335,10 @@ class AtcLaneGuide:
       return False
     return True
 
-  def _pick_kind(self, atc_type, want, v_ego, room_ok):
+  def _pick_kind(self, atc_type, want, v_ego, room_ok, dist_m):
     if atc_type.startswith(("turn left", "turn right")):
+      return PROMPT_TURN
+    if atc_type.startswith(("atc left", "atc right")) and 0. < dist_m <= PROMPT_TURN_M:
       return PROMPT_TURN
     side = self.left if want == BLINKER_LEFT else self.right
     if room_ok and side.room and v_ego >= PROMPT_AUTO_SPEED_MIN:
@@ -345,9 +350,6 @@ class AtcLaneGuide:
 
   def update(self, atc_type, dist_m, v_ego, left_blinker, right_blinker, dt=DT_MDL, md=None):
     room_ok = self._geometry(md) if md is not None else False
-    left_rise = left_blinker and not self.prev_left
-    right_rise = right_blinker and not self.prev_right
-    self.prev_left, self.prev_right = bool(left_blinker), bool(right_blinker)
     want = BLINKER_NONE
     if not atc_type.endswith("prepare"):
       if atc_type.startswith(ATC_LEFT_TYPES):
@@ -370,17 +372,15 @@ class AtcLaneGuide:
     self.last_want = want
     self.last_dist = float(dist_m)
 
-    own_rise = left_rise if want == BLINKER_LEFT else right_rise
-
     if not self.prompted:
       if 0. < dist_m <= self.trigger_m(v_ego):
         self.prompted = True
         self.t = 0.
         self.prompt = want
-        self.kind = self._pick_kind(atc_type, want, v_ego, room_ok)
+        self.kind = self._pick_kind(atc_type, want, v_ego, room_ok, dist_m)
         PROMPT_STATE["kind"] = self.kind
     elif self.prompt != BLINKER_NONE:
       self.t += dt
-      if self.t >= self.PROMPT_S or own_rise:
+      if self.t >= self.PROMPT_S:   # always the full PROMPT_S, blinker or not
         self.prompt = BLINKER_NONE
     return self.prompt

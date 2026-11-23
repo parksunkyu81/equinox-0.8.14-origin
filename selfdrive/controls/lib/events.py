@@ -298,8 +298,11 @@ def atc_lane_prompt_alert(left: bool) -> AlertCallbackType:
       text1, text2 = f"{side} 차선으로 이동하세요", "깜빡이를 톡 치면 차가 옮깁니다"
     else:
       text1, text2 = f"{side} 차선으로 이동하세요", "내비 안내 · 직접 옮겨 주세요"
+    # MID, above laneChange / steerSaturated (LOW), so it holds the screen for
+    # its 4 s instead of flickering with them (2026-11-23--06-07-16 704 s,
+    # 784 s: it came back after those as if it were a second prompt).
     return Alert(text1, text2, AlertStatus.userPrompt, AlertSize.mid,
-                 Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1)
+                 Priority.MID, VisualAlert.none, AudibleAlert.prompt, .1)
   return func
 
 
