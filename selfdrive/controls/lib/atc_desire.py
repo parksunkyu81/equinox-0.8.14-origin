@@ -276,13 +276,14 @@ class AtcLaneGuide:
   60-80 km/h. Not on the straight road far before the point (2026-11-23, on
   request: the prompt at the start of the 160-350 m range came too early).
   It does not look at the lanes: the camera cannot tell a yellow centre line
-  from a white one. Skipped if the driver's blinker on the instruction's side
-  is already on, cut short by it. Re-armed after the instruction has been gone
+  from a white one. Shown even when the driver's blinker on the instruction's
+  side is already on (2026-11-23, on request: 9 of 24 instructions had no
+  prompt for that reason); cut short only when the driver puts that blinker
+  on while it is up. Re-armed after the instruction has been gone
   REARM_S, and at once when a new one starts: the side changes, or the
   distance jumps back up by NEW_INSTR_JUMP_M (2026-11-23--01-36-34: a left
   turn right after a right turn, and a right turn right after a left, got no
-  prompt). A blinker left on from the previous maneuver, on the other side,
-  neither skips nor cuts the prompt.
+  prompt). A blinker on the other side never cuts it.
   """
   PROMPT_S = 4.
   REARM_S = 5.
@@ -298,11 +299,16 @@ class AtcLaneGuide:
     self.prompt = BLINKER_NONE
     self.last_want = BLINKER_NONE
     self.last_dist = 0.
+    self.prev_left = False
+    self.prev_right = False
 
   def trigger_m(self, v_ego):
     return min(self.PROMPT_MAX_M, max(self.PROMPT_MIN_M, v_ego * self.PROMPT_AHEAD_S))
 
   def update(self, atc_type, dist_m, v_ego, left_blinker, right_blinker, dt=DT_MDL):
+    left_rise = left_blinker and not self.prev_left
+    right_rise = right_blinker and not self.prev_right
+    self.prev_left, self.prev_right = bool(left_blinker), bool(right_blinker)
     want = BLINKER_NONE
     if not atc_type.endswith("prepare"):
       if atc_type.startswith(ATC_LEFT_TYPES):
@@ -319,18 +325,13 @@ class AtcLaneGuide:
     self.away_t = 0.
 
     # a new instruction re-arms at once
-    if want != self.last_want or (self.last_dist > 0. and dist_m > self.last_dist + self.NEW_INSTR_JUMP_M):
+    if want != self.last_want or dist_m > max(self.last_dist, 0.) + self.NEW_INSTR_JUMP_M:
       self.prompted = False
       self.prompt = BLINKER_NONE
     self.last_want = want
     self.last_dist = float(dist_m)
 
-    own = left_blinker if want == BLINKER_LEFT else right_blinker
-    if own:
-      if self.prompt != BLINKER_NONE or 0. < dist_m <= self.trigger_m(v_ego):
-        self.prompted = True    # the driver is on it
-      self.prompt = BLINKER_NONE
-      return self.prompt
+    own_rise = left_rise if want == BLINKER_LEFT else right_rise
 
     if not self.prompted:
       if 0. < dist_m <= self.trigger_m(v_ego):
@@ -339,6 +340,6 @@ class AtcLaneGuide:
         self.prompt = want
     elif self.prompt != BLINKER_NONE:
       self.t += dt
-      if self.t >= self.PROMPT_S:
+      if self.t >= self.PROMPT_S or own_rise:
         self.prompt = BLINKER_NONE
     return self.prompt
