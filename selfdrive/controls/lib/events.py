@@ -279,6 +279,30 @@ def joystick_alert(CP: car.CarParams, sm: messaging.SubMaster, metric: bool, sof
   #return NormalPermanentAlert("Joystick Mode", vals)
   return NormalPermanentAlert("조이스틱 모드", vals)
 
+def atc_lane_prompt_alert(left: bool) -> AlertCallbackType:
+  # The navigation (ATC) lane prompt. Its wording is chosen by
+  # atc_desire.AtcLaneGuide when the prompt comes up (PROMPT_STATE) and says
+  # what the car will do with the driver's blinker:
+  #   auto   -- a tap moves the car one lane (15 km/h+, room seen there)
+  #   turn   -- the turn stage: the blinker starts the turn assist
+  #   manual -- the driver moves across by hand
+  # One chime as it comes up; the kind is held for the whole prompt.
+  from selfdrive.controls.lib.atc_desire import PROMPT_STATE, PROMPT_AUTO, PROMPT_TURN
+
+  def func(CP: car.CarParams, sm: messaging.SubMaster, metric: bool, soft_disable_time: int) -> Alert:
+    side = "좌측" if left else "우측"
+    kind = PROMPT_STATE.get("kind")
+    if kind == PROMPT_TURN:
+      text1, text2 = ("좌회전 준비" if left else "우회전 준비"), "내비 안내 · 깜빡이를 켜 주세요"
+    elif kind == PROMPT_AUTO:
+      text1, text2 = f"{side} 차선으로 이동하세요", "깜빡이를 톡 치면 차가 옮깁니다"
+    else:
+      text1, text2 = f"{side} 차선으로 이동하세요", "내비 안내 · 직접 옮겨 주세요"
+    return Alert(text1, text2, AlertStatus.userPrompt, AlertSize.mid,
+                 Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1)
+  return func
+
+
 def auto_lane_change_alert(CP: car.CarParams, sm: messaging.SubMaster, metric: bool, soft_disable_time: int) -> Alert:
   alc_timer = sm['lateralPlan'].autoLaneChangeTimer
   return Alert(
@@ -525,26 +549,16 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
       Priority.LOW, VisualAlert.none, AudibleAlert.none, .1, alert_rate=0.75),
   },
 
-  # Navigation (ATC) lane change prompt, raised by controlsd while atc_desire.
-  # AtcLaneGuide has it up: once per instruction, just before the point, 4 s,
-  # one chime. From 15 km/h a tap of the blinker moves the car one lane when
-  # there is room; under 15 the driver does (the lane band reads 자동 대기 /
-  # 직접 변경). The names
-  # are older than the meaning and stay for log replay.
+  # Navigation (ATC) prompt, raised by controlsd while atc_desire.AtcLaneGuide
+  # has it up (once per instruction, just before the point, 4 s, one chime).
+  # Its wording follows the guide's pick: atc_lane_prompt_alert. The names are
+  # older than the meaning and stay for log replay.
   EventName.atcBlinkerLeft: {
-    ET.WARNING: Alert(
-      "좌측 차선으로 이동하세요",
-      "내비 안내 · 깜빡이를 켜 주세요",
-      AlertStatus.userPrompt, AlertSize.mid,
-      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1),
+    ET.WARNING: atc_lane_prompt_alert(left=True),
   },
 
   EventName.atcBlinkerRight: {
-    ET.WARNING: Alert(
-      "우측 차선으로 이동하세요",
-      "내비 안내 · 깜빡이를 켜 주세요",
-      AlertStatus.userPrompt, AlertSize.mid,
-      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1),
+    ET.WARNING: atc_lane_prompt_alert(left=False),
   },
 
   EventName.laneChangeBlocked: {

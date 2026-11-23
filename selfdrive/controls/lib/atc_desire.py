@@ -262,6 +262,20 @@ ATC_LANE_LEFT_TYPES = ("fork left", "atc left")
 ATC_LANE_RIGHT_TYPES = ("fork right", "atc right")
 
 
+# What the ATC prompt tells the driver, chosen when it comes up and held for
+# it (events.py reads PROMPT_STATE through the alert callback; both run in
+# controlsd):
+#   PROMPT_AUTO   "○측 차선으로 이동하세요 / 깜빡이를 톡 치면 차가 옮깁니다"
+#                 -- lane stage, from ATC_TAP speed (15 km/h) with room there,
+#                 so the tap moves the car (desire_helper.py)
+#   PROMPT_TURN   "○회전 준비 / 깜빡이를 켜 주세요" -- turn stage: the blinker
+#                 sends the turn desire, room does not matter
+#   PROMPT_MANUAL "○측 차선으로 이동하세요 / 직접 옮겨 주세요" -- otherwise
+PROMPT_AUTO, PROMPT_TURN, PROMPT_MANUAL = "auto", "turn", "manual"
+PROMPT_STATE = {"kind": PROMPT_MANUAL}
+PROMPT_AUTO_SPEED_MIN = 15. / 3.6   # = desire_helper.ATC_TAP_SPEED_MIN
+
+
 class AtcLaneGuide:
   """Tells the driver once, just before the point, which way the navigation goes.
 
@@ -293,6 +307,11 @@ class AtcLaneGuide:
   NEW_INSTR_JUMP_M = 30.
 
   def __init__(self):
+    # Its own copy of DesireHelper's side geometry (same SideState, same model
+    # frames) for SideState.room, which lives in plannerd.
+    self.left = SideState("left")
+    self.right = SideState("right")
+    self.kind = PROMPT_MANUAL
     self.prompted = False
     self.t = 0.
     self.away_t = 0.
@@ -302,10 +321,30 @@ class AtcLaneGuide:
     self.prev_left = False
     self.prev_right = False
 
+  def _geometry(self, md):
+    try:
+      lines, probs, edges = md.laneLines, md.laneLineProbs, md.roadEdges
+      if len(lines) < 4 or len(probs) < 4 or len(edges) < 2:
+        return False
+      self.left.update_lane_geometry(lines[0], probs[0], lines[1], edges[0], cur_prob=probs[1])
+      self.right.update_lane_geometry(lines[3], probs[3], lines[2], edges[1], cur_prob=probs[2])
+    except (ValueError, IndexError, TypeError, AttributeError):
+      return False
+    return True
+
+  def _pick_kind(self, atc_type, want, v_ego, room_ok):
+    if atc_type.startswith(("turn left", "turn right")):
+      return PROMPT_TURN
+    side = self.left if want == BLINKER_LEFT else self.right
+    if room_ok and side.room and v_ego >= PROMPT_AUTO_SPEED_MIN:
+      return PROMPT_AUTO
+    return PROMPT_MANUAL
+
   def trigger_m(self, v_ego):
     return min(self.PROMPT_MAX_M, max(self.PROMPT_MIN_M, v_ego * self.PROMPT_AHEAD_S))
 
-  def update(self, atc_type, dist_m, v_ego, left_blinker, right_blinker, dt=DT_MDL):
+  def update(self, atc_type, dist_m, v_ego, left_blinker, right_blinker, dt=DT_MDL, md=None):
+    room_ok = self._geometry(md) if md is not None else False
     left_rise = left_blinker and not self.prev_left
     right_rise = right_blinker and not self.prev_right
     self.prev_left, self.prev_right = bool(left_blinker), bool(right_blinker)
@@ -338,6 +377,8 @@ class AtcLaneGuide:
         self.prompted = True
         self.t = 0.
         self.prompt = want
+        self.kind = self._pick_kind(atc_type, want, v_ego, room_ok)
+        PROMPT_STATE["kind"] = self.kind
     elif self.prompt != BLINKER_NONE:
       self.t += dt
       if self.t >= self.PROMPT_S or own_rise:
