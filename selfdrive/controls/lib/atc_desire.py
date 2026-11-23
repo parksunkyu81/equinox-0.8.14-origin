@@ -276,20 +276,28 @@ class AtcLaneGuide:
   60-80 km/h. Not on the straight road far before the point (2026-11-23, on
   request: the prompt at the start of the 160-350 m range came too early).
   It does not look at the lanes: the camera cannot tell a yellow centre line
-  from a white one. Skipped if a blinker is already on, cut short by any
-  blinker, re-armed only after the instruction has been gone REARM_S.
+  from a white one. Skipped if the driver's blinker on the instruction's side
+  is already on, cut short by it. Re-armed after the instruction has been gone
+  REARM_S, and at once when a new one starts: the side changes, or the
+  distance jumps back up by NEW_INSTR_JUMP_M (2026-11-23--01-36-34: a left
+  turn right after a right turn, and a right turn right after a left, got no
+  prompt). A blinker left on from the previous maneuver, on the other side,
+  neither skips nor cuts the prompt.
   """
   PROMPT_S = 4.
   REARM_S = 5.
   PROMPT_AHEAD_S = 6.
   PROMPT_MIN_M = 45.
   PROMPT_MAX_M = 150.
+  NEW_INSTR_JUMP_M = 30.
 
   def __init__(self):
     self.prompted = False
     self.t = 0.
     self.away_t = 0.
     self.prompt = BLINKER_NONE
+    self.last_want = BLINKER_NONE
+    self.last_dist = 0.
 
   def trigger_m(self, v_ego):
     return min(self.PROMPT_MAX_M, max(self.PROMPT_MIN_M, v_ego * self.PROMPT_AHEAD_S))
@@ -310,9 +318,17 @@ class AtcLaneGuide:
       return self.prompt
     self.away_t = 0.
 
-    if left_blinker or right_blinker:
+    # a new instruction re-arms at once
+    if want != self.last_want or (self.last_dist > 0. and dist_m > self.last_dist + self.NEW_INSTR_JUMP_M):
+      self.prompted = False
+      self.prompt = BLINKER_NONE
+    self.last_want = want
+    self.last_dist = float(dist_m)
+
+    own = left_blinker if want == BLINKER_LEFT else right_blinker
+    if own:
       if self.prompt != BLINKER_NONE or 0. < dist_m <= self.trigger_m(v_ego):
-        self.prompted = True    # the driver is on it (or chose otherwise)
+        self.prompted = True    # the driver is on it
       self.prompt = BLINKER_NONE
       return self.prompt
 
