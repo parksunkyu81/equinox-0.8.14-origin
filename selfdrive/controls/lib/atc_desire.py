@@ -273,6 +273,10 @@ ATC_LANE_RIGHT_TYPES = ("fork right", "atc right")
 #   PROMPT_MANUAL "○측 차선으로 이동하세요 / 직접 옮겨 주세요" -- otherwise
 PROMPT_AUTO, PROMPT_TURN, PROMPT_MANUAL = "auto", "turn", "manual"
 PROMPT_STATE = {"kind": PROMPT_MANUAL}
+# "좌/우회전 중" while the turn desire is out (controlsd fills it each cycle,
+# events.py turn_in_progress_alert reads it). sub: "" / "sat" (the steering is
+# at its 300 limit) / "slow" (under 10 km/h, where LKAS is off).
+TURN_STATE = {"left": False, "sub": ""}
 PROMPT_AUTO_SPEED_MIN = 15. / 3.6   # = desire_helper.ATC_TAP_SPEED_MIN
 # A turn instruction ("atc left/right" is its lane stage) this close to the
 # point is the turn: the prompt comes at ~45 m, and the navigation's turn

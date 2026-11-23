@@ -306,6 +306,18 @@ def atc_lane_prompt_alert(left: bool) -> AlertCallbackType:
   return func
 
 
+def turn_in_progress_alert(CP: car.CarParams, sm: messaging.SubMaster, metric: bool, soft_disable_time: int) -> Alert:
+  # Green, silent (the "회전 준비" prompt already chimed). The second line:
+  # the steering at its 300 limit -> hold the wheel; under 10 km/h the car
+  # does not steer at all -> turn it yourself. controlsd fills TURN_STATE.
+  from selfdrive.controls.lib.atc_desire import TURN_STATE
+  text1 = "좌회전 중" if TURN_STATE.get("left") else "우회전 중"
+  sub = TURN_STATE.get("sub")
+  text2 = "핸들을 잡아 주세요" if sub == "sat" else ("직접 돌려 주세요" if sub == "slow" else "")
+  return Alert(text1, text2, AlertStatus.normal, AlertSize.mid,
+               Priority.LOW, VisualAlert.none, AudibleAlert.none, .1)
+
+
 def auto_lane_change_alert(CP: car.CarParams, sm: messaging.SubMaster, metric: bool, soft_disable_time: int) -> Alert:
   alc_timer = sm['lateralPlan'].autoLaneChangeTimer
   return Alert(
@@ -1077,12 +1089,11 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
     ET.NO_ENTRY: NoEntryAlert("LKAS Disabled"),
   },
 
+  # "좌회전 중 / 우회전 중" while the turn desire is out (2026-11-23, on
+  # request). The event was unused; it is reused rather than adding one to
+  # car.capnp, which would rebuild everything on the EON.
   EventName.turningIndicatorOn: {
-    ET.WARNING: Alert(
-      "방향지시등 동작중에는 핸들을 잡아주세요",
-      "",
-      AlertStatus.userPrompt, AlertSize.small,
-      Priority.LOW, VisualAlert.none, AudibleAlert.none, .2),
+    ET.WARNING: turn_in_progress_alert,
   },
 
   EventName.autoLaneChange: {

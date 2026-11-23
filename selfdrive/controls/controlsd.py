@@ -16,7 +16,7 @@ from selfdrive.boardd.boardd import can_list_to_can_capnp
 from selfdrive.car.car_helpers import get_car, get_startup_event, get_one_can
 from selfdrive.controls.lib.lane_planner import CAMERA_OFFSET
 from selfdrive.controls.lib.atc_desire import ATC_LEFT_TYPES, ATC_RIGHT_TYPES, AtcLaneGuide, \
-  BLINKER_NONE, BLINKER_LEFT, BLINKER_RIGHT
+  BLINKER_NONE, BLINKER_LEFT, BLINKER_RIGHT, TURN_STATE
 from selfdrive.controls.lib.drive_helpers import update_v_cruise, initialize_v_cruise
 from selfdrive.controls.lib.drive_helpers import get_lag_adjusted_curvature
 from selfdrive.controls.lib.straight_wobble_filter import StraightWobbleFilter
@@ -89,6 +89,15 @@ MODEL_FCW_HOLD_FRAMES = int(0.3 / DT_CTRL)  # 30 frames at 100 Hz
 
 # Gate engagement until the final Panda safety configuration is stable. After engagement,
 # debounce only the short controlsAllowed message skew; safety configuration changes stay immediate.
+# "좌/우회전 중" second line: under this speed LKAS is off on this car.
+TURN_SLOW_KPH = 10.
+# How long "핸들을 잡아 주세요" stays under the turn message after the steering
+# saturation prompt would have fired (it replaces steerSaturated in a turn).
+TURN_SAT_HOLD_S = 1.5
+# Under TURN_SLOW_KPH the message shows only while the car is moving and the
+# wheel is turned that way, i.e. the turn itself, not the wait before it.
+TURN_MOVING_KPH = 2.
+TURN_SHOW_WHEEL_DEG = 30.
 PANDA_SAFETY_MATCH_FRAMES = 10  # 100 ms at 100 Hz
 # This debounce has to outlast the loop that re-arms controlsAllowed, not just message skew.
 # Panda clears controlsAllowed when boardd reports engaged=0 for three of its 1 Hz ticks
@@ -514,6 +523,7 @@ class Controls:
 
         self.steer_limited = False
         self.steer_sat_elapsed = 0.0
+        self.turn_sat_hold_s = 0.0   # "핸들을 잡아 주세요" under the turn message
         self.steer_sat_clear_elapsed = 0.0
         # Time left on the pedal hold. Set at the end of one control step and read
         # at the start of the next, since the steering result is not known yet
@@ -2202,6 +2212,7 @@ class Controls:
         # an actual deviation still raises it immediately.
         steer_saturated_now = bool(lac_log.active and lac_log.saturated and
                                    not CS.steeringPressed)
+        turning = lat_plan.desire in (log.LateralPlan.Desire.turnLeft, log.LateralPlan.Desire.turnRight)
         if steer_saturated_now:
             self.steer_sat_elapsed += DT_CTRL
             self.steer_sat_clear_elapsed = 0.0
@@ -2232,7 +2243,27 @@ class Controls:
                 falling_short = (math.copysign(1.0, desired_lat) *
                                  (desired_lat - float(lac_log.actualLateralAccel)) >= STEER_SAT_MIN_SHORTFALL)
             if deviating or (self.steer_sat_elapsed >= STEER_SAT_WARN_HOLD_S and falling_short):
-                self.events.add(EventName.steerSaturated)
+                if turning:
+                    self.turn_sat_hold_s = TURN_SAT_HOLD_S   # said inside the turn message
+                else:
+                    self.events.add(EventName.steerSaturated)
+
+        # "좌회전 중 / 우회전 중" while the turn desire is out, with the steering
+        # limit or the low-speed cut-off as its second line.
+        self.turn_sat_hold_s = max(0.0, self.turn_sat_hold_s - DT_CTRL)
+        # Only while the car is turning: the desire stays out while it waits
+        # at a light or creeps in the turn queue (2026-11-23--08-45-38: 133 s
+        # and 44 s, 80-93% of it under 10 km/h), which is no "회전 중".
+        turn_left = lat_plan.desire == log.LateralPlan.Desire.turnLeft
+        wheel_toward = CS.steeringAngleDeg * (1. if turn_left else -1.)
+        turning_now = turning and (CS.vEgo >= TURN_SLOW_KPH * CV.KPH_TO_MS or
+                                   (CS.vEgo > TURN_MOVING_KPH * CV.KPH_TO_MS and
+                                    wheel_toward > TURN_SHOW_WHEEL_DEG))
+        if turning_now and self.enabled:
+            TURN_STATE["left"] = turn_left
+            TURN_STATE["sub"] = ("slow" if CS.vEgo < TURN_SLOW_KPH * CV.KPH_TO_MS else
+                                 "sat" if self.turn_sat_hold_s > 0. else "")
+            self.events.add(EventName.turningIndicatorOn)
 
         # Ensure no NaNs/Infs
         for p in ACTUATOR_FIELDS:

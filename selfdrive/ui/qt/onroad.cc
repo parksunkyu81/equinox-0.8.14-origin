@@ -373,9 +373,12 @@ void OnroadAlerts::paintEvent(QPaintEvent *event) {
   //    bands around them and only the text is drawn here.
   const bool atc_left = alert.type.startsWith("atcBlinkerLeft/");
   const bool atc_right = alert.type.startsWith("atcBlinkerRight/");
+  // "좌회전 중 / 우회전 중" (turningIndicatorOn) sits here too: the turn
+  // comes with the driver's blinker as a rule, so the live bands frame it.
   const bool lane_change = alert.type.startsWith("laneChange/") ||
                            alert.type.startsWith("preLaneChangeLeft/") ||
-                           alert.type.startsWith("preLaneChangeRight/");
+                           alert.type.startsWith("preLaneChangeRight/") ||
+                           alert.type.startsWith("turningIndicatorOn/");
   if (atc_left || atc_right || lane_change) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
