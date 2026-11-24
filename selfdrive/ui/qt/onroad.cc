@@ -697,10 +697,10 @@ void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
 }
 
 
-// Lead marker: four corner brackets around the lead car with the distance /
+// Lead marker: a rectangle outline around the lead car with the distance /
 // speed / gap readout in a small pill inside the bottom edge (2026-11-24, on
 // request; it replaced the red chevron and the big readout box under it).
-// The corner colour carries the danger level drawHud works out: cyan safe,
+// The outline colour carries the danger level drawHud works out: cyan safe,
 // orange close, red too close, each a little thicker than the last.
 void NvgWindow::drawLead(QPainter &painter, const cereal::ModelDataV2::LeadDataV3::Reader &lead_data,
                          const QPointF &vd, const QString &info_text, int danger) {
@@ -722,16 +722,14 @@ void NvgWindow::drawLead(QPainter &painter, const cereal::ModelDataV2::LeadDataV
   // 30% over the first 7 / 8 / 10, which read too thin on the road.
   static const int kWidths[3] = {9, 10, 13};
   danger = std::clamp(danger, 0, 2);
-  const float arm = std::clamp(std::min(bw, bh) * 0.22f, 18.0f, 60.0f);
 
+  // A full rectangle outline (2026-11-24, on request; it was four corner
+  // brackets), small rounded corners only so the thick stroke's joins stay
+  // clean.
   painter.save();
-  QPainterPath corners;
-  corners.moveTo(left, top + arm);     corners.lineTo(left, top);     corners.lineTo(left + arm, top);
-  corners.moveTo(right - arm, top);    corners.lineTo(right, top);    corners.lineTo(right, top + arm);
-  corners.moveTo(left, bottom - arm);  corners.lineTo(left, bottom);  corners.lineTo(left + arm, bottom);
-  corners.moveTo(right - arm, bottom); corners.lineTo(right, bottom); corners.lineTo(right, bottom - arm);
   painter.setBrush(Qt::NoBrush);
-  painter.strokePath(corners, QPen(kColors[danger], kWidths[danger], Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  painter.setPen(QPen(kColors[danger], kWidths[danger], Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  painter.drawRoundedRect(QRectF(left, top, right - left, bottom - top), 6, 6);
 
   if (!info_text.isEmpty()) {
     // Small, inside the bottom edge. Its width is the text's, not the box's:
