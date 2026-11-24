@@ -732,22 +732,26 @@ void NvgWindow::drawLead(QPainter &painter, const cereal::ModelDataV2::LeadDataV
   painter.drawRoundedRect(QRectF(left, top, right - left, bottom - top), 6, 6);
 
   if (!info_text.isEmpty()) {
-    // Small, inside the bottom edge. Its width is the text's, not the box's:
-    // a far lead's box is narrower than the readout, and the pill then sticks
-    // out on both sides rather than shrinking the text below reading size.
-    // Font and padding both 30% over the first 24 px / 28 / 10, so the pill
-    // grows with its text.
+    // Centred on the box, and one fixed size whatever the distance (on
+    // request): the font never scales with the box, so near and far leads
+    // read the same. A far lead's box can be narrower than the pill; it then
+    // stays centred and reaches past both sides equally.
+    //
+    // Solid dark green under white text: about 5:1 contrast on its own, so it
+    // reads over a bright sky, the dark car body or the green path alike. A
+    // thin white rim keeps its edge visible where it sits on that green path.
     configFont(painter, "Open Sans", 31, "Bold");
     QFontMetrics metrics(painter.font());
     const int pill_w = metrics.horizontalAdvance(info_text) + 36;
     const int pill_h = metrics.height() + 13;
-    QRect pill(static_cast<int>(cx - pill_w / 2.0f), static_cast<int>(bottom - 8 - pill_h), pill_w, pill_h);
+    QRect pill(static_cast<int>(cx - pill_w / 2.0f), static_cast<int>((top + bottom) / 2.0f - pill_h / 2.0f),
+               pill_w, pill_h);
     pill.moveLeft(std::clamp(pill.left(), 12, std::max(12, width() - pill.width() - 12)));
 
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(0, 0, 0, 165));
+    painter.setPen(QPen(QColor(255, 255, 255, 200), 2));
+    painter.setBrush(QColor(0, 125, 60, 235));
     painter.drawRoundedRect(pill, pill_h / 2.0, pill_h / 2.0);
-    painter.setPen(QColor(255, 255, 255, 240));
+    painter.setPen(QColor(255, 255, 255));
     painter.drawText(pill, Qt::AlignCenter, info_text);
   }
   painter.restore();
