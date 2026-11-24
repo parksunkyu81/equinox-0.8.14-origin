@@ -702,36 +702,50 @@ class Controls:
             "interrupt_load": float(panda_state.interruptLoad),
         }
 
-    def _controls_mismatch_service_snapshot(self, service):
-        rcv_time = self.sm.rcv_time[service]
-        return {
-            "valid": bool(self.sm.valid[service]),
-            "alive": bool(self.sm.alive[service]),
-            "frequency_ok": bool(self.sm.freq_ok[service]),
-            "updated": bool(self.sm.updated[service]),
-            "receive_age_s": max(0.0, sec_since_boot() - rcv_time) if rcv_time else None,
-            "receive_frame": int(self.sm.rcv_frame[service]),
-            "log_mono_time": int(self.sm.logMonoTime[service]),
-        }
+    MISMATCH_SNAPSHOT_SERVICES = ("pandaStates", "deviceState", "managerState")
 
-    def _controls_mismatch_snapshot(self, panda_safety_matches, include_manager_processes=False):
-        panda_states = self.sm['pandaStates']
+    def _controls_mismatch_capture(self, panda_safety_matches, include_manager_processes=False):
+        """The raw inputs of one mismatch snapshot, taken at 20 Hz.
+
+        Turning them into the snapshot dict (_controls_mismatch_snapshot_from)
+        is the expensive part -- a few dozen capnp reads and conversions -- and
+        the dicts are only read when a mismatch episode is written, which has
+        not happened since 2026-09-12. So the 20 Hz history keeps these tuples,
+        and the message readers in them, and builds the dicts on that frame.
+        controls_ready is self.initialized: controlsd sets the ControlsReady
+        param itself when it initializes, and reading it back hit the
+        filesystem on every sample.
+        """
+        sm = self.sm
+        return (sm.frame, sec_since_boot(), self.enabled, self.active, self.initialized,
+                self.panda_safety_ready, self.panda_safety_match_counter, panda_safety_matches,
+                self.mismatch_counter, self.can_rcv_error, self.can_rcv_error_counter,
+                sm['pandaStates'], sm['deviceState'], sm['peripheralState'], sm['managerState'],
+                tuple((sm.valid[s], sm.alive[s], sm.freq_ok[s], sm.updated[s], sm.rcv_time[s],
+                       sm.rcv_frame[s], sm.logMonoTime[s]) for s in self.MISMATCH_SNAPSHOT_SERVICES),
+                include_manager_processes)
+
+    def _controls_mismatch_snapshot_from(self, capture):
+        (frame, now, enabled, active, controls_ready, panda_safety_ready, panda_safety_match_counter,
+         panda_safety_matches, mismatch_counter, can_rcv_error, can_rcv_error_counter,
+         panda_states, device_state, peripheral_state, manager_state, services,
+         include_manager_processes) = capture
         snapshot = {
-            "frame": int(self.sm.frame),
-            "started": bool(self.sm['deviceState'].started),
-            "enabled": bool(self.enabled),
-            "active": bool(self.active),
-            "controls_ready": bool(self.params.get_bool("ControlsReady")),
-            "panda_safety_ready": bool(self.panda_safety_ready),
-            "panda_safety_match_counter": int(self.panda_safety_match_counter),
+            "frame": int(frame),
+            "started": bool(device_state.started),
+            "enabled": bool(enabled),
+            "active": bool(active),
+            "controls_ready": bool(controls_ready),
+            "panda_safety_ready": bool(panda_safety_ready),
+            "panda_safety_match_counter": int(panda_safety_match_counter),
             "panda_safety_matches": bool(panda_safety_matches),
-            "controls_allowed_mismatch_counter": int(self.mismatch_counter),
-            "can_receive_error": bool(self.can_rcv_error),
-            "can_receive_error_counter": int(self.can_rcv_error_counter),
-            "charging_disabled": bool(self.sm['deviceState'].chargingDisabled),
+            "controls_allowed_mismatch_counter": int(mismatch_counter),
+            "can_receive_error": bool(can_rcv_error),
+            "can_receive_error_counter": int(can_rcv_error_counter),
+            "charging_disabled": bool(device_state.chargingDisabled),
             "panda_count": len(panda_states),
             "peripheral_usb_power_mode": self._diagnostic_enum_value(
-                self.sm['peripheralState'].usbPowerMode),
+                peripheral_state.usbPowerMode),
             "car": {
                 "fingerprint": str(self.CP.carFingerprint),
                 "name": str(self.CP.carName),
@@ -744,8 +758,16 @@ class Controls:
             },
             "pandas": [self._controls_mismatch_panda_snapshot(panda_state, i)
                        for i, panda_state in enumerate(panda_states)],
-            "services": {service: self._controls_mismatch_service_snapshot(service)
-                         for service in ("pandaStates", "deviceState", "managerState")},
+            "services": {service: {
+                "valid": bool(valid),
+                "alive": bool(alive),
+                "frequency_ok": bool(freq_ok),
+                "updated": bool(updated),
+                "receive_age_s": max(0.0, now - rcv_time) if rcv_time else None,
+                "receive_frame": int(rcv_frame),
+                "log_mono_time": int(log_mono_time),
+            } for service, (valid, alive, freq_ok, updated, rcv_time, rcv_frame, log_mono_time)
+              in zip(self.MISMATCH_SNAPSHOT_SERVICES, services)},
         }
         if include_manager_processes:
             snapshot["manager_processes"] = [{
@@ -754,8 +776,12 @@ class Controls:
                 "should_be_running": bool(process.shouldBeRunning),
                 "pid": int(process.pid),
                 "exit_code": int(process.exitCode),
-            } for process in self.sm['managerState'].processes]
+            } for process in manager_state.processes]
         return snapshot
+
+    def _controls_mismatch_snapshot(self, panda_safety_matches, include_manager_processes=False):
+        return self._controls_mismatch_snapshot_from(
+          self._controls_mismatch_capture(panda_safety_matches, include_manager_processes))
 
     def _record_controls_mismatch_snapshot(self, snapshot):
         if self.sm.frame - self.controls_mismatch_last_sample_frame < CONTROLS_MISMATCH_SAMPLE_FRAMES:
@@ -774,8 +800,8 @@ class Controls:
         append_controls_mismatch_diagnostic(
             "controls_mismatch",
             reasons=list(reasons),
-            trigger=snapshot,
-            history=list(self.controls_mismatch_history),
+            trigger=self._controls_mismatch_snapshot_from(snapshot) if snapshot is not None else None,
+            history=[self._controls_mismatch_snapshot_from(c) for c in self.controls_mismatch_history],
         )
 
     def _read_comma_pedal_profile(self, params):
@@ -1442,12 +1468,12 @@ class Controls:
         need_sample = (self.sm.frame - self.controls_mismatch_last_sample_frame
                        >= CONTROLS_MISMATCH_SAMPLE_FRAMES)
         need_episode = bool(controls_mismatch_reasons) and not self.controls_mismatch_active
-        controls_mismatch_snapshot = None
+        controls_mismatch_capture = None
         if need_sample or need_episode:
-            controls_mismatch_snapshot = self._controls_mismatch_snapshot(
+            controls_mismatch_capture = self._controls_mismatch_capture(
                 panda_safety_matches, include_manager_processes=bool(controls_mismatch_reasons))
-            self._record_controls_mismatch_snapshot(controls_mismatch_snapshot)
-        self._record_controls_mismatch_episode(controls_mismatch_reasons, controls_mismatch_snapshot)
+            self._record_controls_mismatch_snapshot(controls_mismatch_capture)
+        self._record_controls_mismatch_episode(controls_mismatch_reasons, controls_mismatch_capture)
         e3 = sec_since_boot()
 
         # Check for HW or system issues
@@ -1953,7 +1979,8 @@ class Controls:
         # CarControl is reconstructed again in publish_logs. Use the same
         # helper in both places so activation flags cannot be dropped between
         # lateral control and the vehicle CarController.
-        apply_control_activation(CC, self.active, CS, self.CP, self.events.any(ET.OVERRIDE))
+        self._frame_lat_active, _ = apply_control_activation(
+          CC, self.active, CS, self.CP, self.events.any(ET.OVERRIDE))
 
         actuators = CC.actuators
         actuators.longControlState = self.LoC.long_control_state
@@ -2469,7 +2496,10 @@ class Controls:
         # state_control computes these flags on a different temporary
         # CarControl message. Re-populate them on the message passed to CI.apply
         # and published to carControl; otherwise both fields default to false.
-        apply_control_activation(CC, self.active, CS, self.CP, self.events.any(ET.OVERRIDE))
+        # latActive is state_control's (same active, car state and params);
+        # longActive is re-evaluated, as the events may have changed since.
+        apply_control_activation(CC, self.active, CS, self.CP, self.events.any(ET.OVERRIDE),
+                                 lat_active=self._frame_lat_active)
 
         orientation_value = self.sm['liveLocationKalman'].orientationNED.value
         if len(orientation_value) > 2:

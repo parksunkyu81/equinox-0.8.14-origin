@@ -62,7 +62,10 @@ class Events:
     self.events.append(event_name)
 
   def clear(self) -> None:
-    self.events_prev = {k: (v + 1 if k in self.events else 0) for k, v in self.events_prev.items()}
+    # A set for the membership test: events_prev holds every event name (~150)
+    # and this used to scan the events list for each of them, every frame.
+    current = set(self.events)
+    self.events_prev = {k: (v + 1 if k in current else 0) for k, v in self.events_prev.items()}
     self.events = self.static_events.copy()
 
   def any(self, event_type: str) -> bool:

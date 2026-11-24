@@ -74,6 +74,11 @@ def _finite_float(value, default):
 
 
 def normalize_comma_pedal_profile(profile):
+  # Already a profile name: controlsd passes the same normalized string three
+  # times a frame (controller, gain, rise scale), and the decode/strip/lower
+  # below would return it unchanged.
+  if type(profile) is str and profile in COMMA_PEDAL_PROFILE_GAINS:
+    return profile
   try:
     if isinstance(profile, bytes):
       profile = profile.decode('utf8')
