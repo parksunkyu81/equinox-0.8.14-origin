@@ -98,6 +98,16 @@ TURN_ABORT_DIST_M = 120.      # still not turned this far after the start (appro
 TURN_ABORT_WRONG_DEG = 30.    # turned this much the other way
 TURN_ABORT_SPEED = 40 * CV.KPH_TO_MS
 TURN_REARM_S = 10.            # after a finished turn, no new turn desire for this long
+# ... unless the navigation shows a new turn point: one this much farther than
+# what is left of the point the car turned at (its distance when the turn
+# started, minus the distance driven since). The lift is for ATC turns only and
+# only once that new point is inside ATC_TURN_FORCE_M, so a lever left on
+# after the turn still cannot send the car into a driveway before it.
+# 2026-11-24--01-18-04 at 784 s: a second left turn 16 s after the first; the
+# navigation already showed the next point (67 m) before the first turn ended,
+# but the rearm held the desire until exactly 10 s after it -- 19 m before the
+# point instead of 40 -- and the driver turned the wheel himself.
+TURN_REARM_NEW_POINT_M = 20.
 # ATC turn stage: with the driver's blinker on the turn's side and the point
 # this close, it is a turn whatever the road edge reads. 2026-11-22--22-42-17
 # at 1453.5 s: a T-junction left turn 25.7 m ahead; the cross road was not in
@@ -110,6 +120,14 @@ TURN_REARM_S = 10.            # after a finished turn, no new turn desire for th
 # time before the road opened stayed 4.2 -> 4.3 s. 50 m gained no more on
 # the late turns and only reaches further toward driveways before the point.
 ATC_TURN_FORCE_M = 40.
+# No lane change starts this close to an ATC turn point: the blinker waits as
+# the turn, and ATC_TURN_FORCE_M turns it into the turn desire.
+# 2026-11-24--01-18-04 at 747 s: the blinker put on 132 m before a left turn
+# (navigation "atc left", the pre-turn lane stage) started a lane change only
+# at 50 m, when room showed on the left; it ended 6 m before the point, the
+# turn desire came there, and the turn was sharp with a -69 deg swing after it.
+ATC_TURN_NO_LANE_CHANGE_M = 60.
+ATC_TURN_TYPES = ("atc left", "atc right", "turn left", "turn right")
 
 # Turn desire re-pulse. modeld hands the model a desire only on its rising
 # edge (driving.cc: "desire input is just a pulse"), and the model forgets it
@@ -180,6 +198,8 @@ class DesireHelper:
     self.enable_turn_desires = True
     self.turn_desire_state = False
     self.turn_disable_count = 0
+    self.turn_point_left = 0.        # what is left of the point the last turn was for [m]
+    self.turn_rearm_new_point = False  # navigation shows a new point (TURN_REARM_NEW_POINT_M)
     self.blinker_ignore = False
     self.atc_type = ""
     self.atc_active = 0             # 0: none, 1: ATC acting, 2: cancelled by an opposite driver blinker
@@ -216,6 +236,14 @@ class DesireHelper:
   # ─────────────────────────────────────────────
   def update(self, carstate, active, lane_change_prob, modeldata=None, atc_type="", atc_dist=0.):
     self.atc_dist = float(atc_dist)
+    # New navigation turn point during or after a turn (TURN_REARM_NEW_POINT_M).
+    # The blinker-only driver turn keeps the full rearm either way.
+    if self.turn_latched != TURN_NONE or self.turn_disable_count > 0:
+      self.turn_point_left -= max(0., carstate.vEgo) * DT_MDL
+      if self.atc_dist > 0. and self.atc_dist > self.turn_point_left + TURN_REARM_NEW_POINT_M:
+        self.turn_rearm_new_point = True
+    else:
+      self.turn_rearm_new_point = False
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
     driver_st = (BLINKER_LEFT if carstate.leftBlinker else 0) | (BLINKER_RIGHT if carstate.rightBlinker else 0)
 
@@ -472,6 +500,8 @@ class DesireHelper:
       if self.turn_direction == TURN_NONE:
         return
       self.turn_latched = self.turn_direction
+      self.turn_point_left = max(0., self.atc_dist)
+      self.turn_rearm_new_point = False
       self.turn_heading_deg = 0.
       self.turn_dist_m = 0.
       self.turn_end_reason = ""
@@ -681,7 +711,10 @@ class DesireHelper:
 
       if desire_enabled and self.maneuver_type == "turn" and self.enable_turn_desires:
         self.lane_change_state = LaneChangeState.off
-        if self.turn_disable_count > 0 or not (driver_enabled or self.atc_turn_confirmed):
+        new_point_close = (self.turn_rearm_new_point and self.atc_type in ("turn left", "turn right") and
+                           0. < self.atc_dist <= ATC_TURN_FORCE_M)
+        rearm_hold = self.turn_disable_count > 0 and not new_point_close
+        if rearm_hold or not (driver_enabled or self.atc_turn_confirmed):
           self.turn_direction = TURN_NONE
           self.lane_change_direction = LaneChangeDirection.none
         else:
@@ -771,6 +804,9 @@ class DesireHelper:
               can_start = (driver_enabled and not self.atc_tap_used and
                            self.atc_tap_t >= ATC_TAP_S and v_ego >= ATC_TAP_SPEED_MIN and
                            side.room and not side.side_object_detected and not bsd_active)
+              # Close to a turn point the blinker is the turn (ATC_TURN_NO_LANE_CHANGE_M).
+              if self.atc_type in ATC_TURN_TYPES and 0. < self.atc_dist <= ATC_TURN_NO_LANE_CHANGE_M:
+                can_start = False
               if can_start:
                 self.atc_tap_used = True
                 self.lane_change_state = LaneChangeState.laneChangeStarting
