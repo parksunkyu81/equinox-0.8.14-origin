@@ -11,12 +11,16 @@
 #include <QMap>
 #include "selfdrive/ui/qt/screenrecorder/screenrecorder.h"
 
-// Right-hand onroad column: turn-info box (bottom, carrot's spot), status
-// block above it, thermal panel above that. Computed in onroad.cc.
+// Right-hand onroad column, bottom up: turn-info box (carrot's spot), the
+// thermal strip above it, the brake / ACC / auto-hold / LKAS status block
+// above that. Computed in onroad.cc.
+constexpr int THERMAL_W = 338;   // 2 x 140 + 14 status block width, +15%
+constexpr int THERMAL_H = 89;    // 77 px it started at, +15%
 struct RightColumnLayout {
   QRect turn_box;
   int status_bottom = 0;    // bottom edge of the brake / ACC / auto-hold / LKAS block
-  int thermal_bottom = 0;   // bottom edge of the thermal panel's background
+  int thermal_top = 0;      // the thermal strip's background, top and bottom
+  int thermal_bottom = 0;
 };
 RightColumnLayout rightColumnLayout(int w, int h);
 

@@ -1375,18 +1375,23 @@ static QString ndaSafetyLabel(int cam_type) {
 //
 // 2026-11-24: the box is 699 wide (x 1171..1870 on the 1880 px HUD), taking
 // the 60 px the bottom row gave up when the speed panel moved left, and it
-// drops by BOTTOM_ROW_DROP now that the CPU line is no longer under it. The
-// status block and the thermal panel above it follow, as before.
+// drops by BOTTOM_ROW_DROP now that the CPU line is no longer under it.
+//
+// Later on 2026-11-24 the thermal strip moved from above the status block to
+// between it and the turn-info box (on request), so from the bottom up it is
+// now: turn-info box, thermal strip, status block. The strip's height is a
+// fixed THERMAL_H rather than measured from its fonts, so this function can
+// place the block above it without drawing anything.
 RightColumnLayout rightColumnLayout(int w, int h) {
   constexpr int BOX_W = 699, BOX_H = 300;
   constexpr int INFO_CLEAR = 50 - BOTTOM_ROW_DROP;
   constexpr int GAP = 20;
-  constexpr int STATUS_SD = 140, STATUS_GAP_Y = 12, STATUS_PANEL_GAP = 19;
+  constexpr int STATUS_PANEL_GAP = 19;
   RightColumnLayout l;
   l.turn_box = QRect(w - 10 - BOX_W, h - 10 - BOX_H - INFO_CLEAR, BOX_W, BOX_H);
-  l.status_bottom = l.turn_box.top() - GAP;
-  const int status_top = l.status_bottom - (2 * STATUS_SD + STATUS_GAP_Y);
-  l.thermal_bottom = status_top - STATUS_PANEL_GAP;
+  l.thermal_bottom = l.turn_box.top() - GAP;
+  l.thermal_top = l.thermal_bottom - THERMAL_H;
+  l.status_bottom = l.thermal_top - STATUS_PANEL_GAP;
   return l;
 }
 
@@ -3322,11 +3327,11 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
     p.setPen(color);
     // Left: above the chevrons. Below them (y 608..668) the shifted band's
     // label would land on the cruise panel's top edge (x 300..532 from y 638).
-    // The left label is also centred 60 px inboard: with the tile group lowered
-    // (2026-11-24) the 조향 신호 ring reaches x 478 at that height, and the
-    // band's own centre would put a wide label's start on it.
+    // Both labels are centred 60 px inboard of their band (2026-11-24): on the
+    // left the lowered 조향 신호 ring reaches x 478 at that height, and on the
+    // right the thermal strip now starts at x 1521 just below the chevrons.
     const int label_y = left ? cy - ch - 30 - 60 : cy + ch + 30;
-    const int label_x = left ? band_x + 60 : band_x;
+    const int label_x = left ? band_x + 60 : band_x - 60;
     p.drawText(QRect(label_x, label_y, band_w, 60), Qt::AlignCenter, label);
   }
 
@@ -3530,27 +3535,27 @@ void NvgWindow::drawThermal(QPainter &p) {
 
   // =========================
   // Layout: one horizontal strip of three tiles (2026-11-24, on request; it
-  // used to be a 213 x 309 column). It is exactly as wide as the brake / ACC /
-  // auto-hold / LKAS block below it -- right edge 21 px off the screen edge,
-  // 2 x 140 + 14 wide -- and stands STATUS_PANEL_GAP above that block
-  // (rightColumnLayout's thermal_bottom), so the right-hand column reads as
-  // one stack: thermal, status, turn-info box.
+  // used to be a 213 x 309 column). It sits between the status block above
+  // and the turn-info box below (rightColumnLayout), right edge 21 px off the
+  // screen edge like the block. THERMAL_W x THERMAL_H is 15% over the
+  // block-wide 294 x 77 it had, so it now reaches 44 px left of the block.
   // =========================
   constexpr int RIGHT_MARGIN = 21;
-  constexpr int STRIP_W = 2 * 140 + 14;
-  const int pad = 14;
+  constexpr int STRIP_W = THERMAL_W;
+  const int pad = 16;
   const int col_w = (STRIP_W - pad * 2) / 3;
-  const int value_label_gap = 10;
+  const int value_label_gap = 12;
 
   // Size the value font so the widest reading ("100%") fits its column with a
   // few px to spare; measured from fixed reference strings, never the live
-  // values, so a changing reading can never resize the strip.
-  int value_pt = 34;
+  // values, so a changing reading can never resize the strip. At 338 wide it
+  // lands near 38 px (it was 32).
+  int value_pt = 42;
   for (; value_pt > 20; value_pt--) {
     configFont(p, "Open Sans", value_pt, "Bold");
     if (QFontMetrics(p.font()).tightBoundingRect("100%").width() <= col_w - 6) break;
   }
-  constexpr int LABEL_PT = 22;
+  constexpr int LABEL_PT = 25;   // 22 + 15%
   // Ink heights, not line boxes: every string here is digits / caps with no
   // descender (see the note this replaced in git history).
   configFont(p, "Open Sans", value_pt, "Bold");
@@ -3558,10 +3563,14 @@ void NvgWindow::drawThermal(QPainter &p) {
   configFont(p, "Open Sans", LABEL_PT, "Bold");
   const int lab_ink_h = QFontMetrics(p.font()).tightBoundingRect("A").height();
 
-  const int total_h = pad * 2 + val_ink_h + value_label_gap + lab_ink_h;
+  // The strip's box is fixed (rightColumnLayout places the status block from
+  // it); the two text lines are centred in it.
+  const RightColumnLayout col = rightColumnLayout(width(), height());
+  const int total_h = col.thermal_bottom - col.thermal_top;
   const int right = width() - RIGHT_MARGIN;
   const int left = right - STRIP_W;
-  const int top = std::max(10, rightColumnLayout(width(), height()).thermal_bottom - total_h);
+  const int top = col.thermal_top;
+  const int text_top = top + (total_h - (val_ink_h + value_label_gap + lab_ink_h)) / 2;
 
   // Publish the panel's box: the status block takes its right edge from it
   // (see the members' comment in onroad.h).
@@ -3571,7 +3580,7 @@ void NvgWindow::drawThermal(QPainter &p) {
 
   p.setPen(Qt::NoPen);
   p.setBrush(QColor(0, 0, 0, 150));
-  p.drawRoundedRect(QRect(left, top, STRIP_W, total_h), 14, 14);
+  p.drawRoundedRect(QRect(left, top, STRIP_W, total_h), 16, 16);
 
   // Faint dividers between the three columns.
   p.setPen(QPen(QColor(255, 255, 255, 38), 2));
@@ -3580,7 +3589,7 @@ void NvgWindow::drawThermal(QPainter &p) {
     p.drawLine(dx, top + 11, dx, top + total_h - 11);
   }
 
-  const int value_base = top + pad + val_ink_h;
+  const int value_base = text_top + val_ink_h;
   const int label_base = value_base + value_label_gap + lab_ink_h;
   // Each string centred on its column by its own ink, so digits look optically
   // centred rather than advance-centred.
