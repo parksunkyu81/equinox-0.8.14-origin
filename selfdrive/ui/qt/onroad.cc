@@ -2559,6 +2559,7 @@ void NvgWindow::drawSpeed(QPainter &p) {
   speed_panel_top_ = (int)panelBg.top();
   speed_panel_cx_ = (int)panelBg.center().x();
   speed_panel_right_ = (int)panelBg.right();
+  speed_panel_bottom_ = (int)std::lround(panelBg.top() + panelBg.height());
 
   // 패널 배경 (✅ 더 투명)
   p.setPen(Qt::NoPen);
@@ -3043,7 +3044,20 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
 
   const int max_shift = std::max(0, height() - (base_y_start + needed_h) - S(20));
   const int y_shift = std::clamp(desired_shift, 0, max_shift);
-  const int y_start = base_y_start + y_shift;
+  int y_start = base_y_start + y_shift;
+
+  // A sign or camera board carries a distance pill under it, and the clamp
+  // above left 50 px of empty road below that pill against the speed panel's
+  // ~20 beside it. Its pill's bottom now lines up with the panel's bottom
+  // edge (2026-11-24, on request), so the two share one bottom margin; the
+  // board, and the NDA icon above it, come down with it. drawSpeed runs first
+  // in drawHud and publishes the panel's edge. The pill ends board_h + 90
+  // below y_start: 15 gap + 55 font + 10 + 10 pad (draw_dist_pill).
+  if ((show_sign || show_cam_or_section) && speed_panel_bottom_ > 0) {
+    const int board_h = S(SPEED_BOARD_W);
+    const int pill_end = board_h + S(15) + S(55) + S(10) + S(10);
+    y_start = std::clamp(speed_panel_bottom_ - pill_end, base_y_start, height() - pill_end);
+  }
 
   // ---- NDA/HDA 아이콘 ----
   // 어느 표지가 그려지든 그 표지 바로 위에 중앙 정렬한다. CAM/SECTION 분기는

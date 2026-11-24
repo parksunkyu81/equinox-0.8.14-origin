@@ -133,6 +133,9 @@ protected:
   int speed_panel_top_ = 0;
   int speed_panel_cx_ = 0;
   int speed_panel_right_ = 0;
+  // Bottom edge of the speed panel; drawSpeedLimit lines the sign / camera
+  // board's distance pill up with it.
+  int speed_panel_bottom_ = 0;
 
   // Where the NDA/HDA badge sits above the speed-limit board. drawSpeedLimit
   // publishes it before its own early return, so the pedal tiles stacked above
