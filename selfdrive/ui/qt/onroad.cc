@@ -719,7 +719,8 @@ void NvgWindow::drawLead(QPainter &painter, const cereal::ModelDataV2::LeadDataV
   const float left = cx - bw / 2, right = cx + bw / 2;
 
   static const QColor kColors[3] = {QColor(0, 220, 230), QColor(255, 150, 0), QColor(255, 45, 45)};
-  static const int kWidths[3] = {7, 8, 10};
+  // 30% over the first 7 / 8 / 10, which read too thin on the road.
+  static const int kWidths[3] = {9, 10, 13};
   danger = std::clamp(danger, 0, 2);
   const float arm = std::clamp(std::min(bw, bh) * 0.22f, 18.0f, 60.0f);
 
@@ -736,10 +737,12 @@ void NvgWindow::drawLead(QPainter &painter, const cereal::ModelDataV2::LeadDataV
     // Small, inside the bottom edge. Its width is the text's, not the box's:
     // a far lead's box is narrower than the readout, and the pill then sticks
     // out on both sides rather than shrinking the text below reading size.
-    configFont(painter, "Open Sans", 24, "Bold");
+    // Font and padding both 30% over the first 24 px / 28 / 10, so the pill
+    // grows with its text.
+    configFont(painter, "Open Sans", 31, "Bold");
     QFontMetrics metrics(painter.font());
-    const int pill_w = metrics.horizontalAdvance(info_text) + 28;
-    const int pill_h = metrics.height() + 10;
+    const int pill_w = metrics.horizontalAdvance(info_text) + 36;
+    const int pill_h = metrics.height() + 13;
     QRect pill(static_cast<int>(cx - pill_w / 2.0f), static_cast<int>(bottom - 8 - pill_h), pill_w, pill_h);
     pill.moveLeft(std::clamp(pill.left(), 12, std::max(12, width() - pill.width() - 12)));
 
