@@ -1258,7 +1258,8 @@ class Controls:
         if self.sm.updated['modelV2']:
             self.atc_lane_prompt = self.atc_lane_guide.update(
                 atc_type, float(rls.xDistToTurn) if rls is not None else 0., CS.vEgo,
-                CS.leftBlinker, CS.rightBlinker, md=self.sm['modelV2'])
+                CS.leftBlinker, CS.rightBlinker, md=self.sm['modelV2'],
+                turn_info=int(rls.xTurnInfo) if rls is not None else 0)
         if self.atc_lane_prompt == BLINKER_LEFT:
             self.events.add(EventName.atcBlinkerLeft)
         elif self.atc_lane_prompt == BLINKER_RIGHT:

@@ -272,7 +272,9 @@ ATC_LANE_RIGHT_TYPES = ("fork right", "atc right")
 #                 sends the turn desire, room does not matter
 #   PROMPT_MANUAL "○측 차선으로 이동하세요 / 직접 옮겨 주세요" -- otherwise
 PROMPT_AUTO, PROMPT_TURN, PROMPT_MANUAL = "auto", "turn", "manual"
-PROMPT_STATE = {"kind": PROMPT_MANUAL}
+# voice: the turn prompt speaks "좌회전 / 우회전 깜빡이를 켜 주세요" instead of the
+# chime (False when the driver's blinker on that side is already on).
+PROMPT_STATE = {"kind": PROMPT_MANUAL, "voice": False}
 # "좌/우회전 중" while the turn desire is out (controlsd fills it each cycle,
 # events.py turn_in_progress_alert reads it). sub: "" / "sat" (the steering is
 # at its 300 limit) / "slow" (under 10 km/h, where LKAS is off).
@@ -283,6 +285,17 @@ PROMPT_AUTO_SPEED_MIN = 15. / 3.6   # = desire_helper.ATC_TAP_SPEED_MIN
 # stage only starts at 43-60 m, so on the 2026-11-23 drives most turn prompts
 # came up as "차선으로 이동하세요" instead of "회전 준비".
 PROMPT_TURN_M = 60.
+# Turn instructions (xTurnInfo 1 / 2) get their own spoken prompt once the point
+# is this close (2026-11-24, on request). A blinker put on 60-40 m out is what
+# starts the turn: inside desire_helper.ATC_TURN_NO_LANE_CHANGE_M (60) it cannot
+# start a lane change, and it is still on at ATC_TURN_FORCE_M (40), where the
+# turn stage reads it. 55 leaves the navigation distance (updated about once a
+# second, 14 m at 50 km/h) room to land inside 60.
+TURN_PROMPT_M = 55.
+# For a turn instruction the lane prompt ("○측 차선으로 이동하세요") comes only
+# this far out; closer than this it would land seconds before the turn prompt
+# and be cut off by it, so the turn prompt is the only one.
+TURN_LANE_PROMPT_MIN_M = 80.
 
 
 class AtcLaneGuide:
@@ -322,6 +335,7 @@ class AtcLaneGuide:
     self.right = SideState("right")
     self.kind = PROMPT_MANUAL
     self.prompted = False
+    self.turn_prompted = False   # the spoken turn prompt of this instruction is done
     self.t = 0.
     self.away_t = 0.
     self.prompt = BLINKER_NONE
@@ -352,7 +366,7 @@ class AtcLaneGuide:
   def trigger_m(self, v_ego):
     return min(self.PROMPT_MAX_M, max(self.PROMPT_MIN_M, v_ego * self.PROMPT_AHEAD_S))
 
-  def update(self, atc_type, dist_m, v_ego, left_blinker, right_blinker, dt=DT_MDL, md=None):
+  def update(self, atc_type, dist_m, v_ego, left_blinker, right_blinker, dt=DT_MDL, md=None, turn_info=0):
     room_ok = self._geometry(md) if md is not None else False
     want = BLINKER_NONE
     if not atc_type.endswith("prepare"):
@@ -365,6 +379,7 @@ class AtcLaneGuide:
       self.away_t += dt
       if self.away_t >= self.REARM_S:
         self.prompted = False
+        self.turn_prompted = False
       self.prompt = BLINKER_NONE
       return self.prompt
     self.away_t = 0.
@@ -372,17 +387,30 @@ class AtcLaneGuide:
     # a new instruction re-arms at once
     if want != self.last_want or dist_m > max(self.last_dist, 0.) + self.NEW_INSTR_JUMP_M:
       self.prompted = False
+      self.turn_prompted = False
       self.prompt = BLINKER_NONE
     self.last_want = want
     self.last_dist = float(dist_m)
 
-    if not self.prompted:
-      if 0. < dist_m <= self.trigger_m(v_ego):
+    is_turn = turn_info in (1, 2) or atc_type.startswith(("turn left", "turn right"))
+    if is_turn and not self.turn_prompted and 0. < dist_m <= TURN_PROMPT_M:
+      # The turn prompt, spoken; it replaces a lane prompt still on screen.
+      self.prompted = self.turn_prompted = True
+      self.t = 0.
+      self.prompt = want
+      self.kind = PROMPT_TURN
+      blinker_on = left_blinker if want == BLINKER_LEFT else right_blinker
+      PROMPT_STATE.update(kind=self.kind, voice=not blinker_on)
+    elif not self.prompted:
+      trigger = self.trigger_m(v_ego)
+      if is_turn:
+        trigger = trigger if trigger >= TURN_LANE_PROMPT_MIN_M else 0.
+      if 0. < dist_m <= trigger:
         self.prompted = True
         self.t = 0.
         self.prompt = want
         self.kind = self._pick_kind(atc_type, want, v_ego, room_ok, dist_m)
-        PROMPT_STATE["kind"] = self.kind
+        PROMPT_STATE.update(kind=self.kind, voice=False)
     elif self.prompt != BLINKER_NONE:
       self.t += dt
       if self.t >= self.PROMPT_S:   # always the full PROMPT_S, blinker or not

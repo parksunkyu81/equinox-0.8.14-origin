@@ -432,6 +432,8 @@ struct CarControl {
       cornerEntry @11;
       steerRequired @12;
       laneLost @13;
+      atcTurnLeft @14;
+      atcTurnRight @15;
     }
   }
 

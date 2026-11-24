@@ -292,8 +292,13 @@ def atc_lane_prompt_alert(left: bool) -> AlertCallbackType:
   def func(CP: car.CarParams, sm: messaging.SubMaster, metric: bool, soft_disable_time: int) -> Alert:
     side = "좌측" if left else "우측"
     kind = PROMPT_STATE.get("kind")
+    sound = AudibleAlert.prompt
     if kind == PROMPT_TURN:
       text1, text2 = ("좌회전 준비" if left else "우회전 준비"), "내비 안내 · 깜빡이를 켜 주세요"
+      # Spoken "좌회전 / 우회전 깜빡이를 켜 주세요" 55 m out; silent when the
+      # blinker is already on (AtcLaneGuide sets voice).
+      sound = ((AudibleAlert.atcTurnLeft if left else AudibleAlert.atcTurnRight)
+               if PROMPT_STATE.get("voice") else AudibleAlert.none)
     elif kind == PROMPT_AUTO:
       text1, text2 = f"{side} 차선으로 이동하세요", "깜빡이를 톡 치면 차가 옮깁니다"
     else:
@@ -302,7 +307,7 @@ def atc_lane_prompt_alert(left: bool) -> AlertCallbackType:
     # its 4 s instead of flickering with them (2026-11-23--06-07-16 704 s,
     # 784 s: it came back after those as if it were a second prompt).
     return Alert(text1, text2, AlertStatus.userPrompt, AlertSize.mid,
-                 Priority.MID, VisualAlert.none, AudibleAlert.prompt, .1)
+                 Priority.MID, VisualAlert.none, sound, .1)
   return func
 
 
