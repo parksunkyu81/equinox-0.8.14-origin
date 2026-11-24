@@ -287,15 +287,19 @@ PROMPT_AUTO_SPEED_MIN = 15. / 3.6   # = desire_helper.ATC_TAP_SPEED_MIN
 PROMPT_TURN_M = 60.
 # Turn instructions (xTurnInfo 1 / 2) get their own spoken prompt once the point
 # is this close (2026-11-24, on request). A blinker put on 60-40 m out is what
-# starts the turn: inside desire_helper.ATC_TURN_NO_LANE_CHANGE_M (60) it cannot
+# starts the turn: inside desire_helper.ATC_TURN_NO_LANE_CHANGE_M (100) it cannot
 # start a lane change, and it is still on at ATC_TURN_FORCE_M (40), where the
 # turn stage reads it. 55 leaves the navigation distance (updated about once a
 # second, 14 m at 50 km/h) room to land inside 60.
 TURN_PROMPT_M = 55.
-# For a turn instruction the lane prompt ("○측 차선으로 이동하세요") comes only
-# this far out; closer than this it would land seconds before the turn prompt
-# and be cut off by it, so the turn prompt is the only one.
-TURN_LANE_PROMPT_MIN_M = 80.
+# For a turn instruction the lane prompt ("○측 차선으로 이동하세요") comes only when
+# the speed puts it this far out (v*6 s, from ~66 km/h), and never inside
+# ATC_TURN_NO_LANE_CHANGE_M (100), where a tap no longer moves the car; closer it
+# would also land seconds before the turn prompt. 110 leaves room for the ~1 Hz
+# distance.
+TURN_LANE_PROMPT_MIN_M = 110.
+# = desire_helper.ATC_TURN_NO_LANE_CHANGE_M (desire_helper imports this module)
+TURN_NO_LANE_CHANGE_M = 100.
 
 
 class AtcLaneGuide:
@@ -403,9 +407,12 @@ class AtcLaneGuide:
       PROMPT_STATE.update(kind=self.kind, voice=not blinker_on)
     elif not self.prompted:
       trigger = self.trigger_m(v_ego)
+      floor = 0.
       if is_turn:
+        # only where a tap can still move the car (TURN_NO_LANE_CHANGE_M)
         trigger = trigger if trigger >= TURN_LANE_PROMPT_MIN_M else 0.
-      if 0. < dist_m <= trigger:
+        floor = TURN_NO_LANE_CHANGE_M
+      if floor < dist_m <= trigger:
         self.prompted = True
         self.t = 0.
         self.prompt = want

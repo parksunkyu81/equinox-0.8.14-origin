@@ -126,7 +126,13 @@ ATC_TURN_FORCE_M = 40.
 # (navigation "atc left", the pre-turn lane stage) started a lane change only
 # at 50 m, when room showed on the left; it ended 6 m before the point, the
 # turn desire came there, and the turn was sharp with a -69 deg swing after it.
-ATC_TURN_NO_LANE_CHANGE_M = 60.
+# 60 -> 100 m (2026-11-24, on request): five ATC lane changes the driver's hand
+# cancelled that day (02-56-54 164 s, 03-11-42 896 s and 986 s, 06-07-36 597 s,
+# 07-10-51 1175 s) had started 68-150 m before a left turn from the blinker the
+# driver had put on for that turn; the blinker stayed on and the car turned left
+# after each. 100 m stops the 68, 88 and 89 m ones; the day's completed ATC lane
+# changes all started 123 m or further out.
+ATC_TURN_NO_LANE_CHANGE_M = 100.
 ATC_TURN_TYPES = ("atc left", "atc right", "turn left", "turn right")
 
 # Turn desire re-pulse. modeld hands the model a desire only on its rising
