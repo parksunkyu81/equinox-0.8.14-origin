@@ -686,9 +686,9 @@ void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
     bg.setColorAt(0.55, QColor(255, 48, 25, 185));
     bg.setColorAt(1.00, QColor(255, 92, 30, 0));
   } else {
-    bg.setColorAt(0.00, QColor(55, 235, 72, 190));    // green
-    bg.setColorAt(0.50, QColor(55, 235, 72, 160));
-    bg.setColorAt(1.00, QColor(55, 235, 72, 0));      // fade out
+    bg.setColorAt(0.00, QColor(12, 105, 145, 190));   // teal blue (2026-11-25, on request; was green 55,235,72)
+    bg.setColorAt(0.50, QColor(12, 105, 145, 160));
+    bg.setColorAt(1.00, QColor(12, 105, 145, 0));     // fade out
   }
 
   painter.setBrush(bg);
