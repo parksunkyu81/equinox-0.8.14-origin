@@ -22,6 +22,7 @@ from selfdrive.loggerd.config import get_available_percent
 from selfdrive.statsd import statlog
 from selfdrive.swaglog import cloudlog
 from selfdrive.thermald.power_monitoring import PowerMonitoring
+from selfdrive.thermald.proc_cpu_log import ProcCpuLog
 from selfdrive.thermald.fan_controller import EonFanController, UnoFanController, TiciFanController
 from selfdrive.version import terms_version, training_version
 
@@ -190,6 +191,7 @@ def thermald_thread(end_event, hw_queue):
   current_filter = FirstOrderFilter(0., CURRENT_TAU, DT_TRML)
   temp_filter = FirstOrderFilter(0., TEMP_TAU, DT_TRML)
   should_start_prev = False
+  proc_cpu_log = ProcCpuLog()
   in_car = False
   is_uno = False
   engaged_prev = False
@@ -348,6 +350,12 @@ def thermald_thread(end_event, hw_queue):
       params.put_bool("IsEngaged", False)
       engaged_prev = False
       HARDWARE.set_power_save(not should_start)
+
+    # Per-process CPU while onroad, /data/log/proc_cpu.jsonl (proc_cpu_log.py).
+    try:
+      proc_cpu_log.update(sec_since_boot(), should_start)
+    except Exception:
+      cloudlog.exception("proc_cpu_log failed")
 
     if sm.updated['controlsState']:
       engaged = sm['controlsState'].enabled

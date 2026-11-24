@@ -371,7 +371,12 @@ class AtcLaneGuide:
     return min(self.PROMPT_MAX_M, max(self.PROMPT_MIN_M, v_ego * self.PROMPT_AHEAD_S))
 
   def update(self, atc_type, dist_m, v_ego, left_blinker, right_blinker, dt=DT_MDL, md=None, turn_info=0):
-    room_ok = self._geometry(md) if md is not None else False
+    # The side geometry only feeds the prompt kind, so it runs only under an
+    # instruction ("... prepare" included, which warms its 1 s windows up well
+    # before the prompt point). Without one it was ~0.1 ms of every controlsd
+    # frame on core 3 for nothing.
+    in_instruction = atc_type.startswith(ATC_LEFT_TYPES + ATC_RIGHT_TYPES)
+    room_ok = self._geometry(md) if (md is not None and in_instruction) else False
     want = BLINKER_NONE
     if not atc_type.endswith("prepare"):
       if atc_type.startswith(ATC_LEFT_TYPES):

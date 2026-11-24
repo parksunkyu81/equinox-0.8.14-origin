@@ -458,6 +458,12 @@ class Controls:
         self.corner_alert = CornerAlert()
         self.atc_lane_guide = AtcLaneGuide()
         self.atc_lane_prompt = BLINKER_NONE
+        self._atc_rls = None
+        self._atc_type = ""
+        # modelV2 changes at 20 Hz; what the launch latch reads from it is
+        # worked out once per model frame, not on every 100 Hz control frame.
+        self._launch_lead_accel = 0.0
+        self._model_go_plan_speed = float('nan')
         self.curv_speed = 0.0
         self.v_cruise_kph_limit = 0
         self.applyMaxSpeed = 0
@@ -1254,7 +1260,11 @@ class Controls:
         # per instruction, just before the turn or fork point ("좌측/우측 차선으로
         # 이동하세요", one chime); stepped on modelV2 frames for its 20 Hz timers.
         rls = get_road_speed_limiter().roadLimitSpeed
-        atc_type = str(rls.atcType) if rls is not None else ""
+        # roadLimitSpeed comes at 20 Hz: convert its text once per message.
+        if rls is not self._atc_rls:
+            self._atc_rls = rls
+            self._atc_type = str(rls.atcType) if rls is not None else ""
+        atc_type = self._atc_type
         if self.sm.updated['modelV2']:
             self.atc_lane_prompt = self.atc_lane_guide.update(
                 atc_type, float(rls.xDistToTurn) if rls is not None else 0., CS.vEgo,
@@ -1912,10 +1922,15 @@ class Controls:
             self.standstill_auto_launch = self._read_standstill_auto_launch()
         # The launch floor follows the lead's own acceleration. radard publishes
         # aLeadK = 0 for vision leads, so take it from the model directly.
-        model_leads = self.sm['modelV2'].leadsV3
-        launch_lead_accel = (float(model_leads[0].a[0])
-                             if len(model_leads) and model_leads[0].prob > 0.5 and
-                             len(model_leads[0].a) else 0.0)
+        if self.sm.updated['modelV2']:
+            model_leads = self.sm['modelV2'].leadsV3
+            self._launch_lead_accel = (float(model_leads[0].a[0])
+                                       if len(model_leads) and model_leads[0].prob > 0.5 and
+                                       len(model_leads[0].a) else 0.0)
+            self._model_go_plan_speed = self._model_plan_speed(MODEL_GO_PLAN_T_S)
+        launch_lead_accel = self._launch_lead_accel
+        # nan while modelV2 is invalid, as _model_plan_speed itself returns.
+        model_go_plan_speed = self._model_go_plan_speed if self.sm.valid['modelV2'] else float('nan')
         self.stop_accel_boost_active = self.stop_accel_boost_latch.update(
           boost_system_ready,
           dynamic_follow_valid and dynamic_follow.leadCatchupActive,
@@ -1927,7 +1942,7 @@ class Controls:
           lead_distance=dynamic_follow.leadDistance if dynamic_follow_valid else 0.0,
           standstill_launch_enabled=self.standstill_auto_launch,
           lead_accel=launch_lead_accel,
-          model_plan_speed=self._model_plan_speed(MODEL_GO_PLAN_T_S))
+          model_plan_speed=model_go_plan_speed)
         self.standstill_launch_active = bool(
           self.stop_accel_boost_active and self.stop_accel_boost_latch.standstill_launch)
 
