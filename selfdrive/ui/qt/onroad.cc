@@ -740,10 +740,11 @@ void NvgWindow::drawLead(QPainter &painter, const cereal::ModelDataV2::LeadDataV
     // Solid dark green under white text: about 5:1 contrast on its own, so it
     // reads over a bright sky, the dark car body or the green path alike. A
     // thin white rim keeps its edge visible where it sits on that green path.
-    configFont(painter, "Open Sans", 31, "Bold");
+    // 40 px with its padding: 30% over the 31 / 36 / 13 it had (on request).
+    configFont(painter, "Open Sans", 40, "Bold");
     QFontMetrics metrics(painter.font());
-    const int pill_w = metrics.horizontalAdvance(info_text) + 36;
-    const int pill_h = metrics.height() + 13;
+    const int pill_w = metrics.horizontalAdvance(info_text) + 47;
+    const int pill_h = metrics.height() + 17;
     QRect pill(static_cast<int>(cx - pill_w / 2.0f), static_cast<int>((top + bottom) / 2.0f - pill_h / 2.0f),
                pill_w, pill_h);
     pill.moveLeft(std::clamp(pill.left(), 12, std::max(12, width() - pill.width() - 12)));
