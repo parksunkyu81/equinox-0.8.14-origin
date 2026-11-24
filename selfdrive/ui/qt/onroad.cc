@@ -3257,6 +3257,10 @@ float interp(float x, std::initializer_list<T> x_list, std::initializer_list<T> 
   return yL + dydx * ( x - xL );
 }
 
+// LaneChangeLowSpeed [km/h] for the blinker label, read once per blinker episode
+// (the setting only changes offroad): -1 = read it on the next blinker.
+static int lane_change_low_speed_kph = -1;
+
 void NvgWindow::drawTurnSignals(QPainter &p) {
   const SubMaster &sm = *(uiState()->sm);
   const auto car_state = sm["carState"].getCarState();
@@ -3265,6 +3269,7 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
 
   // nothing to show with both off, and hazards shouldn't paint both edges
   if (left_on == right_on) {
+    lane_change_low_speed_kph = -1;
     p.setOpacity(1.0);
     return;
   }
@@ -3289,11 +3294,16 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
     // With a navigation (ATC) instruction: from 15 km/h the blinker (a tap is
     // enough) moves the car one lane when there is room, under 15 the driver
     // does it by hand (desire_helper.py ATC_TAP_SPEED_MIN). Otherwise: under 30 km/h a nudge starts it
-    // (LANE_CHANGE_LOW_SPEED), from 30 the blinker alone after 1 s.
+    // (LANE_CHANGE_LOW_SPEED, the LaneChangeLowSpeed param), from there the
+    // blinker alone after 1 s.
     const QString atc = QString::fromUtf8(sm["roadLimitSpeed"].getRoadLimitSpeed().getAtcType().cStr());
     const bool atc_lane = (atc.startsWith("fork ") || atc.startsWith("atc ") || atc.startsWith("turn ")) &&
                           !atc.contains("prepare");
-    const bool fast = car_state.getVEgo() >= 30 / 3.6f;
+    if (lane_change_low_speed_kph < 0) {
+      const int kph = QString::fromStdString(Params().get("LaneChangeLowSpeed")).toInt();
+      lane_change_low_speed_kph = (kph == 40 || kph == 50 || kph == 60) ? kph : 30;
+    }
+    const bool fast = car_state.getVEgo() >= lane_change_low_speed_kph / 3.6f;
     if (atc_lane) label = car_state.getVEgo() >= 15 / 3.6f ? "자동 대기" : "직접 변경";
     else label = (lp.getAutoLaneChangeEnabled() && fast) ? "자동 대기" : "핸들 밀기";
   } else {

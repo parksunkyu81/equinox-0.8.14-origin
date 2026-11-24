@@ -27,7 +27,19 @@ ATC_LANE_CHANGE_SPEED_MIN = LANE_CHANGE_SPEED_MIN
 #   - needs room on that side (a lane, or a road edge more than a lane away).
 #     The driver turn below wants the opposite (no lane, no edge), so the two
 #     never both read true: at an intersection mouth the blinker turns.
+# The default; the LaneChangeLowSpeed param (community menu: 30 / 40 / 50 / 60
+# km/h, 2026-11-24) moves it, read once when plannerd starts.
 LANE_CHANGE_LOW_SPEED = 30 * CV.KPH_TO_MS
+LANE_CHANGE_LOW_SPEED_CHOICES_KPH = (30, 40, 50, 60)
+
+
+def lane_change_low_speed(params):
+  """LaneChangeLowSpeed [km/h] -> m/s; anything not offered in the menu reads as 30."""
+  try:
+    kph = int(params.get("LaneChangeLowSpeed", encoding='utf8') or 0)
+  except (TypeError, ValueError):
+    kph = 0
+  return (kph if kph in LANE_CHANGE_LOW_SPEED_CHOICES_KPH else 30) * CV.KPH_TO_MS
 # ATC lane change: the driver's blinker on the instruction's side must be seen
 # this long. A tap of the lever (the three-flash lane-change blink) shows for
 # 1.0-2.3 s in carState on this car (19 short runs, 2026-11-22 rlogs), so a
@@ -51,7 +63,9 @@ ATC_TAP_SPEED_MIN = 15 * CV.KPH_TO_MS
 # It may take over a low-speed lane change still waiting for the nudge
 # (preLaneChange), never one already moving.
 DRIVER_TURN_SPEED_MIN = 5 * CV.KPH_TO_MS
-DRIVER_TURN_SPEED_MAX = LANE_CHANGE_LOW_SPEED
+# Fixed at 30 whatever LaneChangeLowSpeed says: a blinker-only turn above that is
+# not an intersection turn.
+DRIVER_TURN_SPEED_MAX = 30 * CV.KPH_TO_MS
 DRIVER_TURN_EDGE_FAR_M = 4.
 DRIVER_TURN_OPEN_FRAMES = 5
 DRIVER_TURN_MAX_WHEEL_DEG = 90.
@@ -193,6 +207,7 @@ class DesireHelper:
     params = Params()
     self.lane_change_enabled = params.get_bool('LaneChangeEnabled')
     self.auto_lane_change_enabled = params.get_bool('AutoLaneChangeEnabled')
+    self.lane_change_low_speed = lane_change_low_speed(params)
     self.auto_lane_change_timer = 0.0
     self.prev_torque_applied = False
 
@@ -374,7 +389,7 @@ class DesireHelper:
   # ─────────────────────────────────────────────
   def _low_speed_room(self, carstate):
     """Under LANE_CHANGE_LOW_SPEED: a lane or a road edge a lane away on the change side."""
-    if carstate.vEgo >= LANE_CHANGE_LOW_SPEED:
+    if carstate.vEgo >= self.lane_change_low_speed:
       return True
     if not self.sides_valid or self.lane_change_direction == LaneChangeDirection.none:
       return False
@@ -384,7 +399,7 @@ class DesireHelper:
   def _update_legacy(self, carstate, active, lane_change_prob, one_blinker):
     v_ego = carstate.vEgo
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN
-    low_speed = v_ego < LANE_CHANGE_LOW_SPEED
+    low_speed = v_ego < self.lane_change_low_speed
 
     if (not active) or (self.lane_change_timer > LANE_CHANGE_TIME_MAX) or (not one_blinker) or (not self.lane_change_enabled):
       self.lane_change_state = LaneChangeState.off

@@ -922,6 +922,13 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                "· 이 차는 10 km/h 아래에서 조향이 꺼지고 조향 힘이 300에서 막혀, 급한 교차로 회전은 직접 도와야 할 수 있습니다.",
                {{0, "0: 끔"}, {1, "1: 차선변경·회전만"}, {2, "2: 차선변경·회전 + 감속"}, {3, "3: 감속만"}}, 0);
 
+  addAtcSelect("LaneChangeLowSpeed", "차선변경 자동 시작 속도",
+               "깜빡이만으로 차선변경이 시작되는 최저 속도입니다 (기본 30 km/h).\n"
+               "· 이 속도 이상: 깜빡이를 켜면 1초 뒤 자동으로 옮깁니다 (자동 차선변경을 켠 경우).\n"
+               "· 이 속도 미만: 핸들을 그쪽으로 살짝 밀어야 시작하고, 옆에 차선이나 공간이 보여야 합니다.\n"
+               "· 다음 주행(시동)부터 적용됩니다.",
+               {{30, "30 km/h"}, {40, "40 km/h"}, {50, "50 km/h"}, {60, "60 km/h"}}, 30);
+
   QList<QPair<int, QString>> turnSpeedOptions = {{0, "감속 안 함"}};
   for (int v = 15; v <= 100; v += 5) {
     QString text = QString("%1 km/h").arg(v);

@@ -52,6 +52,7 @@ def manager_init() -> None:
     ("IsLdwsCar", "0"),
     ("LaneChangeEnabled", "1"),
     ("AutoLaneChangeEnabled", "1"),
+    ("LaneChangeLowSpeed", "30"),
 
     ("RecordRLog", "1"),
 
