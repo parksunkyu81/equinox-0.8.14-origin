@@ -1158,6 +1158,19 @@ struct LateralPlan @0xe1e9318e2ae8b51e {
   # 0 = none, 1 = ordinary lane blending, 2 = temporal hold, 3 = road edge
   curveFallbackSource @48 :UInt8;
 
+  # Model curve profile for controlsd's curve slowdown and corner prompt
+  # (curve_speed_limiter.build_v0813_model_curve_profile), built here once per
+  # model frame instead of inside controlsd's 100 Hz loop on core 3. Index 0
+  # is a placeholder: controlsd puts its live measured curvature there. The
+  # profile depends on speed only through the tuning band, so controlsd uses it
+  # only when its own band matches and builds it itself otherwise.
+  curveProfileBuilt @49 :Bool;
+  curveProfileBand @50 :Int8;
+  curveProfileValid @51 :Bool;
+  curveProfileCurvatures @52 :List(Float64);
+  curveProfileTimes @53 :List(Float64);
+  curveProfileDistances @54 :List(Float64);
+
   enum Desire {
     none @0;
     turnLeft @1;

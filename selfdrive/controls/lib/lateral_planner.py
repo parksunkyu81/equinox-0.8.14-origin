@@ -10,6 +10,8 @@ import cereal.messaging as messaging
 from cereal import log
 from common.params import Params
 from selfdrive.controls.lib.model_data_validation import as_finite_vector, validated_model_trajectory
+from selfdrive.controls.lib.curve_speed_limiter import (
+  build_model_curve_profile_from_model, model_curve_tuning_band)
 
 TRAJECTORY_SIZE = 33
 
@@ -91,6 +93,9 @@ class LateralPlanner:
     self.t_idxs = np.arange(TRAJECTORY_SIZE)
     self.y_pts = np.zeros(TRAJECTORY_SIZE)
     self.model_data_valid = False
+    # controlsd's model curve profile, built here (see log.capnp curveProfile*).
+    self.curve_profile = None
+    self.curve_profile_band = 0
 
     self.v_mpc = 0.0
     if self.use_v09:
@@ -153,6 +158,14 @@ class LateralPlanner:
     # Parse model predictions
     md = sm['modelV2']
     self.LP.parse_model(md)
+
+    # controlsd's curve slowdown profile, once per model frame. Index 0 is a
+    # placeholder that controlsd overwrites with its live measured curvature.
+    try:
+      self.curve_profile_band = model_curve_tuning_band(v_ego)
+      self.curve_profile = build_model_curve_profile_from_model(md, 0.0, v_ego)
+    except Exception:
+      self.curve_profile = None
     trajectory = validated_model_trajectory(md, TRAJECTORY_SIZE)
     self.model_data_valid = trajectory is not None
     if trajectory is not None:
@@ -400,5 +413,14 @@ class LateralPlanner:
     lateralPlan.curveRawTargetDProb = float(self.LP.curve_raw_target_d_prob_diag)
     lateralPlan.curveGeometryPlausible = bool(self.LP.curve_geometry_plausible_diag)
     lateralPlan.curveFallbackSource = int(self.LP.curve_fallback_source_diag)
+
+    if self.curve_profile is not None:
+      curvatures, times, distances, valid, _diag = self.curve_profile
+      lateralPlan.curveProfileBuilt = True
+      lateralPlan.curveProfileBand = int(self.curve_profile_band)
+      lateralPlan.curveProfileValid = bool(valid)
+      lateralPlan.curveProfileCurvatures = curvatures
+      lateralPlan.curveProfileTimes = times
+      lateralPlan.curveProfileDistances = distances
 
     pm.send('lateralPlan', plan_send)

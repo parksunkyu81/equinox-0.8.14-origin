@@ -51,6 +51,7 @@ from selfdrive.controls.lib.launch_floor_diag import LaunchFloorDiag
 from selfdrive.controls.lib.curve_speed_limiter import (
   CurveSpeedLimiter, CURVE_SPEED_DISABLED, build_v0813_model_curve_profile, calculate_curve_speed,
   CornerAlert, model_curve_tuning_band, prepare_profile, CORNER_ALERT_MIN_SPEED_KPH,
+  model_curve_band_diag,
 )
 from selfdrive.controls.lib.curve_pedal_coordinator import CurvePedalCoordinator
 from selfdrive.controls.lib.predictive_coasting import PredictiveCoastingCoordinator
@@ -440,6 +441,7 @@ class Controls:
         # (modelV2 rcv_frame, speed tuning band, built profile). See
         # _model_curve_profile() for why those two keys are sufficient.
         self._curve_profile_cache = None
+        self._curve_model_ticks = {}  # modelV2 logMonoTime -> (v_ego, curvature, v_cruise_kph)
         self.curve_pedal_coordinator = CurvePedalCoordinator(DT_CTRL)
         self.predictive_coasting = PredictiveCoastingCoordinator(DT_CTRL)
         self.predictive_coast_pedal_scale = 1.0
@@ -816,11 +818,25 @@ class Controls:
         inputs: the measured curvature, which occupies index 0 and nothing else,
         and v_ego, which acts only through the speed tuning band.
         """
-        rcv_frame = sm.rcv_frame['modelV2']
         band = model_curve_tuning_band(v_ego)
         cache = self._curve_profile_cache
 
-        if cache is not None and cache[0] == rcv_frame and cache[1] == band:
+        # plannerd builds the same profile once per model frame and sends it in
+        # lateralPlan (~1 ms of Python a model frame that used to land on this
+        # loop on core 3). It is used whenever it was built for this speed
+        # band; otherwise -- band boundary, or an older plannerd -- build here.
+        lp = sm['lateralPlan']
+        if sm.valid['lateralPlan'] and lp.curveProfileBuilt and lp.curveProfileBand == band:
+            key = ('lp', sm.logMonoTime['lateralPlan'])
+            if cache is None or cache[0] != key or cache[1] != band:
+                valid = bool(lp.curveProfileValid)
+                cache = (key, band, (list(lp.curveProfileCurvatures), list(lp.curveProfileTimes),
+                                     list(lp.curveProfileDistances), valid,
+                                     model_curve_band_diag(band, valid)))
+                self._curve_profile_cache = cache
+        rcv_frame = ('md', sm.rcv_frame['modelV2'])
+        if cache is not None and cache[1] == band and (cache[0] == rcv_frame or cache[0][0] == 'lp'
+                                                       and cache[0][1] == sm.logMonoTime['lateralPlan']):
             curvatures, times, distances, valid, diag = cache[2]
             if curvatures:
                 measured = abs(float(measured_curvature)) if np.isfinite(measured_curvature) else 0.0
@@ -842,6 +858,10 @@ class Controls:
         self._curve_profile_cache = (rcv_frame, band, result)
         return result
 
+    def _curve_profile_from_planner(self, sm):
+        """True when this model frame's curve profile comes from plannerd."""
+        return bool(sm.valid['lateralPlan'] and sm['lateralPlan'].curveProfileBuilt)
+
     def cal_curve_speed(self, sm, v_ego, frame, measured_curvature):
         lateralPlan = sm['lateralPlan']
         if not self.slow_on_curves:
@@ -859,33 +879,73 @@ class Controls:
         # 40 Hz. The profile itself is built once per model frame regardless --
         # see _model_curve_profile() -- and the confirmation below still counts
         # only fresh model evidence.
-        model_updated = bool(sm.updated['modelV2'])
         lateral_plan_updated = bool(sm.updated['lateralPlan'])
-        if not (model_updated or lateral_plan_updated):
-            return
+        from_planner = self._curve_profile_from_planner(sm)
+        if sm.updated['modelV2']:
+            # What each modelV2 tick saw, by model frame, for the replay below.
+            # Kept for a few frames: when plannerd runs late the next modelV2
+            # can land before the lateralPlan of the one before it.
+            self._curve_model_ticks[sm.logMonoTime['modelV2']] = (
+              v_ego, measured_curvature, self.v_cruise_kph)
+            while len(self._curve_model_ticks) > 4:
+                self._curve_model_ticks.pop(next(iter(self._curve_model_ticks)))
+        if from_planner:
+            # The profile comes from plannerd in lateralPlan, ~20 ms after the
+            # model frame. Both of that frame's ticks are replayed here when it
+            # arrives, in the order they used to come and each with the inputs
+            # it used to see: the modelV2 tick (model evidence, or the measured
+            # fallback when the model is invalid) with the speed, curvature and
+            # cruise speed captured when modelV2 landed, then the lateralPlan
+            # tick (the lateralPlan fallback) with the live ones. The prompt's
+            # confirm count and hold and the limiter's gates and holds were
+            # tuned on the car on that sequence, and a speed taken 20 ms later
+            # flips borderline decisions at the slowdown's speed gate.
+            if not lateral_plan_updated:
+                return
+            # A model frame this loop never saw as a modelV2 tick (two landed
+            # within one control frame and only the newer was read) had no
+            # modelV2 tick before either, so only its lateralPlan tick runs.
+            model_inputs = self._curve_model_ticks.pop(lateralPlan.modelMonoTime, None)
+            plan_tick = (False, True, v_ego, measured_curvature, self.v_cruise_kph)
+            ticks = (((True, False) + model_inputs, plan_tick) if model_inputs is not None
+                     else (plan_tick,))
+        else:
+            model_updated = bool(sm.updated['modelV2'])
+            if not (model_updated or lateral_plan_updated):
+                return
+            ticks = ((model_updated, lateral_plan_updated, v_ego, measured_curvature, self.v_cruise_kph),)
 
-        cruise_speed_ms = self.v_cruise_kph * CV.KPH_TO_MS
         curvature_factor = 0.85 * ntune_scc_get("sccCurvatureFactor")
+        for tick_model, tick_plan, tick_v, tick_curv, tick_cruise_kph in ticks:
+            # CP.minSteerSpeed is the LKAS torque gate. It reaches the profile only
+            # as the model_profile_control_allowed diagnostic; what gates the
+            # slowdown itself is CURVE_SLOWDOWN_MIN_SPEED_KPH, below.
+            (model_curvatures, model_times, model_distances,
+             model_profile_valid, model_profile_diag) = self._model_curve_profile(
+              sm, tick_v, tick_curv, float(self.CP.minSteerSpeed) * CV.MS_TO_KPH)
 
-        # CP.minSteerSpeed is the LKAS torque gate. It reaches the profile only
-        # as the model_profile_control_allowed diagnostic; what gates the
-        # slowdown itself is CURVE_SLOWDOWN_MIN_SPEED_KPH, below.
-        (model_curvatures, model_times, model_distances,
-         model_profile_valid, model_profile_diag) = self._model_curve_profile(
-          sm, v_ego, measured_curvature, float(self.CP.minSteerSpeed) * CV.MS_TO_KPH)
+            # The prompt and the speed limiter read the same profile and each used
+            # to validate and smooth it for itself. Do it once here and hand both
+            # the result. Only worth it above the lower of their two speed gates --
+            # below that neither gets as far as looking at it, and preparing it
+            # would be new work on the frames that had none.
+            profile_prepared = None
+            if (model_profile_valid and
+                    float(tick_v) * CV.MS_TO_KPH >= CORNER_ALERT_MIN_SPEED_KPH):
+                profile_prepared = prepare_profile(
+                  model_curvatures, time_idxs=model_times, distances=model_distances,
+                  trusted=True)
 
-        # The prompt and the speed limiter read the same profile and each used
-        # to validate and smooth it for itself. Do it once here and hand both
-        # the result. Only worth it above the lower of their two speed gates --
-        # below that neither gets as far as looking at it, and preparing it
-        # would be new work on the frames that had none.
-        profile_prepared = None
-        if (model_profile_valid and
-                float(v_ego) * CV.MS_TO_KPH >= CORNER_ALERT_MIN_SPEED_KPH):
-            profile_prepared = prepare_profile(
-              model_curvatures, time_idxs=model_times, distances=model_distances,
-              trusted=True)
+            self._curve_tick(sm, tick_v, tick_curv, lateralPlan, tick_cruise_kph * CV.KPH_TO_MS,
+                             curvature_factor, model_curvatures, model_times, model_distances,
+                             model_profile_valid, model_profile_diag, profile_prepared,
+                             tick_model, tick_plan)
 
+    def _curve_tick(self, sm, v_ego, measured_curvature, lateralPlan, cruise_speed_ms,
+                    curvature_factor, model_curvatures, model_times, model_distances,
+                    model_profile_valid, model_profile_diag, profile_prepared,
+                    model_updated, lateral_plan_updated):
+        """One control tick of cal_curve_speed: the corner prompt and the limiter."""
         # Corner-entry prompt, decided here on the model profile rather than on
         # whether the curve slowdown engaged. The two are different questions:
         # the slowdown engages on any bend it can shave speed for, while the

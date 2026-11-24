@@ -636,6 +636,44 @@ def build_v0813_model_curve_profile(position_t, orientation_rate_z,
   return curvatures, profile_times, distances, valid, diag
 
 
+def build_model_curve_profile_from_model(model, measured_curvature, v_ego,
+                                        control_min_speed_kph=MODEL_CURVE_CONTROL_MIN_SPEED_KPH):
+  """build_v0813_model_curve_profile() off a modelV2 message.
+
+  plannerd builds it once per model frame and publishes it in lateralPlan;
+  controlsd builds it itself only when that copy is missing or was made for a
+  different speed band.
+  """
+  return build_v0813_model_curve_profile(
+    model.position.t,
+    model.orientationRate.z,
+    model.velocity.x, model.velocity.y, model.velocity.z,
+    model.position.x, model.position.y, model.position.z,
+    measured_curvature, v_ego=v_ego,
+    control_min_speed_kph=control_min_speed_kph)
+
+
+def model_curve_band_diag(band, valid):
+  """The part of the profile diag that controlsd reads, rebuilt from the band.
+
+  Only the confirm / invalid-hold frame counts are read downstream; the rest of
+  build_v0813_model_curve_profile()'s diag (per-point tallies) is diagnostics
+  that nothing consumes, so it is not carried across from plannerd.
+  """
+  row = MODEL_CURVE_SPEED_TUNING[band]
+  return {
+    "model_curve_adapter": "v0.8.13_adaptive_arc_fusion",
+    "model_curve_source": "plannerd",
+    "model_profile_min_points": row[2],
+    "model_profile_min_horizon_m": row[3],
+    "model_profile_min_confidence": row[4],
+    "model_profile_leg_distance_m": row[1],
+    "model_confirm_frames": row[5],
+    "model_invalid_hold_frames": row[6],
+    "model_profile_valid": bool(valid),
+  }
+
+
 def build_model_curve_profile(position_t, orientation_rate_z,
                               velocity_x, velocity_y, velocity_z,
                               position_x, position_y, position_z,
