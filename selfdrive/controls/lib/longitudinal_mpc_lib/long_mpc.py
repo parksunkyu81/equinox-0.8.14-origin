@@ -48,6 +48,9 @@ MAX_T = 10.0
 T_IDXS_LST = [index_function(idx, max_val=MAX_T, max_idx=N) for idx in range(N+1)]
 
 T_IDXS = np.array(T_IDXS_LST)
+# The (a - a_prev) cost fades out from 1 s to 2 s into the horizon; this was an
+# np.interp per stage on every set_weights call.
+A_CHANGE_RAMP = [float(np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0])) for i in range(N)]
 T_DIFFS = np.diff(T_IDXS, prepend=[0.])
 MIN_ACCEL = -3.5
 T_FOLLOW = 1.45
@@ -220,6 +223,7 @@ class LongitudinalMpc:
 
   def reset(self):
     self.solver.reset()
+    self._zl_set = None  # the solver's Zl is unknown after a reset
     self.v_solution = np.zeros(N+1)
     self.a_solution = np.zeros(N+1)
     self.prev_a = np.array(self.a_solution)
@@ -257,16 +261,20 @@ class LongitudinalMpc:
     for i in range(N):
       # TODO don't hardcode A_CHANGE_COST idx
       # reduce the cost on (a-a_prev) later in the horizon.
-      W[4,4] = a_change_tf * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0])
+      W[4,4] = a_change_tf * A_CHANGE_RAMP[i]
       self.solver.cost_set(i, 'W', W)
     # Setting the slice without the copy make the array not contiguous,
     # causing issues with the C interface.
     self.solver.cost_set(N, 'W', np.copy(W[:COST_E_DIM, :COST_E_DIM]))
 
-    # Set L2 slack cost on lower bound constraints
-    Zl = np.array(constraint_cost_weights)
-    for i in range(N):
-      self.solver.cost_set(i, 'Zl', Zl)
+    # Set L2 slack cost on lower bound constraints. Only the danger-zone term
+    # moves (with the follow distance), so skip the N calls when it has not.
+    zl_key = tuple(float(x) for x in constraint_cost_weights)
+    if zl_key != getattr(self, '_zl_set', None):
+      Zl = np.array(constraint_cost_weights)
+      for i in range(N):
+        self.solver.cost_set(i, 'Zl', Zl)
+      self._zl_set = zl_key
 
   def set_weights(self, prev_accel_constraint=True, v_lead0=0, v_lead1=0):
     cost_multipliers = self.get_cost_multipliers(v_lead0, v_lead1)
@@ -281,7 +289,7 @@ class LongitudinalMpc:
     W = np.asfortranarray(np.diag([X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST, a_change_cost, J_EGO_COST]))
     for i in range(N):
       # reduce the cost on (a-a_prev) later in the horizon.
-      W[4,4] = a_change_cost * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0])
+      W[4,4] = a_change_cost * A_CHANGE_RAMP[i]
       self.solver.cost_set(i, 'W', W)
     # Setting the slice without the copy make the array not contiguous,
     # causing issues with the C interface.
@@ -291,6 +299,7 @@ class LongitudinalMpc:
     Zl = np.array([LIMIT_COST, LIMIT_COST, LIMIT_COST, DANGER_ZONE_COST])
     for i in range(N):
       self.solver.cost_set(i, 'Zl', Zl)
+    self._zl_set = None
 
   def set_weights_for_xva_policy(self):
     W = np.asfortranarray(np.diag([0., 10., 1., 10., 0.0, 1.]))    # W = np.asfortranarray(np.diag([0., 0.2, 0.25, 1., 0.0, .1]))
@@ -304,6 +313,7 @@ class LongitudinalMpc:
     Zl = np.array([LIMIT_COST, LIMIT_COST, LIMIT_COST, 0.0])
     for i in range(N):
       self.solver.cost_set(i, 'Zl', Zl)
+    self._zl_set = None
 
   def set_cur_state(self, v, a):
     v_prev = self.x0[1]
@@ -366,7 +376,10 @@ class LongitudinalMpc:
     lead_xv_1 = self.process_lead(radarstate.leadTwo, 1)
 
     if not gh_actions:
-      self.set_desired_TR(self.dynamic_follow.update(carstate))  # update dynamic follow and get desired TR
+      # update dynamic follow and get desired TR. Not set_desired_TR(): its
+      # set_weights() with default leads was overwritten by the call below
+      # before every solve, and cost ~1.5 ms a model frame on the EON.
+      self.desired_TR = self.dynamic_follow.update(carstate)
 
     self.set_weights(prev_accel_constraint=prev_accel_constraint, v_lead0=lead_xv_0[0, 1], v_lead1=lead_xv_1[0, 1])
 

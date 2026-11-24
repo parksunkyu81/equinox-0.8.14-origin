@@ -624,8 +624,8 @@ class LanePlanner:
         pre_curve_strength,
         MODEL_PATH_CURVE_WEIGHT * model_curve_strength,
         ROAD_EDGE_CURVE_WEIGHT * self._road_edge_curve_strength())
-    pre_curve_assist = float(np.clip(
-      pre_curve_strength * speed_curve_weight, 0.0, 1.0))
+    # Scalar clips: min/max, not np.clip (~30 us each on the EON).
+    pre_curve_assist = min(max(float(pre_curve_strength * speed_curve_weight), 0.0), 1.0)
     # Publish the pre-curve value now so the early returns below still report
     # an assist level; the lane-geometry path overwrites it once the richer
     # estimate is available.
@@ -758,8 +758,7 @@ class LanePlanner:
       [0.0, 1.0])
     combined_curve_strength = max(
       pre_curve_strength, geometry_curve_strength)
-    curve_assist = float(np.clip(
-      combined_curve_strength * speed_curve_weight, 0.0, 1.0))
+    curve_assist = min(max(float(combined_curve_strength * speed_curve_weight), 0.0), 1.0)
     self.curve_assist_diag = curve_assist
     self.curve_raw_target_d_prob_diag = float(raw_target_d_prob)
     self.curve_geometry_plausible_diag = geometry_plausible
@@ -819,10 +818,8 @@ class LanePlanner:
 
     center_delta_ref = float(np.interp(20.0, path_xyz[:, 0], center_delta))
     max_step = LANE_CENTER_MAX_CORRECTION_RATE_MS * DT_MDL
-    limited_ref = float(np.clip(
-      center_delta_ref,
-      self._prev_center_delta_m - max_step,
-      self._prev_center_delta_m + max_step))
+    limited_ref = min(max(center_delta_ref, self._prev_center_delta_m - max_step),
+                      self._prev_center_delta_m + max_step)
     # That rescale divided by this frame's raw 20 m sample, so its ratio diverged
     # as the sample passed through zero -- which it does routinely, because the
     # slew limiter bites on most frames and the raw correction alternates sign at
