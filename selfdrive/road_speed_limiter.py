@@ -188,6 +188,97 @@ def normalize_road_limit(road_limit, apilot=None):
   return out
 
 
+ANNOUNCE_SEARCH_S = 1.0     # announcement period while no phone is talking
+ANNOUNCE_LINKED_S = 5.0     # and once one is (main() also answers it every 1 s)
+LINK_TIMEOUT_S = 6.0        # same as check(): no packet this long = not linked
+ANNOUNCE_MAX_NEIGHBOURS = 16
+LAST_PEER_PATH = os.getenv("NDA_LAST_PEER_PATH", "/data/log/nda_last_peer")
+NDA_LINK_LOG_PATH = os.getenv("NDA_LINK_LOG_PATH", "/data/log/nda_link.jsonl")
+NDA_LINK_LOG_MAX_BYTES = 512 * 1024
+
+
+def load_last_peer(path=None):
+  try:
+    with open(path or LAST_PEER_PATH) as f:
+      ip = f.read().strip()
+    socket.inet_aton(ip)
+    return ip
+  except Exception:
+    return None
+
+
+def save_last_peer(ip, path=None):
+  try:
+    with open(path or LAST_PEER_PATH, 'w') as f:
+      f.write(ip)
+  except Exception:
+    pass
+
+
+def announce_unicast_targets(last_peer_ip, broadcast_address, arp_path='/proc/net/arp', iface='wlan0'):
+  """Hosts to send the announcement to directly: the last phone that talked
+  (DHCP usually hands it the same address on the car router) and the complete
+  wlan0 ARP entries, all inside the current broadcast subnet."""
+  def same_net(ip):
+    # /24 check is enough for phone hotspots and small car routers; a wider
+    # subnet just skips the filter's benefit, not the broadcast.
+    return broadcast_address is None or ip.rsplit('.', 1)[0] == broadcast_address.rsplit('.', 1)[0]
+
+  out = []
+  if last_peer_ip and same_net(last_peer_ip):
+    out.append(last_peer_ip)
+  try:
+    with open(arp_path) as f:
+      next(f)
+      for line in f:
+        p = line.split()
+        if len(p) >= 6 and p[5] == iface and p[2] == '0x2' and p[0] not in out and same_net(p[0]):
+          out.append(p[0])
+          if len(out) >= ANNOUNCE_MAX_NEIGHBOURS:
+            break
+  except Exception:
+    pass
+  return out
+
+
+class NdaLinkLog:
+  """/data/log/nda_link.jsonl: when the process started, which broadcast address
+  it announced on, when the phone's first packet came and from where, and when
+  the link went silent. roadLimitSpeed is not in the rlog, so without this a slow
+  NDA connection leaves no trace. A few lines per drive."""
+
+  def __init__(self, path=None):
+    self.path = path or NDA_LINK_LOG_PATH
+    self.t0 = sec_since_boot()
+    self.lost_logged = False
+    self._once = set()
+
+  def event(self, name, once=False, **kw):
+    if once:
+      if name in self._once:
+        return
+      self._once.add(name)
+    if name == 'lost':
+      self.lost_logged = True
+    elif name == 'linked':
+      self.lost_logged = False
+    now = sec_since_boot()
+    rec = {'t': round(now, 2), 'since_start_s': round(now - self.t0, 1), 'event': name}
+    rec.update(kw)
+    line = json.dumps(rec, separators=(',', ':'))
+    path = self.path
+
+    def write():
+      try:
+        if os.path.exists(path) and os.path.getsize(path) > NDA_LINK_LOG_MAX_BYTES:
+          os.replace(path, path + ".1")
+        with open(path, 'a') as f:
+          f.write(line + "\n")
+      except Exception:
+        pass
+    threading.Thread(target=write, daemon=True).start()
+
+
 class RoadLimitSpeedServer:
   def __init__(self):
     self.json_road_limit = None
@@ -201,6 +292,11 @@ class RoadLimitSpeedServer:
 
     self.remote_gps_addr = None
     self.last_time_location = 0
+
+    self.last_rx = -1e9
+    self.last_peer_ip = load_last_peer()
+    self.link_log = NdaLinkLog()
+    self.link_log.event('start', last_peer=self.last_peer_ip)
 
     broadcast = Thread(target=self.broadcast_thread, args=[])
     broadcast.setDaemon(True)
@@ -277,31 +373,43 @@ class RoadLimitSpeedServer:
       return None
 
   def broadcast_thread(self):
-
+    # The phone only learns the EON's address from this announcement. It used to
+    # go out every 5 s as a broadcast only, with the broadcast address re-read
+    # every 50 s. Phones in Wi-Fi power save drop most broadcast frames, and on
+    # 2026-11-24 the first TmapNda packet came 348 s after start. Until a phone
+    # talks: every 1 s, as a broadcast plus unicasts to the last phone and to the
+    # wlan0 neighbours (unicast is not filtered). Once linked, main() answers the
+    # phone every 1 s already, so only the 5 s broadcast stays.
     broadcast_address = None
-    frame = 0
+    last_sent = -1e9
+    msg = 'EON:ROAD_LIMIT_SERVICE:v1'.encode()
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
       try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
         while True:
-
-          try:
-
-            if broadcast_address is None or frame % 10 == 0:
-              broadcast_address = self.get_broadcast_address()
-
-            print('broadcast_address', broadcast_address)
-
-            if broadcast_address is not None:
-              address = (broadcast_address, Port.BROADCAST_PORT)
-              sock.sendto('EON:ROAD_LIMIT_SERVICE:v1'.encode(), address)
-          except:
-            pass
-
-          time.sleep(5.)
-          frame += 1
+          now = sec_since_boot()
+          linked = now - self.last_rx < LINK_TIMEOUT_S
+          interval = ANNOUNCE_LINKED_S if linked else ANNOUNCE_SEARCH_S
+          if now - last_sent >= interval:
+            last_sent = now
+            try:
+              address = self.get_broadcast_address()
+              if address != broadcast_address:
+                self.link_log.event('bcast_addr', addr=address, prev=broadcast_address)
+                broadcast_address = address
+              if broadcast_address is not None:
+                sock.sendto(msg, (broadcast_address, Port.BROADCAST_PORT))
+                if not linked:
+                  for ip in announce_unicast_targets(self.last_peer_ip, broadcast_address):
+                    try:
+                      sock.sendto(msg, (ip, Port.BROADCAST_PORT))
+                    except Exception:
+                      pass
+            except Exception as e:
+              self.link_log.event('bcast_error', err=str(e)[:80], once=True)
+          time.sleep(ANNOUNCE_SEARCH_S)
 
       except:
         pass
@@ -319,6 +427,7 @@ class RoadLimitSpeedServer:
       ret = bool(ready[0])
       if ret:
         data, self.remote_addr = sock.recvfrom(UDP_RECV_BUFFER)
+        self._note_rx(self.remote_addr[0])
         json_obj = json.loads(data.decode())
 
         # 예전에는 os.system(json_obj['cmd'])로 LAN의 누구든 root 명령을 실행할 수 있었다.
@@ -386,8 +495,21 @@ class RoadLimitSpeedServer:
 
     return ret
 
+  def _note_rx(self, ip):
+    now = sec_since_boot()
+    gap = now - self.last_rx
+    if gap >= LINK_TIMEOUT_S:
+      # First packet since start, or back after a silence: how long it took.
+      self.link_log.event('linked', ip=ip, after_s=None if self.last_rx < 0 else round(gap, 1))
+    self.last_rx = now
+    if ip != self.last_peer_ip:
+      self.last_peer_ip = ip
+      save_last_peer(ip)
+
   def check(self):
     now = sec_since_boot()
+    if self.last_rx > 0 and now - self.last_rx >= LINK_TIMEOUT_S and not self.link_log.lost_logged:
+      self.link_log.event('lost', silent_s=round(now - self.last_rx, 1))
     if now - self.last_updated > 6.:
       try:
         self.lock.acquire()
