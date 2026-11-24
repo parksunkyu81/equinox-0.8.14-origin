@@ -295,7 +295,7 @@ def atc_lane_prompt_alert(left: bool) -> AlertCallbackType:
     sound = AudibleAlert.prompt
     if kind == PROMPT_TURN:
       text1, text2 = ("좌회전 준비" if left else "우회전 준비"), "내비 안내 · 깜빡이를 켜 주세요"
-      # Spoken "좌회전 / 우회전 깜빡이를 켜 주세요" 55 m out; silent when the
+      # Spoken "좌회전 깜빡이 / 우회전 깜빡이" 55 m out; silent when the
       # blinker is already on (AtcLaneGuide sets voice).
       sound = ((AudibleAlert.atcTurnLeft if left else AudibleAlert.atcTurnRight)
                if PROMPT_STATE.get("voice") else AudibleAlert.none)
