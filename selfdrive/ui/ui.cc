@@ -1,4 +1,5 @@
 #include "selfdrive/ui/ui.h"
+#include "selfdrive/ui/qt/paint_profile.h"
 
 #include <cassert>
 #include <cmath>
@@ -260,6 +261,9 @@ UIState::UIState(QObject *parent) : QObject(parent) {
 }
 
 void UIState::update() {
+  // Timed into paint_profile (ui_paint.jsonl): the socket and state update,
+  // then the uiUpdate slots it fires synchronously (onroad, sidebar, device).
+  paint_profile::begin();
   update_sockets(this);
   update_state(this);
   updateStatus();
@@ -267,7 +271,10 @@ void UIState::update() {
   if (sm->frame % UI_FREQ == 0) {
     watchdog_kick();
   }
+  paint_profile::mark(paint_profile::UI_STATE);
   emit uiUpdate(*this);
+  paint_profile::mark(paint_profile::UI_SLOTS);
+  paint_profile::state_updates++;
 }
 
 Device::Device(QObject *parent) : brightness_filter(BACKLIGHT_OFFROAD, BACKLIGHT_TS, BACKLIGHT_DT), QObject(parent) {

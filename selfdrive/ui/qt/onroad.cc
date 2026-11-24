@@ -12,6 +12,7 @@
 #include <deque>
 
 #include "selfdrive/common/timing.h"
+#include "selfdrive/ui/qt/paint_profile.h"
 #include "selfdrive/ui/qt/util.h"
 #ifdef ENABLE_MAPS
 #include "selfdrive/ui/qt/maps/map.h"
@@ -762,12 +763,14 @@ void NvgWindow::paintGL() {
 }
 
 void NvgWindow::paintEvent(QPaintEvent *event) {
+  paint_profile::begin();
   QPainter p;
   p.begin(this);
 
   p.beginNativePainting();
   CameraViewWidget::paintGL();
   p.endNativePainting();
+  paint_profile::mark(paint_profile::CAMERA);
 
   UIState *s = uiState();
   if (s->worldObjectsVisible()) {
@@ -775,6 +778,8 @@ void NvgWindow::paintEvent(QPaintEvent *event) {
   }
 
   p.end();
+  paint_profile::mark(paint_profile::PAINTER_END);
+  paint_profile::paint_done();
 
   double cur_draw_t = millis_since_boot();
   double dt = cur_draw_t - prev_draw_t;
@@ -900,8 +905,10 @@ void NvgWindow::drawHud(QPainter &p) {
   UIState *s = uiState();
 
   const SubMaster &sm = *(s->sm);
+  paint_profile::mark(paint_profile::HUD_HEAD);
 
   drawLaneLines(p, s);
+  paint_profile::mark(paint_profile::LANES);
 
   auto leads = sm["modelV2"].getModelV2().getLeadsV3();
   const auto lead_one = sm["radarState"].getRadarState().getLeadOne();
@@ -975,12 +982,19 @@ void NvgWindow::drawHud(QPainter &p) {
     drawLead(p, leads[1], s->scene.lead_vertices[1]);
   }
 
+  paint_profile::mark(paint_profile::LEADS);
+
   //drawMaxSpeed(p);
   drawSpeed(p);
+  paint_profile::mark(paint_profile::SPEED);
   drawSpeedLimit(p);
+  paint_profile::mark(paint_profile::SPEED_LIMIT);
   drawThermal(p);
+  paint_profile::mark(paint_profile::THERMAL);
   drawTurnSignals(p);
+  paint_profile::mark(paint_profile::TURN_SIGNALS);
   drawTurnInfo(p);
+  paint_profile::mark(paint_profile::TURN_INFO);
   //drawGpsStatus(p);
 
   if(s->show_debug && width() > 1200)
@@ -1081,9 +1095,11 @@ void NvgWindow::drawHud(QPainter &p) {
   configFont(p, "Open Sans", infoFontSize, "Regular");
   p.setPen(QColor(0, 255, 0, 255));
   p.drawText(info_x, 55, infoText);
+  paint_profile::mark(paint_profile::INFO_LINE);
 
 
   drawBottomIcons(p);
+  paint_profile::mark(paint_profile::BOTTOM_ICONS);
 }
 
 // Shared green -> amber -> red scale for the on-screen gauges. t = 0 is
