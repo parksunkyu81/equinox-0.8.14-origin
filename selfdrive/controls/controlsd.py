@@ -896,8 +896,8 @@ class Controls:
             # it used to see: the modelV2 tick (model evidence, or the measured
             # fallback when the model is invalid) with the speed, curvature and
             # cruise speed captured when modelV2 landed, then the lateralPlan
-            # tick (the lateralPlan fallback) with the live ones. The prompt's
-            # confirm count and hold and the limiter's gates and holds were
+            # tick (the lateralPlan fallback) with the live ones. The
+            # limiter's gates and holds were
             # tuned on the car on that sequence, and a speed taken 20 ms later
             # flips borderline decisions at the slowdown's speed gate.
             if not lateral_plan_updated:
@@ -951,15 +951,24 @@ class Controls:
         # the slowdown engages on any bend it can shave speed for, while the
         # prompt is for a corner the driver has to brake into themselves. Held
         # on self because state_control raises the event, one loop below.
-        if model_profile_valid:
-            self.corner_alert.update(model_curvatures, v_ego,
-                                     distances=model_distances,
-                                     time_idxs=model_times,
-                                     curvature_factor=curvature_factor,
-                                     prepared=profile_prepared)
-        else:
-            # Momentary model dropout, not a straight road -- let the hold run out.
-            self.corner_alert.hold()
+        # Once per model frame, on its modelV2 tick only. It used to run on the
+        # lateralPlan tick as well, feeding the same frame twice: two confirm
+        # frames then took one model frame, so a single-frame spike of the
+        # model's prediction over the gate raised it, and the 2.5 s hold ran
+        # out in 1.25 s. Replayed over the 130 segments of 2026-11-24 the
+        # double count raised 26 prompts against 20, and all six extra were
+        # corners at 1.2-1.8 m/s^2 whose prediction flickered over 2.0 for
+        # one frame at a time; the 20 real ones rise 0.05 s later (median).
+        if model_updated:
+            if model_profile_valid:
+                self.corner_alert.update(model_curvatures, v_ego,
+                                         distances=model_distances,
+                                         time_idxs=model_times,
+                                         curvature_factor=curvature_factor,
+                                         prepared=profile_prepared)
+            else:
+                # Momentary model dropout, not a straight road -- let the hold run out.
+                self.corner_alert.hold()
 
         # Coming off the throttle for a bend is a different question from
         # whether LKAS can steer, so this gate is its own number rather than
