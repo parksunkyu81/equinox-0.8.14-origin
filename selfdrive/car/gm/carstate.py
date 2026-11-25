@@ -7,6 +7,7 @@ from opendbc.can.parser import CANParser
 from selfdrive.car.interfaces import CarStateBase
 from selfdrive.car.gm.values import DBC, CAR, EV_CAR, AccState, CanBus, STEER_THRESHOLD
 from selfdrive.car.gm.bsm_raw_log import BsmRawLog
+from selfdrive.car.gm.distance_button_log import DistanceButtonLog
 from common.realtime import sec_since_boot
 
 
@@ -24,6 +25,10 @@ class CarState(CarStateBase):
     # 0x142 (Side Blind Zone Alert) raw bytes, logged on change until the
     # blind-zone bits are identified on this car (bsm_raw_log.py).
     self.bsm_raw_log = BsmRawLog()
+    # Follow-distance button, logged per press until it is confirmed on this
+    # car (distance_button_log.py). self.distance_button holds its live state.
+    self.distance_button_log = DistanceButtonLog()
+    self.distance_button = False
 
   def update(self, pt_cp, loopback_cp):
     ret = car.CarState.new_message()
@@ -121,10 +126,14 @@ class CarState(CarStateBase):
 
     ret.cruiseState.enabled = self.main_on or ret.adaptiveCruise
 
+    now = sec_since_boot()
+    self.distance_button = self.distance_button_log.update(
+      pt_cp.vl["ASCMSteeringButton"]["DistanceButton"], now, ret.vEgo)
+
     bsm = pt_cp.vl["BCMBlindSpotMonitor"]
     self.bsm_raw_log.update((bsm["Byte0"], bsm["Byte1"], bsm["Byte2"], bsm["Byte3"],
                              bsm["Byte4"], bsm["Byte5"], bsm["Byte6"]),
-                            sec_since_boot(), ret.vEgo, ret.leftBlinker, ret.rightBlinker,
+                            now, ret.vEgo, ret.leftBlinker, ret.rightBlinker,
                             ret.steeringAngleDeg)
 
     return ret
