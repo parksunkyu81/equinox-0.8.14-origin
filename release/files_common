@@ -155,6 +155,7 @@ selfdrive/car/volkswagen/carcontroller.py
 selfdrive/car/volkswagen/volkswagencan.py
 selfdrive/car/gm/__init__.py
 selfdrive/car/gm/carstate.py
+selfdrive/car/gm/bsm_raw_log.py
 selfdrive/car/gm/interface.py
 selfdrive/car/gm/radar_interface.py
 selfdrive/car/gm/values.py
