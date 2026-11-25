@@ -5,7 +5,7 @@ from common.realtime import DT_CTRL
 from math import fabs
 from common.conversions import Conversions as CV
 from selfdrive.ntune import ntune_scc_get
-from selfdrive.car.gm.values import CAR, CruiseButtons, CarControllerParams, NO_ASCM
+from selfdrive.car.gm.values import CAR, CanBus, CruiseButtons, CarControllerParams, NO_ASCM
 from selfdrive.car import STD_CARGO_KG, scale_rot_inertia, scale_tire_stiffness, gen_empty_fingerprint, \
     get_safety_config
 from selfdrive.car.interfaces import CarInterfaceBase
@@ -130,6 +130,8 @@ class CarInterface(CarInterfaceBase):
 
         # Start with a baseline lateral tuning for all GM vehicles. Override tuning as needed in each model section below.
         ret.enableGasInterceptor = 0x201 in fingerprint[0]
+        # Side Blind Zone Alert (0x142, BCMBlindSpotMonitor), when the car sends it.
+        ret.enableBsm = 0x142 in fingerprint[CanBus.POWERTRAIN]
         #ret.minEnableSpeed = 18 * CV.MPH_TO_MS
         ret.minSteerSpeed = GM_MIN_STEER_SPEED_MS
         ret.minEnableSpeed = -1

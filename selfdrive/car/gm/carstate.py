@@ -137,6 +137,14 @@ class CarState(CarStateBase):
                                now, ret.vEgo, ret.leftBlinker, ret.rightBlinker, ret.steeringAngleDeg)
 
     bsm = pt_cp.vl["BCMBlindSpotMonitor"]
+    # Side Blind Zone Alert: byte 0 bit 6 left, bit 7 right. Identified on the
+    # 2026-11-25 drive from bsm_raw.jsonl against the model's lanes: with the
+    # left bit on, a lane existed on the left 100% of the time (left outer line
+    # probability 0.18 -> 0.42); with the right bit on, a lane on the right 96%
+    # against 73% otherwise. desire_helper / atc_desire / controlsd already
+    # hold or block a lane change toward a set side.
+    ret.leftBlindspot = bsm["LeftBSM"] == 1
+    ret.rightBlindspot = bsm["RightBSM"] == 1
     self.bsm_raw_log.update((bsm["Byte0"], bsm["Byte1"], bsm["Byte2"], bsm["Byte3"],
                              bsm["Byte4"], bsm["Byte5"], bsm["Byte6"]),
                             now, ret.vEgo, ret.leftBlinker, ret.rightBlinker,
@@ -175,6 +183,8 @@ class CarState(CarStateBase):
       ("TractionControlOn", "ESPStatus"),
       ("CruiseMainOn", "ECMEngineStatus"),
       ("Brake_Pressed", "ECMEngineStatus"),
+      ("LeftBSM", "BCMBlindSpotMonitor"),
+      ("RightBSM", "BCMBlindSpotMonitor"),
     ] + [(f"Byte{i}", "BCMBlindSpotMonitor") for i in range(7)]       + [(f"RawByte{i}", "ASCMSteeringButton") for i in range(7)]
 
     checks = [

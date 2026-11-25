@@ -159,6 +159,7 @@ protected:
   void drawSpeedLimit(QPainter &p);
   void drawSteer(QPainter &p);
   void drawTurnSignals(QPainter &p);
+  void drawBlindSpot(QPainter &p);
   void drawGpsStatus(QPainter &p);
   void drawDebugText(QPainter &p);
   void drawThermal(QPainter &p);

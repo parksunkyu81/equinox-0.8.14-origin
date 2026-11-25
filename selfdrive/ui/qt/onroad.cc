@@ -992,6 +992,7 @@ void NvgWindow::drawHud(QPainter &p) {
   drawThermal(p);
   paint_profile::mark(paint_profile::THERMAL);
   drawTurnSignals(p);
+  drawBlindSpot(p);
   paint_profile::mark(paint_profile::TURN_SIGNALS);
   drawTurnInfo(p);
   paint_profile::mark(paint_profile::TURN_INFO);
@@ -3276,6 +3277,35 @@ float interp(float x, std::initializer_list<T> x_list, std::initializer_list<T> 
 // LaneChangeLowSpeed [km/h] for the blinker label, read once per blinker episode
 // (the setting only changes offroad): -1 = read it on the next blinker.
 static int lane_change_low_speed_kph = -1;
+
+// Side Blind Zone Alert from the car (carState.left/rightBlindspot, GM 0x142
+// byte 0 bits 6/7). A red badge at the screen edge on that side, so the driver
+// can check it against the mirror light: the left/right assignment came from a
+// statistical match on the 2026-11-25 drive and is not confirmed yet.
+void NvgWindow::drawBlindSpot(QPainter &p) {
+  const auto car_state = (*uiState()->sm)["carState"].getCarState();
+  const bool sides[2] = {car_state.getLeftBlindspot(), car_state.getRightBlindspot()};
+  if (!sides[0] && !sides[1]) return;
+  static QFont font = [] {
+    QFont f("Open Sans");
+    f.setPixelSize(44);
+    f.setStyleName("Bold");
+    return f;
+  }();
+  constexpr int W = 230, H = 76, MARGIN = 24;
+  p.save();
+  p.setFont(font);
+  for (int i = 0; i < 2; i++) {
+    if (!sides[i]) continue;
+    const QRect r(i == 0 ? MARGIN : width() - MARGIN - W, height() / 2 - H / 2, W, H);
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(230, 30, 30, 215));
+    p.drawRoundedRect(r, 18, 18);
+    p.setPen(Qt::white);
+    p.drawText(r, Qt::AlignCenter, i == 0 ? "◀ 사각지대" : "사각지대 ▶");
+  }
+  p.restore();
+}
 
 void NvgWindow::drawTurnSignals(QPainter &p) {
   const SubMaster &sm = *(uiState()->sm);

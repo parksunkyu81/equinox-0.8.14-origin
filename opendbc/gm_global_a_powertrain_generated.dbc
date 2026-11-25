@@ -124,6 +124,8 @@ BO_ 320 BCMTurnSignals: 3 K9_BCM
  SG_ HighBeamsTemporary : 5|1@0+ (1,0) [0|1] "" XXX
 
 BO_ 322 BCMBlindSpotMonitor: 7 K9_BCM
+ SG_ RightBSM : 7|1@0+ (1,0) [0|1] "" NEO
+ SG_ LeftBSM : 6|1@0+ (1,0) [0|1] "" NEO
  SG_ Byte0 : 7|8@0+ (1,0) [0|255] "" NEO
  SG_ Byte1 : 15|8@0+ (1,0) [0|255] "" NEO
  SG_ Byte2 : 23|8@0+ (1,0) [0|255] "" NEO
