@@ -743,6 +743,9 @@ def main():
   server = RoadLimitSpeedServer()
   roadLimitSpeed = messaging.pub_sock('roadLimitSpeed')
   atc_runner = AtcRunner()
+  # Onroad mini-map: the Kakao route on HTTP 7713 and the car on it.
+  from selfdrive.navi_route import NaviRoute
+  navi_route = NaviRoute()
   last_sdp_t = -1e9
 
   with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -766,6 +769,10 @@ def main():
           atc_runner.update(now, apilot)
         except Exception as e:
           print("road_speed_limiter: ATC update failed:", e)
+        try:
+          navi_route.update(now, apilot, atc_runner.v_ego)
+        except Exception as e:
+          print("road_speed_limiter: mini-map route update failed:", e)
 
         dat = messaging.new_message()
         dat.init('roadLimitSpeed')
@@ -801,6 +808,11 @@ def main():
           atc_runner.fill(dat.roadLimitSpeed)
         except Exception as e:
           print("road_speed_limiter: ATC fill failed:", e)
+        try:
+          turn_d = float(atc_runner.atc.xDistToTurn) if atc_runner.atc.xTurnInfo > 0 else 0.
+          navi_route.fill(dat.roadLimitSpeed, now, turn_d)
+        except Exception as e:
+          print("road_speed_limiter: mini-map route fill failed:", e)
 
         roadLimitSpeed.send(dat.to_bytes())
         # Was once per loop, i.e. once per packet or per 1 s timeout; the loop

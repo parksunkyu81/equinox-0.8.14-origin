@@ -2071,6 +2071,20 @@ struct RoadLimitSpeed {
     sdiDescr @20 :Text;
     posRoadName @21 :Text;
 
+    # Onroad mini-map (selfdrive/navi_route.py): the Kakao route TmapNda posts
+    # on HTTP 7713, and the car on it (phone GPS fix matched to the route,
+    # advanced by vEgo between fixes; the EON has no GPS). carHeading is
+    # degrees from north, clockwise. route* runs from 80 m behind the car to
+    # 700 m ahead; turn* is the point xDistToTurn ahead on the route.
+    miniMapValid @22 :Bool;
+    carLat @23 :Float64;
+    carLon @24 :Float64;
+    carHeading @25 :Float32;
+    routeLat @26 :List(Float64);
+    routeLon @27 :List(Float64);
+    turnLat @28 :Float64;
+    turnLon @29 :Float64;
+
     struct RestArea {
       image @0 :Text;
       title @1 :Text;

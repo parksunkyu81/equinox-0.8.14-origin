@@ -5,6 +5,7 @@
 
 #include "selfdrive/common/util.h"
 #include "selfdrive/ui/qt/widgets/cameraview.h"
+#include "selfdrive/ui/qt/minimap.h"
 #include "selfdrive/ui/ui.h"
 
 #include <QTimer>
@@ -114,6 +115,8 @@ protected:
   QPixmap ic_nav_fork_r;
   QPixmap ic_nav_uturn;
   void drawTurnInfo(QPainter &p);
+  // Mini-map in the right part of the turn-info box while a Kakao route is known.
+  MiniMap minimap_;
 
   void drawMaxSpeed(QPainter &p);
   void drawSpeed(QPainter &p);
