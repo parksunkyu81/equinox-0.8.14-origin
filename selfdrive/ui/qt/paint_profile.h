@@ -27,11 +27,16 @@ namespace paint_profile {
 
 enum Section {
   CAMERA, HUD_HEAD, LANES, LEADS, SPEED, SPEED_LIMIT, THERMAL, TURN_SIGNALS, TURN_INFO,
-  INFO_LINE, BOTTOM_ICONS, PAINTER_END, UI_STATE, UI_SLOTS, COUNT
+  INFO_LINE, BOTTOM_ICONS, PAINTER_END,
+  // Split of bottom_icons, which stays the total: steering bar + confidence
+  // gauge, wheel + its badges, the BRAKE/HOLD/ACC/LKAS block, the pedal/TR tiles.
+  BI_GAUGES, BI_WHEEL, BI_STATUS, BI_TILES,
+  UI_STATE, UI_SLOTS, COUNT
 };
 inline const char *const NAMES[COUNT] = {
   "camera", "hud_head", "lanes", "leads", "speed", "speed_limit", "thermal", "turn_signals",
-  "turn_info", "info_line", "bottom_icons", "painter_end", "ui_state", "ui_slots",
+  "turn_info", "info_line", "bottom_icons", "painter_end",
+  "bi_gauges", "bi_wheel", "bi_status", "bi_tiles", "ui_state", "ui_slots",
 };
 constexpr int FIRST_STATE_SECTION = UI_STATE;
 
@@ -61,6 +66,18 @@ inline double wall_ms() {
 }
 
 inline void begin() { mark_t = thread_cpu_ms(); }
+
+// Sub-sections inside one mark() section. They keep their own clock, so the
+// enclosing section still reports its full total.
+inline double sub_t = 0.0;
+inline void sub_begin() { sub_t = thread_cpu_ms(); }
+inline void sub_mark(Section s) {
+  const double now = thread_cpu_ms();
+  const double d = now - sub_t;
+  acc[s] += d;
+  if (d > mx[s]) mx[s] = d;
+  sub_t = now;
+}
 
 inline void mark(Section s) {
   const double now = thread_cpu_ms();

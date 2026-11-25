@@ -4,6 +4,8 @@
 
 #include <QDateTime>
 #include <QDebug>
+#include <QGlyphRun>
+#include <QTextLayout>
 #include <QSound>
 #include <QMouseEvent>
 #include <QPainterPath>
@@ -827,7 +829,45 @@ static void drawCenteredText(QPainter &p, int x, int y, const QString &text) {
     return fm.boundingRect(init_rect, 0, text);
   });
   const qreal draw_x = x - real_rect.width() / 2.0;
-  p.drawText(QPointF(draw_x, y), text);
+
+  // The width was memoised, but QPainter::drawText still itemised and shaped
+  // the string (font fallback for Hangul, HarfBuzz) on every call, ~60 calls a
+  // paint. Shape each (font, text) once into glyph runs whose baseline sits at
+  // y = 0 and replay them; the glyphs, positions and pen are the same ones
+  // drawText(QPointF) would produce, so nothing moves.
+  struct FontGlyphRuns {
+    QFont font;
+    QHash<QString, QList<QGlyphRun>> runs;
+  };
+  static auto *run_tables = new std::deque<FontGlyphRuns>;
+  FontGlyphRuns *table = nullptr;
+  for (FontGlyphRuns &t : *run_tables) {
+    if (t.font == p.font()) { table = &t; break; }
+  }
+  if (!table) {
+    run_tables->push_back({p.font(), {}});
+    table = &run_tables->back();
+  }
+  auto it = table->runs.find(text);
+  if (it == table->runs.end()) {
+    if (table->runs.size() >= TEXT_RECT_CACHE_MAX) table->runs.clear();
+    QTextLayout layout(text, p.font(), p.device());
+    QTextOption opt;
+    opt.setWrapMode(QTextOption::NoWrap);
+    layout.setTextOption(opt);
+    layout.beginLayout();
+    QTextLine line = layout.createLine();
+    if (line.isValid()) {
+      line.setLineWidth(1e6);
+      line.setPosition(QPointF(0, -line.ascent()));
+    }
+    layout.endLayout();
+    it = table->runs.insert(text, layout.glyphRuns());
+  }
+  const QPointF origin(draw_x, y);
+  for (const QGlyphRun &run : it.value()) {
+    p.drawGlyphRun(origin, run);
+  }
 }
 
 void NvgWindow::drawText(QPainter &p, int x, int y, const QString &text, int alpha) {
@@ -1420,6 +1460,7 @@ RightColumnLayout rightColumnLayout(int w, int h) {
 }
 
 void NvgWindow::drawBottomIcons(QPainter &p) {
+  paint_profile::sub_begin();
   const SubMaster &sm = *(uiState()->sm);
   auto car_state = sm["carState"].getCarState();
   auto car_control = sm["carControl"].getCarControl();
@@ -1495,6 +1536,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     const int half = ((y1 + radius / 2) - (y2 - radius / 2)) / 2;
     drawConfidenceGauge(p, bar_right + BAR_CAP + GAUGE_GAP + GAUGE_HALF_W, bar_cy - half, bar_cy + half);
   }
+  paint_profile::sub_mark(paint_profile::BI_GAUGES);
 
   float cur_speed = std::max(0.0, car_state.getVEgo() * MS_TO_KPH);
   // The old shared str / str2 / textColor scratch locals are gone: every tile
@@ -2021,6 +2063,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       p.setPen(Qt::NoPen);
     }
   }
+  // Includes the value/colour reads and the 1 s Params refresh above.
+  paint_profile::sub_mark(paint_profile::BI_WHEEL);
 
   // 8. Right-hand status block, sitting above the temperature panel and
   // centred on it:
@@ -2299,6 +2343,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     statusCircle(col_r, row_t, "ACC", acc_bool ? "ON" : "OFF",
                  acc_bool ? QColor(120, 255, 120, 200) : QColor(254, 32, 32, 200), "OFF");
     statusCircle(col_r, row_b, "LKAS", lkas_str, lkas_color, "OFF");
+    paint_profile::sub_mark(paint_profile::BI_STATUS);
 
     // The four pedal/following readings ride above the NDA/HDA badge, at the
     // same size and horizontal gap as the block on the right -- so the two
@@ -2393,6 +2438,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       // stays inside the ring.
       statusRing(scol_r + SD + SGAP_X, speed_row_top, "조향 신호",
                  QString::number(steer_torque), steer_ratio, "300", 0.10f, 1.40f);
+      paint_profile::sub_mark(paint_profile::BI_TILES);
     }
   }
 }
