@@ -2090,7 +2090,8 @@ class Controls:
               self.active, CS, long_plan, pid_accel_limits, t_since_plan,
               self.stop_accel_boost_active, boost_floor_accel,
               self.stop_accel_boost_latch.driver_launch_handoff,
-              stop_accel_boost_factor=self.stop_accel_boost_latch.boost_factor)
+              stop_accel_boost_factor=self.stop_accel_boost_latch.boost_factor,
+              stop_accel_boost_cap=self.stop_accel_boost_latch.accel_cap)
             lead_one = self.sm['radarState'].leadOne
             radar_valid = bool(self.sm.valid['radarState'] and
                                len(self.sm['radarState'].radarErrors) == 0)

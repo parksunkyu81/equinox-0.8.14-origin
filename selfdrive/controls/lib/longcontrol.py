@@ -4,7 +4,7 @@ from common.realtime import DT_CTRL
 from selfdrive.controls.lib.drive_helpers import CONTROL_N, apply_deadzone
 from selfdrive.controls.lib.pid import PIDController
 from selfdrive.controls.lib.stop_accel_boost import (
-  apply_stop_accel_boost, STOP_ACCEL_BOOST_FACTOR, STOP_ACCEL_ZERO_EPS)
+  apply_stop_accel_boost, STOP_ACCEL_BOOST_FACTOR, STOP_ACCEL_ZERO_EPS, LAUNCH_ACCEL_CAP)
 from selfdrive.modeld.constants import T_IDXS
 
 LongCtrlState = car.CarControl.Actuators.LongControlState
@@ -66,7 +66,8 @@ class LongControl:
   def update(self, active, CS, long_plan, accel_limits, t_since_plan,
              stop_accel_boost_active=False, stop_accel_boost_floor=0.0,
              driver_launch_handoff=False,
-             stop_accel_boost_factor=STOP_ACCEL_BOOST_FACTOR):
+             stop_accel_boost_factor=STOP_ACCEL_BOOST_FACTOR,
+             stop_accel_boost_cap=LAUNCH_ACCEL_CAP):
     """Update longitudinal control. This updates the state machine and runs a PID loop"""
     # Interp control trajectory
     speeds = long_plan.speeds
@@ -186,7 +187,8 @@ class LongControl:
     final_accel = apply_stop_accel_boost(
       output_accel, CS.vEgo, boost_allowed, accel_limits,
       launch_floor_accel=stop_accel_boost_floor if boost_allowed else 0.0,
-      boost_factor=stop_accel_boost_factor)
+      boost_factor=stop_accel_boost_factor,
+      accel_cap=stop_accel_boost_cap)
     self.stop_accel_boost_final_accel = float(final_accel)
     self.stop_accel_boost_applied = bool(boost_allowed and
                                          final_accel > output_accel + STOP_ACCEL_ZERO_EPS)

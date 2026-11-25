@@ -201,6 +201,29 @@ FOLLOW_GUARD_SPAN_M = 1.5
 # CAP: no acceleration above this while the launch latch owns the pedal, PID
 # included (the latch bypasses the pedal rise limiter).
 LAUNCH_ACCEL_CAP = 1.10
+# CAP LIFT: the cap is for a lead that pulls away and then slows in the queue
+# (43d11613), not for one that keeps going. 2026-11-25--06-53-47 at 661-668 s
+# (signal launch into a left turn, slightly uphill): the cap held the command
+# at exactly 1.10 (pedal 0.20) for 6 s while the lead opened 3.7 -> 28 m at
+# +3 m/s; acceleration fell from 1.5 to 0.4 m/s^2 by 21 km/h, 0->20 km/h took
+# 4.8 s, the car behind honked and the driver pressed the gas. The same
+# drive's free-road launch (no latch, no cap) got pedal 0.37 and 20 km/h in
+# 3.3 s. So the cap rises by up to LAUNCH_CAP_LIFT_MAX as the low-passed
+# opening speed goes LAUNCH_CAP_LIFT_VREL_MS (from 1.0 m/s, where
+# follow_accel_cap.PULL_AWAY_VREL_MS also lets go) and the gap has
+# LAUNCH_CAP_LIFT_ROOM_M past the closing-safe gap (3 m + 0.6 s * v), ramped
+# over LAUNCH_CAP_LIFT_ROOM_SPAN_M. A lead within that room, or opening slower,
+# keeps 1.10: the 11-19 brake cases sat at 3.1-3.3 m and closing. It rises at
+# most LAUNCH_CAP_LIFT_RISE_MS3 and falls at LAUNCH_CAP_LIFT_FALL_MS3, since
+# the latch bypasses the pedal rise limiter. On the 661 s launch it reaches
+# the full 1.60 by 664 s (gap 17 m, +3 m/s).
+LAUNCH_CAP_LIFT_MAX = 0.50
+LAUNCH_CAP_LIFT_VREL_MS = (1.0, 2.5)
+LAUNCH_CAP_LIFT_ROOM_M = 4.0
+LAUNCH_CAP_LIFT_ROOM_SPAN_M = 4.0
+LAUNCH_CAP_LIFT_VREL_TAU_S = 0.30
+LAUNCH_CAP_LIFT_RISE_MS3 = 1.0
+LAUNCH_CAP_LIFT_FALL_MS3 = 2.0
 STOP_ACCEL_BOOST_FLOOR_FALL_MS3 = 2.0
 
 # A driver pedal press during a confirmed lead launch is an intent to move, not
@@ -306,6 +329,17 @@ def stop_accel_boost_match_floor(v_ego, lead_distance, lead_relative_speed, lead
   opening = min(STOP_ACCEL_BOOST_MATCH_VREL_MAX_MS, max(0.0, float(lead_relative_speed)))
   return min(STOP_ACCEL_BOOST_MATCH_MAX,
              room * (a_lead + STOP_ACCEL_BOOST_MATCH_VREL_GAIN * opening))
+
+
+def launch_cap_lift_target(v_ego, lead_distance, lead_relative_speed):
+  """0..LAUNCH_CAP_LIFT_MAX: how far the launch cap may rise for this lead (CAP LIFT)."""
+  if float(lead_distance) <= 0.0:
+    return 0.0
+  lo, hi = LAUNCH_CAP_LIFT_VREL_MS
+  opening = _clip01((float(lead_relative_speed) - lo) / (hi - lo))
+  margin = float(lead_distance) - stop_accel_boost_safe_gap(v_ego) - LAUNCH_CAP_LIFT_ROOM_M
+  room = _clip01(margin / LAUNCH_CAP_LIFT_ROOM_SPAN_M)
+  return LAUNCH_CAP_LIFT_MAX * min(opening, room)
 
 
 def follow_guard(v_ego, lead_distance):
@@ -447,6 +481,9 @@ class StopAccelBoostLatch:
     self.plan_gate_elapsed = 0.0
     self.plan_gate_since_ok = float('inf')
     self.plan_gate_ok = False
+    self.cap_vrel = 0.0
+    self.cap_lift = 0.0
+    self.accel_cap = LAUNCH_ACCEL_CAP
 
   def _clear_latch(self):
     self.latched = False
@@ -460,6 +497,8 @@ class StopAccelBoostLatch:
     self.floor_engaged = False
     self.match_floor = 0.0
     self._floor_prev = 0.0
+    self.cap_lift = 0.0
+    self.accel_cap = LAUNCH_ACCEL_CAP
 
   def update(self, system_ready, launch_detected, v_ego, brake_pressed=False,
              gas_pressed=False, lead_speed=0.0, lead_relative_speed=0.0,
@@ -632,6 +671,19 @@ class StopAccelBoostLatch:
     self._v_ego = v_ego
     self.floor_accel = self._base_floor() if self.floor_allowed else 0.0
 
+    # CAP LIFT (see LAUNCH_CAP_LIFT_*)
+    if lead_valid:
+      self.cap_vrel += (self.dt / (self.dt + LAUNCH_CAP_LIFT_VREL_TAU_S)) *                        (lead_relative_speed - self.cap_vrel)
+    else:
+      self.cap_vrel = 0.0
+    lift_target = (launch_cap_lift_target(v_ego, lead_distance, self.cap_vrel)
+                   if self.latched else 0.0)
+    if lift_target > self.cap_lift:
+      self.cap_lift = min(lift_target, self.cap_lift + LAUNCH_CAP_LIFT_RISE_MS3 * self.dt)
+    else:
+      self.cap_lift = max(lift_target, self.cap_lift - LAUNCH_CAP_LIFT_FALL_MS3 * self.dt)
+    self.accel_cap = LAUNCH_ACCEL_CAP + self.cap_lift
+
     return bool(self.latched and not gas_pressed and not brake_pressed and
                 (STOP_ACCEL_BOOST_MIN_SPEED_MS <= v_ego < STOP_ACCEL_BOOST_MAX_SPEED_MS or
                  self.standstill_launch))
@@ -691,7 +743,8 @@ class StopAccelBoostLatch:
 
 def apply_stop_accel_boost(requested_accel, v_ego, boost_active, accel_limits,
                            launch_floor_accel=0.0,
-                           boost_factor=STOP_ACCEL_BOOST_FACTOR):
+                           boost_factor=STOP_ACCEL_BOOST_FACTOR,
+                           accel_cap=LAUNCH_ACCEL_CAP):
   """Apply launch boost and an independently safety-gated ramped floor.
 
   `boost_factor` is the lead-tapered multiplier from StopAccelBoostLatch. It is
@@ -709,7 +762,8 @@ def apply_stop_accel_boost(requested_accel, v_ego, boost_active, accel_limits,
   if boost_active and accel >= -STOP_ACCEL_ZERO_EPS:
     accel = max(accel, max(0.0, float(launch_floor_accel)))
   if boost_active:
-    accel = min(accel, LAUNCH_ACCEL_CAP)
+    # LAUNCH_ACCEL_CAP, lifted by StopAccelBoostLatch for an opening lead
+    accel = min(accel, max(LAUNCH_ACCEL_CAP, float(accel_cap)))
 
   return min(float(accel_limits[1]), max(float(accel_limits[0]), accel))
 
