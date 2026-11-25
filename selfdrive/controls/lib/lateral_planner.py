@@ -279,7 +279,7 @@ class LateralPlanner:
       self._log_implausible_plan(
         "target %.1f m at %.2f s exceeds the achievable envelope %.1f m"
         % (float(y_pts[worst]), float(horizon_t[worst]), float(y_envelope[worst])))
-      y_pts = np.clip(y_pts, -y_envelope, y_envelope)
+      y_pts = np.minimum(np.maximum(y_pts, -y_envelope), y_envelope)
 
     if self.plan_implausible:
       self.plan_implausible_cnt += 1

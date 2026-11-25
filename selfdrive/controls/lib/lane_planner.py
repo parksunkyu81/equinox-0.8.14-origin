@@ -302,16 +302,18 @@ class LanePlanner:
 
     refs = np.interp(np.asarray(LANE_WIDTH_CHECK_DISTANCES_M, dtype=float), x, y)
     bend_m = float(np.max(np.abs(refs - refs[0])))
-    strength = float(np.clip(
+    strength = float(min(max(
       interp(bend_m, [CURVE_ASSIST_START_BEND_M, CURVE_ASSIST_FULL_BEND_M], [0.0, 1.0]),
-      0.0, 1.0))
+      0.0), 1.0))
     return x, y, confidence, refs, strength
 
   def _update_d_prob(self, target_d_prob, v_ego, lane_center_refs,
                      lane_change_active, curve_assist):
     """Rate-limit short confidence dropouts, with extra continuity on tight low-speed curves."""
-    target_d_prob = float(np.clip(target_d_prob, 0.0, 1.0))
-    curve_assist = float(np.clip(curve_assist, 0.0, 1.0))
+    # Scalar clips as min/max: np.clip is ~136 us a call on the EON's numpy
+    # against ~4 us, and gives the same result (NaN included).
+    target_d_prob = float(min(max(target_d_prob, 0.0), 1.0))
+    curve_assist = float(min(max(curve_assist, 0.0), 1.0))
     continuity_limit = interp(
       curve_assist, [0.0, 1.0],
       [LANE_CENTER_CONTINUITY_MAX_M, CURVE_LANE_CENTER_CONTINUITY_MAX_M])
@@ -359,12 +361,12 @@ class LanePlanner:
       np.asarray(LANE_WIDTH_CHECK_DISTANCES_M, dtype=float),
       x_values, y_values)
     bend_m = float(np.max(np.abs(refs - refs[0])))
-    return float(np.clip(
+    return float(min(max(
       interp(
         bend_m,
         [CURVE_ASSIST_START_BEND_M, CURVE_ASSIST_FULL_BEND_M],
         [0.0, 1.0]),
-      0.0, 1.0))
+      0.0), 1.0))
 
   def _model_path_curve_strength(self, path_xyz):
     """Use the fresh model path as an early curve cue when lanes are weak."""
@@ -383,7 +385,7 @@ class LanePlanner:
         continue
       best_strength = max(best_strength, strength * confidence)
 
-    return float(np.clip(best_strength, 0.0, 1.0))
+    return float(min(max(best_strength, 0.0), 1.0))
 
 
   def parse_model(self, md):
@@ -534,7 +536,7 @@ class LanePlanner:
 
     # Looser in a curve (0.55 m), still well under a line spacing (~2.4 m on
     # this camera, 0.9 m+ for any real line switch seen so far).
-    max_step = interp(float(np.clip(curve_assist, 0.0, 1.0)), [0.0, 1.0],
+    max_step = interp(float(min(max(curve_assist, 0.0), 1.0)), [0.0, 1.0],
                       [LANE_JUMP_MAX_STEP_M, LANE_JUMP_CURVE_MAX_STEP_M])
     jumped = bool(prev is not None and np.max(np.abs(rel - prev)) > max_step)
 
@@ -582,7 +584,7 @@ class LanePlanner:
     if self._prev_output_x is not None:
       prev = np.interp(np.asarray(path_x, dtype=float),
                        self._prev_output_x, self._prev_output_delta)
-      limited = prev + np.clip(delta - prev, -max_step, max_step)
+      limited = prev + np.minimum(np.maximum(delta - prev, -max_step), max_step)
     limited = np.where(np.isfinite(limited), limited, 0.0)
     sx, sd = self._finite_sorted_unique(path_x, limited)
     if sx is not None:
@@ -802,8 +804,8 @@ class LanePlanner:
       max_correction = np.interp(
         np.abs(path_xyz[:, 0]), [0.0, 20.0],
         [correction_near, correction_far])
-      lane_path_y_interp = path_xyz[:, 1] + np.clip(
-        lane_path_y_interp - path_xyz[:, 1], -max_correction, max_correction)
+      lane_path_y_interp = path_xyz[:, 1] + np.minimum(np.maximum(
+        lane_path_y_interp - path_xyz[:, 1], -max_correction), max_correction)
 
     center_delta = lane_path_y_interp - path_xyz[:, 1]
 
@@ -814,7 +816,7 @@ class LanePlanner:
     center_max = np.interp(
       np.abs(path_xyz[:, 0]), [0.0, 20.0],
       [LANE_CENTER_MAX_CORRECTION_NEAR_M, LANE_CENTER_MAX_CORRECTION_M])
-    center_delta = np.clip(center_delta, -center_max, center_max)
+    center_delta = np.minimum(np.maximum(center_delta, -center_max), center_max)
 
     center_delta_ref = float(np.interp(20.0, path_xyz[:, 0], center_delta))
     max_step = LANE_CENTER_MAX_CORRECTION_RATE_MS * DT_MDL
@@ -848,7 +850,7 @@ class LanePlanner:
     # instead, which limits rises and falls alike and cannot diverge.
     if limited_ref != center_delta_ref:
       center_delta = center_delta + (limited_ref - center_delta_ref)
-    center_delta = np.clip(center_delta, -center_max, center_max)
+    center_delta = np.minimum(np.maximum(center_delta, -center_max), center_max)
     # Re-read the reference from what actually survived, so the next frame's
     # slew limit is anchored on the correction that was applied.
     limited_ref = float(np.interp(20.0, path_xyz[:, 0], center_delta))
