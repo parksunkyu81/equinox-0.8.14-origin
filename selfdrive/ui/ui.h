@@ -105,6 +105,15 @@ typedef struct UIScene {
   line_vertices_data lane_line_vertices[4];
   line_vertices_data road_edge_vertices[2];
 
+  // Turn arrow, drawn instead of the model path while a turn desire is out
+  // (ui.cc update_turn_arrow, onroad.cc drawLaneLines).
+  bool turn_arrow_active = false;
+  bool turn_arrow_left = false;
+  int turn_arrow_hold = 0;
+  bool turn_arrow_ok = false;      // both anchor points projected on screen
+  QPointF turn_arrow_base;         // road point TURN_ARROW_BASE_M ahead
+  QPointF turn_arrow_corner;       // road point where the arrow bends
+
   // lead
   QPointF lead_vertices[2];
   bool lead_radar[2] = {false, false};

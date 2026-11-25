@@ -72,6 +72,55 @@ static void update_line_data(const UIState *s, const cereal::ModelDataV2::XYZTDa
   assert(pvd->cnt <= std::size(pvd->v));
 }
 
+// Turn arrow: while lateralPlan carries a turn desire, the onroad view shows
+// the navigation's turn as a bent arrow instead of the model's path. Before
+// slow intersection turns the model path stays straight, or bends the other
+// way with the road, until the cross road is 10-15 m away (2026-11-25--06-53-47:
+// three left turns read straight or right for 4.8-7 s after "좌회전 하세요"),
+// which on screen looked as if the car were ignoring the turn. Display only:
+// the steering still follows the model (onroad.cc keeps its path, faint).
+//
+// The arrow is drawn in screen space from two road points: the base a few
+// metres ahead and the corner where it bends. Drawn flat on the road it was
+// unreadable: from the 1.22 m camera a turn 10-30 m out is a sliver at the
+// horizon, and the navigation distance ran ~15 m long at the 774 s turn
+// (31 m on the screen's crosswalk, 13 m before the cross road). So the corner
+// sits at the navigation distance clamped to TURN_ARROW_CORNER_M.
+constexpr float TURN_ARROW_BASE_M = 4.f;
+constexpr float TURN_ARROW_CORNER_M[2] = {6.f, 12.f};
+constexpr float TURN_ARROW_DEFAULT_M = 9.f;
+constexpr float TURN_ARROW_NAV_MAX_M = 60.f;   // a farther nav distance is not this turn
+constexpr float TURN_ARROW_GROUND_Z = 1.22f;
+constexpr int TURN_ARROW_HOLD_FRAMES = 10;     // model frames: bridges the 1-2 frame desire re-pulse
+
+static void update_turn_arrow(UIState *s) {
+  UIScene &scene = s->scene;
+  const SubMaster &sm = *(s->sm);
+  const auto desire = sm["lateralPlan"].getLateralPlan().getDesire();
+  const bool left = desire == cereal::LateralPlan::Desire::TURN_LEFT;
+  const bool right = desire == cereal::LateralPlan::Desire::TURN_RIGHT;
+  if (left || right) {
+    scene.turn_arrow_hold = TURN_ARROW_HOLD_FRAMES;
+    scene.turn_arrow_left = left;
+  } else if (scene.turn_arrow_hold > 0) {
+    scene.turn_arrow_hold--;
+  }
+  scene.turn_arrow_active = scene.turn_arrow_hold > 0;
+  if (!scene.turn_arrow_active) return;
+
+  float d = TURN_ARROW_DEFAULT_M;
+  if (sm.alive("roadLimitSpeed")) {
+    const auto nda = sm["roadLimitSpeed"].getRoadLimitSpeed();
+    const int info = nda.getXTurnInfo();
+    const float dist = nda.getXDistToTurn();
+    if (info == (scene.turn_arrow_left ? 1 : 2) && dist > 0.f && dist < TURN_ARROW_NAV_MAX_M) d = dist;
+  }
+  d = std::clamp(d, TURN_ARROW_CORNER_M[0], TURN_ARROW_CORNER_M[1]);
+  scene.turn_arrow_ok =
+    calib_frame_to_full_frame(s, TURN_ARROW_BASE_M, 0.f, TURN_ARROW_GROUND_Z, &scene.turn_arrow_base) &&
+    calib_frame_to_full_frame(s, d, 0.f, TURN_ARROW_GROUND_Z, &scene.turn_arrow_corner);
+}
+
 static void update_model(UIState *s, const cereal::ModelDataV2::Reader &model) {
   UIScene &scene = s->scene;
   auto model_position = model.getPosition();
@@ -114,6 +163,8 @@ static void update_model(UIState *s, const cereal::ModelDataV2::Reader &model) {
   }
   max_idx = get_path_length_idx(model_position, max_distance);
   update_line_data(s, model_position, 0.5, 1.22, &scene.track_vertices, max_idx);
+
+  update_turn_arrow(s);
 }
 
 static void update_sockets(UIState *s) {

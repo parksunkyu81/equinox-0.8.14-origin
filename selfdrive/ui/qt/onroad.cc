@@ -700,8 +700,45 @@ void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
     bg.setColorAt(1.00, QColor(18, 164, 226, 0));     // fade out
   }
 
-  painter.setBrush(bg);
-  painter.drawPolygon(scene.track_vertices.v, scene.track_vertices.cnt);
+  if (scene.turn_arrow_active) {
+    // Turn desire out (ui.cc update_turn_arrow): the model path stays as a
+    // faint band, since the steering still follows it, and the navigation's
+    // turn is the arrow on top.
+    QLinearGradient faint(0, height(), 0, height() / 4);
+    faint.setColorAt(0.00, QColor(18, 164, 226, 70));
+    faint.setColorAt(1.00, QColor(18, 164, 226, 0));
+    painter.setBrush(faint);
+    painter.drawPolygon(scene.track_vertices.v, scene.track_vertices.cnt);
+    if (scene.turn_arrow_ok) {
+      // Screen-space arrow (ui.cc update_turn_arrow): up the lane from the
+      // base, a quarter bend at the corner, then sideways to a head.
+      const float sgn = scene.turn_arrow_left ? -1.f : 1.f;
+      const QPointF b = scene.turn_arrow_base, c = scene.turn_arrow_corner;
+      const float rise = std::max<float>(b.y() - c.y(), 1.f);
+      const float r = std::min<float>(std::clamp<float>(rise * 0.45f, 50.f, 160.f), rise);  // bend radius [px]
+      const float run = std::clamp<float>(width() * 0.14f, 160.f, 320.f);  // sideways leg [px]
+      const float pen_w = std::clamp<float>(rise * 0.22f, 34.f, 70.f);
+      const float head = pen_w * 1.25f;
+      const QPointF knee(c.x(), c.y() + r);
+      const QPointF out(c.x() + sgn * r, c.y());
+      const QPointF end(c.x() + sgn * run, c.y());
+      QPainterPath arrow_path(b);
+      arrow_path.lineTo(knee);
+      arrow_path.quadTo(c, out);
+      arrow_path.lineTo(end);
+      painter.setBrush(Qt::NoBrush);
+      painter.setPen(QPen(QColor(30, 110, 255, 215), pen_w, Qt::SolidLine, Qt::FlatCap, Qt::RoundJoin));
+      painter.drawPath(arrow_path);
+      painter.setPen(Qt::NoPen);
+      painter.setBrush(QColor(30, 110, 255, 215));
+      const QPointF tri[3] = {QPointF(end.x() + sgn * head * 1.3f, end.y()),
+                              QPointF(end.x(), end.y() - head), QPointF(end.x(), end.y() + head)};
+      painter.drawPolygon(tri, 3);
+    }
+  } else {
+    painter.setBrush(bg);
+    painter.drawPolygon(scene.track_vertices.v, scene.track_vertices.cnt);
+  }
 
   painter.restore();
 }
