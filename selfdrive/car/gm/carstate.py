@@ -6,7 +6,7 @@ from opendbc.can.can_define import CANDefine
 from opendbc.can.parser import CANParser
 from selfdrive.car.interfaces import CarStateBase
 from selfdrive.car.gm.values import DBC, CAR, EV_CAR, AccState, CanBus, STEER_THRESHOLD
-from selfdrive.car.gm.bsm_raw_log import BsmRawLog
+from selfdrive.car.gm.bsm_raw_log import BsmRawLog, BUTTON_RAW_LOG_PATH
 from selfdrive.car.gm.distance_button_log import DistanceButtonLog
 from common.realtime import sec_since_boot
 
@@ -29,6 +29,7 @@ class CarState(CarStateBase):
     # car (distance_button_log.py). self.distance_button holds its live state.
     self.distance_button_log = DistanceButtonLog()
     self.distance_button = False
+    self.button_raw_log = BsmRawLog(BUTTON_RAW_LOG_PATH)
 
   def update(self, pt_cp, loopback_cp):
     ret = car.CarState.new_message()
@@ -130,6 +131,11 @@ class CarState(CarStateBase):
     self.distance_button = self.distance_button_log.update(
       pt_cp.vl["ASCMSteeringButton"]["DistanceButton"], now, ret.vEgo)
 
+    btn = pt_cp.vl["ASCMSteeringButton"]
+    self.button_raw_log.update((btn["RawByte0"], btn["RawByte1"], btn["RawByte2"], btn["RawByte3"],
+                                btn["RawByte4"], btn["RawByte5"], btn["RawByte6"]),
+                               now, ret.vEgo, ret.leftBlinker, ret.rightBlinker, ret.steeringAngleDeg)
+
     bsm = pt_cp.vl["BCMBlindSpotMonitor"]
     self.bsm_raw_log.update((bsm["Byte0"], bsm["Byte1"], bsm["Byte2"], bsm["Byte3"],
                              bsm["Byte4"], bsm["Byte5"], bsm["Byte6"]),
@@ -169,7 +175,7 @@ class CarState(CarStateBase):
       ("TractionControlOn", "ESPStatus"),
       ("CruiseMainOn", "ECMEngineStatus"),
       ("Brake_Pressed", "ECMEngineStatus"),
-    ] + [(f"Byte{i}", "BCMBlindSpotMonitor") for i in range(7)]
+    ] + [(f"Byte{i}", "BCMBlindSpotMonitor") for i in range(7)]       + [(f"RawByte{i}", "ASCMSteeringButton") for i in range(7)]
 
     checks = [
       ("BCMTurnSignals", 1),

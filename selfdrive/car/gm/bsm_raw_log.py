@@ -18,6 +18,10 @@ import threading
 import time
 
 LOG_PATH = os.getenv("BSM_RAW_LOG_PATH", "/data/log/bsm_raw.jsonl")
+# The same change log for the steering-wheel button message 0x1E1: the
+# follow-distance button never set DistanceButton (bit 22) on the 2026-11-25
+# drive, so its seven raw bytes are recorded to find where it really is.
+BUTTON_RAW_LOG_PATH = os.getenv("BUTTON_RAW_LOG_PATH", "/data/log/steer_button_raw.jsonl")
 LOG_MAX_BYTES = 2 * 1024 * 1024
 N_BYTES = 7
 COUNTER_CHANGES = 500
@@ -25,12 +29,14 @@ SUMMARY_S = 60.0
 MAX_LINES_PER_S = 10
 
 
-def _write(lines):
+def _write(lines, path=None):
+  path = LOG_PATH if path is None else path
+
   def write():
     try:
-      if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > LOG_MAX_BYTES:
-        os.replace(LOG_PATH, LOG_PATH + ".1")
-      with open(LOG_PATH, 'a') as f:
+      if os.path.exists(path) and os.path.getsize(path) > LOG_MAX_BYTES:
+        os.replace(path, path + ".1")
+      with open(path, 'a') as f:
         f.write("".join(line + "\n" for line in lines))
     except Exception:
       pass
@@ -38,7 +44,8 @@ def _write(lines):
 
 
 class BsmRawLog:
-  def __init__(self):
+  def __init__(self, log_path=None):
+    self.log_path = log_path
     self.last = None
     self.changes = [0] * N_BYTES
     self.ignored = set()
@@ -76,11 +83,11 @@ class BsmRawLog:
             'changed': watched, 'kph': round(v_ego * 3.6, 1),
             'blinker': 'L' if left_blinker else ('R' if right_blinker else ''),
             'steer_deg': round(steering_angle, 1),
-          }, separators=(',', ':'))])
+          }, separators=(',', ':'))], self.log_path)
     if now - self.summary_t >= SUMMARY_S:
       self.summary_t = now
       _write([json.dumps({
         't': round(now, 2), 'event': 'summary', 'seen': self.seen,
         'bytes': [f"{b:02x}" for b in self.last], 'changes': self.changes,
         'ignored': sorted(self.ignored), 'unix_s': int(time.time()),
-      }, separators=(',', ':'))])
+      }, separators=(',', ':'))], self.log_path)
