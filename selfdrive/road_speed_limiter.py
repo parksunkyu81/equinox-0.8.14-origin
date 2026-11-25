@@ -746,6 +746,8 @@ def main():
   # Onroad mini-map: the Kakao route on HTTP 7713 and the car on it.
   from selfdrive.navi_route import NaviRoute
   navi_route = NaviRoute()
+  params = Params()
+  minimap_on, minimap_param_t = True, -1e9
   last_sdp_t = -1e9
 
   with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -769,8 +771,13 @@ def main():
           atc_runner.update(now, apilot)
         except Exception as e:
           print("road_speed_limiter: ATC update failed:", e)
+        if now - minimap_param_t >= 1.0:
+          minimap_param_t = now
+          minimap_on = params.get_bool("ShowMiniMap")
+          navi_route.enabled = minimap_on
         try:
-          navi_route.update(now, apilot, atc_runner.v_ego)
+          if minimap_on:
+            navi_route.update(now, apilot, atc_runner.v_ego)
         except Exception as e:
           print("road_speed_limiter: mini-map route update failed:", e)
 
@@ -810,7 +817,8 @@ def main():
           print("road_speed_limiter: ATC fill failed:", e)
         try:
           turn_d = float(atc_runner.atc.xDistToTurn) if atc_runner.atc.xTurnInfo > 0 else 0.
-          navi_route.fill(dat.roadLimitSpeed, now, turn_d)
+          if minimap_on:
+            navi_route.fill(dat.roadLimitSpeed, now, turn_d)
         except Exception as e:
           print("road_speed_limiter: mini-map route fill failed:", e)
 

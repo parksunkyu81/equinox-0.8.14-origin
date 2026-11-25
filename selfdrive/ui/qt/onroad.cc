@@ -3627,7 +3627,8 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
   // With a Kakao route and a position on it (selfdrive/navi_route.py) the
   // right part of the box is a mini-map and the guidance packs into the left
   // ~350 px; the turn icon and its distance keep their places.
-  const bool map_on = minimap_.active(nda);
+  // Community "ShowMiniMap" off: always the plain guidance layout.
+  const bool map_on = uiState()->show_minimap && minimap_.active(nda);
   constexpr int MAP_W = 330, MAP_H = 280;
   const QRectF map_rect(tbt_x + box_w - 10 - MAP_W, box_y + 10, MAP_W, MAP_H);
   const int text_right = map_on ? (int)map_rect.left() - 10 : tbt_x + box_w - 20;

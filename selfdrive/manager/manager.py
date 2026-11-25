@@ -74,6 +74,7 @@ def manager_init() -> None:
 
     # 59 deg wide model input + 0.9-style lateral MPC (modeld, plannerd, controlsd)
     ("WideOptechLateral", "1"),
+    ("ShowMiniMap", "1"),
 
     # AutoTurnControl (carrot port). carrot's defaults, except the decel rate:
     # this car only coasts (0.17-0.20 m/s^2), carrot's 120 = 1.2 m/s^2 assumes brakes.

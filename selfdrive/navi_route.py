@@ -86,6 +86,7 @@ class NaviRoute:
     self.route_t = -1e9
     self.new_route = False
     self.posts = 0
+    self.enabled = True        # Community "ShowMiniMap"; off -> posts are dropped unparsed
     # local frame of the current route
     self.lat0 = self.lon0 = 0.
     self.kx = EARTH_M_PER_DEG
@@ -112,6 +113,8 @@ class NaviRoute:
   # --- HTTP thread ---
   def on_post(self, body, now=None):
     now = sec_since_boot() if now is None else now
+    if not self.enabled:
+      return
     i = body.find(b'"vrtx"')
     if i < 0:
       return
