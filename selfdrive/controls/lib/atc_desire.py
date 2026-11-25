@@ -272,7 +272,7 @@ ATC_LANE_RIGHT_TYPES = ("fork right", "atc right")
 #                 sends the turn desire, room does not matter
 #   PROMPT_MANUAL "○측 차선으로 이동하세요 / 직접 옮겨 주세요" -- otherwise
 PROMPT_AUTO, PROMPT_TURN, PROMPT_MANUAL = "auto", "turn", "manual"
-# voice: the turn prompt speaks "좌회전 깜빡이 / 우회전 깜빡이" instead of the
+# voice: the turn prompt speaks "좌회전 깜빡이 변경 / 우회전 깜빡이 변경" instead of the
 # chime (False when the driver's blinker on that side is already on).
 PROMPT_STATE = {"kind": PROMPT_MANUAL, "voice": False}
 # "좌/우회전 중" while the turn desire is out (controlsd fills it each cycle,

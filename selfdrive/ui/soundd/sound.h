@@ -25,7 +25,7 @@ const std::tuple<AudibleAlert, QString, int> sound_list[] = {
   // prompt chimes do -- a 1.45 s voice line on repeat is unusable.
   {AudibleAlert::STEER_REQUIRED, "steer_required_ko.wav", 0},
   {AudibleAlert::LANE_LOST, "lane_lost_ko.wav", 0},
-  // "좌회전 깜빡이 / 우회전 깜빡이": the ATC turn prompt (atc_desire.AtcLaneGuide).
+  // "좌회전 깜빡이 변경 / 우회전 깜빡이 변경": the ATC turn prompt (atc_desire.AtcLaneGuide).
   {AudibleAlert::ATC_TURN_LEFT, "atc_turn_left_ko.wav", 0},
   {AudibleAlert::ATC_TURN_RIGHT, "atc_turn_right_ko.wav", 0},
 };
