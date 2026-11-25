@@ -9,9 +9,9 @@ from selfdrive.controls.lib.desire_helper import DesireHelper, AUTO_LCA_START_TI
 import cereal.messaging as messaging
 from cereal import log
 from common.params import Params
-from selfdrive.controls.lib.model_data_validation import as_finite_vector, validated_model_trajectory
+from selfdrive.controls.lib.model_data_validation import validated_model_trajectory
 from selfdrive.controls.lib.curve_speed_limiter import (
-  build_model_curve_profile_from_model, model_curve_tuning_band)
+  build_model_curve_profile_from_model, build_v0813_model_curve_profile, model_curve_tuning_band)
 
 TRAJECTORY_SIZE = 33
 
@@ -84,11 +84,9 @@ class LateralPlanner:
     self.plan_implausible = False
 
     self.path_xyz = np.zeros((TRAJECTORY_SIZE, 3))
-    self.path_xyz_stds = np.ones((TRAJECTORY_SIZE, 3))
     self.speed_forward = np.zeros((TRAJECTORY_SIZE,))
     self.plan_yaw = np.zeros((TRAJECTORY_SIZE,))
     self.plan_yaw_rate = np.zeros((TRAJECTORY_SIZE,))
-    self.plan_curv = np.zeros((TRAJECTORY_SIZE,))
     self.plan_curv_rate = np.zeros((TRAJECTORY_SIZE,))
     self.t_idxs = np.arange(TRAJECTORY_SIZE)
     self.y_pts = np.zeros(TRAJECTORY_SIZE)
@@ -159,32 +157,35 @@ class LateralPlanner:
     md = sm['modelV2']
     self.LP.parse_model(md)
 
-    # controlsd's curve slowdown profile, once per model frame. Index 0 is a
-    # placeholder that controlsd overwrites with its live measured curvature.
-    try:
-      self.curve_profile_band = model_curve_tuning_band(v_ego)
-      self.curve_profile = build_model_curve_profile_from_model(md, 0.0, v_ego)
-    except Exception:
-      self.curve_profile = None
     trajectory = validated_model_trajectory(md, TRAJECTORY_SIZE)
     self.model_data_valid = trajectory is not None
     if trajectory is not None:
       self.path_xyz, self.speed_forward, self.t_idxs, self.plan_yaw, self.plan_yaw_rate = trajectory
-      self.plan_curv = self.plan_yaw_rate / np.maximum(self.speed_forward, np.ones_like(self.speed_forward))
-      # Curvature rate is currently not passed to the MPC. Keep it finite and
-      # avoid np.gradient failures on malformed/non-monotonic model timestamps.
-      self.plan_curv_rate.fill(0.0)
+      # (plan_curv and path_xyz_stds, three more model fields read off capnp
+      # each frame, went: nothing read them. plan_curv_rate stays all zeros.)
     elif sec_since_boot() > self.last_cloudlog_t + 5.0:
       self.last_cloudlog_t = sec_since_boot()
       cloudlog.warning("Lateral planner - incomplete or non-finite model trajectory")
 
-    position_stds = (
-      as_finite_vector(md.position.xStd, expected_size=TRAJECTORY_SIZE),
-      as_finite_vector(md.position.yStd, expected_size=TRAJECTORY_SIZE),
-      as_finite_vector(md.position.zStd, expected_size=TRAJECTORY_SIZE),
-    )
-    if all(position_std is not None for position_std in position_stds):
-      self.path_xyz_stds = np.column_stack(position_stds)
+    # controlsd's curve slowdown profile, once per model frame. Index 0 is a
+    # placeholder that controlsd overwrites with its live measured curvature.
+    # Reading a capnp list costs ~40 us a field on the EON, so the five fields
+    # validated_model_trajectory already converted are handed over as lists
+    # (the same float values); only velocity is still read off the message.
+    try:
+      self.curve_profile_band = model_curve_tuning_band(v_ego)
+      if trajectory is not None:
+        vel = md.velocity
+        path_cols = self.path_xyz.T
+        self.curve_profile = build_v0813_model_curve_profile(
+          self.t_idxs.tolist(), self.plan_yaw_rate.tolist(),
+          vel.x, vel.y, vel.z,
+          path_cols[0].tolist(), path_cols[1].tolist(), path_cols[2].tolist(),
+          0.0, v_ego=v_ego)
+      else:
+        self.curve_profile = build_model_curve_profile_from_model(md, 0.0, v_ego)
+    except Exception:
+      self.curve_profile = None
 
     # Lane change logic
     lane_change_prob = self.LP.l_lane_change_prob + self.LP.r_lane_change_prob
