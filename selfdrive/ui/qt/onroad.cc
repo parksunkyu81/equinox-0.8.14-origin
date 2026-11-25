@@ -1459,6 +1459,69 @@ RightColumnLayout rightColumnLayout(int w, int h) {
   return l;
 }
 
+// 페달 상태 icons, drawn as vector shapes so they stay sharp at any size and
+// need no asset files. Each fits a box h tall centred on c.
+enum class PedalIcon { Accel, Decel, Brake, Boost };
+constexpr float PEDAL_ICON_SCALE = 1.7f;   // icon height / the old value's cap height
+
+static void drawPedalIcon(QPainter &p, QPointF c, float h, PedalIcon kind, const QColor &color) {
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing);
+  p.setOpacity(1.0);
+  const float x = c.x(), y = c.y(), hh = h / 2.0f;
+
+  // Block arrow: a wide head over a stem, pointing up (dir -1) or down (+1).
+  auto arrow = [&](float dir) {
+    const float head_w = h * 0.95f, head_h = h * 0.52f, stem_w = h * 0.38f;
+    const float tip = y + dir * hh, base = tip - dir * head_h, tail = y - dir * hh;
+    QPolygonF poly;
+    poly << QPointF(x, tip)
+         << QPointF(x + head_w / 2, base) << QPointF(x + stem_w / 2, base)
+         << QPointF(x + stem_w / 2, tail) << QPointF(x - stem_w / 2, tail)
+         << QPointF(x - stem_w / 2, base) << QPointF(x - head_w / 2, base);
+    p.setPen(QPen(color, h * 0.06f, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(color);
+    p.drawPolygon(poly);
+  };
+
+  switch (kind) {
+    case PedalIcon::Accel: arrow(-1.0f); break;
+    case PedalIcon::Decel: arrow(1.0f); break;
+    case PedalIcon::Boost: {
+      // Two stacked up-chevrons: faster than a plain 가속 arrow.
+      const float w = h * 0.50f, ch = h * 0.30f, pen = h * 0.17f;
+      p.setPen(QPen(color, pen, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+      p.setBrush(Qt::NoBrush);
+      for (float off : {-h * 0.20f, h * 0.20f}) {
+        const float cy = y + off;
+        QPolygonF v;
+        v << QPointF(x - w, cy + ch / 2) << QPointF(x, cy - ch / 2) << QPointF(x + w, cy + ch / 2);
+        p.drawPolyline(v);
+      }
+      break;
+    }
+    case PedalIcon::Brake: {
+      // The dashboard brake symbol: (!) -- a ring with an exclamation mark,
+      // between two side arcs.
+      const float r = h * 0.33f, pen = h * 0.10f;
+      p.setPen(QPen(color, pen, Qt::SolidLine, Qt::RoundCap));
+      p.setBrush(Qt::NoBrush);
+      p.drawEllipse(QPointF(x, y), r, r);
+      const float ra = h * 0.50f;
+      const QRectF outer(x - ra, y - ra, 2 * ra, 2 * ra);
+      p.drawArc(outer, 135 * 16, 90 * 16);    // left arc
+      p.drawArc(outer, -45 * 16, 90 * 16);    // right arc
+      p.setPen(Qt::NoPen);
+      p.setBrush(color);
+      const float bw = h * 0.10f;
+      p.drawRoundedRect(QRectF(x - bw / 2, y - r * 0.62f, bw, r * 0.80f), bw / 2, bw / 2);
+      p.drawEllipse(QPointF(x, y + r * 0.50f), bw * 0.62f, bw * 0.62f);
+      break;
+    }
+  }
+  p.restore();
+}
+
 void NvgWindow::drawBottomIcons(QPainter &p) {
   paint_profile::sub_begin();
   const SubMaster &sm = *(uiState()->sm);
@@ -1815,22 +1878,25 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // panel at the end of this function.
   const float accel = car_control.getActuators().getAccel();
 
-  QString pedal_status_str;
+  // Shown as an icon rather than a word (on request, 2026-11-25): 가속 green
+  // up arrow, 감속 red down arrow, 브레이크 amber brake symbol (!), BOOST a
+  // double up chevron. Shape and colour both differ, so it reads at a glance.
+  PedalIcon pedal_icon;
   QColor pedalStatusColor;
   if (accel > 0) {
-    pedal_status_str = "가속";
-    pedalStatusColor = QColor(120, 255, 120, 200);
+    pedal_icon = PedalIcon::Accel;
+    pedalStatusColor = QColor(120, 255, 120, 255);
   } else if (accel == 0.0) {
-    pedal_status_str = "브레이크";
-    pedalStatusColor = QColor(255, 185, 15, 200);
+    pedal_icon = PedalIcon::Brake;
+    pedalStatusColor = QColor(255, 185, 15, 255);
   } else {
-    pedal_status_str = "감속";
-    pedalStatusColor = QColor(254, 32, 32, 200);
+    pedal_icon = PedalIcon::Decel;
+    pedalStatusColor = QColor(254, 32, 32, 255);
   }
-  // Only its state text and colour change while the confirmed stop-and-go
-  // launch assist is operating.
+  // Only the icon and colour change while the confirmed stop-and-go launch
+  // assist is operating.
   if (stop_accel_boost_active) {
-    pedal_status_str = "BOOST";
+    pedal_icon = PedalIcon::Boost;
     pedalStatusColor = QColor(225, 255, 239, 255);
   }
 
@@ -2262,10 +2328,15 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
         drawText(p, cx_, top + (i + 1) * label_h + i * LINE_GAP - lift,
                  label_lines[i], label_alpha);
       }
-      QColor c = value_color;
-      configFont(p, "Open Sans", value_pt, "Bold");
-      drawTextWithColor(p, cx_, top + total_h, value, c);
+      if (!value.isEmpty()) {
+        QColor c = value_color;
+        configFont(p, "Open Sans", value_pt, "Bold");
+        drawTextWithColor(p, cx_, top + total_h, value, c);
+      }
       p.setOpacity(1.0);
+      // Where the value's ink sits (baseline top + total_h, cap height
+      // value_h), so a tile can draw an icon in its place.
+      return QRectF(cx_ - value_h / 2.0, top + total_h - value_h, value_h, value_h);
     };
 
     // value_scale > 1 lets the value spill past the disc on purpose; see the
@@ -2278,8 +2349,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       p.setBrush(blackColor(200));
       p.drawEllipse(cx_ - SD / 2, cy - SD / 2, SD, SD);
       // A hair inside the disc's edge so the glyphs don't graze it.
-      drawTileText(cx_, cy, label, value, value_color, SD / 2 - 3, 200, size_ref,
-                   value_scale, label_lift, label_scale);
+      return drawTileText(cx_, cy, label, value, value_color, SD / 2 - 3, 200, size_ref,
+                          value_scale, label_lift, label_scale);
     };
 
     // Same tile as statusCircle plus a progress ring, so the live comma-pedal
@@ -2411,26 +2482,21 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
       statusCircle(scol_l, speed_row,
                    tr_label, tr_str, QColor(120, 255, 120, 200), "8.88");
-      statusCircle(scol_r, speed_row_top,
-                   // size_ref is the widest state this tile can ever show, and
-                   // 브레이크 is 4 full-width glyphs against BOOST's ~3.4 em.
-                   // Sizing off BOOST instead let 브레이크 run far past the
-                   // disc, which is why the fit measures 브레이크 itself.
-                   //
-                   // Raised from 1.33f to 1.60f on request, and the label
-                   // lifted a tenth of the block to keep the two lines apart
-                   // as the value grew into the gap.
-                   //
-                   // This is past the clearance the old value was chosen to
-                   // respect: the widest state, 브레이크 -- the only one that
-                   // gets near it -- reaches a few px over the neighbouring
-                   // disc's edge (페달 신호 since the swap with 페달 강도). It overlaps that disc's fill, not its text,
-                   // and only in that one state. The move to SD 140 does not
-                   // change that: the value and the column pitch grew by the
-                   // same fifth. Widen SGAP_X or shorten the state word if it
-                   // reads badly on the road.
-                   "페달 상태", pedal_status_str, pedalStatusColor, "브레이크",
-                   1.60f, 0.10f);
+      // The state is an icon now, drawn where the value text used to sit.
+      // The fit still measures 브레이크 at 1.60 with the tenth-of-a-block lift,
+      // so the label keeps exactly the place and size it had and still matches
+      // 페달 강도 below it; only the value slot changes from a word to a symbol.
+      const QRectF pedal_value = statusCircle(scol_r, speed_row_top, "페달 상태", "",
+                                              pedalStatusColor, "브레이크", 1.60f, 0.10f);
+      {
+        // Centred on the old value's ink, sized up from its cap height but
+        // kept inside the disc below the label.
+        const float below = speed_row_top + SD / 2 - pedal_value.center().y();
+        const float icon_h = std::min<float>(pedal_value.height() * PEDAL_ICON_SCALE,
+                                             2.0f * (below - 6));
+        drawPedalIcon(p, QPointF(scol_r, pedal_value.center().y()), icon_h, pedal_icon,
+                      pedalStatusColor);
+      }
 
       // 조향 신호, right of 페달 상태 on the same row and in the same style as
       // 페달 신호: red ring filling with the torque sent to the EPS (0..300),
