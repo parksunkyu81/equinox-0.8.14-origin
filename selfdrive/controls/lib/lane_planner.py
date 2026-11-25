@@ -48,6 +48,22 @@ CAMERA_OFFSET = -0.070
 LANE_STD_FULL_CONFIDENCE = 0.15
 LANE_STD_ZERO_CONFIDENCE = 1.20
 LANE_WIDTH_CHECK_DISTANCES_M = (5.0, 10.0, 20.0)
+# The same distances as an array: built once instead of per call (three a frame).
+_LANE_WIDTH_CHECK_X = np.asarray(LANE_WIDTH_CHECK_DISTANCES_M, dtype=float)
+
+
+def _median(values):
+  """np.median for a small finite 1-D array, without its partition machinery
+  (~0.3 ms a call on the EON). Same value: the middle element, or the mean of
+  the two middle ones computed as (a + b) / 2 as np.median does. Anything
+  non-finite goes to np.median for its NaN handling."""
+  n = values.size
+  if n == 0 or not np.isfinite(values.sum()):
+    return float(np.median(values))
+  s = np.sort(values)
+  h = n // 2
+  return float(s[h]) if n % 2 else float((s[h - 1] + s[h]) / 2.0)
+
 LANE_WIDTH_MIN_START_M = 1.8
 # Was 2.5, which sat in the middle of this camera's own width distribution
 # instead of below it. Measured on 2026-08-25--10-51-17 over 1150 frames where
@@ -275,6 +291,11 @@ class LanePlanner:
     if x_values.size < 2:
       return None, None
 
+    # Model x series are almost always strictly increasing already, and then
+    # argsort is the identity and unique keeps every point: return them as
+    # they are (~0.25 ms a call less on the EON, three or four calls a frame).
+    if np.all(x_values[1:] > x_values[:-1]):
+      return x_values, y_values
     order = np.argsort(x_values)
     x_values = x_values[order]
     y_values = y_values[order]
@@ -300,7 +321,7 @@ class LanePlanner:
     if x is None or confidence < ROAD_EDGE_MIN_CONFIDENCE:
       return x, y, confidence, None, 0.0
 
-    refs = np.interp(np.asarray(LANE_WIDTH_CHECK_DISTANCES_M, dtype=float), x, y)
+    refs = np.interp(_LANE_WIDTH_CHECK_X, x, y)
     bend_m = float(np.max(np.abs(refs - refs[0])))
     strength = float(min(max(
       interp(bend_m, [CURVE_ASSIST_START_BEND_M, CURVE_ASSIST_FULL_BEND_M], [0.0, 1.0]),
@@ -358,7 +379,7 @@ class LanePlanner:
       return 0.0
 
     refs = np.interp(
-      np.asarray(LANE_WIDTH_CHECK_DISTANCES_M, dtype=float),
+      _LANE_WIDTH_CHECK_X,
       x_values, y_values)
     bend_m = float(np.max(np.abs(refs - refs[0])))
     return float(min(max(
@@ -671,7 +692,7 @@ class LanePlanner:
       return path_xyz
 
     width_samples = np.abs(np.interp(
-      np.asarray(LANE_WIDTH_CHECK_DISTANCES_M, dtype=float), lane_x, lane_width_pts))
+      _LANE_WIDTH_CHECK_X, lane_x, lane_width_pts))
     width_mod = min(
       interp(width, [LANE_WIDTH_MIN_START_M, LANE_WIDTH_MIN_END_M], [0.0, 1.0]) *
       interp(width, [LANE_WIDTH_MOD_START_M, LANE_WIDTH_MOD_END_M], [1.0, 0.0])
@@ -687,7 +708,7 @@ class LanePlanner:
                      [1.0, 0.0])
 
     self.lane_width_certainty.update(l_prob * r_prob)
-    current_lane_width = float(np.median(width_samples))
+    current_lane_width = _median(width_samples)
     # Only learn from a frame that can actually see both edges of the lane.
     # Updating unconditionally let a curve, where one line is half gone, drag
     # the estimate toward whatever the remaining geometry implied.
