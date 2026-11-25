@@ -101,6 +101,15 @@ BO_ 320 BCMTurnSignals: 3 K9_BCM
  SG_ HighBeamsActive : 7|1@0+ (1,0) [0|1] "" XXX
  SG_ HighBeamsTemporary : 5|1@0+ (1,0) [0|1] "" XXX
 
+BO_ 322 BCMBlindSpotMonitor: 7 K9_BCM
+ SG_ Byte0 : 7|8@0+ (1,0) [0|255] "" NEO
+ SG_ Byte1 : 15|8@0+ (1,0) [0|255] "" NEO
+ SG_ Byte2 : 23|8@0+ (1,0) [0|255] "" NEO
+ SG_ Byte3 : 31|8@0+ (1,0) [0|255] "" NEO
+ SG_ Byte4 : 39|8@0+ (1,0) [0|255] "" NEO
+ SG_ Byte5 : 47|8@0+ (1,0) [0|255] "" NEO
+ SG_ Byte6 : 55|8@0+ (1,0) [0|255] "" NEO
+
 BO_ 328 PSCM_148: 1 K43_PSCM
 
 BO_ 381 ESPStatus: 6 K20_ECM

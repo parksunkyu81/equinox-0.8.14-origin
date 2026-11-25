@@ -6,6 +6,8 @@ from opendbc.can.can_define import CANDefine
 from opendbc.can.parser import CANParser
 from selfdrive.car.interfaces import CarStateBase
 from selfdrive.car.gm.values import DBC, CAR, EV_CAR, AccState, CanBus, STEER_THRESHOLD
+from selfdrive.car.gm.bsm_raw_log import BsmRawLog
+from common.realtime import sec_since_boot
 
 
 class CarState(CarStateBase):
@@ -19,6 +21,9 @@ class CarState(CarStateBase):
     self.adaptive_Cruise = False
     self.enable_lkas = False
     self.main_on = False
+    # 0x142 (Side Blind Zone Alert) raw bytes, logged on change until the
+    # blind-zone bits are identified on this car (bsm_raw_log.py).
+    self.bsm_raw_log = BsmRawLog()
 
   def update(self, pt_cp, loopback_cp):
     ret = car.CarState.new_message()
@@ -116,6 +121,12 @@ class CarState(CarStateBase):
 
     ret.cruiseState.enabled = self.main_on or ret.adaptiveCruise
 
+    bsm = pt_cp.vl["BCMBlindSpotMonitor"]
+    self.bsm_raw_log.update((bsm["Byte0"], bsm["Byte1"], bsm["Byte2"], bsm["Byte3"],
+                             bsm["Byte4"], bsm["Byte5"], bsm["Byte6"]),
+                            sec_since_boot(), ret.vEgo, ret.leftBlinker, ret.rightBlinker,
+                            ret.steeringAngleDeg)
+
     return ret
 
   @staticmethod
@@ -149,7 +160,7 @@ class CarState(CarStateBase):
       ("TractionControlOn", "ESPStatus"),
       ("CruiseMainOn", "ECMEngineStatus"),
       ("Brake_Pressed", "ECMEngineStatus"),
-    ]
+    ] + [(f"Byte{i}", "BCMBlindSpotMonitor") for i in range(7)]
 
     checks = [
       ("BCMTurnSignals", 1),
@@ -165,6 +176,9 @@ class CarState(CarStateBase):
       ("PSCMSteeringAngle", 100),
       ("EBCMVehicleDynamic", 50),
       ("EBCMBrakePedalPosition", 100),
+      # Side Blind Zone Alert, raw bytes for bsm_raw_log. Frequency 0: never
+      # timed out, so a car without it (or before it first sends) keeps canValid.
+      ("BCMBlindSpotMonitor", 0),
     ]
 
     # TODO: Might be wise to find the non-electronic parking brake signal
