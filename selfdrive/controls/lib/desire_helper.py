@@ -26,6 +26,15 @@ LANE_CHANGE_TIME_MAX = 10.
 # taken back to the lane if the alert comes up within BSM_ABORT_S.
 BSM_HOLD_S = 2.0
 BSM_ABORT_S = 1.0
+# A wall, guardrail or kerb on the change side: the model's road edge (1 s
+# ahead) closer than WALL_EDGE_M to our lane line for WALL_HOLD_S stops the
+# start, at any speed. The edge reads 1.4-2.4 m at real walls and 1.2-2.2 m with
+# a real lane there, so no cut splits them; on 1,092 segments (2026-11-18..25,
+# 191 starts, 107 into the next lane) 1.5 m held back 4 real lane changes and
+# caught the median fence of 2026-11-24--03-11-42 and the kerbs and walls on the
+# right, but not the 2026-11-25 concrete barrier (read 1.9 m).
+WALL_EDGE_M = 1.5
+WALL_HOLD_S = 0.5
 ATC_LANE_CHANGE_SPEED_MIN = LANE_CHANGE_SPEED_MIN
 # Under 30 km/h a blinker is as often a turn or a merge in a queue as a lane
 # change, and the car has no blind-spot signal, so a low-speed lane change:
@@ -211,6 +220,7 @@ class DesireHelper:
     self.prev_one_blinker = False
     self.desire = Desire.none
     self.bsm_hold_s = {'left': 0.0, 'right': 0.0}   # BSM_HOLD_S countdown per side
+    self.wall_s = {'left': 0.0, 'right': 0.0}       # road edge inside WALL_EDGE_M this long
 
     params = Params()
     self.lane_change_enabled = params.get_bool('LaneChangeEnabled')
@@ -282,6 +292,7 @@ class DesireHelper:
       self._check_desire_state(modeldata, carstate)
     else:
       self.sides_valid = False
+    self._update_wall()
 
     if not self.lane_change_enabled or not self.sides_valid:
       atc_type = ""
@@ -408,6 +419,19 @@ class DesireHelper:
       return self.bsm_hold_s['right'] > 0.0
     return False
 
+  def _update_wall(self):
+    for key, side in (('left', self.left), ('right', self.right)):
+      near = self.sides_valid and side.dist_to_edge < WALL_EDGE_M
+      self.wall_s[key] = self.wall_s[key] + DT_MDL if near else 0.0
+
+  def _wall_on(self, direction):
+    """Wall / guardrail / kerb right beyond our lane line on that side (WALL_EDGE_M)."""
+    if direction == LaneChangeDirection.left:
+      return self.wall_s['left'] >= WALL_HOLD_S
+    if direction == LaneChangeDirection.right:
+      return self.wall_s['right'] >= WALL_HOLD_S
+    return False
+
   def _low_speed_room(self, carstate):
     """Under LANE_CHANGE_LOW_SPEED: a lane or a road edge a lane away on the change side."""
     if carstate.vEgo >= self.lane_change_low_speed:
@@ -433,7 +457,9 @@ class DesireHelper:
                        (AUTO_LCA_START_TIME+0.25) > self.auto_lane_change_timer > AUTO_LCA_START_TIME
       torque_applied = torque_applied and self._low_speed_room(carstate)
 
-      blindspot_detected = self._blindspot_held(self.lane_change_direction)
+      # A wall on that side waits like a car in the blind zone does.
+      blindspot_detected = (self._blindspot_held(self.lane_change_direction) or
+                            self._wall_on(self.lane_change_direction))
 
       # State transitions
       # off
