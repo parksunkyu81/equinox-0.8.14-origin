@@ -8,7 +8,6 @@ from selfdrive.controls.lib.drive_helpers import CONTROL_N, MPC_COST_LAT, LAT_MP
 from selfdrive.controls.lib.desire_helper import DesireHelper, AUTO_LCA_START_TIME
 import cereal.messaging as messaging
 from cereal import log
-from common.params import Params
 from selfdrive.controls.lib.model_data_validation import validated_model_trajectory
 from selfdrive.controls.lib.curve_speed_limiter import (
   build_model_curve_profile_from_model, build_v0813_model_curve_profile, model_curve_tuning_band)
@@ -125,8 +124,9 @@ class LateralPlanner:
     self.LP = LanePlanner()
     self.v09_center_corr_m = 0.0   # lane centring added to the v09 path at 20 m [m]
     self.DH = DesireHelper()
-    # Read once, like modeld and controlsd: all three must agree for a drive.
-    self.use_v09 = Params().get_bool("WideOptechLateral") if use_v09 is None else bool(use_v09)
+    # Always the v09 (OPTECH) planner on the car since the WideOptechLateral
+    # toggle was removed; use_v09=False is kept for offline replays.
+    self.use_v09 = True if use_v09 is None else bool(use_v09)
 
     # Vehicle model parameters used to calculate lateral movement of car
     self.factor1 = CP.wheelbase - CP.centerToFront

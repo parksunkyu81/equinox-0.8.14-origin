@@ -397,11 +397,10 @@ class Controls:
 
         self.LoC = LongControl(self.CP)
         self.VM = VehicleModel(self.CP)
-        # WideOptechLateral (59 deg model input + 0.9-style lateral MPC, see
-        # lateral_planner.py) moves the demand more on straights; this smooths
-        # those small moves. Read once, like modeld and plannerd do.
-        self.wide_optech_lateral = self.params.get_bool("WideOptechLateral")
-        self.straight_wobble_filter = StraightWobbleFilter() if self.wide_optech_lateral else None
+        # The 59 deg model input + 0.9-style lateral MPC (always on since the
+        # WideOptechLateral toggle was removed, see lateral_planner.py) moves the
+        # demand more on straights; this smooths those small moves.
+        self.straight_wobble_filter = StraightWobbleFilter()
 
         if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
             self.LaC = LatControlAngle(self.CP, self.CI)

@@ -43,15 +43,13 @@ constexpr const kj::ArrayPtr<const T> to_kj_array_ptr(const std::array<T, size> 
 void model_init(ModelState* s, cl_device_id device_id, cl_context context) {
   s->frame = new ModelFrame(device_id, context);
 #ifdef BIG_MODEL
-  // WideOptechLateral: fill big_input_imgs from the same road frame warped into
-  // the sbigmodel frame (focal 455, 59 x 31 deg) the wide branch was built for,
-  // instead of mirroring the 31 deg narrow crop into it. The lateral planner
-  // switches to the 0.9-style MPC under the same param, so the two always change
-  // together. MODELD_WIDE_FROM_ROAD=0/1 overrides the param for offline replays.
-  // Read once here: a change takes effect at the next modeld start.
+  // Fill big_input_imgs from the same road frame warped into the sbigmodel
+  // frame (focal 455, 59 x 31 deg) the wide branch was built for, instead of
+  // mirroring the 31 deg narrow crop into it. Always on since the
+  // WideOptechLateral toggle was removed (the lateral planner always uses the
+  // 0.9-style MPC to match). MODELD_WIDE_FROM_ROAD=0 turns it off for offline replays.
   const char *wide_env = getenv("MODELD_WIDE_FROM_ROAD");
-  const bool wide_from_road = wide_env != nullptr ? strcmp(wide_env, "1") == 0
-                                                  : Params().getBool("WideOptechLateral");
+  const bool wide_from_road = wide_env == nullptr || strcmp(wide_env, "0") != 0;
   if (wide_from_road) {
     s->wide_frame = new ModelFrame(device_id, context);
     LOGW("big model wide input: sbigmodel warp of the road frame");
