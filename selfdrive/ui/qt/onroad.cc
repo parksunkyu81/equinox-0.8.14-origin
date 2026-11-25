@@ -2110,80 +2110,101 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
         return k > 1.0f ? (int)(2.0f * std::sqrt(k)) : 0;
       };
 
-      for (int guard = 0; guard < 96; guard++) {
-        configFont(p, "Open Sans", label_pt, "Bold");
-        const QFontMetrics fm_label(p.font());
-        // One line height for every label line: they are all caps, so their
-        // ink heights match and even spacing is what reads as a block.
-        label_h = 0;
-        for (const QString &line : label_lines) {
-          label_h = std::max(label_h, fm_label.tightBoundingRect(line).height());
+      // The fit below depends only on the label, size_ref, the disc radius and
+      // the two scales -- never on the live value -- yet it ran on every paint:
+      // up to 96 rounds of QFontMetrics and tightBoundingRect (glyph outlines)
+      // per tile. On 2026-11-25 drawBottomIcons was 31 of the 48 ms a paint
+      // took, which held the onroad view to ~8 fps. Fit once per key, reuse.
+      struct TileFit { int label_pt, value_pt, label_h, value_h, total_h; };
+      static auto *fit_cache = new QHash<QString, TileFit>;
+      const QString fit_key = label + QChar(0x1f) + size_ref + QChar(0x1f) +
+                              QString::number(usable_r) + QChar(0x1f) +
+                              QString::number(value_scale) + QChar(0x1f) +
+                              QString::number(label_scale);
+      const auto cached_fit = fit_cache->constFind(fit_key);
+      if (cached_fit != fit_cache->constEnd()) {
+        label_pt = cached_fit->label_pt;
+        value_pt = cached_fit->value_pt;
+        label_h = cached_fit->label_h;
+        value_h = cached_fit->value_h;
+        total_h = cached_fit->total_h;
+      } else {
+        for (int guard = 0; guard < 96; guard++) {
+          configFont(p, "Open Sans", label_pt, "Bold");
+          const QFontMetrics fm_label(p.font());
+          // One line height for every label line: they are all caps, so their
+          // ink heights match and even spacing is what reads as a block.
+          label_h = 0;
+          for (const QString &line : label_lines) {
+            label_h = std::max(label_h, fm_label.tightBoundingRect(line).height());
+          }
+
+          configFont(p, "Open Sans", value_pt, "Bold");
+          const QFontMetrics fm_value(p.font());
+          // Height from "8" rather than the live text, so a changing value can
+          // never reflow the block.
+          value_h = fm_value.tightBoundingRect("8").height();
+          const int value_w = fm_value.width(size_ref);
+
+          const int n = label_lines.size();
+          total_h = label_h * n + LINE_GAP * (n - 1) + TEXT_GAP + value_h;
+          const int half = total_h / 2;
+
+          // Each line is measured where it actually sits: the second label line
+          // is nearer the centre than the first, so it gets a wider chord even
+          // though "STATUS" is the longer word.
+          int label_over = -usable_r;
+          for (int i = 0; i < n; i++) {
+            const int line_top = -half + i * (label_h + LINE_GAP);
+            const int outer = std::max(std::abs(line_top), std::abs(line_top + label_h));
+            label_over = std::max(label_over,
+                                  fm_label.width(label_lines[i]) - chord_at(outer));
+          }
+          const int value_over = value_w - chord_at(half);
+          if (label_over <= 0 && value_over <= 0) {
+            break;
+          }
+          // Give up whichever line overhangs more, so they close in together
+          // instead of one starving the other.
+          if (value_over >= label_over && value_pt > 14) {
+            value_pt--;
+          } else if (label_pt > 9) {
+            label_pt--;
+          } else if (value_pt > 14) {
+            value_pt--;
+          } else {
+            break;
+          }
         }
 
-        configFont(p, "Open Sans", value_pt, "Bold");
-        const QFontMetrics fm_value(p.font());
-        // Height from "8" rather than the live text, so a changing value can
-        // never reflow the block.
-        value_h = fm_value.tightBoundingRect("8").height();
-        const int value_w = fm_value.width(size_ref);
-
-        const int n = label_lines.size();
-        total_h = label_h * n + LINE_GAP * (n - 1) + TEXT_GAP + value_h;
-        const int half = total_h / 2;
-
-        // Each line is measured where it actually sits: the second label line
-        // is nearer the centre than the first, so it gets a wider chord even
-        // though "STATUS" is the longer word.
-        int label_over = -usable_r;
-        for (int i = 0; i < n; i++) {
-          const int line_top = -half + i * (label_h + LINE_GAP);
-          const int outer = std::max(std::abs(line_top), std::abs(line_top + label_h));
-          label_over = std::max(label_over,
-                                fm_label.width(label_lines[i]) - chord_at(outer));
+        // Same escape hatch as value_scale below, for the label. The two pedal
+        // tiles need it: "PEDAL MAX" and "PEDAL LEVEL" are long enough that the
+        // fit drives them down to 13 and 15 px, which is a caption rather than a
+        // label you can read at a glance. Applied before value_scale so the
+        // block height is recomputed once, from the final label size.
+        if (label_scale != 1.0f) {
+          label_pt = (int)(label_pt * label_scale + 0.5f);
+          configFont(p, "Open Sans", label_pt, "Bold");
+          const QFontMetrics fm_scaled(p.font());
+          label_h = 0;
+          for (const QString &line : label_lines) {
+            label_h = std::max(label_h, fm_scaled.tightBoundingRect(line).height());
+          }
+          const int n = label_lines.size();
+          total_h = label_h * n + LINE_GAP * (n - 1) + TEXT_GAP + value_h;
         }
-        const int value_over = value_w - chord_at(half);
-        if (label_over <= 0 && value_over <= 0) {
-          break;
-        }
-        // Give up whichever line overhangs more, so they close in together
-        // instead of one starving the other.
-        if (value_over >= label_over && value_pt > 14) {
-          value_pt--;
-        } else if (label_pt > 9) {
-          label_pt--;
-        } else if (value_pt > 14) {
-          value_pt--;
-        } else {
-          break;
-        }
-      }
 
-      // Same escape hatch as value_scale below, for the label. The two pedal
-      // tiles need it: "PEDAL MAX" and "PEDAL LEVEL" are long enough that the
-      // fit drives them down to 13 and 15 px, which is a caption rather than a
-      // label you can read at a glance. Applied before value_scale so the
-      // block height is recomputed once, from the final label size.
-      if (label_scale != 1.0f) {
-        label_pt = (int)(label_pt * label_scale + 0.5f);
-        configFont(p, "Open Sans", label_pt, "Bold");
-        const QFontMetrics fm_scaled(p.font());
-        label_h = 0;
-        for (const QString &line : label_lines) {
-          label_h = std::max(label_h, fm_scaled.tightBoundingRect(line).height());
+        // Applied after the fit, so it deliberately breaks out of the disc. The
+        // pedal-state tile needs it: its widest state, 브레이크, pins the value
+        // at 24 px, which is too small to read at a glance while driving.
+        if (value_scale != 1.0f) {
+          value_pt = (int)(value_pt * value_scale + 0.5f);
+          configFont(p, "Open Sans", value_pt, "Bold");
+          value_h = QFontMetrics(p.font()).tightBoundingRect("8").height();
+          const int n = label_lines.size();
+          total_h = label_h * n + LINE_GAP * (n - 1) + TEXT_GAP + value_h;
         }
-        const int n = label_lines.size();
-        total_h = label_h * n + LINE_GAP * (n - 1) + TEXT_GAP + value_h;
-      }
-
-      // Applied after the fit, so it deliberately breaks out of the disc. The
-      // pedal-state tile needs it: its widest state, 브레이크, pins the value
-      // at 24 px, which is too small to read at a glance while driving.
-      if (value_scale != 1.0f) {
-        value_pt = (int)(value_pt * value_scale + 0.5f);
-        configFont(p, "Open Sans", value_pt, "Bold");
-        value_h = QFontMetrics(p.font()).tightBoundingRect("8").height();
-        const int n = label_lines.size();
-        total_h = label_h * n + LINE_GAP * (n - 1) + TEXT_GAP + value_h;
+        fit_cache->insert(fit_key, TileFit{label_pt, value_pt, label_h, value_h, total_h});
       }
 
       const int top = cy - total_h / 2;
@@ -3622,18 +3643,25 @@ void NvgWindow::drawThermal(QPainter &p) {
   // few px to spare; measured from fixed reference strings, never the live
   // values, so a changing reading can never resize the strip. At 338 wide it
   // lands near 38 px (it was 32).
-  int value_pt = 42;
-  for (; value_pt > 20; value_pt--) {
-    configFont(p, "Open Sans", value_pt, "Bold");
-    if (QFontMetrics(p.font()).tightBoundingRect("100%").width() <= col_w - 6) break;
-  }
+  // The fit and the two ink heights depend only on col_w, so they are worked
+  // out once per width: the loop below used to run on every paint, up to 22
+  // tightBoundingRect calls (glyph outlines) each time.
   constexpr int LABEL_PT = 25;   // 22 + 15%
-  // Ink heights, not line boxes: every string here is digits / caps with no
-  // descender (see the note this replaced in git history).
-  configFont(p, "Open Sans", value_pt, "Bold");
-  const int val_ink_h = QFontMetrics(p.font()).tightBoundingRect("8°%").height();
-  configFont(p, "Open Sans", LABEL_PT, "Bold");
-  const int lab_ink_h = QFontMetrics(p.font()).tightBoundingRect("A").height();
+  static int fit_col_w = -1, value_pt = 42, val_ink_h = 0, lab_ink_h = 0;
+  if (col_w != fit_col_w) {
+    fit_col_w = col_w;
+    value_pt = 42;
+    for (; value_pt > 20; value_pt--) {
+      configFont(p, "Open Sans", value_pt, "Bold");
+      if (QFontMetrics(p.font()).tightBoundingRect("100%").width() <= col_w - 6) break;
+    }
+    // Ink heights, not line boxes: every string here is digits / caps with no
+    // descender (see the note this replaced in git history).
+    configFont(p, "Open Sans", value_pt, "Bold");
+    val_ink_h = QFontMetrics(p.font()).tightBoundingRect("8°%").height();
+    configFont(p, "Open Sans", LABEL_PT, "Bold");
+    lab_ink_h = QFontMetrics(p.font()).tightBoundingRect("A").height();
+  }
 
   // The strip's box is fixed (rightColumnLayout places the status block from
   // it); the two text lines are centred in it.
@@ -3665,15 +3693,22 @@ void NvgWindow::drawThermal(QPainter &p) {
   const int label_base = value_base + value_label_gap + lab_ink_h;
   // Each string centred on its column by its own ink, so digits look optically
   // centred rather than advance-centred.
+  // Ink rects memoised per font and string, like drawCenteredText's: the
+  // readings take a bounded set of values.
+  static auto *ink_tables = new std::deque<FontTextRects>;
+  auto inkRect = [&](const QString &text) {
+    return cachedTextRect(textRectsFor(ink_tables, p.font()), text,
+                          [&] { return QFontMetrics(p.font()).tightBoundingRect(text); });
+  };
   auto drawTile = [&](int col, const QString &value, const QString &label, const QColor &valColor) {
     const int cx = left + pad + col_w * col + col_w / 2;
     configFont(p, "Open Sans", value_pt, "Bold");
-    const QRect vi = QFontMetrics(p.font()).tightBoundingRect(value);
+    const QRect vi = inkRect(value);
     p.setPen(valColor);
     p.drawText(cx - vi.width() / 2 - vi.left(), value_base, value);
 
     configFont(p, "Open Sans", LABEL_PT, "Bold");
-    const QRect li = QFontMetrics(p.font()).tightBoundingRect(label);
+    const QRect li = inkRect(label);
     p.setPen(QColor(0, 255, 0, 220));
     p.drawText(cx - li.width() / 2 - li.left(), label_base, label);
   };
