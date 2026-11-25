@@ -19,6 +19,13 @@ Desire = log.LateralPlan.Desire
 # itself stops on this car. Turns have no minimum.
 LANE_CHANGE_SPEED_MIN = 10 * CV.KPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
+# Side Blind Zone Alert on the driver-blinker path. A lane change toward a side
+# with a car in its blind zone does not start -- no nudge overrides it -- and
+# stays held BSM_HOLD_S after the alert clears (the ATC path already holds the
+# same 2 s through SideState.update_obstacles). One that has just started is
+# taken back to the lane if the alert comes up within BSM_ABORT_S.
+BSM_HOLD_S = 2.0
+BSM_ABORT_S = 1.0
 ATC_LANE_CHANGE_SPEED_MIN = LANE_CHANGE_SPEED_MIN
 # Under 30 km/h a blinker is as often a turn or a merge in a queue as a lane
 # change, and the car has no blind-spot signal, so a low-speed lane change:
@@ -203,6 +210,7 @@ class DesireHelper:
     self.keep_pulse_timer = 0.0
     self.prev_one_blinker = False
     self.desire = Desire.none
+    self.bsm_hold_s = {'left': 0.0, 'right': 0.0}   # BSM_HOLD_S countdown per side
 
     params = Params()
     self.lane_change_enabled = params.get_bool('LaneChangeEnabled')
@@ -265,6 +273,7 @@ class DesireHelper:
         self.turn_rearm_new_point = True
     else:
       self.turn_rearm_new_point = False
+    self._update_blindspot_hold(carstate)
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
     driver_st = (BLINKER_LEFT if carstate.leftBlinker else 0) | (BLINKER_RIGHT if carstate.rightBlinker else 0)
 
@@ -387,6 +396,18 @@ class DesireHelper:
   # legacy (0.8.14) driver-blinker path; under LANE_CHANGE_LOW_SPEED the
   # start needs the nudge and room on that side
   # ─────────────────────────────────────────────
+  def _update_blindspot_hold(self, carstate):
+    for key, on in (('left', carstate.leftBlindspot), ('right', carstate.rightBlindspot)):
+      self.bsm_hold_s[key] = BSM_HOLD_S if on else max(0.0, self.bsm_hold_s[key] - DT_MDL)
+
+  def _blindspot_held(self, direction):
+    """A car in the blind zone on that side now or within BSM_HOLD_S."""
+    if direction == LaneChangeDirection.left:
+      return self.bsm_hold_s['left'] > 0.0
+    if direction == LaneChangeDirection.right:
+      return self.bsm_hold_s['right'] > 0.0
+    return False
+
   def _low_speed_room(self, carstate):
     """Under LANE_CHANGE_LOW_SPEED: a lane or a road edge a lane away on the change side."""
     if carstate.vEgo >= self.lane_change_low_speed:
@@ -412,8 +433,7 @@ class DesireHelper:
                        (AUTO_LCA_START_TIME+0.25) > self.auto_lane_change_timer > AUTO_LCA_START_TIME
       torque_applied = torque_applied and self._low_speed_room(carstate)
 
-      blindspot_detected = ((carstate.leftBlindspot and self.lane_change_direction == LaneChangeDirection.left) or
-                            (carstate.rightBlindspot and self.lane_change_direction == LaneChangeDirection.right))
+      blindspot_detected = self._blindspot_held(self.lane_change_direction)
 
       # State transitions
       # off
@@ -430,21 +450,32 @@ class DesireHelper:
       elif self.lane_change_state == LaneChangeState.preLaneChange:
         if not one_blinker or below_lane_change_speed:
           self.lane_change_state = LaneChangeState.off
-        elif torque_applied and (not blindspot_detected or self.prev_torque_applied):
+        elif blindspot_detected:
+          # Car in that blind zone: wait. It used to take a second nudge as an
+          # override (prev_torque_applied), and after a blocked automatic start
+          # that flag was set on the very next frame, so any later nudge went
+          # straight through with the zone still occupied. The automatic start
+          # count restarts, so it runs again AUTO_LCA_START_TIME after the zone
+          # has been clear for BSM_HOLD_S.
+          self.auto_lane_change_timer = 0.0
+        elif torque_applied:
           self.lane_change_state = LaneChangeState.laneChangeStarting
-        elif torque_applied and blindspot_detected and self.auto_lane_change_timer != 10.0:
-          self.auto_lane_change_timer = 10.0
-        elif not torque_applied and self.auto_lane_change_timer == 10.0 and not self.prev_torque_applied:
-          self.prev_torque_applied = True
 
       # LaneChangeState.laneChangeStarting
       elif self.lane_change_state == LaneChangeState.laneChangeStarting:
-        # fade out over .5s
-        self.lane_change_ll_prob = max(self.lane_change_ll_prob - 2 * DT_MDL, 0.0)
+        if blindspot_detected and self.lane_change_timer < BSM_ABORT_S:
+          # A car came into that blind zone just as the change began: back to
+          # the lane and wait, as above.
+          self.lane_change_state = LaneChangeState.preLaneChange
+          self.lane_change_ll_prob = 1.0
+          self.auto_lane_change_timer = 0.0
+        else:
+          # fade out over .5s
+          self.lane_change_ll_prob = max(self.lane_change_ll_prob - 2 * DT_MDL, 0.0)
 
-        # 98% certainty
-        if lane_change_prob < 0.02 and self.lane_change_ll_prob < 0.01:
-          self.lane_change_state = LaneChangeState.laneChangeFinishing
+          # 98% certainty
+          if lane_change_prob < 0.02 and self.lane_change_ll_prob < 0.01:
+            self.lane_change_state = LaneChangeState.laneChangeFinishing
 
       # LaneChangeState.laneChangeFinishing
       elif self.lane_change_state == LaneChangeState.laneChangeFinishing:
