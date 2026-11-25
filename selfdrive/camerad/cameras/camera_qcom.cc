@@ -21,6 +21,7 @@
 #include "selfdrive/camerad/include/msmb_ispif.h"
 #include "selfdrive/common/clutil.h"
 #include "selfdrive/common/params.h"
+#include "selfdrive/common/stage_timing.h"
 #include "selfdrive/common/swaglog.h"
 #include "selfdrive/common/timing.h"
 #include "selfdrive/common/util.h"
@@ -1546,8 +1547,27 @@ static void setup_self_recover(CameraState *c, const uint16_t *lapres, size_t la
 // called by processing_thread
 void process_road_camera(MultiCameraState *s, CameraState *c, int cnt) {
   const CameraBuf *b = &c->buf;
+  const double t_lap0 = stage_timing::boot_ms();
   const int roi_id = cnt % std::size(s->lapres);  // rolling roi
   s->lapres[roi_id] = s->lap_conv->Update(b->q, (uint8_t *)b->cur_rgb_buf->addr, roi_id);
+
+  // Road frame stages -> /data/log/camerad_timing.jsonl (stage_timing.h).
+  // divert: ISP EOF -> buffer handed over; queue: -> processing thread picks it
+  // up; debayer / yuv: the two GPU kernels incl. any wait for the GPU; send:
+  // VisionIPC send; eof_to_send: the whole camerad part before modeld can see
+  // the frame; lapconv: the sharpness kernel after the send (GPU, not in path).
+  static stage_timing::Timer timing("/data/log/camerad_timing.jsonl",
+      {"divert", "queue", "debayer", "yuv", "send", "eof_to_send", "lapconv"});
+  const double eof_ms = b->cur_frame_data.timestamp_eof * 1e-6;
+  const double div_ms = b->cur_frame_data.t_divert_ms;
+  timing.add(0, div_ms - eof_ms);
+  timing.add(1, b->t_acquire_ms - div_ms);
+  timing.add(2, b->t_debayer_ms - b->t_acquire_ms);
+  timing.add(3, b->t_yuv_ms - b->t_debayer_ms);
+  timing.add(4, b->t_send_ms - b->t_yuv_ms);
+  timing.add(5, b->t_send_ms - eof_ms);
+  timing.add(6, stage_timing::boot_ms() - t_lap0);
+  timing.frame_done();
   setup_self_recover(c, &s->lapres[0], std::size(s->lapres));
 
   MessageBuilder msg;
@@ -1603,6 +1623,7 @@ void cameras_run(MultiCameraState *s) {
         const int buffer = (isp_event_data->u.buf_done.stream_id & 0xFFFF) - 1;
         if (buffer == 0) {
           c->buf.camera_bufs_metadata[buf_idx] = get_frame_metadata(c, isp_event_data->frame_id);
+          c->buf.camera_bufs_metadata[buf_idx].t_divert_ms = stage_timing::boot_ms();
           c->buf.queue(buf_idx);
         } else {
           auto &ss = c->ss[buffer];

@@ -14,6 +14,7 @@
 #include "selfdrive/common/clutil.h"
 #include "selfdrive/common/modeldata.h"
 #include "selfdrive/common/params.h"
+#include "selfdrive/common/stage_timing.h"
 #include "selfdrive/common/swaglog.h"
 #include "selfdrive/common/util.h"
 #include "selfdrive/hardware/hw.h"
@@ -132,6 +133,7 @@ CameraBuf::~CameraBuf() {
 
 bool CameraBuf::acquire() {
   if (!safe_queue.try_pop(cur_buf_idx, 50)) return false;
+  t_acquire_ms = stage_timing::boot_ms();
 
   if (camera_bufs_metadata[cur_buf_idx].frame_id == -1) {
     LOGE("no frame data? wtf");
@@ -160,9 +162,11 @@ bool CameraBuf::acquire() {
 
   clWaitForEvents(1, &event);
   CL_CHECK(clReleaseEvent(event));
+  t_debayer_ms = stage_timing::boot_ms();
 
   cur_yuv_buf = vipc_server->get_buffer(yuv_type);
   rgb2yuv->queue(q, cur_rgb_buf->buf_cl, cur_yuv_buf->buf_cl);
+  t_yuv_ms = stage_timing::boot_ms();
 
   VisionIpcBufExtra extra = {
                         cur_frame_data.frame_id,
@@ -173,6 +177,7 @@ bool CameraBuf::acquire() {
   cur_yuv_buf->set_frame_id(cur_frame_data.frame_id);
   vipc_server->send(cur_rgb_buf, &extra);
   vipc_server->send(cur_yuv_buf, &extra);
+  t_send_ms = stage_timing::boot_ms();
 
   return true;
 }

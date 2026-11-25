@@ -71,6 +71,9 @@ typedef struct FrameMetadata {
   float lens_sag;
   float lens_err;
   float lens_true_pos;
+
+  // CLOCK_BOOTTIME ms when the ISP handed the buffer over (stage_timing).
+  double t_divert_ms;
 } FrameMetadata;
 
 typedef struct CameraExpInfo {
@@ -108,6 +111,9 @@ public:
   int rgb_width, rgb_height, rgb_stride;
 
   mat3 yuv_transform;
+
+  // CLOCK_BOOTTIME ms stamps of the last acquire(), for stage_timing.
+  double t_acquire_ms = 0, t_debayer_ms = 0, t_yuv_ms = 0, t_send_ms = 0;
 
   CameraBuf() = default;
   ~CameraBuf();

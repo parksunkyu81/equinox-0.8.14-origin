@@ -8,6 +8,7 @@
 #include "cereal/visionipc/visionipc_client.h"
 #include "selfdrive/common/clutil.h"
 #include "selfdrive/common/params.h"
+#include "selfdrive/common/stage_timing.h"
 #include "selfdrive/common/swaglog.h"
 #include "selfdrive/common/util.h"
 #include "selfdrive/hardware/hw.h"
@@ -76,10 +77,21 @@ void run_model(ModelState &model, VisionIpcClient &vipc_client, bool wide_camera
   mat3 model_transform_wide = {};
   bool live_calib_seen = false;
 
+  // Frame stages -> /data/log/modeld_timing.jsonl (stage_timing.h).
+  // eof_to_recv: camera EOF -> modeld has the frame (camerad + VisionIPC);
+  // idle: modeld blocked in recv since its last publish; pre: SubMaster etc.
+  // before the model; exec: model_eval_frame; publish: modelV2 + cameraOdometry;
+  // eof_to_publish: the whole camera -> modelV2 path. "skipped" counts frames
+  // VisionIPC dropped because modeld was still busy.
+  stage_timing::Timer timing("/data/log/modeld_timing.jsonl",
+      {"eof_to_recv", "idle", "pre", "exec", "publish", "eof_to_publish"});
+  double t_last_pub = 0;
+
   while (!do_exit) {
     VisionIpcBufExtra extra = {};
     VisionBuf *buf = vipc_client.recv(&extra);
     if (buf == nullptr) continue;
+    const double t_recv = stage_timing::boot_ms();
 
     // TODO: path planner timeout?
     sm.update(0);
@@ -116,6 +128,18 @@ void run_model(ModelState &model, VisionIpcClient &vipc_client, bool wide_camera
     model_publish(pm, extra.frame_id, frame_id, frame_drop_ratio, *model_output, extra.timestamp_eof, model_execution_time,
                   kj::ArrayPtr<const float>(model.output.data(), model.output.size()), live_calib_seen);
     posenet_publish(pm, extra.frame_id, vipc_dropped_frames, *model_output, extra.timestamp_eof, live_calib_seen);
+
+    const double t_pub = stage_timing::boot_ms();
+    const double eof_ms = extra.timestamp_eof * 1e-6;
+    timing.add(0, t_recv - eof_ms);
+    if (t_last_pub > 0) timing.add(1, t_recv - t_last_pub);
+    timing.add(2, mt1 - t_recv);
+    timing.add(3, mt2 - mt1);
+    timing.add(4, t_pub - mt2);
+    timing.add(5, t_pub - eof_ms);
+    if (run_count > 1 && vipc_dropped_frames > 0) timing.count(std::min(vipc_dropped_frames, 10U));
+    timing.frame_done();
+    t_last_pub = t_pub;
 
     //printf("model process: %.2fms, from last %.2fms, vipc_frame_id %u, frame_id, %u, frame_drop %.3f\n", mt2 - mt1, mt1 - last, extra.frame_id, frame_id, frame_drop_ratio);
     last = mt1;
