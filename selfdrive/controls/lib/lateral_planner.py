@@ -65,6 +65,60 @@ V09_LANE_CENTER_GAIN = 0.8
 # road_speed_limiter publishes roadLimitSpeed (with atcType) at 20 Hz.
 ATC_MSG_TIMEOUT_S = 0.5
 
+# Turn opposite-side limit. With a turn desire out, the path may not go further
+# toward the other side than the ego lane's own centre (and never further than
+# straight ahead when the lane bends toward the turn). 2026-11-25--06-53-47:
+# before the slow left turns the model's path bent right while the left-turn
+# desire was out -- 774 s +1.0 m at 20 m with the lane centred at ~0 (the
+# desire's own wobble), 834 s +3.4 m where the lane itself curved right to
+# +2.4 m -- and at 834 s the car steered right until the driver pushed back.
+# Zeroing the right side outright would have put the 834 s target 1 m left of
+# the left lane line, so the bound follows the lane. Where the model's two ego
+# lines are not a plausible lane (width outside TURN_OPPOSITE_LANE_WIDTH_M) the
+# path is left alone. Model frame: y + is to the right.
+TURN_OPPOSITE_LANE_WIDTH_M = (2.5, 4.5)
+
+
+def limit_turn_opposite(path_xyz, turn_left, ll_x, lll_y, rll_y):
+  """Path y with the opposite-side excursion cut at the lane centre, or None if nothing changed."""
+  x = path_xyz[:, 0]
+  y = path_xyz[:, 1]
+  try:
+    centre = np.interp(x, ll_x, (lll_y + rll_y) * 0.5)
+    width = np.interp(x, ll_x, rll_y - lll_y)
+  except (ValueError, TypeError):
+    return None
+  lo, hi = TURN_OPPOSITE_LANE_WIDTH_M
+  valid = (width >= lo) & (width <= hi) & np.isfinite(centre)
+  if turn_left:
+    bound = np.where(valid, np.maximum(centre, 0.0), np.inf)
+    new_y = np.minimum(y, bound)
+  else:
+    bound = np.where(valid, np.minimum(centre, 0.0), -np.inf)
+    new_y = np.maximum(y, bound)
+  if not np.any(np.abs(new_y - y) > 0.01):
+    return None
+  return new_y
+
+
+# The model's orientation.z has the same sign as the heading of its own path
+# but ~0.55 of its size (11-25 seg 12, 204 curve frames: corr 0.99, sign 100%).
+TURN_OPPOSITE_YAW_SCALE = 0.55
+
+
+def limit_turn_opposite_yaw(x, new_y, t, plan_yaw, plan_yaw_rate, turn_left):
+  """The model's heading and yaw rate, cut where they point further to the other
+  side than the limited path does (scaled to the model's own size)."""
+  geo = np.arctan2(np.gradient(new_y), np.maximum(np.gradient(x), 1e-3))
+  geo_rate = np.gradient(geo) / np.maximum(np.gradient(t), 1e-3)
+  yaw_bound = TURN_OPPOSITE_YAW_SCALE * geo
+  rate_bound = TURN_OPPOSITE_YAW_SCALE * geo_rate
+  if turn_left:
+    return (np.minimum(plan_yaw, np.maximum(yaw_bound, 0.0)),
+            np.minimum(plan_yaw_rate, np.maximum(rate_bound, 0.0)))
+  return (np.maximum(plan_yaw, np.minimum(yaw_bound, 0.0)),
+          np.maximum(plan_yaw_rate, np.minimum(rate_bound, 0.0)))
+
 
 class LateralPlanner:
   def __init__(self, CP, use_v09=None):
@@ -254,15 +308,30 @@ class LateralPlanner:
         "lane blend moved the path %.1f m from the model path (limit %.2f m)"
         % (lane_deviation, MAX_LANE_BLEND_DEVIATION_M))
 
+    # Turn opposite-side limit (TURN_OPPOSITE_*): heading and yaw rate follow
+    # the limited path, so the MPC is not handed a straight path that still
+    # points the other way.
+    plan_yaw, plan_yaw_rate = self.plan_yaw, self.plan_yaw_rate
+    self.turn_opposite_cut_m = 0.0
+    turn = self.DH.turn_direction
+    if turn != log.LateralPlan.Desire.none and not lane_change_active and self.model_data_valid:
+      turn_left = turn == log.LateralPlan.Desire.turnLeft
+      new_y = limit_turn_opposite(d_path_xyz, turn_left, self.LP.ll_x, self.LP.lll_y, self.LP.rll_y)
+      if new_y is not None:
+        self.turn_opposite_cut_m = float(np.interp(20.0, d_path_xyz[:, 0], d_path_xyz[:, 1] - new_y))
+        d_path_xyz[:, 1] = new_y
+        plan_yaw, plan_yaw_rate = limit_turn_opposite_yaw(
+          d_path_xyz[:, 0], new_y, self.t_idxs, plan_yaw, plan_yaw_rate, turn_left)
+
     # OPTECH floors the MPC speed at 1 m/s (lateral planning is not possible at 0).
     v_mpc = max(V09_MIN_SPEED, v_ego) if self.use_v09 else v_ego
     self.v_mpc = v_mpc
     d_path_distance = np.linalg.norm(d_path_xyz, axis=1)
     path_distance = np.linalg.norm(self.path_xyz, axis=1)
     y_pts = np.interp(v_mpc * self.t_idxs[:LAT_MPC_N + 1], d_path_distance, d_path_xyz[:, 1])
-    heading_pts = np.interp(v_mpc * self.t_idxs[:LAT_MPC_N + 1], path_distance, self.plan_yaw)
+    heading_pts = np.interp(v_mpc * self.t_idxs[:LAT_MPC_N + 1], path_distance, plan_yaw)
     if self.use_v09:
-      yaw_rate_pts = np.interp(v_mpc * self.t_idxs[:LAT_MPC_N + 1], path_distance, self.plan_yaw_rate)
+      yaw_rate_pts = np.interp(v_mpc * self.t_idxs[:LAT_MPC_N + 1], path_distance, plan_yaw_rate)
     else:
       curv_rate_pts = np.interp(v_mpc * self.t_idxs[:LAT_MPC_N + 1], path_distance, self.plan_curv_rate)
 
