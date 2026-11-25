@@ -179,6 +179,31 @@ TURN_REPULSE_LAUNCH_V = 2. * CV.KPH_TO_MS
 TURN_REPULSE_STOP_S = 3.
 TURN_REPULSE_PERIOD_S = 2.5
 TURN_REPULSE_GAP_FRAMES = 2
+# Near-point re-pulse. An ATC turn desire starts ATC_TURN_FORCE_M (40 m) out,
+# which at 10-20 km/h is 7-10 s before the turn, and the model does not hold a
+# pulse that long. On 2026-11-25--06-53-47 three slow left turns (boot t 774,
+# 794, 834 s; 10-19 km/h) kept the path straight or bent it RIGHT (+1..+6 m at
+# 30 m, the model's turnLeft and turnRight states level at 0.3-0.5) and only
+# turned left 9-15 m from the point; the driver braked to 7 km/h, under the
+# LKAS cut-off, and turned the wheel 400 deg himself. The same drive's turns at
+# 22-40 km/h bent the path 1-1.5 s after the pulse. Two desire blinks in the
+# slow turns (799.56, 839.01) were followed by the left turn 1.5-2.5 s later.
+# So while moving with an ATC turn desire and the point inside
+# TURN_NEAR_REPULSE_M, the desire is re-pulsed every TURN_REPULSE_PERIOD_S as
+# long as the model's path at TURN_NEAR_PATH_X is not yet TURN_NEAR_BENT_M
+# toward the turn side (on that drive bent paths read 3-25 m there, unbent
+# ones -0.6..+3.6 m the wrong way). Not once the car has turned
+# TURN_NEAR_MAX_HEADING_DEG toward the side: on the turn's exit the path
+# straightens and reads "unbent" too (replay of that drive: 2 such exit
+# pulses, 0.6-5.4 m from the point after 60-90 deg), and a turn pulse there
+# would hold the model in the turn. Nor inside TURN_NEAR_MIN_M: the model took
+# 1.5-2.5 s to turn after a pulse, too late from there, and the navigation
+# distance lags (one 2.6 m pulse in that replay came after the point).
+TURN_NEAR_REPULSE_M = 25.
+TURN_NEAR_MIN_M = 8.
+TURN_NEAR_MAX_HEADING_DEG = 15.
+TURN_NEAR_PATH_X = 20.
+TURN_NEAR_BENT_M = 2.
 
 
 class DesireHelper:
@@ -269,12 +294,15 @@ class DesireHelper:
     self.turn_stop_t = 0.
     self.turn_repulse_clock = 0.
     self.turn_repulse_left = 0
+    self.turn_near_clock = TURN_REPULSE_PERIOD_S   # first near re-pulse fires at once
+    self.modeldata = None
 
   # ─────────────────────────────────────────────
   # entry
   # ─────────────────────────────────────────────
   def update(self, carstate, active, lane_change_prob, modeldata=None, atc_type="", atc_dist=0.):
     self.atc_dist = float(atc_dist)
+    self.modeldata = modeldata
     # New navigation turn point during or after a turn (TURN_REARM_NEW_POINT_M).
     # The blinker-only driver turn keeps the full rearm either way.
     if self.turn_latched != TURN_NONE or self.turn_disable_count > 0:
@@ -358,6 +386,7 @@ class DesireHelper:
       self.turn_stop_t = 0.
       self.turn_repulse_clock = 0.
       self.turn_repulse_left = 0
+      self.turn_near_clock = TURN_REPULSE_PERIOD_S
       return
     v = carstate.vEgo
     fire = False
@@ -372,11 +401,38 @@ class DesireHelper:
         fire = True   # moving off after the wait
       self.turn_stop_t = 0.
       self.turn_repulse_clock = 0.
+      # near the point with the path still unbent (TURN_NEAR_*)
+      self.turn_near_clock += DT_MDL
+      if fire:
+        self.turn_near_clock = 0.
+      elif (self.atc_owner and not self.turn_by_driver and TURN_NEAR_MIN_M <= self.atc_dist <= TURN_NEAR_REPULSE_M and
+            self.turn_heading_deg < TURN_NEAR_MAX_HEADING_DEG and
+            self.turn_near_clock >= TURN_REPULSE_PERIOD_S and self._path_unbent()):
+        self.turn_near_clock = 0.
+        fire = True
     if fire:
       self.turn_repulse_left = TURN_REPULSE_GAP_FRAMES
     if self.turn_repulse_left > 0:
       self.turn_repulse_left -= 1
       self.desire = Desire.none
+
+  def _path_unbent(self):
+    """The model's path at TURN_NEAR_PATH_X is less than TURN_NEAR_BENT_M toward the turn side."""
+    try:
+      pos = self.modeldata.position
+      xs, ys = pos.x, pos.y
+      for i in range(1, len(xs)):
+        if xs[i] >= TURN_NEAR_PATH_X:
+          x0, x1 = xs[i - 1], xs[i]
+          w = (TURN_NEAR_PATH_X - x0) / (x1 - x0) if x1 > x0 else 1.
+          y = ys[i - 1] + (ys[i] - ys[i - 1]) * w
+          break
+      else:
+        return False   # path shorter than that: the car is already turning hard or stopping
+    except (AttributeError, IndexError, TypeError):
+      return False
+    toward = -y if self.desire == Desire.turnLeft else y   # modelV2 y is + to the right
+    return toward < TURN_NEAR_BENT_M
 
   def _reset_maneuver(self):
     self.lane_change_state = LaneChangeState.off
