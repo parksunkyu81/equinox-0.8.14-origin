@@ -1459,51 +1459,48 @@ RightColumnLayout rightColumnLayout(int w, int h) {
   return l;
 }
 
-// 페달 상태 icons, drawn as vector shapes so they stay sharp at any size and
-// need no asset files. Each fits a box h tall centred on c.
+// 페달 상태 icons (design G, chosen 2026-11-25), standard shapes so they read
+// without learning: Google Material Design arrow_upward / arrow_downward /
+// keyboard_double_arrow_up outlines (24 x 24 grid, Apache 2.0) for 가속 /
+// 감속 / BOOST, and the ISO 2575 brake tell-tale (!) for 브레이크. Vector
+// shapes, so no asset files. Each fits a box s wide and tall centred on c.
 enum class PedalIcon { Accel, Decel, Brake, Boost };
-constexpr float PEDAL_ICON_SCALE = 1.7f;   // icon height / the old value's cap height
 
-static void drawPedalIcon(QPainter &p, QPointF c, float h, PedalIcon kind, const QColor &color) {
+static void drawPedalIcon(QPainter &p, QPointF c, float s, PedalIcon kind, const QColor &color) {
+  static const QPointF ARROW_UP[] = {{4, 12}, {5.41, 13.41}, {11, 7.83}, {11, 20}, {13, 20},
+                                     {13, 7.83}, {18.58, 13.42}, {20, 12}, {12, 4}};
+  static const QPointF ARROW_DOWN[] = {{4, 12}, {5.41, 10.59}, {11, 16.17}, {11, 4}, {13, 4},
+                                       {13, 16.17}, {18.58, 10.58}, {20, 12}, {12, 20}};
+  static const QPointF DOUBLE_UP_LOW[] = {{6, 17.59}, {7.41, 19}, {12, 14.42}, {16.59, 19},
+                                          {18, 17.59}, {12, 11.59}};
+  static const QPointF DOUBLE_UP_HIGH[] = {{6, 11}, {7.41, 12.41}, {12, 7.83}, {16.59, 12.41},
+                                           {18, 11}, {12, 5}};
   p.save();
   p.setRenderHint(QPainter::Antialiasing);
   p.setOpacity(1.0);
-  const float x = c.x(), y = c.y(), hh = h / 2.0f;
+  const float x = c.x(), y = c.y();
 
-  // Block arrow: a wide head over a stem, pointing up (dir -1) or down (+1).
-  auto arrow = [&](float dir) {
-    const float head_w = h * 0.95f, head_h = h * 0.52f, stem_w = h * 0.38f;
-    const float tip = y + dir * hh, base = tip - dir * head_h, tail = y - dir * hh;
+  auto material = [&](const QPointF *pts, int n) {
     QPolygonF poly;
-    poly << QPointF(x, tip)
-         << QPointF(x + head_w / 2, base) << QPointF(x + stem_w / 2, base)
-         << QPointF(x + stem_w / 2, tail) << QPointF(x - stem_w / 2, tail)
-         << QPointF(x - stem_w / 2, base) << QPointF(x - head_w / 2, base);
-    p.setPen(QPen(color, h * 0.06f, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    for (int i = 0; i < n; i++) {
+      poly << QPointF(x + (pts[i].x() - 12) * s / 24, y + (pts[i].y() - 12) * s / 24);
+    }
+    p.setPen(Qt::NoPen);
     p.setBrush(color);
     p.drawPolygon(poly);
   };
 
   switch (kind) {
-    case PedalIcon::Accel: arrow(-1.0f); break;
-    case PedalIcon::Decel: arrow(1.0f); break;
-    case PedalIcon::Boost: {
-      // Two stacked up-chevrons: faster than a plain 가속 arrow.
-      const float w = h * 0.50f, ch = h * 0.30f, pen = h * 0.17f;
-      p.setPen(QPen(color, pen, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-      p.setBrush(Qt::NoBrush);
-      for (float off : {-h * 0.20f, h * 0.20f}) {
-        const float cy = y + off;
-        QPolygonF v;
-        v << QPointF(x - w, cy + ch / 2) << QPointF(x, cy - ch / 2) << QPointF(x + w, cy + ch / 2);
-        p.drawPolyline(v);
-      }
+    case PedalIcon::Accel: material(ARROW_UP, 9); break;
+    case PedalIcon::Decel: material(ARROW_DOWN, 9); break;
+    case PedalIcon::Boost:
+      material(DOUBLE_UP_LOW, 6);
+      material(DOUBLE_UP_HIGH, 6);
       break;
-    }
     case PedalIcon::Brake: {
-      // The dashboard brake symbol: (!) -- a ring with an exclamation mark,
-      // between two side arcs.
-      const float r = h * 0.33f, pen = h * 0.10f;
+      // (!) -- a ring with an exclamation mark between two side arcs, at
+      // 0.8 of the box so its arcs sit as wide as the arrows' heads.
+      const float h = s * 0.8f, r = h * 0.33f, pen = h * 0.10f;
       p.setPen(QPen(color, pen, Qt::SolidLine, Qt::RoundCap));
       p.setBrush(Qt::NoBrush);
       p.drawEllipse(QPointF(x, y), r, r);
@@ -2328,15 +2325,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
         drawText(p, cx_, top + (i + 1) * label_h + i * LINE_GAP - lift,
                  label_lines[i], label_alpha);
       }
-      if (!value.isEmpty()) {
-        QColor c = value_color;
-        configFont(p, "Open Sans", value_pt, "Bold");
-        drawTextWithColor(p, cx_, top + total_h, value, c);
-      }
+      QColor c = value_color;
+      configFont(p, "Open Sans", value_pt, "Bold");
+      drawTextWithColor(p, cx_, top + total_h, value, c);
       p.setOpacity(1.0);
-      // Where the value's ink sits (baseline top + total_h, cap height
-      // value_h), so a tile can draw an icon in its place.
-      return QRectF(cx_ - value_h / 2.0, top + total_h - value_h, value_h, value_h);
     };
 
     // value_scale > 1 lets the value spill past the disc on purpose; see the
@@ -2349,8 +2341,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       p.setBrush(blackColor(200));
       p.drawEllipse(cx_ - SD / 2, cy - SD / 2, SD, SD);
       // A hair inside the disc's edge so the glyphs don't graze it.
-      return drawTileText(cx_, cy, label, value, value_color, SD / 2 - 3, 200, size_ref,
-                          value_scale, label_lift, label_scale);
+      drawTileText(cx_, cy, label, value, value_color, SD / 2 - 3, 200, size_ref,
+                   value_scale, label_lift, label_scale);
     };
 
     // Same tile as statusCircle plus a progress ring, so the live comma-pedal
@@ -2482,19 +2474,19 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
       statusCircle(scol_l, speed_row,
                    tr_label, tr_str, QColor(120, 255, 120, 200), "8.88");
-      // The state is an icon now, drawn where the value text used to sit.
-      // The fit still measures 브레이크 at 1.60 with the tenth-of-a-block lift,
-      // so the label keeps exactly the place and size it had and still matches
-      // 페달 강도 below it; only the value slot changes from a word to a symbol.
-      const QRectF pedal_value = statusCircle(scol_r, speed_row_top, "페달 상태", "",
-                                              pedalStatusColor, "브레이크", 1.60f, 0.10f);
+      // 페달 상태: no label, a ring in the state's colour and one large
+      // standard icon (design G, chosen 2026-11-25), so it reads at a glance.
       {
-        // Centred on the old value's ink, sized up from its cap height but
-        // kept inside the disc below the label.
-        const float below = speed_row_top + SD / 2 - pedal_value.center().y();
-        const float icon_h = std::min<float>(pedal_value.height() * PEDAL_ICON_SCALE,
-                                             2.0f * (below - 6));
-        drawPedalIcon(p, QPointF(scol_r, pedal_value.center().y()), icon_h, pedal_icon,
+        p.setPen(Qt::NoPen);
+        p.setBrush(blackColor(200));
+        p.drawEllipse(scol_r - SD / 2, speed_row_top - SD / 2, SD, SD);
+        p.save();
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(pedalStatusColor, 8));
+        p.drawEllipse(QPointF(scol_r, speed_row_top), SD / 2 - 6, SD / 2 - 6);
+        p.restore();
+        drawPedalIcon(p, QPointF(scol_r, speed_row_top), SD * 5 / 7, pedal_icon,
                       pedalStatusColor);
       }
 
