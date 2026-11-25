@@ -635,6 +635,10 @@ void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
   constexpr float LANE_LINE_WEAK_PROB = 0.5f;
   constexpr float LANE_LINE_MIN_DRAW_PROB = 0.05f;
   constexpr float LANE_LINE_WEAK_MIN_ALPHA = 0.45f;
+  // Side Blind Zone Alert: the ego line on that side turns red (drawBlindSpot
+  // adds the edge glow). 1 = ego-left, 2 = ego-right.
+  const auto bsm_cs = (*s->sm)["carState"].getCarState();
+  const bool bsm_side[3] = {false, bsm_cs.getLeftBlindspot(), bsm_cs.getRightBlindspot()};
   for (int i = 1; i <= 2; ++i) {
     const float prob = scene.lane_line_probs[i];
     if (prob < LANE_LINE_MIN_DRAW_PROB) {
@@ -653,6 +657,9 @@ void NvgWindow::drawLaneLines(QPainter &painter, const UIState *s) {
       painter.setBrush(QColor::fromRgbF(1.0, 0.55, 0.0, a));   // orange
     } else {
       painter.setBrush(QColor::fromRgbF(0.0, 0.45, 1.0, a));   // blue
+    }
+    if (bsm_side[i]) {
+      painter.setBrush(QColor::fromRgbF(0.92, 0.12, 0.12, std::max(a, 0.85f)));   // red: car in that blind zone
     }
     painter.drawPolygon(scene.lane_line_vertices[i].v, scene.lane_line_vertices[i].cnt);
   }
@@ -3279,30 +3286,39 @@ float interp(float x, std::initializer_list<T> x_list, std::initializer_list<T> 
 static int lane_change_low_speed_kph = -1;
 
 // Side Blind Zone Alert from the car (carState.left/rightBlindspot, GM 0x142
-// byte 0 bits 6/7). A red badge at the screen edge on that side, so the driver
-// can check it against the mirror light: the left/right assignment came from a
-// statistical match on the 2026-11-25 drive and is not confirmed yet.
+// byte 0 bits 6/7), shown on that side so the driver can check it against the
+// mirror light: the left/right assignment came from a statistical match on the
+// 2026-11-25 drive and is not confirmed yet.
 void NvgWindow::drawBlindSpot(QPainter &p) {
   const auto car_state = (*uiState()->sm)["carState"].getCarState();
   const bool sides[2] = {car_state.getLeftBlindspot(), car_state.getRightBlindspot()};
   if (!sides[0] && !sides[1]) return;
-  static QFont font = [] {
-    QFont f("Open Sans");
-    f.setPixelSize(44);
-    f.setStyleName("Bold");
-    return f;
-  }();
-  constexpr int W = 230, H = 76, MARGIN = 24;
+  // A red glow fading in from that screen edge, readable from the corner of
+  // the eye without reading anything, and a small car marker low on that edge
+  // (the radar watches beside and behind the car, not the lane ahead).
+  constexpr int GLOW_W = 150;
+  constexpr int CAR_W = 44, CAR_H = 70, CAR_MARGIN = 26;
+  const int top = header_h;
+  const int h = height() - top;
   p.save();
-  p.setFont(font);
+  p.setPen(Qt::NoPen);
   for (int i = 0; i < 2; i++) {
     if (!sides[i]) continue;
-    const QRect r(i == 0 ? MARGIN : width() - MARGIN - W, height() / 2 - H / 2, W, H);
-    p.setPen(Qt::NoPen);
-    p.setBrush(QColor(230, 30, 30, 215));
-    p.drawRoundedRect(r, 18, 18);
-    p.setPen(Qt::white);
-    p.drawText(r, Qt::AlignCenter, i == 0 ? "◀ 사각지대" : "사각지대 ▶");
+    const bool left = i == 0;
+    const int x0 = left ? 0 : width() - GLOW_W;
+    QLinearGradient glow(left ? 0 : width(), 0, left ? GLOW_W : width() - GLOW_W, 0);
+    glow.setColorAt(0.0, QColor(235, 30, 30, 200));
+    glow.setColorAt(1.0, QColor(235, 30, 30, 0));
+    p.setBrush(glow);
+    p.drawRect(x0, top, GLOW_W, h);
+
+    const int cx = left ? CAR_MARGIN : width() - CAR_MARGIN - CAR_W;
+    const int cy = height() * 2 / 3 - CAR_H / 2;
+    p.setBrush(QColor(255, 255, 255, 235));
+    p.drawRoundedRect(cx, cy, CAR_W, CAR_H, 12, 12);
+    p.setBrush(QColor(235, 30, 30, 235));
+    p.drawRoundedRect(cx + 7, cy + 10, CAR_W - 14, 18, 5, 5);   // windscreen
+    p.drawRoundedRect(cx + 7, cy + CAR_H - 22, CAR_W - 14, 12, 4, 4);   // rear window
   }
   p.restore();
 }
