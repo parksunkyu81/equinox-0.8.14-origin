@@ -1970,11 +1970,15 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   } else {
     pedal_state = PedalIcon::Decel;
   }
-  // Stopped and nothing pressed or sent: show it as AUTO HOLD (A) rather than
-  // the red 감속 arrow -- the car is held, not slowing down. Display only, so
-  // the 가속 -> 감속 hold timing above is untouched.
-  const bool pedal_stopped = car_state.getStandstill() || car_state.getVEgo() < 0.1f;
-  const PedalIcon pedal_icon = (pedal_state == PedalIcon::Decel && pedal_stopped)
+  // The car's auto hold is holding and nothing is pressed or sent: show it as
+  // AUTO HOLD (A) rather than the red 감속 arrow. carState.autoHold is CAN
+  // EPBStatus.EPBClosed; on the 11-25/26 drives it came on 0.5 s after the
+  // driver lifted off the brake at a standstill in D (and ~2 s after P), so
+  // this matches the dashboard lamp rather than every stop. It drops only once
+  // the car rolls at 1-5 km/h, but by then the pedal shows 가속. Display only,
+  // so the 가속 -> 감속 hold timing above is untouched.
+  const bool car_held = car_state.getAutoHold() > 0;
+  const PedalIcon pedal_icon = (pedal_state == PedalIcon::Decel && car_held)
                                  ? PedalIcon::Hold : pedal_state;
   QColor pedalStatusColor;
   switch (pedal_icon) {
