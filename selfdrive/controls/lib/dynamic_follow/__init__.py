@@ -22,6 +22,7 @@ DEFAULT_TR = 1.3   #1.45
 # band per speed with the brake-free floor, scaled by what FollowLearner
 # (controlsd) learns from the driver's gas and brake corrections.
 GAP_SCALE_REFRESH_S = 5.0
+TOGGLE_REFRESH_S = 0.5    # ActiveStopAccelBoost / StandstillAutoLaunch
 
 
 def speed_based_min_tr(v_ego):
@@ -153,6 +154,7 @@ class DynamicFollow:
     self.coast_curve = default_coast_curve()
     self.lift_margin = 1.0
     self.last_gap_scale_read = -GAP_SCALE_REFRESH_S
+    self.last_toggle_read = -TOGGLE_REFRESH_S
 
     self.sng = False
     self.car_data = CarData()
@@ -484,19 +486,25 @@ class DynamicFollow:
 
   def _get_live_params(self):
     # ParamControl writes ASCII "0"/"1" values. Read it live so the menu
-    # switch takes effect without restarting controls.
-    params = Params()
-    self.stop_accel_boost_enabled = params.get_bool("ActiveStopAccelBoost")
-    try:
-      self.standstill_auto_launch = params.get_bool("StandstillAutoLaunch")
-    except Exception:   # key not built into params yet: stay off
-      self.standstill_auto_launch = False
-
+    # switch takes effect without restarting controls -- but not every model
+    # frame: two file reads at 20 Hz were ~0.25 ms a frame of plannerd, and a
+    # tap on the 자동 출발 tile showing up 0.5 s later changes nothing.
+    now = sec_since_boot()
+    params = None
+    if now - self.last_toggle_read >= TOGGLE_REFRESH_S:
+      self.last_toggle_read = now
+      params = Params()
+      self.stop_accel_boost_enabled = params.get_bool("ActiveStopAccelBoost")
+      try:
+        self.standstill_auto_launch = params.get_bool("StandstillAutoLaunch")
+      except Exception:   # key not built into params yet: stay off
+        self.standstill_auto_launch = False
 
     # gap_scale is learned in controlsd (follow_learner.py) and handed over
     # through its saved state; a few seconds of lag is irrelevant to it.
-    now = sec_since_boot()
     if now - self.last_gap_scale_read >= GAP_SCALE_REFRESH_S:
+      if params is None:
+        params = Params()
       self.last_gap_scale_read = now
       try:
         raw = params.get(FOLLOW_LEARN_PARAM)
