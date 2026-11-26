@@ -75,6 +75,25 @@ def _int_or_none(v):
     return None
 
 
+def _i16(v, default=0):
+  """A phone value for an Int16 field: numbers and numeric strings rounded and
+  clamped, anything else the default. capnp raises on None, text, a fraction
+  or an out-of-range value, and one such write used to end main()."""
+  try:
+    return int(clip(int(round(float(v))), -32768, 32767))
+  except (TypeError, ValueError, OverflowError):
+    return default
+
+
+def _flag(v):
+  if isinstance(v, str):
+    return v.strip().lower() in ("1", "true", "yes")
+  try:
+    return bool(v)
+  except Exception:
+    return False
+
+
 def normalize_road_limit(road_limit, apilot=None):
   """송신 앱마다 다른 road_limit 해석을 이 수신기 기준으로 맞춘다.
 
@@ -377,7 +396,18 @@ class RoadLimitSpeedServer:
       if ret:
         data, self.remote_addr = sock.recvfrom(UDP_RECV_BUFFER)
         self._note_rx(self.remote_addr[0])
-        json_obj = json.loads(data.decode())
+        try:
+          json_obj = json.loads(data.decode())
+        except (UnicodeDecodeError, ValueError) as e:
+          json_obj = None
+          bad = 'not JSON: %s' % str(e)[:60]
+        else:
+          bad = None if isinstance(json_obj, dict) else 'JSON %s, not an object' % type(json_obj).__name__
+        if bad is not None:
+          # Drop this packet only. Clearing json_road_limit here (as the old
+          # catch-all did) lifted every limit until the next good packet.
+          self.link_log.event('bad_packet', once=True, why=bad, size=len(data))
+          return False
 
         # Destination packets (nda_manager's legacy 'cmd', 'nav_destination') fed
         # the Mapbox navd, which is gone: ignore them, and never run 'cmd' in a shell.
@@ -423,13 +453,9 @@ class RoadLimitSpeedServer:
         finally:
           self.lock.release()
 
-    except:
-
-      try:
-        self.lock.acquire()
-        self.json_road_limit = None
-      finally:
-        self.lock.release()
+    except Exception as e:
+      # Keep the last good data; check() still clears it after 6 s of silence.
+      self.link_log.event('recv_error', once=True, err=str(e)[:80])
 
     return ret
 
@@ -787,67 +813,80 @@ def main():
 
       sock.setblocking(False)
 
+      loop_errors = {}
       while True:
-
-        server.udp_recv(sock, LOOP_TIMEOUT_S)
-
-        now = sec_since_boot()
-        with server.lock:
-          apilot, server.apilot = server.apilot, None
         try:
-          atc_runner.update(now, apilot)
+          server.udp_recv(sock, LOOP_TIMEOUT_S)
+
+          now = sec_since_boot()
+          with server.lock:
+            apilot, server.apilot = server.apilot, None
+          try:
+            atc_runner.update(now, apilot)
+          except Exception as e:
+            print("road_speed_limiter: ATC update failed:", e)
+          try:
+            section_log.update(now, apilot, server.json_road_limit, atc_runner.v_ego)
+          except Exception as e:
+            print("road_speed_limiter: section log failed:", e)
+
+          dat = messaging.new_message()
+          dat.init('roadLimitSpeed')
+          dat.roadLimitSpeed.active = _i16(server.active)
+          dat.roadLimitSpeed.roadLimitSpeed = _i16(server.get_limit_val("road_limit_speed", 0))
+          dat.roadLimitSpeed.isHighway = _flag(server.get_limit_val("is_highway", False))
+          dat.roadLimitSpeed.camType = _i16(server.get_limit_val("cam_type", 0))
+          dat.roadLimitSpeed.camLimitSpeedLeftDist = _i16(server.get_limit_val("cam_limit_speed_left_dist", 0))
+          dat.roadLimitSpeed.camLimitSpeed = _i16(server.get_limit_val("cam_limit_speed", 0))
+          dat.roadLimitSpeed.sectionLimitSpeed = _i16(server.get_limit_val("section_limit_speed", 0))
+          dat.roadLimitSpeed.sectionLeftDist = _i16(server.get_limit_val("section_left_dist", 0))
+          dat.roadLimitSpeed.camSpeedFactor = CAMERA_SPEED_FACTOR
+          dat.roadLimitSpeed.bumpLeftDist = max(0, _i16(server.get_limit_val("bump_dist", 0)))
+
+          try:
+            json = server.json_road_limit
+            if json is not None and "rest_area" in json:
+
+              restAreaList = []
+              for rest_area in json["rest_area"]:
+                restArea = log.RoadLimitSpeed.RestArea.new_message()
+                restArea.image = server.get_json_val(rest_area, "image")
+                restArea.title = server.get_json_val(rest_area, "title")
+                restArea.oilPrice = server.get_json_val(rest_area, "oilPrice")
+                restArea.distance = server.get_json_val(rest_area, "distance")
+                restAreaList.append(restArea)
+
+              dat.roadLimitSpeed.restArea = restAreaList
+          except:
+            pass
+
+          try:
+            atc_runner.fill(dat.roadLimitSpeed)
+          except Exception as e:
+            print("road_speed_limiter: ATC fill failed:", e)
+
+          roadLimitSpeed.send(dat.to_bytes())
+          # Was once per loop, i.e. once per packet or per 1 s timeout; the loop
+          # is 20 Hz now, so keep the reply to the phone at 1 Hz.
+          if now - last_sdp_t >= SDP_INTERVAL_S:
+            last_sdp_t = now
+            server.send_sdp(sock)
+          server.check()
         except Exception as e:
-          print("road_speed_limiter: ATC update failed:", e)
-        try:
-          section_log.update(now, apilot, server.json_road_limit, atc_runner.v_ego)
-        except Exception as e:
-          print("road_speed_limiter: section log failed:", e)
-
-        dat = messaging.new_message()
-        dat.init('roadLimitSpeed')
-        dat.roadLimitSpeed.active = server.active
-        dat.roadLimitSpeed.roadLimitSpeed = server.get_limit_val("road_limit_speed", 0)
-        dat.roadLimitSpeed.isHighway = server.get_limit_val("is_highway", False)
-        dat.roadLimitSpeed.camType = server.get_limit_val("cam_type", 0)
-        dat.roadLimitSpeed.camLimitSpeedLeftDist = server.get_limit_val("cam_limit_speed_left_dist", 0)
-        dat.roadLimitSpeed.camLimitSpeed = server.get_limit_val("cam_limit_speed", 0)
-        dat.roadLimitSpeed.sectionLimitSpeed = server.get_limit_val("section_limit_speed", 0)
-        dat.roadLimitSpeed.sectionLeftDist = server.get_limit_val("section_left_dist", 0)
-        dat.roadLimitSpeed.camSpeedFactor = CAMERA_SPEED_FACTOR
-        dat.roadLimitSpeed.bumpLeftDist = int(clip(server.get_limit_val("bump_dist", 0) or 0, 0, 32767))
-
-        try:
-          json = server.json_road_limit
-          if json is not None and "rest_area" in json:
-
-            restAreaList = []
-            for rest_area in json["rest_area"]:
-              restArea = log.RoadLimitSpeed.RestArea.new_message()
-              restArea.image = server.get_json_val(rest_area, "image")
-              restArea.title = server.get_json_val(rest_area, "title")
-              restArea.oilPrice = server.get_json_val(rest_area, "oilPrice")
-              restArea.distance = server.get_json_val(rest_area, "distance")
-              restAreaList.append(restArea)
-
-            dat.roadLimitSpeed.restArea = restAreaList
-        except:
-          pass
-
-        try:
-          atc_runner.fill(dat.roadLimitSpeed)
-        except Exception as e:
-          print("road_speed_limiter: ATC fill failed:", e)
-
-        roadLimitSpeed.send(dat.to_bytes())
-        # Was once per loop, i.e. once per packet or per 1 s timeout; the loop
-        # is 20 Hz now, so keep the reply to the phone at 1 Hz.
-        if now - last_sdp_t >= SDP_INTERVAL_S:
-          last_sdp_t = now
-          server.send_sdp(sock)
-        server.check()
+          # One bad iteration used to end main() through the except below with
+          # nothing logged, and nothing restarts this process (manager.py starts
+          # it once), so controlsd kept the last limit until the next boot.
+          now = sec_since_boot()
+          key = type(e).__name__ + ':' + str(e)[:60]
+          if now - loop_errors.get(key, -1e9) >= 60.:
+            loop_errors[key] = now
+            server.link_log.event('loop_error', err=key)
+            print("road_speed_limiter: loop error:", key)
+          time.sleep(LOOP_TIMEOUT_S)
 
     except Exception as e:
       server.last_exception = e
+      server.link_log.event('main_exit', err=str(e)[:80])
 
 
 BUMP_LOG_PATH = os.getenv("SPEED_BUMP_LOG_PATH", "/data/log/speed_bump.jsonl")
@@ -911,6 +950,9 @@ class BumpLog:
     threading.Thread(target=write, daemon=True).start()
 
 
+RLS_STALE_S = 3.   # controlsd: a roadLimitSpeed older than this is dropped
+
+
 class RoadSpeedLimiter:
   def __init__(self):
     self.slowing_down = False
@@ -918,6 +960,7 @@ class RoadSpeedLimiter:
 
     self.sock = messaging.sub_sock("roadLimitSpeed")
     self.roadLimitSpeed = None
+    self.rx_t = -1e9
 
     # 방지턱: 20m 전부터 20km/h, 마지막 방지턱을 넘고 25m 뒤 해제. controlsd가 speed_bump_active를 보고
     # 목표를 V_CRUISE_MIN 예외로 받는다.
@@ -931,8 +974,15 @@ class RoadSpeedLimiter:
   def recv(self):
     try:
       dat = messaging.recv_sock(self.sock, wait=False)
+      now = sec_since_boot()
       if dat is not None:
         self.roadLimitSpeed = dat.roadLimitSpeed
+        self.rx_t = now
+      elif self.roadLimitSpeed is not None and now - self.rx_t > RLS_STALE_S:
+        # The receiver publishes at 20 Hz. Without this a dead receiver left its
+        # last message -- a section or camera cap, an ATC turn -- in force for
+        # the rest of the drive.
+        self.roadLimitSpeed = None
     except:
       pass
 
@@ -965,16 +1015,13 @@ class RoadSpeedLimiter:
       section_left_dist = self.roadLimitSpeed.sectionLeftDist
       camSpeedFactor = CAMERA_SPEED_FACTOR
 
-      if is_highway is not None:
-        if is_highway:
-          MIN_LIMIT = 40
-          MAX_LIMIT = 120
-        else:
-          MIN_LIMIT = 20
-          MAX_LIMIT = 100
-      else:
-        MIN_LIMIT = 20
-        MAX_LIMIT = 120
+      # TmapNda always sends is_highway false (the real road class only comes
+      # with TMAP's auto-exit option), so the old non-highway ceiling of 100
+      # dropped every 110 / 120 km/h camera and section. Those limits exist on
+      # expressways only, so the ceiling is 120 everywhere; the floor stays 40
+      # on a road known to be a highway.
+      MIN_LIMIT = 40 if is_highway else 20
+      MAX_LIMIT = 120
 
       # 방지턱은 전용 플래너가 전담한다. 거리는 두 SDI 칸 중 어디서 왔든 bumpLeftDist로
       # 온다(첫 칸만 보던 때는 카메라·스쿨존 뒤의 방지턱이 늦게 잡혔다).
