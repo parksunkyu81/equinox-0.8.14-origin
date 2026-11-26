@@ -157,6 +157,24 @@ LAUNCH_GO_OPEN_M = 1.5
 LAUNCH_GO_MIN_GAP_M = 3.5    # 5.0 on 11-19
 LAUNCH_GAP_TAU_S = 0.30      # low-pass on the vision gap for GO
 LAUNCH_GO_HOLD_S = 0.30      # the opening must hold this long
+# EARLY GO (2026-11-26, on request: "the lead is far ahead before the car
+# starts, halve it"). The 11-25/26 drives: the lead moved, GO came 1.9 s later
+# (median), and the pedal plus the auto-hold release took another 0.8 s, so the
+# lead was 4.5 m further away when the car rolled. The pedal / EPB part cannot
+# be shortened (the pedal is at its launch level within 0.5 s; the EPB releases
+# on its own, 0.4 s slower than without auto-hold), so GO comes earlier: at
+# LAUNCH_GO_EARLY_OPEN_M held for LAUNCH_GO_EARLY_HOLD_S, but only while the
+# model's own plan v(2 s) is at least LAUNCH_GO_EARLY_PLAN_MS right then.
+# Without that, 0.6 m alone launched on a stopped lead's noise once
+# (11-22 01-11-43 164.9 s: speed 0.51, plan 0.09, the lead left 26 s later).
+# Otherwise the 1.5 m rule above still applies. Replay of 152 automatic
+# standstill launches (11-18..26, model-lead traces): the gap grown by the time
+# the car moves 3.4 -> 1.7 m (median), lead-moves -> car-moves 3.0 -> 2.0 s,
+# the lead stopping again within 4 s of GO 12 -> 15, GO before the lead had
+# moved 1 -> 1 (a driver-started stop). This car cannot brake by itself.
+LAUNCH_GO_EARLY_OPEN_M = 0.6
+LAUNCH_GO_EARLY_HOLD_S = 0.20
+LAUNCH_GO_EARLY_PLAN_MS = 0.5
 # MODEL CONFIRM: a second way to latch a standstill launch, from the driving
 # model's own plan instead of the lead track. The lead detector in
 # dynamic_follow only arms on a lead that reads stopped and steady; on
@@ -476,6 +494,7 @@ class StopAccelBoostLatch:
     self.stop_gap = 0.0
     self.gap_filtered = 0.0
     self.go_elapsed = 0.0
+    self.go_early_elapsed = 0.0
     self.model_go_elapsed = 0.0
     self.model_go = False
     self.plan_gate_elapsed = 0.0
@@ -635,10 +654,19 @@ class StopAccelBoostLatch:
       self.go_elapsed += self.dt
     else:
       self.go_elapsed = 0.0
+    # EARLY GO (see LAUNCH_GO_EARLY_*): a smaller opening, with the plan agreeing.
+    go_gap_early = max(LAUNCH_GO_MIN_GAP_M, self.stop_gap + LAUNCH_GO_EARLY_OPEN_M)
+    if v_ego < STOP_ACCEL_BOOST_MIN_SPEED_MS and self.gap_filtered >= go_gap_early:
+      self.go_early_elapsed += self.dt
+    else:
+      self.go_early_elapsed = 0.0
+    early_go = bool(self.go_early_elapsed >= LAUNCH_GO_EARLY_HOLD_S and
+                    math.isfinite(plan_speed) and plan_speed >= LAUNCH_GO_EARLY_PLAN_MS)
     self.guard = follow_guard(v_ego, lead_distance)
     self.standstill_launch = bool(
       standstill_launch_enabled and self.latched and
-      ((self.go_elapsed >= LAUNCH_GO_HOLD_S and self.plan_gate_ok) or self.standstill_launch) and
+      (((self.go_elapsed >= LAUNCH_GO_HOLD_S or early_go) and self.plan_gate_ok) or
+       self.standstill_launch) and
       not gas_pressed and not brake_pressed and
       v_ego < STOP_ACCEL_BOOST_MIN_SPEED_MS and
       lead_valid and
