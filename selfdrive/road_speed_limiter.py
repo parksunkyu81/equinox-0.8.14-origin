@@ -953,10 +953,27 @@ class BumpLog:
 RLS_STALE_S = 3.   # controlsd: a roadLimitSpeed older than this is dropped
 
 
+# SECTION START BRIDGE. Passing the section's start camera, TmapNda drops the
+# camera (first SDI slot) a packet or more before it sends the section block
+# (nSdiBlockDist), so for 1-3 s nothing was reported and the cap lifted: on
+# 2026-11-26--00-21-48 at 1999-2002 s it went back to 90 and the car sped up
+# 73 -> 78 km/h before the 80 km/h section's 76 came back. Now, once a start
+# camera (구간단속 시작) has been seen within SECTION_BRIDGE_PASS_M, its limit
+# is held for up to SECTION_BRIDGE_S until the section data arrives. Anything
+# section-shaped (block distance, an in-section or end camera) ends the bridge,
+# so the release at the section's end is unchanged.
+SECTION_START_CAM_TYPE = 2
+SECTION_IN_CAM_TYPES = (3, 4)      # 구간단속 끝, 구간단속중
+SECTION_BRIDGE_PASS_M = 150
+SECTION_BRIDGE_S = 10.
+SECTION_BRIDGE_LEFT_DIST_M = 1000  # left_dist reported while bridging (no distance is known)
+
+
 class RoadSpeedLimiter:
   def __init__(self):
     self.slowing_down = False
     self.started_dist = 0
+    self.section_start = None   # (limit, last distance, time) of the last start camera seen
 
     self.sock = messaging.sub_sock("roadLimitSpeed")
     self.roadLimitSpeed = None
@@ -1142,7 +1159,30 @@ class RoadSpeedLimiter:
                                cam_limit_speed_left_dist, section_limit_speed, section_left_dist,
                                camSpeedFactor, MIN_LIMIT, MAX_LIMIT, log):
     """Camera / section-enforcement slowdown from the first SDI slot (bumps excluded)."""
-    if cam_limit_speed_left_dist is not None and cam_limit_speed is not None and cam_limit_speed_left_dist > 0:
+    now = sec_since_boot()
+    has_cam = cam_limit_speed_left_dist is not None and cam_limit_speed is not None and cam_limit_speed_left_dist > 0
+    has_section = section_left_dist is not None and section_limit_speed is not None and section_left_dist > 0
+    if has_section or (has_cam and cam_type in SECTION_IN_CAM_TYPES):
+      self.section_start = None
+    elif has_cam and cam_type == SECTION_START_CAM_TYPE and MIN_LIMIT <= cam_limit_speed <= MAX_LIMIT:
+      self.section_start = (cam_limit_speed, cam_limit_speed_left_dist, now)
+
+    def bridge():
+      """The start camera's limit while the section data has not arrived yet, else None."""
+      st = self.section_start
+      if st is None:
+        return None
+      limit, last_dist, seen_t = st
+      if last_dist > SECTION_BRIDGE_PASS_M or now - seen_t > SECTION_BRIDGE_S:
+        if now - seen_t > SECTION_BRIDGE_S:
+          self.section_start = None
+        return None
+      first_started = not self.slowing_down
+      self.slowing_down = True
+      return (self._camera_target(limit, camSpeedFactor, is_metric), limit,
+              SECTION_BRIDGE_LEFT_DIST_M, first_started, log)
+
+    if has_cam:
 
       if MIN_LIMIT <= cam_limit_speed <= MAX_LIMIT:
         cap_clu, active = self._camera_cap(
@@ -1154,10 +1194,14 @@ class RoadSpeedLimiter:
           self.started_dist = cam_limit_speed_left_dist if first_started else self.started_dist
           return cap_clu, cam_limit_speed, cam_limit_speed_left_dist, first_started, log
 
+      if cam_type != SECTION_START_CAM_TYPE:
+        held = bridge()
+        if held is not None:
+          return held
       self.slowing_down = False
       return 0, cam_limit_speed, cam_limit_speed_left_dist, False, log
 
-    elif section_left_dist is not None and section_limit_speed is not None and section_left_dist > 0:
+    elif has_section:
       if MIN_LIMIT <= section_limit_speed <= MAX_LIMIT:
 
         if not self.slowing_down:
@@ -1172,6 +1216,9 @@ class RoadSpeedLimiter:
       self.slowing_down = False
       return 0, section_limit_speed, section_left_dist, False, log
 
+    held = bridge()
+    if held is not None:
+      return held
     self.slowing_down = False
     return 0, 0, 0, False, log
 
