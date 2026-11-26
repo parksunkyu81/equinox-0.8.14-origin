@@ -677,10 +677,104 @@ class AtcRunner:
     threading.Thread(target=write, daemon=True).start()
 
 
+SECTION_LOG_PATH = os.getenv("SECTION_LOG_PATH", "/data/log/section.jsonl")
+SECTION_LOG_INTERVAL_S = 1.0
+SECTION_LOG_TAIL_S = 30.       # keep logging this long after the section ends
+SECTION_LOG_MAX_BYTES = 1024 * 1024
+SECTION_SDI_TYPES = (2, 3, 4)  # 구간단속 시작 / 끝 / 구간단속중
+
+
+class SectionLog:
+  """/data/log/section.jsonl: section enforcement (구간단속) as TmapNda reports it.
+
+  roadLimitSpeed is not in the rlog, and controlsState only shows the cap the
+  EON applied, so when the car stays slow after a section nothing showed
+  whether the phone was still sending it. While a section is reported (block
+  distance > 0 or a section SDI in the first slot) and for SECTION_LOG_TAIL_S
+  after, one line a second plus one at start and end: the phone's raw values,
+  how old the last packet is, and how far the car has gone since the phone's
+  block distance last changed (a frozen value shows as that number growing
+  while the distance stays put). A dict and a background append once a second.
+  """
+
+  def __init__(self, path=SECTION_LOG_PATH):
+    self.path = path
+    self.raw = {}
+    self.last_pkt_t = None
+    self.active = False
+    self.end_t = None
+    self.last_t = -1e9
+    self.odo = 0.
+    self.block_dist = None
+    self.block_changed_odo = 0.
+    self.block_changed_t = None
+    self.prev_t = None
+
+  def update(self, now, apilot, road_limit, v_ego):
+    dt = 0. if self.prev_t is None else clip(now - self.prev_t, 0., 0.5)
+    self.prev_t = now
+    self.odo += max(0., v_ego) * dt
+    if isinstance(apilot, dict) and "nRoadLimitSpeed" in apilot:
+      self.last_pkt_t = now
+      self.raw = {k: _int_or_none(apilot.get(k)) for k in (
+        "nSdiBlockDist", "nSdiBlockSpeed", "nSdiBlockAverageSpeed", "nSdiBlockTime",
+        "nSdiType", "nSdiDist", "nSdiSpeedLimit")}
+      bd = self.raw["nSdiBlockDist"]
+      if bd != self.block_dist:
+        self.block_dist = bd
+        self.block_changed_odo = self.odo
+        self.block_changed_t = now
+    rl = road_limit if isinstance(road_limit, dict) else {}
+    sec_left = _int_or_none(rl.get("section_left_dist")) or 0
+    cam_type = _int_or_none(rl.get("cam_type"))
+    in_section = sec_left > 0 or (self.raw.get("nSdiBlockDist") or 0) > 0 or cam_type in SECTION_SDI_TYPES
+
+    event = None
+    if in_section and not self.active:
+      event = 'start'
+    elif self.active and not in_section:
+      event = 'end'
+      self.end_t = now
+    self.active = in_section
+    tail = self.end_t is not None and now - self.end_t < SECTION_LOG_TAIL_S
+    if event is None:
+      if not (in_section or tail) or now - self.last_t < SECTION_LOG_INTERVAL_S:
+        return
+      event = 'tick' if in_section else 'tail'
+    self.last_t = now
+
+    rec = {
+      't': round(now, 2), 'event': event, 'kph': round(v_ego * 3.6, 1),
+      'pkt_age_s': None if self.last_pkt_t is None else round(now - self.last_pkt_t, 1),
+      'rl_none': road_limit is None,
+      'sec_limit': _int_or_none(rl.get("section_limit_speed")), 'sec_left': sec_left,
+      'sec_avg': _int_or_none(rl.get("section_avg_speed")), 'sec_time': _int_or_none(rl.get("section_left_time")),
+      'cam_type': cam_type, 'cam_limit': _int_or_none(rl.get("cam_limit_speed")),
+      'cam_dist': _int_or_none(rl.get("cam_limit_speed_left_dist")),
+      'road_limit': _int_or_none(rl.get("road_limit_speed")),
+      'block_same_m': None if self.block_changed_t is None else round(self.odo - self.block_changed_odo, 1),
+      'block_same_s': None if self.block_changed_t is None else round(now - self.block_changed_t, 1),
+    }
+    rec.update(self.raw)
+    line = json.dumps(rec, separators=(',', ':'))
+    path = self.path
+
+    def write():
+      try:
+        if os.path.exists(path) and os.path.getsize(path) > SECTION_LOG_MAX_BYTES:
+          os.replace(path, path + ".1")
+        with open(path, 'a') as f:
+          f.write(line + "\n")
+      except Exception:
+        pass
+    threading.Thread(target=write, daemon=True).start()
+
+
 def main():
   server = RoadLimitSpeedServer()
   roadLimitSpeed = messaging.pub_sock('roadLimitSpeed')
   atc_runner = AtcRunner()
+  section_log = SectionLog()
   last_sdp_t = -1e9
 
   with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -704,6 +798,10 @@ def main():
           atc_runner.update(now, apilot)
         except Exception as e:
           print("road_speed_limiter: ATC update failed:", e)
+        try:
+          section_log.update(now, apilot, server.json_road_limit, atc_runner.v_ego)
+        except Exception as e:
+          print("road_speed_limiter: section log failed:", e)
 
         dat = messaging.new_message()
         dat.init('roadLimitSpeed')
