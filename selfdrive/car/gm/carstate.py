@@ -22,9 +22,6 @@ class CarState(CarStateBase):
     self.adaptive_Cruise = False
     self.enable_lkas = False
     self.main_on = False
-    # 0x142 (Side Blind Zone Alert) raw bytes, logged on change until the
-    # blind-zone bits are identified on this car (bsm_raw_log.py).
-    self.bsm_raw_log = BsmRawLog()
     # Follow-distance button, logged per press until it is confirmed on this
     # car (distance_button_log.py). self.distance_button holds its live state.
     self.distance_button_log = DistanceButtonLog()
@@ -145,10 +142,8 @@ class CarState(CarStateBase):
     # hold or block a lane change toward a set side.
     ret.leftBlindspot = bsm["LeftBSM"] == 1
     ret.rightBlindspot = bsm["RightBSM"] == 1
-    self.bsm_raw_log.update((bsm["Byte0"], bsm["Byte1"], bsm["Byte2"], bsm["Byte3"],
-                             bsm["Byte4"], bsm["Byte5"], bsm["Byte6"]),
-                            now, ret.vEgo, ret.leftBlinker, ret.rightBlinker,
-                            ret.steeringAngleDeg)
+    # The raw-byte change log that found those bits is gone (23 us a frame on
+    # the EON); bsm_raw_log.py still logs the steering-wheel button bytes.
 
     return ret
 
@@ -185,7 +180,7 @@ class CarState(CarStateBase):
       ("Brake_Pressed", "ECMEngineStatus"),
       ("LeftBSM", "BCMBlindSpotMonitor"),
       ("RightBSM", "BCMBlindSpotMonitor"),
-    ] + [(f"Byte{i}", "BCMBlindSpotMonitor") for i in range(7)]       + [(f"RawByte{i}", "ASCMSteeringButton") for i in range(7)]
+    ] + [(f"RawByte{i}", "ASCMSteeringButton") for i in range(7)]
 
     checks = [
       ("BCMTurnSignals", 1),
@@ -201,7 +196,7 @@ class CarState(CarStateBase):
       ("PSCMSteeringAngle", 100),
       ("EBCMVehicleDynamic", 50),
       ("EBCMBrakePedalPosition", 100),
-      # Side Blind Zone Alert, raw bytes for bsm_raw_log. Frequency 0: never
+      # Side Blind Zone Alert. Frequency 0: never
       # timed out, so a car without it (or before it first sends) keeps canValid.
       ("BCMBlindSpotMonitor", 0),
     ]

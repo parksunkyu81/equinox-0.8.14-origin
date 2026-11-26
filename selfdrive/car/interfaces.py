@@ -36,6 +36,9 @@ class CarInterfaceBase(ABC):
     self.low_speed_alert = False
     self.silent_steer_warning = True
     self.v_ego_cluster_seen = False
+    # An interface that sets this hands controlsd its event names directly
+    # instead of writing them into CarState.events (see controlsd).
+    self.event_names = None
 
     self.CS = None
     self.can_parsers = []

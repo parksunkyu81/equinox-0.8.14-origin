@@ -277,6 +277,12 @@ class Controls:
     # whole struct into a fresh message every frame.
     PUBLISH_NAMES = ("cc", "apply", "cs_fill", "cs_send", "msgs")
 
+    # data_sample ("wait"), split. Only drain is slack: the blocking receive
+    # of boardd's CAN frame. carstate (CI.update: CAN parse and CarState
+    # build) and sm (SubMaster poll) are CPU work the "wait" label hid -- on
+    # 2026-11-26 the main thread used 7.9 ms a frame against a work_ms of 6.1.
+    SAMPLE_NAMES = ("drain", "carstate", "sm", "rest")
+
     # update_events, split the same way. It is 1.39 ms and 20% of the loop's
     # work, and the only phase that does not move with contention, so what
     # comes out of here is real. setup is the clear and the two add_from_msg
@@ -664,6 +670,9 @@ class Controls:
         self._ev_max = [0.0] * len(self.EVENT_NAMES)
         self._ctl_acc = [0.0] * len(self.CONTROL_NAMES)
         self._ctl_max = [0.0] * len(self.CONTROL_NAMES)
+        self._smp_acc = [0.0] * len(self.SAMPLE_NAMES)
+        self._smp_max = [0.0] * len(self.SAMPLE_NAMES)
+        self._smp_marks = (0.0, 0.0, 0.0)
 
     @staticmethod
     def _diagnostic_enum_value(value):
@@ -1300,7 +1309,11 @@ class Controls:
             else:
                 self.events.add(EventName.controlsInitializing)
 
-        self.events.add_from_msg(CS.events)
+        car_event_names = self.CI.event_names
+        if car_event_names is not None:
+            self.events.events.extend(car_event_names)
+        else:
+            self.events.add_from_msg(CS.events)
         e1 = sec_since_boot()
 
         # Create events for battery, temperature, disk space, and memory
@@ -1797,9 +1810,12 @@ class Controls:
 
         # Update carState from CAN
         can_strs = messaging.drain_sock_raw(self.can_sock, wait_for_one=True)
+        s_drain = sec_since_boot()
         CS = self.CI.update(self.CC, can_strs)
+        s_cs = sec_since_boot()
 
         self.sm.update(0)
+        self._smp_marks = (s_drain, s_cs, sec_since_boot())
 
         if not self.initialized:
             all_valid = CS.canValid and self.sm.all_checks()
@@ -2824,9 +2840,9 @@ class Controls:
         breakdown alongside it, costs 26 us a frame measured on the EON,
         0.26% of the budget, which is cheap enough not to need a flag.
 
-        "wait" is data_sample, which blocks in drain_sock_raw until boardd
-        publishes the next CAN frame. It is the loop's slack, not work.
-        Everything after it is work, and their sum is what own_cpu_pct sees.
+        "wait" is data_sample. Only its drain_sock_raw block is slack; it also
+        runs CI.update and the SubMaster poll, which sample_mean_ms splits
+        out, and cpu_work_ms is the loop's work including those.
         """
         acc = self._step_acc
         mx = self._step_max
@@ -2842,6 +2858,21 @@ class Controls:
         acc[3] += d3
         acc[4] += d4
         acc[5] += d5
+        sa = self._smp_acc
+        sm_ = self._smp_max
+        m0, m1, m2 = self._smp_marks
+        s0 = m0 - t0
+        s1 = m1 - m0
+        s2 = m2 - m1
+        s3 = t1 - m2
+        sa[0] += s0
+        sa[1] += s1
+        sa[2] += s2
+        sa[3] += s3
+        if s0 > sm_[0]: sm_[0] = s0
+        if s1 > sm_[1]: sm_[1] = s1
+        if s2 > sm_[2]: sm_[2] = s2
+        if s3 > sm_[3]: sm_[3] = s3
         # Straight-line rather than a loop over the pairs: at 100 Hz the range()
         # and its indexing cost more than the six comparisons they would save.
         if d0 > mx[0]: mx[0] = d0
@@ -2864,6 +2895,9 @@ class Controls:
             window_s=round(t6 - self._step_window_t, 3),
             step_ms=round(1000.0 * total / n, 3),
             work_ms=round(1000.0 * (total - acc[0]) / n, 3),
+            # work_ms keeps its old meaning (everything after data_sample) so
+            # drives stay comparable; this one counts data_sample's CPU too.
+            cpu_work_ms=round(1000.0 * (total - self._smp_acc[0]) / n, 3),
             mean_ms={name: round(1000.0 * acc[i] / n, 3) for i, name in enumerate(names)},
             max_ms={name: round(1000.0 * mx[i], 3) for i, name in enumerate(names)},
             publish_mean_ms={name: round(1000.0 * self._pub_acc[i] / n, 3)
@@ -2878,6 +2912,10 @@ class Controls:
                              for i, name in enumerate(self.CONTROL_NAMES)},
             control_max_ms={name: round(1000.0 * self._ctl_max[i], 3)
                             for i, name in enumerate(self.CONTROL_NAMES)},
+            sample_mean_ms={name: round(1000.0 * self._smp_acc[i] / n, 3)
+                            for i, name in enumerate(self.SAMPLE_NAMES)},
+            sample_max_ms={name: round(1000.0 * self._smp_max[i], 3)
+                           for i, name in enumerate(self.SAMPLE_NAMES)},
         )
         # The write itself lands after t6, so it is outside every delta above.
         # It shows up as one longer loop period in a thousand and nowhere else.
@@ -2891,6 +2929,8 @@ class Controls:
         self._ev_max = [0.0] * len(self.EVENT_NAMES)
         self._ctl_acc = [0.0] * len(self.CONTROL_NAMES)
         self._ctl_max = [0.0] * len(self.CONTROL_NAMES)
+        self._smp_acc = [0.0] * len(self.SAMPLE_NAMES)
+        self._smp_max = [0.0] * len(self.SAMPLE_NAMES)
 
     def _record_publish_timing(self, p0, p1, p2, p3, p4, p5):
         """Accumulate the publish_logs breakdown for the current step window.

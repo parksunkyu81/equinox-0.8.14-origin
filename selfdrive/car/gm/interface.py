@@ -394,7 +394,11 @@ class CarInterface(CarInterfaceBase):
 
         ###
 
-        ret.events = events.to_msg()
+        # The event names go to controlsd as a plain list. Writing them into
+        # ret.events (to_msg, ~50 us) only for controlsd to read them straight
+        # back out (add_from_msg) was wasted work: controlsd overwrites
+        # carState.events with its own full list before it publishes.
+        self.event_names = events.events
 
         # copy back carState packet to CS
         self.CS.out = ret.as_reader()

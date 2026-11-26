@@ -25,6 +25,12 @@ cdef class CANParser:
     map[string, uint32_t] msg_name_to_address
     map[uint32_t, string] address_to_msg_name
     vector[SignalValue] can_values
+    # Addresses whose vl_all lists were filled since the last clear. vl_all
+    # holds one dict per DBC message, under both its address and its name (88
+    # keys for GM), and clearing every one of them on every update cost 20 us
+    # a parser on the EON when only the messages that arrived have anything
+    # to clear.
+    set vl_all_dirty
 
   cdef readonly:
     dict vl
@@ -45,6 +51,7 @@ cdef class CANParser:
 
     self.vl = {}
     self.vl_all = {}
+    self.vl_all_dirty = set()
     self.can_valid = False
     self.can_invalid_cnt = CAN_INVALID_CNT
 
@@ -120,20 +127,25 @@ cdef class CANParser:
       cv_name = <unicode>cv.name
       self.vl[cv.address][cv_name] = cv.value
       self.vl_all[cv.address][cv_name].extend(cv.all_values)
+      self.vl_all_dirty.add(cv.address)
       updated_addrs.insert(cv.address)
 
     return updated_addrs
 
+  cdef void clear_vl_all(self):
+    # name and address keys share one dict, so clearing by address covers both
+    for addr in self.vl_all_dirty:
+      self.vl_all[addr].clear()
+    self.vl_all_dirty.clear()
+
   def update_string(self, dat, sendcan=False):
-    for v in self.vl_all.values():
-      v.clear()
+    self.clear_vl_all()
 
     self.can.update_string(dat, sendcan)
     return self.update_vl()
 
   def update_strings(self, strings, sendcan=False):
-    for v in self.vl_all.values():
-      v.clear()
+    self.clear_vl_all()
 
     updated_addrs = set()
     for s in strings:
