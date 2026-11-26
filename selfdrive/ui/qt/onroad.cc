@@ -481,9 +481,6 @@ void NvgWindow::initializeGL() {
   setBackgroundColor(bg_colors[STATUS_DISENGAGED]);
 
   // neokii
-  ic_brake = QPixmap("../assets/images/img_brake_disc.png").scaled(img_size, img_size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-  ic_autohold_warning = QPixmap("../assets/images/img_autohold_warning.png").scaled(img_size, img_size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-  ic_autohold_active = QPixmap("../assets/images/img_autohold_active.png").scaled(img_size, img_size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
   ic_nda = QPixmap("../assets/images/img_nda.png");
   ic_hda = QPixmap("../assets/images/img_hda.png");
   ic_acc = QPixmap("../assets/images/img_lat_icon.png");
@@ -1738,10 +1735,6 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     lkas_color = QColor(255, 175, 0, 220);
   }
 
-  // AUTO HOLD is drawn in the right-hand status column below; only its state
-  // is read here.
-  const int autohold = car_state.getAutoHold();
-
   // 5. AI driving profiles
   x = icon_start_x + (icon_step * 4);
 
@@ -1937,10 +1930,9 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       break;
   }
 
-  // ACC and BRAKE moved to the right-hand status column below; only their
-  // state is read here.
+  // ACC is drawn in the right-hand status column below; only its state is
+  // read here.
   const bool acc_bool = car_state.getAdaptiveCruise();
-  const bool brake_valid = car_state.getBrakePressed();
 
   /*// 5. long control state
   x = icon_start_x + (icon_step * 1);
@@ -2411,23 +2403,12 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       p.setPen(Qt::NoPen);
     };
 
-    auto statusIcon = [&](int cx_, int cy, QPixmap &img, bool on) {
-      p.setPen(Qt::NoPen);
-      p.setBrush(QColor(0, 0, 0, on ? 77 : 26));
-      p.drawEllipse(cx_ - SD / 2, cy - SD / 2, SD, SD);
-      p.setOpacity(on ? 1.0f : 0.15f);
-      const int isz = (SD / 2) * 1.5;
-      p.drawPixmap(cx_ - isz / 2, cy - isz / 2, isz, isz, img);
-      p.setOpacity(1.0);
-    };
-
     // Right edge flush with the panel below, so the block keeps that panel's
     // margin off the screen edge and grows to the left. Centred on the panel
     // it would come within 6 px of the edge.
     const int block_cx = thermal_panel_right_ > 0
                          ? thermal_panel_right_ - SD - SGAP_X / 2
                          : thermal_panel_cx_;
-    const int col_l = block_cx - (SD + SGAP_X) / 2;
     const int col_r = block_cx + (SD + SGAP_X) / 2;
     // Anchored from the bottom so the block always grows away from the panel.
     // Two rows of icon/state pairs; the pedal tiles moved over to the speed
@@ -2437,12 +2418,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     const int row_b = rightColumnLayout(width(), height()).status_bottom - SD / 2;
     const int row_t = row_b - SD - SGAP_Y;
 
-    statusIcon(col_l, row_t, ic_brake, brake_valid);
-    if (autohold >= 0) {
-      statusIcon(col_l, row_b,
-                 autohold > 1 ? ic_autohold_warning : ic_autohold_active,
-                 autohold > 0);
-    }
+    // The brake and auto-hold icons that filled the left column are gone (on
+    // request, 2026-11-26); ACC and LKAS keep their place on the right.
     statusCircle(col_r, row_t, "ACC", acc_bool ? "ON" : "OFF",
                  acc_bool ? QColor(120, 255, 120, 200) : QColor(254, 32, 32, 200), "OFF");
     statusCircle(col_r, row_b, "LKAS", lkas_str, lkas_color, "OFF");
