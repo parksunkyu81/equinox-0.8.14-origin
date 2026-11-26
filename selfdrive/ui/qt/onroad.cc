@@ -1884,28 +1884,57 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
   // 1. PEDAL -- state and colour only; the tile is drawn above the speed
   // panel at the end of this function.
-  const float accel = car_control.getActuators().getAccel();
-
+  //
   // Shown as an icon rather than a word (on request, 2026-11-25): 가속 green
   // up arrow, 감속 red down arrow, 브레이크 amber brake symbol (!), BOOST a
   // double up chevron. Shape and colour both differ, so it reads at a glance.
-  PedalIcon pedal_icon;
-  QColor pedalStatusColor;
-  if (accel > 0) {
-    pedal_icon = PedalIcon::Accel;
-    pedalStatusColor = QColor(120, 255, 120, 255);
-  } else if (accel == 0.0) {
-    pedal_icon = PedalIcon::Brake;
-    pedalStatusColor = QColor(255, 185, 15, 255);
-  } else {
-    pedal_icon = PedalIcon::Decel;
-    pedalStatusColor = QColor(254, 32, 32, 255);
+  //
+  // It used to follow the planner's actuators.accel: > 0 가속, == 0 브레이크,
+  // < 0 감속. On this car accel is never negative -- every decel request is
+  // exactly 0 (the comma pedal cannot brake) -- so 감속 never showed and every
+  // coast, slowdown and standstill showed 브레이크: 21% of the 11-26 drives
+  // with no brake pressed. And the pedal follows the plan through its rise
+  // limiter (0.4 s median, 1.5 s p90 behind an accel > 0), so 가속 led the car.
+  // Now it shows what the car is doing: the driver's brake, the pedal command
+  // actually sent (actuatorsOutput.gas) or the driver's gas, and otherwise
+  // 감속 (coasting). 가속 comes on at once; 가속 -> 감속 waits PEDAL_DECEL_HOLD_MS
+  // so a brief dip of the pedal does not flash the red arrow.
+  constexpr float PEDAL_ON = 0.03f, PEDAL_OFF = 0.015f;
+  constexpr double PEDAL_DECEL_HOLD_MS = 500.;
+  static PedalIcon pedal_state = PedalIcon::Decel;
+  static double pedal_low_since = -1.;
+  const double pedal_now = millis_since_boot();
+  const float pedal_out = car_control.getActuatorsOutput().getGas();
+  if (pedal_out > PEDAL_OFF) {
+    pedal_low_since = -1.;
+  } else if (pedal_low_since < 0.) {
+    pedal_low_since = pedal_now;
   }
-  // Only the icon and colour change while the confirmed stop-and-go launch
-  // assist is operating.
-  if (stop_accel_boost_active) {
-    pedal_icon = PedalIcon::Boost;
-    pedalStatusColor = QColor(225, 255, 239, 255);
+  if (car_state.getBrakePressed()) {
+    pedal_state = PedalIcon::Brake;
+  } else if (stop_accel_boost_active) {
+    pedal_state = PedalIcon::Boost;
+  } else if (car_state.getGasPressed() || pedal_out > PEDAL_ON) {
+    pedal_state = PedalIcon::Accel;
+  } else if (pedal_state == PedalIcon::Accel || pedal_state == PedalIcon::Boost) {
+    if (pedal_low_since >= 0. && pedal_now - pedal_low_since >= PEDAL_DECEL_HOLD_MS) {
+      pedal_state = PedalIcon::Decel;
+    }
+  } else {
+    pedal_state = PedalIcon::Decel;
+  }
+  const PedalIcon pedal_icon = pedal_state;
+  QColor pedalStatusColor;
+  switch (pedal_icon) {
+    case PedalIcon::Accel: pedalStatusColor = QColor(120, 255, 120, 255); break;
+    case PedalIcon::Brake: pedalStatusColor = QColor(255, 185, 15, 255); break;
+    case PedalIcon::Boost: pedalStatusColor = QColor(225, 255, 239, 255); break;
+    case PedalIcon::Decel:
+    default:
+      // Grey while openpilot is not engaged: nothing is being asked of the car.
+      pedalStatusColor = controls_state.getEnabled() ? QColor(254, 32, 32, 255)
+                                                     : QColor(200, 200, 200, 200);
+      break;
   }
 
   // ACC and BRAKE moved to the right-hand status column below; only their
