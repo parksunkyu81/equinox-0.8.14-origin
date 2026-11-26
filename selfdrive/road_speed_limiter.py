@@ -160,6 +160,8 @@ def normalize_road_limit(road_limit, apilot=None):
 ANNOUNCE_SEARCH_S = 1.0     # announcement period while no phone is talking
 ANNOUNCE_LINKED_S = 5.0     # and once one is (main() also answers it every 1 s)
 LINK_TIMEOUT_S = 6.0        # same as check(): no packet this long = not linked
+RX_STATS_WINDOW_S = 60.
+RX_STATS_LONG_GAP_S = 1.5   # TmapNda sends about 2 road_limit packets a second
 ANNOUNCE_MAX_NEIGHBOURS = 16
 LAST_PEER_PATH = os.getenv("NDA_LAST_PEER_PATH", "/data/log/nda_last_peer")
 NDA_LINK_LOG_PATH = os.getenv("NDA_LINK_LOG_PATH", "/data/log/nda_link.jsonl")
@@ -306,6 +308,13 @@ class RoadLimitSpeedServer:
     self.last_time_location = 0
 
     self.last_rx = -1e9
+    # per-minute receive statistics (see RX_STATS_*)
+    self.rx_win_t = None
+    self.rx_n = 0
+    self.rx_last_pkt = None
+    self.rx_max_gap = 0.
+    self.rx_gaps_long = 0
+    self.navi_ref = None
     self.peers = load_last_peers()
     self.last_peer_ip = self.peers[0] if self.peers else None
     self.link_log = NdaLinkLog()
@@ -542,6 +551,7 @@ class RoadLimitSpeedServer:
           if 'road_limit' in json_obj:
             self.json_road_limit = normalize_road_limit(json_obj['road_limit'], json_obj.get('apilot'))
             self.last_updated = sec_since_boot()
+            self._rx_stat(self.last_updated)
             # TmapNda's apilot is the JSON it sends carrotpilot on 7706 (TBT included):
             # handed to AutoTurnControl by main().
             apilot = json_obj.get('apilot')
@@ -570,8 +580,40 @@ class RoadLimitSpeedServer:
       self.peers = self.peers[:PEERS_MAX]
       save_last_peers(self.peers)
 
+  def _rx_stat(self, now):
+    if self.rx_win_t is None:
+      self.rx_win_t = now
+    if self.rx_last_pkt is not None:
+      gap = now - self.rx_last_pkt
+      if gap < LINK_TIMEOUT_S:          # longer ones are logged as lost / linked
+        self.rx_max_gap = max(self.rx_max_gap, gap)
+        if gap >= RX_STATS_LONG_GAP_S:
+          self.rx_gaps_long += 1
+    self.rx_last_pkt = now
+    self.rx_n += 1
+
+  def _rx_stats_flush(self, now):
+    """One nda_link.jsonl line a minute while packets come: how many, the
+    longest gap under the 6 s loss limit, gaps over RX_STATS_LONG_GAP_S, and
+    route packets with a 0 distance the turn box rode over. Pauses shorter
+    than 6 s left no trace before."""
+    if self.rx_win_t is None or now - self.rx_win_t < RX_STATS_WINDOW_S:
+      return
+    held = 0
+    if self.navi_ref is not None:
+      held, self.navi_ref.zero_held = self.navi_ref.zero_held, 0
+    if self.rx_n > 0:
+      self.link_log.event('rx_stats', pkts=self.rx_n, hz=round(self.rx_n / (now - self.rx_win_t), 2),
+                          max_gap_s=round(self.rx_max_gap, 2), gaps_over_1_5s=self.rx_gaps_long,
+                          navi_zero_held=held)
+    self.rx_win_t = now if self.rx_n > 0 else None
+    self.rx_n = 0
+    self.rx_max_gap = 0.
+    self.rx_gaps_long = 0
+
   def check(self):
     now = sec_since_boot()
+    self._rx_stats_flush(now)
     if self.last_rx > 0 and now - self.last_rx >= LINK_TIMEOUT_S and not self.link_log.lost_logged:
       self.link_log.event('lost', silent_s=round(now - self.last_rx, 1))
     if now - self.last_updated > 6.:
@@ -651,10 +693,20 @@ def _apilot_text(apilot, key):
   return "" if v == "null" else v[:100]
 
 
+# The turn-info box is drawn only while goPosDist and goPosTime are both > 0,
+# so one packet with a 0 there (TMAP re-routing, a hiccup) blanked the whole
+# box until the next packet, 0.5 s later. Up to NAVI_ZERO_HOLD_S of such
+# packets keep the last route values; a route that has really ended goes
+# after that.
+NAVI_ZERO_HOLD_S = 3.0
+
+
 class NaviInfo:
   """What the onroad turn-info box shows besides the turn itself (carrot carrotMan fields)."""
 
   def __init__(self):
+    self.route_t = None
+    self.zero_held = 0        # packets bridged by NAVI_ZERO_HOLD_S (for the rx stats)
     self.clear()
 
   def clear(self):
@@ -663,14 +715,23 @@ class NaviInfo:
     self.go_pos_time = 0
     self.sdi_descr = ""
     self.pos_road_name = ""
+    self.route_t = None
 
-  def update(self, apilot):
+  def update(self, apilot, now=None):
     # carrot reads these in the same GuidePoint block as the TBT fields.
     if not isinstance(apilot, dict) or "nRoadLimitSpeed" not in apilot:
       return
+    go_dist = _apilot_int(apilot, "nGoPosDist")
+    go_time = _apilot_int(apilot, "nGoPosTime")
+    if go_dist > 0 and go_time > 0:
+      self.route_t = now
+    elif (self.go_pos_dist > 0 and now is not None and self.route_t is not None and
+          now - self.route_t < NAVI_ZERO_HOLD_S):
+      self.zero_held += 1
+      return                  # keep the last route values (and text) for now
     self.tbt_main_text = _apilot_text(apilot, "szTBTMainText")
-    self.go_pos_dist = _apilot_int(apilot, "nGoPosDist")
-    self.go_pos_time = _apilot_int(apilot, "nGoPosTime")
+    self.go_pos_dist = go_dist
+    self.go_pos_time = go_time
     self.pos_road_name = _apilot_text(apilot, "szPosRoadName")
     sdi_type = _apilot_int(apilot, "nSdiType", -1)
     sdi_dist = _apilot_int(apilot, "nSdiDist")
@@ -744,7 +805,7 @@ class AtcRunner:
     self._read_carstate(now)
     if apilot is not None:
       self.atc.update_tbt(apilot, now)
-      self.navi.update(apilot)
+      self.navi.update(apilot, now)
     if now - self.atc.last_packet_t > self.atc_stale_s:
       self.navi.clear()
     dt = 0. if self.last_t is None else clip(now - self.last_t, 0., 0.5)
@@ -900,6 +961,7 @@ def main():
   server = RoadLimitSpeedServer()
   roadLimitSpeed = messaging.pub_sock('roadLimitSpeed')
   atc_runner = AtcRunner()
+  server.navi_ref = atc_runner.navi
   section_log = SectionLog()
   last_sdp_t = -1e9
 
