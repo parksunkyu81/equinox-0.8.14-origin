@@ -1,5 +1,6 @@
 #include "selfdrive/ui/qt/onroad.h"
 
+#include <climits>
 #include <cmath>
 
 #include <QDateTime>
@@ -817,6 +818,118 @@ void NvgWindow::showEvent(QShowEvent *event) {
   prev_draw_t = millis_since_boot();
 }
 
+// Per-font tables for the text caches below, found by QFont compare like
+// textRectsFor. Deliberately leaked statics, for the same reason.
+template <typename V>
+struct FontTable {
+  QFont font;
+  QHash<QString, V> map;
+};
+
+template <typename V>
+static QHash<QString, V> &fontTable(std::deque<FontTable<V>> *tables, const QFont &font) {
+  for (FontTable<V> &t : *tables) {
+    if (t.font == font) return t.map;
+  }
+  tables->push_back({font, {}});
+  return tables->back().map;
+}
+
+template <typename V, typename Make>
+static const V &cachedFor(std::deque<FontTable<V>> *tables, const QFont &font,
+                          const QString &key, Make make) {
+  QHash<QString, V> &map = fontTable(tables, font);
+  auto it = map.find(key);
+  if (it == map.end()) {
+    if (map.size() >= TEXT_RECT_CACHE_MAX) map.clear();
+    it = map.insert(key, make());
+  }
+  return it.value();
+}
+
+// QPainter::drawText itemises and shapes the string (font fallback for Hangul,
+// HarfBuzz) on every call. Shape each (font, text) once into glyph runs whose
+// baseline sits at y = 0 and replay them; the glyphs, positions and pen are the
+// same ones drawText(QPointF) produces, so nothing moves (0 px difference on
+// the EON, every HUD font and string, 2026-11-27).
+struct ShapedText {
+  QList<QGlyphRun> runs;
+  qreal ascent = 0;
+};
+
+static const ShapedText &shapedText(QPainter &p, const QString &text) {
+  static auto *tables = new std::deque<FontTable<ShapedText>>;
+  return cachedFor(tables, p.font(), text, [&] {
+    ShapedText s;
+    QTextLayout layout(text, p.font(), p.device());
+    QTextOption opt;
+    opt.setWrapMode(QTextOption::NoWrap);
+    layout.setTextOption(opt);
+    layout.beginLayout();
+    QTextLine line = layout.createLine();
+    if (line.isValid()) {
+      line.setLineWidth(1e6);
+      line.setPosition(QPointF(0, -line.ascent()));
+      s.ascent = line.ascent();
+    }
+    layout.endLayout();
+    s.runs = layout.glyphRuns();
+    return s;
+  });
+}
+
+// drawText(QPointF baseline, text), from the cache.
+static void drawTextRuns(QPainter &p, const QPointF &baseline, const QString &text) {
+  for (const QGlyphRun &run : shapedText(p, text).runs) {
+    p.drawGlyphRun(baseline, run);
+  }
+}
+
+// drawText(rect, Qt::AlignCenter, text), from the cache. The text's box inside
+// the rect comes from the same layout pass drawText runs (QFontMetricsF::
+// boundingRect with the same flags); its first baseline is one line ascent
+// below that box's top. Matches drawText to the pixel whenever the text fits
+// the rect (612 of 612 cases on the EON). Text that overflows is laid out
+// differently by Qt, so it goes through drawText as before.
+static void drawTextRunsCentered(QPainter &p, const QRect &rect, const QString &text) {
+  static auto *tables = new std::deque<FontTable<QRectF>>;
+  const QString key = text + QChar(0x1f) + QString::number(rect.width()) +
+                      QChar(0x1f) + QString::number(rect.height());
+  const QRectF bb = cachedFor(tables, p.font(), key, [&] {
+    return QFontMetricsF(p.font(), p.device())
+        .boundingRect(QRectF(0, 0, rect.width(), rect.height()), Qt::AlignCenter, text);
+  });
+  if (bb.left() < 0 || bb.top() < 0 || bb.right() > rect.width() || bb.bottom() > rect.height()) {
+    p.drawText(rect, Qt::AlignCenter, text);
+    return;
+  }
+  const ShapedText &s = shapedText(p, text);
+  const QPointF origin(rect.x() + bb.x(), rect.y() + bb.y() + s.ascent);
+  for (const QGlyphRun &run : s.runs) {
+    p.drawGlyphRun(origin, run);
+  }
+}
+
+// QFontMetricsF::horizontalAdvance, memoised per font and string.
+static qreal cachedAdvance(QPainter &p, const QString &text) {
+  static auto *tables = new std::deque<FontTable<qreal>>;
+  return cachedFor(tables, p.font(), text, [&] {
+    return QFontMetricsF(p.font()).horizontalAdvance(text);
+  });
+}
+
+// QFontMetrics(F)::elidedText(text, Qt::ElideRight, width), memoised. The
+// integer and float metrics can elide differently, so the caller says which.
+static QString cachedElided(QPainter &p, const QString &text, qreal width, bool float_metrics) {
+  static auto *tables = new std::deque<FontTable<QString>>;
+  const QString key = text + QChar(0x1f) + QString::number(width, 'g', 10) +
+                      (float_metrics ? QChar('f') : QChar('i'));
+  return cachedFor(tables, p.font(), key, [&] {
+    return float_metrics ? QFontMetricsF(p.font()).elidedText(text, Qt::ElideRight, width)
+                         : QFontMetrics(p.font()).elidedText(text, Qt::ElideRight, (int)width);
+  });
+}
+
 // QRect::moveCenter rounds to an integer centre, and how far it rounds
 // (0 or 0.5 px) depends on the parity of the glyph bounding box's width --
 // consistent for any one string, but a single narrow glyph (e.g. "0") and a
@@ -834,45 +947,7 @@ static void drawCenteredText(QPainter &p, int x, int y, const QString &text) {
     return fm.boundingRect(init_rect, 0, text);
   });
   const qreal draw_x = x - real_rect.width() / 2.0;
-
-  // The width was memoised, but QPainter::drawText still itemised and shaped
-  // the string (font fallback for Hangul, HarfBuzz) on every call, ~60 calls a
-  // paint. Shape each (font, text) once into glyph runs whose baseline sits at
-  // y = 0 and replay them; the glyphs, positions and pen are the same ones
-  // drawText(QPointF) would produce, so nothing moves.
-  struct FontGlyphRuns {
-    QFont font;
-    QHash<QString, QList<QGlyphRun>> runs;
-  };
-  static auto *run_tables = new std::deque<FontGlyphRuns>;
-  FontGlyphRuns *table = nullptr;
-  for (FontGlyphRuns &t : *run_tables) {
-    if (t.font == p.font()) { table = &t; break; }
-  }
-  if (!table) {
-    run_tables->push_back({p.font(), {}});
-    table = &run_tables->back();
-  }
-  auto it = table->runs.find(text);
-  if (it == table->runs.end()) {
-    if (table->runs.size() >= TEXT_RECT_CACHE_MAX) table->runs.clear();
-    QTextLayout layout(text, p.font(), p.device());
-    QTextOption opt;
-    opt.setWrapMode(QTextOption::NoWrap);
-    layout.setTextOption(opt);
-    layout.beginLayout();
-    QTextLine line = layout.createLine();
-    if (line.isValid()) {
-      line.setLineWidth(1e6);
-      line.setPosition(QPointF(0, -line.ascent()));
-    }
-    layout.endLayout();
-    it = table->runs.insert(text, layout.glyphRuns());
-  }
-  const QPointF origin(draw_x, y);
-  for (const QGlyphRun &run : it.value()) {
-    p.drawGlyphRun(origin, run);
-  }
+  drawTextRuns(p, QPointF(draw_x, y), text);
 }
 
 void NvgWindow::drawText(QPainter &p, int x, int y, const QString &text, int alpha) {
@@ -2118,11 +2193,17 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
                                  .arg(static_cast<int>(std::lround(steer_angle_deg)));
 
     configFont(p, "Open Sans", 43, "Bold");
-    QFontMetrics angle_fm(p.font());
+    // The font is fixed, so its two measurements are taken once.
+    static int angle_ref_w = -1, angle_font_h = 0;
+    if (angle_ref_w < 0) {
+      QFontMetrics angle_fm(p.font());
+      angle_ref_w = angle_fm.horizontalAdvance("-888°");
+      angle_font_h = angle_fm.height();
+    }
     // The NDA badge above uses the same angle-only width as its minimum.
-    const int badge_min_w = angle_fm.horizontalAdvance("-888°") + 38;
+    const int badge_min_w = angle_ref_w + 38;
     const int angle_w = badge_min_w;
-    const int angle_h = angle_fm.height() + 24;
+    const int angle_h = angle_font_h + 24;
     // Centred on the wheel, but kept off the speed panel to its left, the same
     // rule as the NDA badge: the torque value makes this box wider than the wheel.
     int angle_left = x - angle_w / 2;
@@ -2134,7 +2215,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     p.setBrush(QColor(0, 0, 0, 160));
     p.drawRoundedRect(angle_rect, 10, 10);
     p.setPen(QColor(0, 255, 0, 255));
-    p.drawText(angle_rect, Qt::AlignCenter, angle_text);
+    drawTextRunsCentered(p, angle_rect, angle_text);
     p.setPen(Qt::NoPen);
 
     // NDA badge, centred above the wheel in the same style as the angle
@@ -2172,8 +2253,13 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
         event = false;
       }
 
-      QFontMetrics nda_fm(p.font());
-      const int nda_w = std::max(badge_min_w, nda_fm.horizontalAdvance(nda_text) + 38);
+      static auto *nda_adv = new QHash<QString, int>;
+      auto adv = nda_adv->constFind(nda_text);
+      if (adv == nda_adv->constEnd()) {
+        if (nda_adv->size() >= TEXT_RECT_CACHE_MAX) nda_adv->clear();
+        adv = nda_adv->insert(nda_text, QFontMetrics(p.font()).horizontalAdvance(nda_text));
+      }
+      const int nda_w = std::max(badge_min_w, adv.value() + 38);
       const int nda_h = angle_h;
       // Centred on the wheel, but never over the speed panel to its left: a
       // Hangul label is wider than the wheel, and centred it ran 15-35 px into
@@ -2186,7 +2272,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       p.setBrush(QColor(0, 0, 0, 160));
       p.drawRoundedRect(nda_rect, 10, 10);
       p.setPen(event ? QColor(255, 200, 0, 255) : QColor(0, 255, 0, 255));
-      p.drawText(nda_rect, Qt::AlignCenter, nda_text);
+      drawTextRunsCentered(p, nda_rect, nda_text);
       p.setPen(Qt::NoPen);
     }
   }
@@ -2684,23 +2770,30 @@ void NvgWindow::drawSpeed(QPainter &p) {
   const QString speed_template = "888";
   const QString unit_template  = "km/h";
 
-  configFont(p, "Open Sans", 176, "Bold");
-  QFontMetricsF fmSpeed(p.font());
-  QRectF rSpeedT = fmSpeed.boundingRect(speed_template);
-  QRectF speedRectT(x - rSpeedT.width() / 2.0,
-                    y_speed - fmSpeed.ascent(),
-                    rSpeedT.width(),
-                    fmSpeed.height());
+  // Measured from fixed templates and positions, so worked out once per x
+  // rather than with two QFontMetricsF on every paint.
+  static int bg_for_x = INT_MIN;
+  static QRectF bgBase;
+  if (x != bg_for_x) {
+    bg_for_x = x;
+    configFont(p, "Open Sans", 176, "Bold");
+    QFontMetricsF fmSpeed(p.font());
+    QRectF rSpeedT = fmSpeed.boundingRect(speed_template);
+    QRectF speedRectT(x - rSpeedT.width() / 2.0,
+                      y_speed - fmSpeed.ascent(),
+                      rSpeedT.width(),
+                      fmSpeed.height());
 
-  configFont(p, "Open Sans", 66, "Regular");
-  QFontMetricsF fmUnit(p.font());
-  QRectF rUnitT = fmUnit.boundingRect(unit_template);
-  QRectF unitRectT(x - rUnitT.width() / 2.0,
-                   y_unit - fmUnit.ascent(),
-                   rUnitT.width(),
-                   fmUnit.height());
+    configFont(p, "Open Sans", 66, "Regular");
+    QFontMetricsF fmUnit(p.font());
+    QRectF rUnitT = fmUnit.boundingRect(unit_template);
+    QRectF unitRectT(x - rUnitT.width() / 2.0,
+                     y_unit - fmUnit.ascent(),
+                     rUnitT.width(),
+                     fmUnit.height());
 
-  QRectF bgBase = speedRectT.united(unitRectT).adjusted(-28, -18, 28, 18);
+    bgBase = speedRectT.united(unitRectT).adjusted(-28, -18, 28, 18);
+  }
 
   // 폭 20% 확대 + 센터 유지
   const qreal bgW = bgBase.width() * 1.2;
@@ -2784,9 +2877,12 @@ void NvgWindow::drawSpeed(QPainter &p) {
   // drawTextWithColor 는 y 를 베이스라인으로 쓴다. 숫자를 원하는 높이에
   // "가운데" 놓으려면 자기 글자 높이의 절반만큼 내려야 한다. 높이 기준은
   // 실제 문자열이 아니라 "8" 로 고정해서, 값이 바뀌어도 줄이 흔들리지 않게 한다.
+  // The "8" height per font is memoised: two fonts, the same every paint.
+  static auto *eight_tables = new std::deque<FontTextRects>;
   auto baselineAt = [&](int center_y) {
-    QFontMetrics fm(p.font());
-    return center_y + fm.boundingRect("8").height() / 2;
+    const QRect r8 = cachedTextRect(textRectsFor(eight_tables, p.font()), QStringLiteral("8"),
+                                    [&] { return QFontMetrics(p.font()).boundingRect("8"); });
+    return center_y + r8.height() / 2;
   };
 
   // Colors
@@ -3590,12 +3686,12 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
 static void drawShadowText(QPainter &p, qreal x, qreal y, const QString &text,
                            const QColor &color, bool centre) {
   if (text.isEmpty()) return;
-  const qreal w = centre ? QFontMetricsF(p.font()).horizontalAdvance(text) : 0.;
+  const qreal w = centre ? cachedAdvance(p, text) : 0.;
   const QPointF pos(x - w / 2., y);
   p.setPen(QColor(0, 0, 0, 200));
-  p.drawText(pos + QPointF(3, 3), text);
+  drawTextRuns(p, pos + QPointF(3, 3), text);
   p.setPen(color);
-  p.drawText(pos, text);
+  drawTextRuns(p, pos, text);
 }
 
 // AutoTurnControl turn-info box: carrot hud_renderer.py _draw_turn_info_hud()
@@ -3639,12 +3735,9 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
 
   // guidance text (elided: the box is narrower than carrot's)
   configFont(p, "Open Sans", 52, "Bold");
-  {
-    const QFontMetrics fm(p.font());
-    drawShadowText(p, tbt_x + 20, tbt_y - 8,
-                   fm.elidedText(QString::fromUtf8(nda.getTbtMainText().cStr()), Qt::ElideRight, box_w - 40),
-                   white, false);
-  }
+  drawShadowText(p, tbt_x + 20, tbt_y - 8,
+                 cachedElided(p, QString::fromUtf8(nda.getTbtMainText().cStr()), box_w - 40, false),
+                 white, false);
 
   // turn icon, ATC state backdrop, distance
   const int turn_info = nda.getXTurnInfo();
@@ -3702,8 +3795,8 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
     // rounded advance cut short labels ("사고다…") with half the box empty.
     const QFontMetricsF fm(p.font());
     const qreal avail = box_w - (label_x - tbt_x) - 20;
-    const QString shown = fm.elidedText(sdi, Qt::ElideRight, avail);
-    const qreal tw = fm.horizontalAdvance(shown);
+    const QString shown = cachedElided(p, sdi, avail, true);
+    const qreal tw = cachedAdvance(p, shown);
     const qreal th = fm.height();
     p.setPen(Qt::NoPen);
     p.setBrush(QColor(0, 228, 48));
@@ -3721,11 +3814,21 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
   const QDateTime eta = QDateTime::currentDateTimeUtc().toOffsetFromUtc(9 * 3600).addSecs(go_time);
   const QString eta_text = QString("도착: %1분(%2)").arg(go_time / 60.0, 0, 'f', 1).arg(eta.toString("HH:mm"));
   const int eta_avail = box_w - 195 - 24;
-  int eta_size = 56;
-  for (; eta_size > 34; eta_size -= 2) {
-    configFont(p, "Open Sans", eta_size, "Bold");
-    if (QFontMetrics(p.font()).horizontalAdvance(eta_text) <= eta_avail) break;
+  // The fit depends only on the text and the room, so it is worked out once
+  // per pair rather than re-measured at up to 11 sizes on every paint.
+  static auto *eta_fit = new QHash<QString, int>;
+  const QString fit_key = eta_text + QChar(0x1f) + QString::number(eta_avail);
+  auto fit = eta_fit->constFind(fit_key);
+  if (fit == eta_fit->constEnd()) {
+    int size = 56;
+    for (; size > 34; size -= 2) {
+      configFont(p, "Open Sans", size, "Bold");
+      if (QFontMetrics(p.font()).horizontalAdvance(eta_text) <= eta_avail) break;
+    }
+    if (eta_fit->size() >= TEXT_RECT_CACHE_MAX) eta_fit->clear();
+    fit = eta_fit->insert(fit_key, size);
   }
+  const int eta_size = fit.value();
   configFont(p, "Open Sans", eta_size, "Bold");
   drawShadowText(p, tbt_x + 195, tbt_y + 74, eta_text, white, false);
   configFont(p, "Open Sans", 56, "Bold");
@@ -3859,12 +3962,12 @@ void NvgWindow::drawThermal(QPainter &p) {
     configFont(p, "Open Sans", value_pt, "Bold");
     const QRect vi = inkRect(value);
     p.setPen(valColor);
-    p.drawText(cx - vi.width() / 2 - vi.left(), value_base, value);
+    drawTextRuns(p, QPointF(cx - vi.width() / 2 - vi.left(), value_base), value);
 
     configFont(p, "Open Sans", LABEL_PT, "Bold");
     const QRect li = inkRect(label);
     p.setPen(QColor(0, 255, 0, 220));
-    p.drawText(cx - li.width() / 2 - li.left(), label_base, label);
+    drawTextRuns(p, QPointF(cx - li.width() / 2 - li.left(), label_base), label);
   };
 
   // BAT (coloured by the CPU temperature, as before)
