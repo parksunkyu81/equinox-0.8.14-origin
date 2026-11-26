@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QButtonGroup>
+#include <QComboBox>
 #include <QFileSystemWatcher>
 #include <QFrame>
 #include <QLabel>
@@ -134,6 +135,11 @@ private:
   LateralControl* lateralControl = nullptr;
 
   QWidget* homeWidget;
+  // TR level combo; re-synced on show because the onroad TR tile changes it too.
+  QComboBox* followGapCombo = nullptr;
+
+protected:
+  void showEvent(QShowEvent *event) override;
 
 public:
   explicit CommunityPanel(QWidget *parent = nullptr);

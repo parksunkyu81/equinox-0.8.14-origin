@@ -7,8 +7,9 @@ selectable profiles: the gap is an elastic band per speed.
 
 * floor_tr(v): the closest the car may run, from the brake-free analysis of a
   lead slowing by 10 km/h over 3 s with the car coasting after 0.8 s. Below
-  20 km/h it stays at 0.9 s -- stops there need the brake whatever the gap,
-  and a wider gap only invites cut-ins. 30-70 km/h is raised to 1.0 s, where
+  20 km/h it is the driver's FollowGapLevel: SHT 0.8 s, MID 0.9 s (default),
+  LONG 1.0 s -- stops there need the brake whatever the gap, and a wider gap
+  only invites cut-ins. 30-70 km/h is raised to 1.0 s, where
   the gap decides most brake presses. From 100 km/h the earlier speed floor
   already had margin and is kept.
 
@@ -30,6 +31,7 @@ TR * v + v^2/(2 b) + STOP_DISTANCE against the lead's v_lead^2/(2 b), so the
 """
 import json
 import math
+import time
 
 from common.numpy_fast import clip, interp
 
@@ -38,8 +40,46 @@ from common.numpy_fast import clip, interp
 FOLLOW_LEARN_PARAM = "CommaFollowLearn"
 
 FLOOR_BP_KPH = (0.0, 20.0, 30.0, 60.0, 70.0, 80.0, 100.0, 120.0, 140.0)
-FLOOR_TR_S = (0.9, 0.9, 1.0, 1.0, 1.0, 1.05, 1.1, 1.2, 1.3)
-MIN_FOLLOW_TR = FLOOR_TR_S[0]
+FLOOR_TR_S = (0.9, 0.9, 1.0, 1.0, 1.0, 1.05, 1.1, 1.2, 1.3)   # MID
+
+# Driver's gap level (Community menu "TR", or a tap on the onroad TR tile).
+# It moves only the 0-20 km/h floor; from 30 km/h up all three are the same.
+FOLLOW_GAP_LEVEL_PARAM = "FollowGapLevel"
+FOLLOW_GAP_LEVELS = ("sht", "mid", "long")
+DEFAULT_GAP_LEVEL = "mid"
+LOW_SPEED_FLOOR_S = {"sht": 0.8, "mid": 0.9, "long": 1.0}
+MIN_FOLLOW_TR = min(LOW_SPEED_FLOOR_S.values())
+GAP_LEVEL_REFRESH_S = 1.0
+
+_level_cache = {"level": DEFAULT_GAP_LEVEL, "t": -1e9}
+
+
+def parse_gap_level(raw):
+  try:
+    if isinstance(raw, bytes):
+      raw = raw.decode('utf8')
+    level = (raw or "").strip().lower()
+  except Exception:
+    return DEFAULT_GAP_LEVEL
+  return level if level in FOLLOW_GAP_LEVELS else DEFAULT_GAP_LEVEL
+
+
+def current_gap_level():
+  """FollowGapLevel, re-read at most once a second in each process."""
+  now = time.monotonic()
+  if now - _level_cache["t"] >= GAP_LEVEL_REFRESH_S:
+    _level_cache["t"] = now
+    try:
+      from common.params import Params
+      _level_cache["level"] = parse_gap_level(Params().get(FOLLOW_GAP_LEVEL_PARAM))
+    except Exception:
+      pass   # keep the last good level
+  return _level_cache["level"]
+
+
+def floor_table(level):
+  low = LOW_SPEED_FLOOR_S[parse_gap_level(level)]
+  return (low, low) + FLOOR_TR_S[2:]
 
 BAND_BP_KPH = (0.0, 30.0, 60.0, 100.0, 140.0)
 BAND_WIDTH_S = (0.4, 0.5, 0.5, 0.4, 0.3)
@@ -71,9 +111,10 @@ def read_gap_scale(raw):
     return 1.0
 
 
-def floor_tr(v_ego):
+def floor_tr(v_ego, level=None):
   v = float(v_ego) if math.isfinite(float(v_ego)) else 0.0
-  return float(interp(max(0.0, v) * 3.6, FLOOR_BP_KPH, FLOOR_TR_S))
+  table = floor_table(current_gap_level() if level is None else level)
+  return float(interp(max(0.0, v) * 3.6, FLOOR_BP_KPH, table))
 
 
 def band(v_ego, scale=1.0):

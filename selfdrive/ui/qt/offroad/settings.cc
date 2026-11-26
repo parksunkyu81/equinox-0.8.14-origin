@@ -600,8 +600,31 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   layoutBtn_5->addWidget(commaPedalResistanceLabel, 1);
   layoutBtn_5->addWidget(commaPedalResistanceCombo, 0);
 
-  // The Dynamic Follow menus (profile, Min TR, multiplier) are gone: the
-  // following gap is one setting-free control (dynamic_follow/follow_gap.py).
+  // TR (following gap) level: SHT / MID / LONG sets the 0-20 km/h floor of
+  // dynamic_follow/follow_gap.py to 0.8 / 0.9 / 1.0 s. plannerd and controlsd
+  // re-read FollowGapLevel once a second; the onroad TR tile cycles it too.
+  QString follow_gap_level = QString::fromStdString(
+    Params().get("FollowGapLevel")).trimmed().toLower();
+  if (follow_gap_level != "sht" && follow_gap_level != "mid" && follow_gap_level != "long") {
+    follow_gap_level = "mid";
+    Params().put("FollowGapLevel", "mid");
+  }
+  QLabel* followGapLabel = new QLabel("TR following distance (SHT / MID / LONG)", homeWidget);
+  followGapLabel->setObjectName("commaPedalResistanceLabel");
+  followGapLabel->setWordWrap(true);
+  followGapLabel->setMinimumWidth(0);
+  followGapLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+  followGapCombo = new QComboBox(homeWidget);
+  followGapCombo->setObjectName("commaPedalResistanceCombo");
+  followGapCombo->addItems(QStringList() << "SHT" << "MID" << "LONG");
+  followGapCombo->setCurrentText(follow_gap_level.toUpper());
+  connect(followGapCombo, &QComboBox::currentTextChanged, [=](const QString &selected) {
+    Params().put("FollowGapLevel", selected.toLower().toStdString());
+  });
+  QHBoxLayout* followGapLayout = new QHBoxLayout();
+  followGapLayout->setContentsMargins(0, 0, 0, 0);
+  followGapLayout->addWidget(followGapLabel, 1);
+  followGapLayout->addWidget(followGapCombo, 0);
 
   QString lateral_control = QString::fromStdString(Params().get("LateralControl"));
   if(lateral_control.length() == 0)
@@ -1004,10 +1027,21 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
   // Order right after the Dynamic Follow multiplier button: comma pedal
   // resistance, then torque latAccelFactor, then the toggles. The toggle loop
   // above already puts a line before the first toggle.
-  toggleLayout->insertLayout(0, layoutBtn_5);
+  toggleLayout->insertLayout(0, followGapLayout);
   toggleLayout->insertWidget(1, horizontal_line());
-  toggleLayout->insertLayout(2, torqueLatAccelLayout);
+  toggleLayout->insertLayout(2, layoutBtn_5);
+  toggleLayout->insertWidget(3, horizontal_line());
+  toggleLayout->insertLayout(4, torqueLatAccelLayout);
 
+}
+
+void CommunityPanel::showEvent(QShowEvent *event) {
+  QWidget::showEvent(event);
+  if (followGapCombo) {
+    QString level = QString::fromStdString(Params().get("FollowGapLevel")).trimmed().toUpper();
+    if (level != "SHT" && level != "MID" && level != "LONG") level = "MID";
+    if (followGapCombo->currentText() != level) followGapCombo->setCurrentText(level);
+  }
 }
 
 LateralControl::LateralControl(QWidget* parent): QWidget(parent) {

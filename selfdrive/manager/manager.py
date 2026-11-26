@@ -83,6 +83,7 @@ def manager_init() -> None:
     # Dynamic TR
     ("CustomTREnabled", "1"),
     ("CommaPedalResistance", "mid"),
+    ("FollowGapLevel", "mid"),
 
     # Temp
     ("CruiseGap1", "11"),

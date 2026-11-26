@@ -177,8 +177,19 @@ bool NvgWindow::hitAutoLaunchTile(const QPoint &pos) const {
          auto_launch_tile_rect_.contains(pos);
 }
 
-// The TR tile no longer takes taps: there are no following-distance profiles
-// to step through (dynamic_follow/follow_gap.py has one gap and no settings).
+bool NvgWindow::hitTrTile(const QPoint &pos) const {
+  return !tr_tile_rect_.isEmpty() && millis_since_boot() - tr_tile_drawn_t_ < 500.0 &&
+         tr_tile_rect_.contains(pos);
+}
+
+// Tapping the TR tile steps FollowGapLevel (Community "TR following distance"):
+// the 0-20 km/h floor of dynamic_follow/follow_gap.py, 0.8 / 0.9 / 1.0 s.
+static QString nextFollowGapLevel(const QString &cur) {
+  if (cur == "sht") return "mid";
+  if (cur == "mid") return "long";
+  if (cur == "long") return "sht";
+  return "long";   // unset reads as MID, so the next level is LONG
+}
 
 // Tapping the 페달 강도 tile steps CommaPedalResistance in the settings menu's
 // order. controlsd and the planner re-read it on their own, without a restart.
@@ -217,6 +228,17 @@ void OnroadWindow::mouseReleaseEvent(QMouseEvent* e) {
       nvg->hitAutoLaunchTile(nvg->mapFrom(this, endPos))) {
     Params params;
     params.putBool("ActiveStopAccelBoost", !params.getBool("ActiveStopAccelBoost"));
+    nvg->refreshPedalProfile();
+    return;
+  }
+  // And the TR tile: a tap steps FollowGapLevel SHT -> MID -> LONG.
+  // plannerd and controlsd re-read it within a second.
+  if (std::abs(dx) < 40 && std::abs(dy) < 40 && nvg->isVisible() &&
+      nvg->hitTrTile(nvg->mapFrom(this, endPos))) {
+    Params params;
+    const QString next = nextFollowGapLevel(
+      QString::fromStdString(params.get("FollowGapLevel")).trimmed().toLower());
+    params.put("FollowGapLevel", next.toStdString());
     nvg->refreshPedalProfile();
     return;
   }
@@ -1843,6 +1865,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     ai_pedal_profile = pedal_profile;
     // 자동 출발 tile: Community "Activate stop accel boost", same refresh.
     auto_launch_on_ = params.getBool("ActiveStopAccelBoost");
+    // TR tile: FollowGapLevel, same refresh.
+    const QString gap_level = QString::fromStdString(
+      params.get("FollowGapLevel")).trimmed().toUpper();
+    follow_gap_level_ = (gap_level == "SHT" || gap_level == "LONG") ? gap_level : "MID";
   }
 
   // Colour encodes the level so the setting reads at a glance without having
@@ -1868,8 +1894,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // the end of this function.
   const float tr_value = controls_state.getDynamicTRValue();
   //int cruise_gap = car_state.getCruiseGap();
-  // There is no profile name to show any more: the label is just "TR".
-  const QString tr_label = "TR";
+  // The label carries the FollowGapLevel: TR(SHT), TR(MID), TR(LONG).
+  const QString tr_label = QString("TR(%1)").arg(follow_gap_level_);
   QString tr_str;
   tr_str.sprintf("%.2f", tr_value);
 
@@ -2530,6 +2556,8 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
       statusCircle(scol_l, speed_row,
                    tr_label, tr_str, QColor(120, 255, 120, 200), "8.88");
+      tr_tile_rect_ = QRect(scol_l - SD / 2, speed_row - SD / 2, SD, SD);
+      tr_tile_drawn_t_ = millis_since_boot();
       // 페달 상태: no label, a ring in the state's colour and one large
       // standard icon (design G, chosen 2026-11-25), so it reads at a glance.
       {

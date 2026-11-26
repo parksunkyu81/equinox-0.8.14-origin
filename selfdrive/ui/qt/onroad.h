@@ -59,6 +59,9 @@ public:
   // 자동 출발 tile: tapping it flips ActiveStopAccelBoost. Same rules as
   // hitPedalTile; refreshPedalProfile also re-reads this tile's state.
   bool hitAutoLaunchTile(const QPoint &pos) const;
+  // TR tile: tapping it cycles FollowGapLevel SHT -> MID -> LONG. Same rules
+  // as hitPedalTile; refreshPedalProfile also re-reads this tile's level.
+  bool hitTrTile(const QPoint &pos) const;
   // 페달 신호 tile as last drawn (this widget's coordinates; empty until the
   // first HUD frame). OnroadWindow parks the record button above it.
   QRect pedalSignalTileRect() const { return pedal_signal_tile_rect_; }
@@ -153,6 +156,10 @@ protected:
   QRect auto_launch_tile_rect_;
   double auto_launch_tile_drawn_t_ = 0;
   bool auto_launch_on_ = false;
+  // Where the TR tile was last drawn, and the FollowGapLevel it shows.
+  QRect tr_tile_rect_;
+  double tr_tile_drawn_t_ = 0;
+  QString follow_gap_level_ = "MID";
   void drawSpeedLimit(QPainter &p);
   void drawSteer(QPainter &p);
   void drawTurnSignals(QPainter &p);
