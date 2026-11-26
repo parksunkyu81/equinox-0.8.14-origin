@@ -7,7 +7,7 @@ selectable profiles: the gap is an elastic band per speed.
 
 * floor_tr(v): the closest the car may run, from the brake-free analysis of a
   lead slowing by 10 km/h over 3 s with the car coasting after 0.8 s. Below
-  20 km/h it stays at 0.8 s -- stops there need the brake whatever the gap,
+  20 km/h it stays at 0.9 s -- stops there need the brake whatever the gap,
   and a wider gap only invites cut-ins. 30-70 km/h is raised to 1.0 s, where
   the gap decides most brake presses. From 100 km/h the earlier speed floor
   already had margin and is kept.
@@ -38,7 +38,7 @@ from common.numpy_fast import clip, interp
 FOLLOW_LEARN_PARAM = "CommaFollowLearn"
 
 FLOOR_BP_KPH = (0.0, 20.0, 30.0, 60.0, 70.0, 80.0, 100.0, 120.0, 140.0)
-FLOOR_TR_S = (0.8, 0.8, 1.0, 1.0, 1.0, 1.05, 1.1, 1.2, 1.3)
+FLOOR_TR_S = (0.9, 0.9, 1.0, 1.0, 1.0, 1.05, 1.1, 1.2, 1.3)
 MIN_FOLLOW_TR = FLOOR_TR_S[0]
 
 BAND_BP_KPH = (0.0, 30.0, 60.0, 100.0, 140.0)
