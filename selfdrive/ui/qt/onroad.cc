@@ -2409,6 +2409,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     const int block_cx = thermal_panel_right_ > 0
                          ? thermal_panel_right_ - SD - SGAP_X / 2
                          : thermal_panel_cx_;
+    const int col_l = block_cx - (SD + SGAP_X) / 2;
     const int col_r = block_cx + (SD + SGAP_X) / 2;
     // Anchored from the bottom so the block always grows away from the panel.
     // Two rows of icon/state pairs; the pedal tiles moved over to the speed
@@ -2416,11 +2417,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // The block now sits on top of the turn-info box with the thermal panel
     // above it (rightColumnLayout); it used to stand on the thermal panel.
     const int row_b = rightColumnLayout(width(), height()).status_bottom - SD / 2;
-    const int row_t = row_b - SD - SGAP_Y;
 
-    // The brake and auto-hold icons that filled the left column are gone (on
-    // request, 2026-11-26); ACC and LKAS keep their place on the right.
-    statusCircle(col_r, row_t, "ACC", acc_bool ? "ON" : "OFF",
+    // The brake and auto-hold icons are gone (on request, 2026-11-26), and ACC
+    // moved down from above LKAS to sit left of it, so the block is one row.
+    statusCircle(col_l, row_b, "ACC", acc_bool ? "ON" : "OFF",
                  acc_bool ? QColor(120, 255, 120, 200) : QColor(254, 32, 32, 200), "OFF");
     statusCircle(col_r, row_b, "LKAS", lkas_str, lkas_color, "OFF");
     paint_profile::sub_mark(paint_profile::BI_STATUS);
