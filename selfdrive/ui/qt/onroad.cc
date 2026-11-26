@@ -308,37 +308,49 @@ static constexpr int SPEED_BOARD_PANEL_GAP = 15;
 static constexpr int TURN_BAND_W = 240;
 static constexpr int TURN_BAND_GAP = 400;      // inner edge of the band, out from screen centre
 static constexpr int TURN_LEFT_BAND_SHIFT = 130;
-static constexpr int TURN_CHEVRONS = 3;
-static constexpr int TURN_CHEVRON_STEP = 56;
-static constexpr int TURN_CHEVRON_W = 38;
-static constexpr int TURN_CHEVRON_H = 58;
+// The indicator itself is one filled arrow, the ISO 2575 turn-signal
+// tell-tale (2026-11-26, on request; it was three sequential chevrons). It
+// fills the span the chevrons did: back edge at turnBandInner, tip 150 px
+// out from it.
+static constexpr int TURN_ARROW_LEN = 150;     // back edge to tip
+static constexpr int TURN_ARROW_HEAD = 66;     // head length along the arrow
+static constexpr int TURN_ARROW_H = 64;        // half height of the head
+static constexpr int TURN_ARROW_SHAFT = 26;    // half height of the shaft
 
 static int turnBandX(int w, bool left) {
   return left ? w / 2 - TURN_BAND_GAP - TURN_BAND_W + TURN_LEFT_BAND_SHIFT : w / 2 + TURN_BAND_GAP;
 }
 
-// x of the innermost chevron's back edge (the end nearest the screen centre)
+// x of the arrow's back edge (the end nearest the screen centre)
 static int turnBandInner(int w, bool left) {
   const int band_x = turnBandX(w, left);
   return left ? band_x + TURN_BAND_W - 30 : band_x + 30;
 }
 
-// Three chevrons pointing outward; the first `lit` (inside-out) full colour,
-// the rest faint.
-static void drawTurnChevrons(QPainter &p, int w, int h, bool left, const QColor &color, int lit) {
+// One filled arrow pointing outward, full colour when lit and faint when not
+// (the off half of a blink).
+static void drawTurnArrow(QPainter &p, int w, int h, bool left, const QColor &color, bool lit) {
   const int cy = h / 2;
   const int dir = left ? -1 : 1;
-  const int inner = turnBandInner(w, left);
-  for (int i = 0; i < TURN_CHEVRONS; i++) {
-    const int x = inner + dir * i * TURN_CHEVRON_STEP;
-    QColor c = color;
-    c.setAlpha(i < lit ? 255 : 50);
-    QPainterPath chevron;
-    chevron.moveTo(x, cy - TURN_CHEVRON_H);
-    chevron.lineTo(x + dir * TURN_CHEVRON_W, cy);
-    chevron.lineTo(x, cy + TURN_CHEVRON_H);
-    p.strokePath(chevron, QPen(c, 22, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-  }
+  const int back = turnBandInner(w, left);
+  const int tip = back + dir * TURN_ARROW_LEN;
+  const int head = tip - dir * TURN_ARROW_HEAD;
+  const QPointF pts[] = {
+    {(qreal)tip, (qreal)cy},
+    {(qreal)head, (qreal)(cy - TURN_ARROW_H)},
+    {(qreal)head, (qreal)(cy - TURN_ARROW_SHAFT)},
+    {(qreal)back, (qreal)(cy - TURN_ARROW_SHAFT)},
+    {(qreal)back, (qreal)(cy + TURN_ARROW_SHAFT)},
+    {(qreal)head, (qreal)(cy + TURN_ARROW_SHAFT)},
+    {(qreal)head, (qreal)(cy + TURN_ARROW_H)},
+  };
+  QColor c = color;
+  c.setAlpha(lit ? 255 : 50);
+  p.save();
+  p.setPen(QPen(c, 6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  p.setBrush(c);
+  p.drawPolygon(pts, 7);
+  p.restore();
 }
 
 // OnroadAlerts
@@ -377,8 +389,8 @@ void OnroadAlerts::paintEvent(QPaintEvent *event) {
     p.setRenderHint(QPainter::TextAntialiasing);
     if (atc_left || atc_right) {
       const QColor amber(255, 175, 0);
-      drawTurnChevrons(p, width(), height(), true, amber, atc_left ? TURN_CHEVRONS : 0);
-      drawTurnChevrons(p, width(), height(), false, amber, atc_right ? TURN_CHEVRONS : 0);
+      drawTurnArrow(p, width(), height(), true, amber, atc_left);
+      drawTurnArrow(p, width(), height(), false, amber, atc_right);
     }
 
     const int gap_l = turnBandInner(width(), true) + 30;
@@ -3517,24 +3529,23 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
     label = (uiState()->status == STATUS_ENGAGED && car_state.getVEgo() < 10 / 3.6f) ? "10km/h+" : "";
   }
 
-  // Geometry: TURN_BAND_* / TURN_CHEVRON_* above OnroadAlerts.
+  // Geometry: TURN_BAND_* / TURN_ARROW_* above OnroadAlerts.
   const int band_w = TURN_BAND_W;
   const int band_x = turnBandX(width(), left);
   const int cy = height() / 2;
-  const int ch = TURN_CHEVRON_H;
+  const int ch = TURN_ARROW_H;
   p.save();
   p.setRenderHint(QPainter::Antialiasing);
   p.setOpacity(1.0);
 
-  // Chevrons and label only -- no halo behind them, so the path view stays
+  // Arrow and label only -- no halo behind them, so the path view stays
   // unobstructed where the indicator overlaps it.
 
-  // Three chevrons firing inside-out, the way a sequential turn signal does.
-  const int n = TURN_CHEVRONS;
+  // The arrow blinks like the dashboard tell-tale: lit for 55% of the period,
+  // faint for the rest, and faster while the car is actually moving over.
   const double period = changing ? 460.0 : 800.0;
   const double phase = fmod(millis_since_boot(), period) / period;
-  const int lit = phase < 0.82 ? (int)(phase / 0.82 * n) + 1 : 0;
-  drawTurnChevrons(p, width(), height(), left, color, lit);
+  drawTurnArrow(p, width(), height(), left, color, phase < 0.55);
 
   if (!label.isEmpty()) {
     configFont(p, "Open Sans", 40, "Bold");
