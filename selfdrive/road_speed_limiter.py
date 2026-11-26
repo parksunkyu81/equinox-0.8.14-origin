@@ -9,6 +9,7 @@ import time
 import socket
 import fcntl
 import struct
+import subprocess
 from threading import Thread
 from cereal import messaging, log
 from common.numpy_fast import clip
@@ -165,36 +166,79 @@ NDA_LINK_LOG_PATH = os.getenv("NDA_LINK_LOG_PATH", "/data/log/nda_link.jsonl")
 NDA_LINK_LOG_MAX_BYTES = 512 * 1024
 
 
-def load_last_peer(path=None):
+PEERS_MAX = 4               # phones remembered, one per network in practice
+
+# Wi-Fi recovery. The long link losses were not the phone: the EON's wlan0 had
+# no address at all. Leaving home Wi-Fi it sat unassociated for 174 s before
+# Android joined the car network (2026-11-2x boot t 497 -> 671), because a
+# disconnected Android scans less and less often. While wlan0 has no IPv4 the
+# announcer now asks wpa_supplicant to scan and reassociate every
+# WIFI_KICK_EVERY_S, and if that has not helped after WIFI_TOGGLE_AFTER_S it
+# turns Wi-Fi off and on (at most every WIFI_TOGGLE_EVERY_S). Nothing runs
+# while wlan0 has an address, so a working link is never touched.
+WIFI_KICK_AFTER_S = 5.
+WIFI_KICK_EVERY_S = 5.
+WIFI_TOGGLE_AFTER_S = 60.
+WIFI_TOGGLE_EVERY_S = 120.
+WPA_CLI = ['wpa_cli', '-p', '/data/misc/wifi/sockets', '-i', 'wlan0']
+
+
+def _ip4(ip):
+  return struct.unpack('!I', socket.inet_aton(ip))[0]
+
+
+def load_last_peers(path=None):
+  """Recent phone addresses, newest first. The file used to hold one address,
+  so in the car the home phone's address was the only one remembered and it
+  was dropped as off-net: the car network started from broadcast alone."""
   try:
     with open(path or LAST_PEER_PATH) as f:
-      ip = f.read().strip()
-    socket.inet_aton(ip)
-    return ip
+      text = f.read().strip()
+    peers = json.loads(text) if text.startswith('[') else [text]
+    out = []
+    for ip in peers:
+      socket.inet_aton(ip)
+      if ip not in out:
+        out.append(ip)
+    return out[:PEERS_MAX]
   except Exception:
-    return None
+    return []
 
 
-def save_last_peer(ip, path=None):
+def save_last_peers(peers, path=None):
   try:
     with open(path or LAST_PEER_PATH, 'w') as f:
-      f.write(ip)
+      f.write(json.dumps(peers[:PEERS_MAX]))
   except Exception:
     pass
 
 
-def announce_unicast_targets(last_peer_ip, broadcast_address, arp_path='/proc/net/arp', iface='wlan0'):
-  """Hosts to send the announcement to directly: the last phone that talked
-  (DHCP usually hands it the same address on the car router) and the complete
-  wlan0 ARP entries, all inside the current broadcast subnet."""
+def announce_unicast_targets(peers, iface_addr, arp_path='/proc/net/arp', iface='wlan0'):
+  """Hosts to send the announcement to directly: the remembered phones (DHCP
+  usually hands a phone the same address on the same network) and the complete
+  wlan0 ARP entries, all inside wlan0's own subnet.
+
+  iface_addr is (ip, netmask) of wlan0, or None when unknown (no filter). The
+  filter used to compare the first three octets with the broadcast address,
+  which on the car network's /16 (broadcast 172.16.255.255, phone 172.16.0.100)
+  rejected every host, so nothing was unicast there at all."""
+  if isinstance(peers, str):
+    peers = [peers]
+  peers = peers or []
+
   def same_net(ip):
-    # /24 check is enough for phone hotspots and small car routers; a wider
-    # subnet just skips the filter's benefit, not the broadcast.
-    return broadcast_address is None or ip.rsplit('.', 1)[0] == broadcast_address.rsplit('.', 1)[0]
+    if iface_addr is None:
+      return True
+    try:
+      my_ip, mask = iface_addr
+      return (_ip4(ip) & _ip4(mask)) == (_ip4(my_ip) & _ip4(mask)) and ip != my_ip
+    except Exception:
+      return False
 
   out = []
-  if last_peer_ip and same_net(last_peer_ip):
-    out.append(last_peer_ip)
+  for ip in peers:
+    if ip and ip not in out and same_net(ip):
+      out.append(ip)
   try:
     with open(arp_path) as f:
       next(f)
@@ -262,9 +306,10 @@ class RoadLimitSpeedServer:
     self.last_time_location = 0
 
     self.last_rx = -1e9
-    self.last_peer_ip = load_last_peer()
+    self.peers = load_last_peers()
+    self.last_peer_ip = self.peers[0] if self.peers else None
     self.link_log = NdaLinkLog()
-    self.link_log.event('start', last_peer=self.last_peer_ip)
+    self.link_log.event('start', last_peer=self.last_peer_ip, peers=self.peers)
 
     broadcast = Thread(target=self.broadcast_thread, args=[])
     broadcast.setDaemon(True)
@@ -327,6 +372,51 @@ class RoadLimitSpeedServer:
     except:
       self.remote_gps_addr = None
 
+  @staticmethod
+  def get_iface_addr(iface='wlan0'):
+    """(ipv4, netmask) of iface, or None when it has no address."""
+    try:
+      s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+      try:
+        req = struct.pack('256s', iface.encode('utf-8'))
+        ip = socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x8915, req)[20:24])    # SIOCGIFADDR
+        mask = socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x891b, req)[20:24])  # SIOCGIFNETMASK
+        return ip, mask
+      finally:
+        s.close()
+    except Exception:
+      return None
+
+  def wifi_recover(self, now, has_addr):
+    """Nudge Android back onto a Wi-Fi network while wlan0 has no address (see WIFI_*)."""
+    if has_addr:
+      if self.wifi_lost_t is not None and self.wifi_kick_t >= self.wifi_lost_t:
+        self.link_log.event('wifi_back', down_s=round(now - self.wifi_lost_t, 1))
+      self.wifi_lost_t = None
+      return
+    if self.wifi_lost_t is None:
+      self.wifi_lost_t = now
+      return
+    down = now - self.wifi_lost_t
+    if down < WIFI_KICK_AFTER_S:
+      return
+    if down >= WIFI_TOGGLE_AFTER_S and now - self.wifi_toggle_t >= WIFI_TOGGLE_EVERY_S:
+      self.wifi_toggle_t = now
+      self.link_log.event('wifi_toggle', down_s=round(down, 1))
+      cmd = 'svc wifi disable; sleep 2; svc wifi enable'
+      subprocess.Popen(['sh', '-c', cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+      self.wifi_kick_t = now
+      return
+    if now - self.wifi_kick_t >= WIFI_KICK_EVERY_S:
+      if self.wifi_kick_t < self.wifi_lost_t:
+        self.link_log.event('wifi_kick', down_s=round(down, 1))   # first kick of this outage
+      self.wifi_kick_t = now
+      for args in (['scan'], ['reassociate']):
+        try:
+          subprocess.Popen(WPA_CLI + args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+          pass
+
   def get_broadcast_address(self):
     try:
       s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -351,6 +441,9 @@ class RoadLimitSpeedServer:
     broadcast_address = None
     last_sent = -1e9
     msg = 'EON:ROAD_LIMIT_SERVICE:v1'.encode()
+    self.wifi_lost_t = None
+    self.wifi_kick_t = -1e9
+    self.wifi_toggle_t = -1e9
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
       try:
@@ -367,10 +460,15 @@ class RoadLimitSpeedServer:
               if address != broadcast_address:
                 self.link_log.event('bcast_addr', addr=address, prev=broadcast_address)
                 broadcast_address = address
+              iface_addr = self.get_iface_addr()
+              try:
+                self.wifi_recover(now, iface_addr is not None)
+              except Exception as e:
+                self.link_log.event('wifi_recover_error', once=True, err=str(e)[:80])
               if broadcast_address is not None:
                 sock.sendto(msg, (broadcast_address, Port.BROADCAST_PORT))
                 if not linked:
-                  for ip in announce_unicast_targets(self.last_peer_ip, broadcast_address):
+                  for ip in announce_unicast_targets(self.peers, iface_addr):
                     try:
                       sock.sendto(msg, (ip, Port.BROADCAST_PORT))
                     except Exception:
@@ -468,7 +566,9 @@ class RoadLimitSpeedServer:
     self.last_rx = now
     if ip != self.last_peer_ip:
       self.last_peer_ip = ip
-      save_last_peer(ip)
+      self.peers = [ip] + [p for p in self.peers if p != ip]
+      self.peers = self.peers[:PEERS_MAX]
+      save_last_peers(self.peers)
 
   def check(self):
     now = sec_since_boot()
