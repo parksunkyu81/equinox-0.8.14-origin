@@ -1484,7 +1484,9 @@ RightColumnLayout rightColumnLayout(int w, int h) {
 // keyboard_double_arrow_up outlines (24 x 24 grid, Apache 2.0) for 가속 /
 // 감속 / BOOST, and the ISO 2575 brake tell-tale (!) for 브레이크. Vector
 // shapes, so no asset files. Each fits a box s wide and tall centred on c.
-enum class PedalIcon { Accel, Decel, Brake, Boost };
+// Hold is the AUTO HOLD tell-tale, (A): the brake symbol's ring and side arcs
+// with an A in place of the (!) (2026-11-26, on request).
+enum class PedalIcon { Accel, Decel, Brake, Boost, Hold };
 
 static void drawPedalIcon(QPainter &p, QPointF c, float s, PedalIcon kind, const QColor &color) {
   static const QPointF ARROW_UP[] = {{4, 12}, {5.41, 13.41}, {11, 7.83}, {11, 20}, {13, 20},
@@ -1517,9 +1519,10 @@ static void drawPedalIcon(QPainter &p, QPointF c, float s, PedalIcon kind, const
       material(DOUBLE_UP_LOW, 6);
       material(DOUBLE_UP_HIGH, 6);
       break;
-    case PedalIcon::Brake: {
-      // (!) -- a ring with an exclamation mark between two side arcs, at
-      // 0.8 of the box so its arcs sit as wide as the arrows' heads.
+    case PedalIcon::Brake:
+    case PedalIcon::Hold: {
+      // (!) / (A) -- a ring with an exclamation mark or an A between two side
+      // arcs, at 0.8 of the box so its arcs sit as wide as the arrows' heads.
       const float h = s * 0.8f, r = h * 0.33f, pen = h * 0.10f;
       p.setPen(QPen(color, pen, Qt::SolidLine, Qt::RoundCap));
       p.setBrush(Qt::NoBrush);
@@ -1528,6 +1531,19 @@ static void drawPedalIcon(QPainter &p, QPointF c, float s, PedalIcon kind, const
       const QRectF outer(x - ra, y - ra, 2 * ra, 2 * ra);
       p.drawArc(outer, 135 * 16, 90 * 16);    // left arc
       p.drawArc(outer, -45 * 16, 90 * 16);    // right arc
+      if (kind == PedalIcon::Hold) {
+        // A: two legs from an apex and a crossbar, in the ring's own stroke.
+        const float ah = r * 0.58f, aw = r * 0.46f;
+        QPainterPath a;
+        a.moveTo(x - aw, y + ah);
+        a.lineTo(x, y - ah);
+        a.lineTo(x + aw, y + ah);
+        a.moveTo(x - aw * 0.52f, y + ah * 0.22f);
+        a.lineTo(x + aw * 0.52f, y + ah * 0.22f);
+        p.setPen(QPen(color, pen * 0.9f, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.drawPath(a);
+        break;
+      }
       p.setPen(Qt::NoPen);
       p.setBrush(color);
       const float bw = h * 0.10f;
@@ -1928,12 +1944,23 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   } else {
     pedal_state = PedalIcon::Decel;
   }
-  const PedalIcon pedal_icon = pedal_state;
+  // Stopped and nothing pressed or sent: show it as AUTO HOLD (A) rather than
+  // the red 감속 arrow -- the car is held, not slowing down. Display only, so
+  // the 가속 -> 감속 hold timing above is untouched.
+  const bool pedal_stopped = car_state.getStandstill() || car_state.getVEgo() < 0.1f;
+  const PedalIcon pedal_icon = (pedal_state == PedalIcon::Decel && pedal_stopped)
+                                 ? PedalIcon::Hold : pedal_state;
   QColor pedalStatusColor;
   switch (pedal_icon) {
     case PedalIcon::Accel: pedalStatusColor = QColor(120, 255, 120, 255); break;
     case PedalIcon::Brake: pedalStatusColor = QColor(255, 185, 15, 255); break;
     case PedalIcon::Boost: pedalStatusColor = QColor(225, 255, 239, 255); break;
+    case PedalIcon::Hold:
+      // Green like the dashboard AUTO HOLD lamp while holding; grey while
+      // openpilot is not engaged, as 감속 is.
+      pedalStatusColor = controls_state.getEnabled() ? QColor(61, 220, 107, 255)
+                                                     : QColor(200, 200, 200, 200);
+      break;
     case PedalIcon::Decel:
     default:
       // Grey while openpilot is not engaged: nothing is being asked of the car.
