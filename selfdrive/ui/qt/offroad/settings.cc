@@ -11,10 +11,6 @@
 #include "selfdrive/ui/qt/offroad/networking.h"
 #endif
 
-#ifdef ENABLE_MAPS
-#include "selfdrive/ui/qt/maps/map_settings.h"
-#endif
-
 #include "selfdrive/common/params.h"
 #include "selfdrive/common/util.h"
 #include "selfdrive/hardware/hw.h"
@@ -120,14 +116,6 @@ TogglesPanel::TogglesPanel(SettingsWindow *parent) : ListWidget(parent) {
       "When enabled, pressing the accelerator pedal will disengage openpilot.",
       "../assets/offroad/icon_disengage_on_accelerator.svg",
     },
-#ifdef ENABLE_MAPS
-    {
-      "NavSettingTime24h",
-      "Show ETA in 24h format",
-      "Use 24h format instead of am/pm",
-      "../assets/offroad/icon_metric.png",
-    },
-#endif
 
   };
 
@@ -479,12 +467,6 @@ SettingsWindow::SettingsWindow(QWidget *parent) : QFrame(parent) {
     {"Software", new SoftwarePanel(this)},
     {"Community", community},
   };
-
-#ifdef ENABLE_MAPS
-  auto map_panel = new MapPanel(this);
-  panels.push_back({"Navigation", map_panel});
-  QObject::connect(map_panel, &MapPanel::closeSettings, this, &SettingsWindow::closeSettings);
-#endif
 
   const int padding = panels.size() > 3 ? 25 : 35;
 

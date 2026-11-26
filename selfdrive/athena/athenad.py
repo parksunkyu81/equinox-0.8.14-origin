@@ -264,19 +264,6 @@ def getVersion():
   }
 
 
-@dispatcher.add_method
-def setNavDestination(latitude=0, longitude=0, place_name=None, place_details=None):
-  destination = {
-    "latitude": latitude,
-    "longitude": longitude,
-    "place_name": place_name,
-    "place_details": place_details,
-  }
-  Params().put("NavDestination", json.dumps(destination))
-
-  return {"success": 1}
-
-
 def scan_dir(path, prefix):
   files = list()
   # only walk directories that match the prefix

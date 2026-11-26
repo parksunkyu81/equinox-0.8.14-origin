@@ -97,7 +97,7 @@ void HomeWindow::showRoadView(bool show) {
 void HomeWindow::mouseReleaseEvent(QMouseEvent* e) {
   // Handle sidebar collapsing
   if ((onroad->isVisible() || body->isVisible()) && (!sidebar->isVisible() || e->x() > sidebar->width())) {
-    sidebar->setVisible(!sidebar->isVisible() && !onroad->isMapVisible());
+    sidebar->setVisible(!sidebar->isVisible());
   }
 }
 

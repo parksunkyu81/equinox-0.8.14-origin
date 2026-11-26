@@ -2,7 +2,6 @@ import json
 import math
 import os
 import random
-import re
 
 import select
 import threading
@@ -67,56 +66,6 @@ class Port:
   BROADCAST_PORT = 2899
   RECEIVE_PORT = 2843
   LOCATION_PORT = BROADCAST_PORT
-
-
-# nda_manager가 보내는 레거시 목적지 명령. 셸로 실행하지 않고 이 두 형태만 인식해 Params로 처리한다.
-LEGACY_DEST_SET = re.compile(r"^echo '(\{.*\})' > /data/params/d/NavDestination$", re.DOTALL)
-LEGACY_DEST_CLEAR = "rm /data/params/d/NavDestination"
-
-
-def parse_nav_destination(obj):
-  """폰이 보낸 목적지를 검증해 NavDestination 형식 dict로 반환. 잘못된 값이면 None."""
-  if not isinstance(obj, dict):
-    return None
-  try:
-    lat = float(obj["latitude"])
-    lon = float(obj["longitude"])
-  except (KeyError, TypeError, ValueError):
-    return None
-  if not (-90. <= lat <= 90. and -180. <= lon <= 180.) or (abs(lat) < 1e-6 and abs(lon) < 1e-6):
-    return None
-  name = obj.get("place_name")
-  name = str(name)[:200] if name is not None else None
-  return {"latitude": lat, "longitude": lon, "place_name": name, "place_details": None}
-
-
-def apply_nav_destination(dest, params=None):
-  """dest가 None이면 목적지 삭제, dict면 검증 후 저장. 저장/삭제했으면 True."""
-  params = params if params is not None else Params()
-  if dest is None:
-    params.delete("NavDestination")
-    return True
-  parsed = parse_nav_destination(dest)
-  if parsed is None:
-    return False
-  params.put("NavDestination", json.dumps(parsed))
-  return True
-
-
-def handle_legacy_cmd(cmd, params=None):
-  """레거시 {"cmd": ...} 처리. 목적지 설정/삭제 두 형태 외에는 무시한다 (임의 셸 실행 금지)."""
-  if not isinstance(cmd, str):
-    return False
-  if cmd.strip() == LEGACY_DEST_CLEAR:
-    return apply_nav_destination(None, params)
-  m = LEGACY_DEST_SET.match(cmd.strip())
-  if m:
-    try:
-      return apply_nav_destination(json.loads(m.group(1)), params)
-    except ValueError:
-      return False
-  print("road_speed_limiter: ignored unsupported cmd")
-  return False
 
 
 def _int_or_none(v):
@@ -430,21 +379,10 @@ class RoadLimitSpeedServer:
         self._note_rx(self.remote_addr[0])
         json_obj = json.loads(data.decode())
 
-        # 예전에는 os.system(json_obj['cmd'])로 LAN의 누구든 root 명령을 실행할 수 있었다.
-        # 이제 nda_manager의 목적지 명령만 해석하고 셸은 실행하지 않는다.
-        if 'cmd' in json_obj:
-          try:
-            handle_legacy_cmd(json_obj['cmd'])
-            ret = False
-          except:
-            pass
-
-        if 'nav_destination' in json_obj:
-          try:
-            apply_nav_destination(json_obj['nav_destination'])
-            ret = False
-          except:
-            pass
+        # Destination packets (nda_manager's legacy 'cmd', 'nav_destination') fed
+        # the Mapbox navd, which is gone: ignore them, and never run 'cmd' in a shell.
+        if 'cmd' in json_obj or 'nav_destination' in json_obj:
+          ret = False
 
         if 'request_gps' in json_obj:
           try:

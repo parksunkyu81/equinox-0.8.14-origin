@@ -1,4 +1,3 @@
-third_party/mapbox-gl-native-qt/include/*
 
 selfdrive/timezoned.py
 
@@ -20,11 +19,5 @@ selfdrive/hardware/tici/updater
 
 selfdrive/ui/qt/spinner_larch64
 selfdrive/ui/qt/text_larch64
-selfdrive/ui/qt/maps/*.cc
-selfdrive/ui/qt/maps/*.h
 
-selfdrive/ui/navd/*.cc
-selfdrive/ui/navd/*.h
-selfdrive/ui/navd/navd
-selfdrive/ui/navd/.gitignore
 

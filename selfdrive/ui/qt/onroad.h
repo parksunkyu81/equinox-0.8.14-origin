@@ -175,7 +175,6 @@ class OnroadWindow : public QWidget {
 
 public:
   OnroadWindow(QWidget* parent = 0);
-  bool isMapVisible() const { return map && map->isVisible(); }
 
 protected:
   void mousePressEvent(QMouseEvent* e) override;
@@ -187,7 +186,6 @@ private:
   OnroadAlerts *alerts;
   NvgWindow *nvg;
   QColor bg = bg_colors[STATUS_DISENGAGED];
-  QWidget *map = nullptr;
   QHBoxLayout* split;
 
   // neokii

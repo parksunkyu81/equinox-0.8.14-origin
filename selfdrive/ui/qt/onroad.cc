@@ -16,10 +16,6 @@
 #include "selfdrive/common/timing.h"
 #include "selfdrive/ui/qt/paint_profile.h"
 #include "selfdrive/ui/qt/util.h"
-#ifdef ENABLE_MAPS
-#include "selfdrive/ui/qt/maps/map.h"
-#include "selfdrive/ui/qt/maps/map_helpers.h"
-#endif
 
 namespace {
 
@@ -257,11 +253,6 @@ void OnroadWindow::mouseReleaseEvent(QMouseEvent* e) {
     return;
   }
 
-  if (map != nullptr) {
-    bool sidebarVisible = geometry().x() > 0;
-    map->setVisible(!sidebarVisible && !map->isVisible());
-  }
-
   // propagation event to parent(HomeWindow)
   QWidget::mouseReleaseEvent(e);
 }
@@ -272,23 +263,6 @@ void OnroadWindow::mousePressEvent(QMouseEvent* e) {
 }
 
 void OnroadWindow::offroadTransition(bool offroad) {
-#ifdef ENABLE_MAPS
-  if (!offroad) {
-    if (map == nullptr && (uiState()->prime_type || !MAPBOX_TOKEN.isEmpty())) {
-      MapWindow * m = new MapWindow(get_mapbox_settings());
-      map = m;
-
-      QObject::connect(uiState(), &UIState::offroadTransition, m, &MapWindow::offroadTransition);
-
-      m->setFixedWidth(topWidget(this)->width() / 2);
-      split->addWidget(m, 0, Qt::AlignRight);
-
-      // Make map visible after adding to split
-      m->offroadTransition(offroad);
-    }
-  }
-#endif
-
   alerts->updateAlert({}, bg);
 
   // update stream type
@@ -527,7 +501,7 @@ void NvgWindow::initializeGL() {
     ic_wheel = QPixmap("../assets/img_chffr_wheel.png").scaled(wheel_icon_size, wheel_icon_size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
   }
 
-  // Turn-info box icons (the mapbox navigation set already in assets/).
+  // Turn-info box icons (assets/navigation/).
   // carrot draws turn_l / turn_r / lane_change_l / lane_change_r / turn_u.
   {
     constexpr int TURN_ICON = 140;
