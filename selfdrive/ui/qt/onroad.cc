@@ -146,16 +146,16 @@ void OnroadWindow::updateState(const UIState &s) {
 
 }
 
-// Record button centred over the 페달 신호 tile, its bottom the tile group's
-// own gap (19 px) above the tile, and kept 10 px inside the HUD's left edge
-// (the 190 px button is wider than the 140 px tile at x 30..170).
+// Record button at the height it had over the 페달 신호 tile (its bottom the
+// tile group's own gap, 19 px, above the tile), but against the HUD's right
+// edge, 10 px in (2026-11-26, on request; it used to be centred on the tile).
 void OnroadWindow::placeRecorder() {
   if (recorder == nullptr || nvg == nullptr) return;
   const QRect tile = nvg->pedalSignalTileRect();
   if (tile.isEmpty()) return;
   constexpr int GAP = 19;
   constexpr int EDGE = 10;
-  const int bx = std::max(EDGE, tile.center().x() - recorder->width() / 2);
+  const int bx = nvg->width() - EDGE - recorder->width();
   const int by = std::max(EDGE, tile.top() - GAP - recorder->height());
   const QPoint target = nvg->mapTo(this, QPoint(bx, by));
   if (recorder->pos() != target) {
