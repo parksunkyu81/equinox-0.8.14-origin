@@ -825,13 +825,6 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                           "../assets/offroad/icon_shell.png",
                                           this));*/
 
-  // The UI re-reads it within 5 s; navi_route (road_speed_limiter) within 1 s.
-  toggles.append(new ParamControl("ShowMiniMap",
-                                            "턴 안내 박스 미니맵",
-                                            "길안내 중 오른쪽 아래 턴 안내 박스 안에 지도(도로, 건물, 경로, 내 차)를 함께 보여줍니다. TmapNda의 '경로선 콤마 표시'가 켜져 있어야 합니다. 끄면 예전처럼 안내 문구만 보여주고, 경로 수신과 지도 그리기를 하지 않아 CPU를 아낍니다.",
-                                            "../assets/offroad/icon_road.png",
-                                            this));
-
   toggles.append(new ParamControl("AutoShutdown",
                                           "Enable auto shutdown",
                                           "Automatically power off the EON 180 seconds after external power is disconnected and driving has stopped.",

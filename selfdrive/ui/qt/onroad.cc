@@ -3598,22 +3598,12 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
 
   const QColor white(255, 255, 255);
 
-  // With a Kakao route and a position on it (selfdrive/navi_route.py) the
-  // right part of the box is a mini-map and the guidance packs into the left
-  // ~350 px; the turn icon and its distance keep their places.
-  // Community "ShowMiniMap" off: always the plain guidance layout.
-  const bool map_on = uiState()->show_minimap && minimap_.active(nda);
-  constexpr int MAP_W = 330, MAP_H = 280;
-  const QRectF map_rect(tbt_x + box_w - 10 - MAP_W, box_y + 10, MAP_W, MAP_H);
-  const int text_right = map_on ? (int)map_rect.left() - 10 : tbt_x + box_w - 20;
-
   // guidance text (elided: the box is narrower than carrot's)
-  configFont(p, "Open Sans", map_on ? 44 : 52, "Bold");
+  configFont(p, "Open Sans", 52, "Bold");
   {
     const QFontMetrics fm(p.font());
     drawShadowText(p, tbt_x + 20, tbt_y - 8,
-                   fm.elidedText(QString::fromUtf8(nda.getTbtMainText().cStr()), Qt::ElideRight,
-                                 text_right - (tbt_x + 20)),
+                   fm.elidedText(QString::fromUtf8(nda.getTbtMainText().cStr()), Qt::ElideRight, box_w - 40),
                    white, false);
   }
 
@@ -3664,15 +3654,15 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
   // camera description (green tag) or road name
   const QString sdi = QString::fromUtf8(nda.getSdiDescr().cStr());
   const QString road = QString::fromUtf8(nda.getPosRoadName().cStr());
-  configFont(p, "Open Sans", map_on ? 30 : 50, "Bold");
-  const int label_x = map_on ? tbt_x + 195 : tbt_x + 200;
-  const int label_base = map_on ? tbt_y + 180 : tbt_y + 210;
+  configFont(p, "Open Sans", 50, "Bold");
+  const int label_x = tbt_x + 200;
+  const int label_base = tbt_y + 210;
   if (!sdi.isEmpty()) {
     // Elide against the room left in the box (pill ends 10 px inside its right
     // edge), then size the pill to what is drawn. Eliding to the text's own
     // rounded advance cut short labels ("사고다…") with half the box empty.
     const QFontMetricsF fm(p.font());
-    const qreal avail = map_on ? text_right - label_x - 10 : box_w - (label_x - tbt_x) - 20;
+    const qreal avail = box_w - (label_x - tbt_x) - 20;
     const QString shown = fm.elidedText(sdi, Qt::ElideRight, avail);
     const qreal tw = fm.horizontalAdvance(shown);
     const qreal th = fm.height();
@@ -3681,9 +3671,7 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
     p.drawRoundedRect(QRectF(label_x - 10, label_base - fm.ascent() - 4, tw + 20, th + 8), 10, 10);
     drawShadowText(p, label_x, label_base, shown, white, false);
   } else if (!road.isEmpty()) {
-    drawShadowText(p, label_x, label_base,
-                   map_on ? QFontMetrics(p.font()).elidedText(road, Qt::ElideRight, text_right - label_x) : road,
-                   white, false);
+    drawShadowText(p, label_x, label_base, road, white, false);
   }
 
   // arrival time and distance left
@@ -3692,16 +3680,6 @@ void NvgWindow::drawTurnInfo(QPainter &p) {
   // it settles near 46). The distance left is not tied to it any more: it is
   // short, so it keeps 56 px.
   const QDateTime eta = QDateTime::currentDateTimeUtc().toOffsetFromUtc(9 * 3600).addSecs(go_time);
-  if (map_on) {
-    // Narrow column beside the map: distance left, then the arrival clock.
-    configFont(p, "Open Sans", 44, "Bold");
-    drawShadowText(p, tbt_x + 195, tbt_y + 70, QString("%1km").arg(go_dist / 1000.0, 0, 'f', 1), white, false);
-    configFont(p, "Open Sans", 30, "Bold");
-    drawShadowText(p, tbt_x + 195, tbt_y + 122, eta.toString("HH:mm") + " 도착", white, false);
-    minimap_.draw(p, map_rect, nda);
-    p.restore();
-    return;
-  }
   const QString eta_text = QString("도착: %1분(%2)").arg(go_time / 60.0, 0, 'f', 1).arg(eta.toString("HH:mm"));
   const int eta_avail = box_w - 195 - 24;
   int eta_size = 56;

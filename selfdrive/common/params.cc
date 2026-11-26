@@ -210,7 +210,6 @@ std::unordered_map<std::string, uint32_t> keys = {
 
     {"SoftRestartTriggered", CLEAR_ON_MANAGER_START},
     {"WideCameraOnly", PERSISTENT},
-    {"ShowMiniMap", PERSISTENT},
 
     // AutoTurnControl (carrot port): road_speed_limiter.py reads them every second.
     {"AutoTurnControl", PERSISTENT},

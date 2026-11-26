@@ -151,7 +151,6 @@ public:
 
   bool recording = false;
   bool show_debug = false;
-  bool show_minimap = true;   // Community "ShowMiniMap"
   std::string lat_control;
 
 signals:
