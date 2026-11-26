@@ -103,6 +103,16 @@ TURN_ARM_M = 30.
 NO_LIMIT_KPH = 250.
 ATC_SAFE_SEC = 2.0          # update_auto_turn(): safe_sec = 2.0
 STALE_S = 6.                # road_speed_limiter.py drops road_limit after 6 s
+# Distance resync from the phone. Every packet used to overwrite the countdown
+# with nTBTDist. TmapNda keeps re-sending its last guidance when TMAP stops
+# updating it (2026-11-26 drives: "18 m, turn left" for 67 s at 12-36 km/h,
+# "107 m, turn right" for ~140 s), so the turn sat 18 m ahead for a minute,
+# held the turn stage and its speed cap. And the phone's distance runs 1-2 m
+# behind the car's, so around the turn-stage edge (~44 m) every packet pushed
+# the countdown back over it: 49 turn <-> atc flips within 3 s on 11-23..26.
+# Now a packet moves the countdown only when the phone's value changes, and
+# not upward by up to RESYNC_LAG_M on the same instruction.
+RESYNC_LAG_M = 15.
 
 
 def calculate_current_speed(left_dist, safe_speed_kph, safe_time, safe_decel_rate):
@@ -156,6 +166,8 @@ class AutoTurnControl:
     self.navTypeNext, self.navModifierNext, self.xTurnInfoNext = "invalid", "", -1
     self.xDistToTurn = 0.
     self.xDistToTurnNext = 0.
+    self._tbt_key = None        # (nTBTTurnType, nTBTDist) of the last packet
+    self._tbt_next_key = None   # (nTBTTurnTypeNext, nTBTDistNext)
 
     self.atc_paused = False
     self.atc_activate_count = 0
@@ -228,10 +240,17 @@ class AutoTurnControl:
     else:
       self.navTypeNext, self.navModifierNext, self.xTurnInfoNext = "invalid", "", -1
 
-    if self.nTBTDist > 0 and self.xTurnInfo > 0:
-      self.xDistToTurn = self.nTBTDist
-    if self.nTBTDistNext > 0 and self.xTurnInfoNext > 0:
-      self.xDistToTurnNext = self.nTBTDistNext + self.nTBTDist
+    key = (self.nTBTTurnType, self.nTBTDist)
+    if self.nTBTDist > 0 and self.xTurnInfo > 0 and key != self._tbt_key:
+      same_turn = self._tbt_key is not None and self._tbt_key[0] == self.nTBTTurnType
+      lag = self.nTBTDist - self.xDistToTurn
+      if not (same_turn and self.xDistToTurn > 0. and 0. < lag <= RESYNC_LAG_M):
+        self.xDistToTurn = self.nTBTDist
+    self._tbt_key = key
+    next_key = (self.nTBTTurnTypeNext, self.nTBTDistNext)
+    if self.nTBTDistNext > 0 and self.xTurnInfoNext > 0 and next_key != self._tbt_next_key:
+      self.xDistToTurnNext = self.nTBTDistNext + self.xDistToTurn
+    self._tbt_next_key = next_key
 
   # ── per cycle ─────────────────────────────────────────────────────────────
   def update(self, now, v_ego, delta_dist, steering_pressed, steering_torque):
