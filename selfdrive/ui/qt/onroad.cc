@@ -3662,7 +3662,9 @@ void NvgWindow::drawThermal(QPainter &p) {
     value_pt = 42;
     for (; value_pt > 20; value_pt--) {
       configFont(p, "Open Sans", value_pt, "Bold");
-      if (QFontMetrics(p.font()).tightBoundingRect("100%").width() <= col_w - 6) break;
+      // 14 px clear each side of the widest reading (it was 3, and the three
+      // readings ran together; 2026-11-27, on request).
+      if (QFontMetrics(p.font()).tightBoundingRect("100%").width() <= col_w - 28) break;
     }
     // Ink heights, not line boxes: every string here is digits / caps with no
     // descender (see the note this replaced in git history).
@@ -3691,8 +3693,8 @@ void NvgWindow::drawThermal(QPainter &p) {
   p.setBrush(QColor(0, 0, 0, 150));
   p.drawRoundedRect(QRect(left, top, STRIP_W, total_h), 16, 16);
 
-  // Faint dividers between the three columns.
-  p.setPen(QPen(QColor(255, 255, 255, 38), 2));
+  // Dividers between the three columns, visible enough to separate them.
+  p.setPen(QPen(QColor(255, 255, 255, 90), 2));
   for (int i = 1; i < 3; i++) {
     const int dx = left + pad + col_w * i;
     p.drawLine(dx, top + 11, dx, top + total_h - 11);
