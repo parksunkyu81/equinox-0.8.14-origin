@@ -3646,6 +3646,10 @@ void NvgWindow::drawThermal(QPainter &p) {
   constexpr int STRIP_W = THERMAL_W;
   const int pad = 16;
   const int col_w = (STRIP_W - pad * 2) / 3;
+  // The value font keeps the size it had in the 102 px columns ("100%" fitted
+  // to 96 px); the strip grew instead so each column leaves 14 px either side
+  // of that reading (2026-11-27, on request).
+  constexpr int VALUE_FIT_W = 96;
   const int value_label_gap = 12;
 
   // Size the value font so the widest reading ("100%") fits its column with a
@@ -3662,9 +3666,7 @@ void NvgWindow::drawThermal(QPainter &p) {
     value_pt = 42;
     for (; value_pt > 20; value_pt--) {
       configFont(p, "Open Sans", value_pt, "Bold");
-      // 14 px clear each side of the widest reading (it was 3, and the three
-      // readings ran together; 2026-11-27, on request).
-      if (QFontMetrics(p.font()).tightBoundingRect("100%").width() <= col_w - 28) break;
+      if (QFontMetrics(p.font()).tightBoundingRect("100%").width() <= VALUE_FIT_W) break;
     }
     // Ink heights, not line boxes: every string here is digits / caps with no
     // descender (see the note this replaced in git history).
