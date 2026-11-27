@@ -1424,7 +1424,18 @@ static constexpr int PARKING_CAM_TYPE = 17;
 // reports of a bump already passed (and its 150 m placeholder) never reach
 // the screen. The number is TmapNda's own reported distance; when TmapNda has
 // dropped the bump before reaching it, the planner's estimate stands in.
+// road_speed_limiter publishes roadLimitSpeed at 20 Hz whether or not the
+// phone is linked (a phone link loss clears its fields within 6 s). A message
+// older than 1 s means the receiver itself has stopped, and SubMaster keeps
+// handing out that last message: every NDA / ATC element checks this so none
+// of them freezes on screen.
+static bool ndaFresh(const SubMaster &sm) {
+  return sm.rcv_frame("roadLimitSpeed") > 0 &&
+         nanos_since_boot() - sm.rcv_time("roadLimitSpeed") <= 1000000000ULL;
+}
+
 static int shownBumpDist(const SubMaster &sm) {
+  if (!ndaFresh(sm)) return -1;
   if (!sm["controlsState"].getControlsState().getSpeedBumpTracking()) return -1;
   auto nda = sm["roadLimitSpeed"].getRoadLimitSpeed();
   if (nda.getActive() <= 0) return -1;
@@ -2183,7 +2194,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // distance ("방지턱 85m", no limit), in yellow so it stands apart from the
     // plain road label.
     auto nda = sm["roadLimitSpeed"].getRoadLimitSpeed();
-    if (nda.getActive() > 0) {
+    if (ndaFresh(sm) && nda.getActive() > 0) {
       const int cam_type = nda.getCamType();
       const int cam_limit = nda.getCamLimitSpeed();
       const int cam_dist = nda.getCamLimitSpeedLeftDist();
@@ -2998,18 +3009,21 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   const SubMaster &sm = *(uiState()->sm);
   auto roadLimitSpeed = sm["roadLimitSpeed"].getRoadLimitSpeed();
 
-  const int activeNDA = roadLimitSpeed.getActive();
-  const int camLimitSpeed = roadLimitSpeed.getCamLimitSpeed();
-  const int camLimitSpeedLeftDist = roadLimitSpeed.getCamLimitSpeedLeftDist();
-  const int sectionLimitSpeed = roadLimitSpeed.getSectionLimitSpeed();
-  const int sectionLeftDist = roadLimitSpeed.getSectionLeftDist();
+  // A stopped receiver reads as "nothing": no icon, no board (see ndaFresh).
+  const bool fresh = ndaFresh(sm);
+  const int activeNDA = fresh ? roadLimitSpeed.getActive() : 0;
+  const int camType = fresh ? roadLimitSpeed.getCamType() : 0;
+  const int camLimitSpeed = fresh ? roadLimitSpeed.getCamLimitSpeed() : 0;
+  const int camLimitSpeedLeftDist = fresh ? roadLimitSpeed.getCamLimitSpeedLeftDist() : 0;
+  const int sectionLimitSpeed = fresh ? roadLimitSpeed.getSectionLimitSpeed() : 0;
+  const int sectionLeftDist = fresh ? roadLimitSpeed.getSectionLeftDist() : 0;
 
   int limit_speed = 0;
   int left_dist = 0;
 
   // A bump in the first SDI slot is drawn as the bump sign below, never as a
   // "10" camera board (road_speed_limiter fills its limit with 10).
-  const bool cam_is_bump = roadLimitSpeed.getCamType() == SPEED_BUMP_CAM_TYPE;
+  const bool cam_is_bump = camType == SPEED_BUMP_CAM_TYPE;
 
   if (!cam_is_bump && camLimitSpeed > 0 && camLimitSpeedLeftDist > 0) {
     limit_speed = camLimitSpeed;
@@ -3026,7 +3040,7 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   // Parking enforcement camera ahead (first SDI slot). It carries no speed
   // limit, so it never reached the camera board before.
   const bool show_parking = !show_bump && activeNDA > 0 &&
-                            roadLimitSpeed.getCamType() == PARKING_CAM_TYPE && camLimitSpeedLeftDist > 0;
+                            camType == PARKING_CAM_TYPE && camLimitSpeedLeftDist > 0;
 
   // A sign (bump, then parking) takes the board's place; the camera/section
   // board returns once it is gone.
@@ -3321,7 +3335,9 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
     // does it by hand (desire_helper.py ATC_TAP_SPEED_MIN). Otherwise: under 30 km/h a nudge starts it
     // (LANE_CHANGE_LOW_SPEED, the LaneChangeLowSpeed param), from there the
     // blinker alone after 1 s.
-    const QString atc = QString::fromUtf8(sm["roadLimitSpeed"].getRoadLimitSpeed().getAtcType().cStr());
+    const QString atc = ndaFresh(sm)
+        ? QString::fromUtf8(sm["roadLimitSpeed"].getRoadLimitSpeed().getAtcType().cStr())
+        : QString();
     const bool atc_lane = (atc.startsWith("fork ") || atc.startsWith("atc ") || atc.startsWith("turn ")) &&
                           !atc.contains("prepare");
     if (lane_change_low_speed_kph < 0) {
@@ -3394,10 +3410,7 @@ static void drawShadowText(QPainter &p, qreal x, qreal y, const QString &text,
 // cancelled fork is grey. Shown only while a route is being guided, like carrot.
 void NvgWindow::drawTurnInfo(QPainter &p) {
   const SubMaster &sm = *(uiState()->sm);
-  if (sm.rcv_frame("roadLimitSpeed") == 0 ||
-      nanos_since_boot() - sm.rcv_time("roadLimitSpeed") > 1000000000ULL) {
-    return;   // road_speed_limiter not publishing: never show a frozen box
-  }
+  if (!ndaFresh(sm)) return;   // road_speed_limiter not publishing: never show a frozen box
   const auto nda = sm["roadLimitSpeed"].getRoadLimitSpeed();
   const int go_dist = nda.getGoPosDist();
   const int go_time = nda.getGoPosTime();
