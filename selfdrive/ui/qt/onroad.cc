@@ -3250,7 +3250,11 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   const bool show_sign = show_bump || show_parking;
   const int sign_dist = show_bump ? bump_dist : camLimitSpeedLeftDist;
   const bool show_cam_or_section = !show_sign && (limit_speed > 0 && left_dist > 0);
-  const bool show_road = (roadLimit_Speed > 0 && roadLimit_Speed < 200);
+  // The SPEED LIMIT board is off (2026-11-27, on request): TmapNda's road limit
+  // can stay frozen for kilometres during route guidance, and the board is not
+  // needed. Camera, section, bump and parking boards still show. The value is
+  // display-only -- no speed control reads it.
+  const bool show_road = false && (roadLimit_Speed > 0 && roadLimit_Speed < 200);
 
   // ============================================================
   // ✅ 15% 확대 스케일
