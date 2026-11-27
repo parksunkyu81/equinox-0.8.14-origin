@@ -3286,6 +3286,16 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
   }
 
   if (!show_sign && !show_cam_or_section && !show_road) {
+    // No board: the NDA / HDA icon still shows that TmapNda is connected, in
+    // the spot it had above the SPEED LIMIT board (nda_badge_top_, published
+    // above). A camera / bump board draws it above itself as before.
+    if (activeNDA > 0) {
+      const int w = S(120);
+      const int h = S(54);
+      p.setOpacity(1.f);
+      p.drawPixmap(x_start + (S(SPEED_BOARD_W) - w) / 2, nda_badge_top_, w, h,
+                   (activeNDA == 1) ? ic_nda : ic_hda);
+    }
     p.restore();
     return;
   }
