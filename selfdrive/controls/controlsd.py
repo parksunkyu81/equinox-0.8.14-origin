@@ -28,7 +28,7 @@ from selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from selfdrive.controls.lib.latcontrol_angle import LatControlAngle
 from selfdrive.controls.lib.events import Events, ET
 from selfdrive.controls.lib.alertmanager import AlertManager, set_offroad_alert
-from selfdrive.controls.lib.control_activation import apply_control_activation
+from selfdrive.controls.lib.control_activation import apply_control_activation, SteerSpeedGate
 from selfdrive.controls.lib.vehicle_model import VehicleModel
 from selfdrive.locationd.calibrationd import Calibration
 from selfdrive.hardware import HARDWARE, TICI, EON
@@ -374,6 +374,8 @@ class Controls:
         else:
             self.CI, self.CP = CI, CI.CP
 
+        # LKAS speed gate with hysteresis; see control_activation.py.
+        self.steer_speed_gate = SteerSpeedGate(self.CP.minSteerSpeed)
 
         # read params
         self.is_metric = params.get_bool("IsMetric")
@@ -2015,7 +2017,8 @@ class Controls:
         # helper in both places so activation flags cannot be dropped between
         # lateral control and the vehicle CarController.
         self._frame_lat_active, _ = apply_control_activation(
-          CC, self.active, CS, self.CP, self.events.any(ET.OVERRIDE))
+          CC, self.active, CS, self.CP, self.events.any(ET.OVERRIDE),
+          steer_speed_ok=self.steer_speed_gate.update(CS.vEgo))
 
         actuators = CC.actuators
         actuators.longControlState = self.LoC.long_control_state
