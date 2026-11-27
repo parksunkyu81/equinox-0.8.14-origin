@@ -995,7 +995,12 @@ def main():
           dat = messaging.new_message()
           dat.init('roadLimitSpeed')
           dat.roadLimitSpeed.active = _i16(server.active)
-          dat.roadLimitSpeed.roadLimitSpeed = _i16(server.get_limit_val("road_limit_speed", 0))
+          # TmapNda's road_limit_speed is not taken (2026-11-27, on request): during
+          # Kakao route guidance TmapNda can keep sending one value for kilometres,
+          # and only the SPEED LIMIT board read it. roadLimitSpeed stays 0, so the
+          # board does not show. ATC still reads apilot.nRoadLimitSpeed (fork
+          # speed, turn start distance); that is unchanged.
+          dat.roadLimitSpeed.roadLimitSpeed = 0
           dat.roadLimitSpeed.isHighway = _flag(server.get_limit_val("is_highway", False))
           dat.roadLimitSpeed.camType = _i16(server.get_limit_val("cam_type", 0))
           dat.roadLimitSpeed.camLimitSpeedLeftDist = _i16(server.get_limit_val("cam_limit_speed_left_dist", 0))
