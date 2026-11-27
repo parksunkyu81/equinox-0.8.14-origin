@@ -1755,45 +1755,18 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
   // 3. LKAS (swapped column with WHEEL, per user request)
   // carControl.latActive is the exact flag the GM CarController gates LKAS on
-  // (apply_control_activation: steer faults, minSteerSpeed, standstill, angle
-  // limit). Read it instead of re-deriving from speed -- the old
-  // "cur_speed > 10" copy showed ON while steering was actually cut, and
-  // duplicated GM_MIN_STEER_SPEED_KPH as a literal.
-  //const bool lkas_bool = car_state.getLkasEnable();
+  // (apply_control_activation: steer faults, standstill, angle limit and the
+  // SteerSpeedGate -- on at minSteerSpeed + 2 km/h = 12, off below 10).
+  // Show it as is. Re-checking the UI speed against a flat 10 km/h here would
+  // disagree with that 12-on / 10-off hysteresis.
   const bool lat_active = car_control.getLatActive();
-  //const bool engaged = controls_state.getEnabled();
-  const float min_steer_kph = sm["carParams"].getCarParams().getMinSteerSpeed() * MS_TO_KPH;
 
   // Value/colour only -- LKAS itself is drawn in the right-hand status column
   // stacked above the temperature panel, at the end of this function.
-  QString lkas_str;
-  QColor lkas_color;
-  if (lat_active && cur_speed > min_steer_kph) {
-    lkas_str = "ON";
-    lkas_color = QColor(120, 255, 120, 200);
-  }
-  else if (lat_active && cur_speed < min_steer_kph) {
-    // City stop-and-go: steering is cut by the speed gate and comes back on
-    // its own above it. Amber, not red -- nothing is broken. This is checked
-    // BEFORE the fault branch on purpose: the PSCM reports
-    // LKATorqueDeliveredStatus == 2 (steerFaultTemporary) while stopped or
-    // creeping simply because it is not delivering LKA torque there. In the
-    // 2026-08-26 city drive every one of those 24.9s sat under 10 km/h, so
-    // ranking the fault first would paint normal stop-and-go red.
-    lkas_str = "OFF";
-    lkas_color = QColor(255, 175, 0, 220);
-  }
-  else  {
-    // City stop-and-go: steering is cut by the speed gate and comes back on
-    // its own above it. Amber, not red -- nothing is broken. This is checked
-    // BEFORE the fault branch on purpose: the PSCM reports
-    // LKATorqueDeliveredStatus == 2 (steerFaultTemporary) while stopped or
-    // creeping simply because it is not delivering LKA torque there. In the
-    // 2026-08-26 city drive every one of those 24.9s sat under 10 km/h, so
-    // ranking the fault first would paint normal stop-and-go red.
-    lkas_str = "OFF";
-    lkas_color = QColor(255, 175, 0, 220);
-  }
+  // OFF is amber, not red: in city stop-and-go steering is cut by the speed
+  // gate and comes back on its own.
+  const QString lkas_str = lat_active ? "ON" : "OFF";
+  const QColor lkas_color = lat_active ? QColor(120, 255, 120, 200) : QColor(255, 175, 0, 220);
 
   // 5. AI driving profiles
   x = icon_start_x + (icon_step * 4);
