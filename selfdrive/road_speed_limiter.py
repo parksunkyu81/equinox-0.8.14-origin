@@ -739,59 +739,6 @@ class NaviInfo:
     self.sdi_descr = SDI_DESCR_KO.get(-1 if sdi_type == 0 and sdi_dist == 0 else sdi_type, "")
 
 
-# TmapNda can keep sending one road limit for many kilometres while TMAP has
-# moved on (2026-11-27: 50 for 3.5 km during route guidance; its two limit
-# sources share one confirmation counter and reset each other, and while a
-# change is held its 8 s fallback to 0 never fires). The EON has no other
-# source for the real limit -- OSM carries one on 1-26 % of city roads -- so
-# once the car has been on this many other roads with the limit unchanged,
-# the value is taken as frozen and not shown (on request). It returns as soon
-# as the phone sends a different value.
-FROZEN_LIMIT_NEW_ROADS = 3
-
-
-class RoadLimitFreezeGuard:
-  """Hides a road limit that stayed the same across FROZEN_LIMIT_NEW_ROADS
-  road names (szPosRoadName) other than the one it started on. Distinct names
-  are counted, so a name flickering at a junction counts once. Only the
-  SPEED LIMIT board reads roadLimitSpeed.roadLimitSpeed; camera, section and
-  bump values are untouched."""
-
-  def __init__(self, link_log=None):
-    self.link_log = link_log
-    self.limit = None
-    self.start_road = None
-    self.new_roads = set()
-    self.hidden = False
-
-  def update(self, limit, apilot):
-    if limit != self.limit:
-      self._set_hidden(False, limit)
-      self.limit = limit
-      self.start_road = None
-      self.new_roads = set()
-    if isinstance(apilot, dict):
-      road = _apilot_text(apilot, "szPosRoadName").strip()
-      if road:
-        if self.start_road is None:
-          self.start_road = road
-        elif road != self.start_road:
-          self.new_roads.add(road)
-    self._set_hidden(limit > 0 and len(self.new_roads) >= FROZEN_LIMIT_NEW_ROADS, limit)
-    return 0 if self.hidden else limit
-
-  def _set_hidden(self, hidden, limit):
-    if hidden == self.hidden:
-      return
-    self.hidden = hidden
-    if self.link_log is not None:
-      if hidden:
-        self.link_log.event('road_limit_hidden', limit=limit, start_road=self.start_road,
-                            new_roads=sorted(self.new_roads))
-      else:
-        self.link_log.event('road_limit_shown', old=self.limit, new=limit)
-
-
 class AtcRunner:
   """Feeds AutoTurnControl from TmapNda packets and carState, and logs it.
 
@@ -1016,7 +963,6 @@ def main():
   atc_runner = AtcRunner()
   server.navi_ref = atc_runner.navi
   section_log = SectionLog()
-  limit_guard = RoadLimitFreezeGuard(server.link_log)
   last_sdp_t = -1e9
 
   with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -1049,12 +995,7 @@ def main():
           dat = messaging.new_message()
           dat.init('roadLimitSpeed')
           dat.roadLimitSpeed.active = _i16(server.active)
-          road_limit = _i16(server.get_limit_val("road_limit_speed", 0))
-          try:
-            road_limit = limit_guard.update(road_limit, apilot)
-          except Exception as e:
-            print("road_speed_limiter: limit guard failed:", e)
-          dat.roadLimitSpeed.roadLimitSpeed = road_limit
+          dat.roadLimitSpeed.roadLimitSpeed = _i16(server.get_limit_val("road_limit_speed", 0))
           dat.roadLimitSpeed.isHighway = _flag(server.get_limit_val("is_highway", False))
           dat.roadLimitSpeed.camType = _i16(server.get_limit_val("cam_type", 0))
           dat.roadLimitSpeed.camLimitSpeedLeftDist = _i16(server.get_limit_val("cam_limit_speed_left_dist", 0))
