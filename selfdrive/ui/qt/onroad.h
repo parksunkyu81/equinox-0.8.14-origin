@@ -14,7 +14,7 @@
 // Right-hand onroad column, bottom up: turn-info box (carrot's spot), the
 // thermal strip above it, the brake / ACC / auto-hold / LKAS status block
 // above that. Computed in onroad.cc.
-constexpr int THERMAL_W = 338;   // 2 x 140 + 14 status block width, +15%
+constexpr int THERMAL_W = 372;   // 338 (2 x 140 + 14, +15%) + 10% for room between readings
 constexpr int THERMAL_H = 89;    // 77 px it started at, +15%
 struct RightColumnLayout {
   QRect turn_box;
