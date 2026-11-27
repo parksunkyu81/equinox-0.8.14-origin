@@ -1666,10 +1666,9 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   }
   paint_profile::sub_mark(paint_profile::BI_GAUGES);
 
-  float cur_speed = std::max(0.0, car_state.getVEgo() * MS_TO_KPH);
-  // The old shared str / str2 / textColor scratch locals are gone: every tile
-  // now builds its own strings and colour. The commented-out blocks below
-  // still reference them, so restoring one means declaring them again.
+  // The old shared str / str2 / textColor / cur_speed scratch locals are gone:
+  // every tile now builds its own strings and colour. The commented-out blocks
+  // below still reference them, so restoring one means declaring them again.
 
   /*
   // Previous steering-angle display (kept for easy restoration).
