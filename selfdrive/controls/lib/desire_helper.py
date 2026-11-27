@@ -205,6 +205,21 @@ TURN_NEAR_MAX_HEADING_DEG = 15.
 TURN_NEAR_PATH_X = 20.
 TURN_NEAR_BENT_M = 2.
 
+# Driver cancel lock. The driver steering against a turn desire (or putting
+# the other blinker on) ends it ("cancel" in _apply_turn_latch). Before
+# 2026-11-27 the very next model frame started it again -- the blinker was
+# still on and the point still inside ATC_TURN_FORCE_M -- so the car pulled
+# left again 0.05-0.6 s after every push: on 2026-11-27--01-27-06 one left
+# turn (boot t 492-501 s, 38 -> 9 m out) started 5 times against the driver,
+# and three others 2-3 times each. Now a cancelled turn stays off until the
+# driver's blinker has gone off and come on again (a fresh go-ahead), for
+# the ATC and the blinker-only turn alike. Since that is now final, a push
+# must last TURN_CANCEL_PRESS_S: on that drive the deliberate ones lasted
+# 0.25-3.4 s, while a hand catching the wheel mid-turn read steeringPressed
+# for 0.10-0.15 s (5 of 12 cancels, e.g. 239.1 s at 84 deg in a turn the car
+# then finished). The other blinker still cancels at once.
+TURN_CANCEL_PRESS_S = 0.2
+
 
 class DesireHelper:
   """Lane change / turn desire.
@@ -233,7 +248,10 @@ class DesireHelper:
   blinker on the instruction's side -- a tap is enough -- moves the car one
   lane when there is room there; under 15 the driver changes lanes by hand. An ATC
   intersection turn still sends the turn desire, after the driver's blinker on
-  the same side or a nudge of the wheel toward that side.
+  the same side. A push of the wheel toward that side no longer starts it (it
+  did until 2026-11-27): close to the point that push is mostly the driver moving into
+  the turn lane by hand, and on 2026-11-27--01-27-06 it started two left turns
+  30-35 m early with no blinker on (boot t 170.0 and 457.2 s).
   """
 
   def __init__(self):
@@ -273,7 +291,11 @@ class DesireHelper:
     self.prev_atc_below_speed = False   # last ATC frame was under ATC_LANE_CHANGE_SPEED_MIN
     self.prev_driver_enabled = False
     self.atc_owner = False         # the current maneuver belongs to the ATC path
-    self.atc_turn_confirmed = False  # driver confirmed this ATC turn (blinker or nudge)
+    self.atc_turn_confirmed = False  # driver confirmed this ATC turn (blinker)
+    # driver cancel lock (see the comment above DesireHelper)
+    self.turn_cancel_lock = False
+    self.turn_cancel_saw_off = False   # the blinker has been off since the cancel
+    self.turn_opp_press_t = 0.         # driver pushing against the latched turn this long
     self.atc_dist = 0.               # navigation distance to the point [m] (0: unknown)
     self.atc_side = BLINKER_NONE     # side of the current instruction
     self.atc_stale_blinker = BLINKER_NONE  # driver blinker already on when it started
@@ -314,6 +336,11 @@ class DesireHelper:
     self._update_blindspot_hold(carstate)
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
     driver_st = (BLINKER_LEFT if carstate.leftBlinker else 0) | (BLINKER_RIGHT if carstate.rightBlinker else 0)
+    if self.turn_cancel_lock:
+      if driver_st == BLINKER_NONE:
+        self.turn_cancel_saw_off = True
+      elif self.turn_cancel_saw_off:
+        self.turn_cancel_lock = False   # blinker off, then on again: a fresh go-ahead
 
     if modeldata is not None:
       self._process_sides(carstate, modeldata)
@@ -359,7 +386,8 @@ class DesireHelper:
 
   def _update_driver_turn(self, carstate, active, driver_st):
     """Start a turn desire from the driver's blinker alone (DRIVER_TURN_*)."""
-    if self.turn_by_driver or self.turn_latched != TURN_NONE:
+    if self.turn_by_driver or self.turn_latched != TURN_NONE or self.turn_cancel_lock:
+      self.driver_turn_open = 0
       return
     left = driver_st == BLINKER_LEFT
     side = self.left if left else (self.right if driver_st == BLINKER_RIGHT else None)
@@ -639,6 +667,7 @@ class DesireHelper:
       self.turn_heading_deg = 0.
       self.turn_dist_m = 0.
       self.turn_end_reason = ""
+      self.turn_opp_press_t = 0.
 
     left = self.turn_latched == TURN_LEFT
     v = max(0., carstate.vEgo)
@@ -647,8 +676,10 @@ class DesireHelper:
     self.turn_dist_m += v * DT_MDL
 
     opposite_blinker = driver_st == (BLINKER_RIGHT if left else BLINKER_LEFT)
-    opposite_press = carstate.steeringPressed and (
+    pushing_back = carstate.steeringPressed and (
       carstate.steeringTorque < 0 if left else carstate.steeringTorque > 0)
+    self.turn_opp_press_t = self.turn_opp_press_t + DT_MDL if pushing_back else 0.
+    opposite_press = self.turn_opp_press_t >= TURN_CANCEL_PRESS_S - 1e-6
     wheel_toward = carstate.steeringAngleDeg * (1. if left else -1.)
     self.driver_turn_off_t = self.driver_turn_off_t + DT_MDL if driver_st == BLINKER_NONE else 0.
 
@@ -676,6 +707,10 @@ class DesireHelper:
       self.lane_change_direction = LaneChangeDirection.none
       if reason == "done":
         self.turn_disable_count = int(TURN_REARM_S / DT_MDL)
+      elif reason == "cancel":
+        self.turn_cancel_lock = True
+        self.turn_cancel_saw_off = driver_st == BLINKER_NONE
+        self.atc_turn_confirmed = False
       self.turn_by_driver = False
       return
 
@@ -768,8 +803,8 @@ class DesireHelper:
     side = self._get_selected_side(blinker_state) if blinker_state in (BLINKER_LEFT, BLINKER_RIGHT) else None
     atc_lane_change_requested = atc_enabled and self.atc_type in ATC_LANE_TYPES
     # carrot lets a right fork start on its own; here any ATC request (fork,
-    # pre-turn lane, or a turn read as a lane change) needs the driver's
-    # blinker or nudge, since the car cannot light its own lamp.
+    # pre-turn lane, or a turn) needs the driver's blinker, since the car
+    # cannot light its own lamp.
     atc_needs_driver = atc_enabled and not driver_enabled
     atc_lane_change_manual_only = atc_lane_change_requested and not driver_enabled
     atc_lane_change_only = atc_lane_change_requested and not driver_enabled
@@ -836,11 +871,10 @@ class DesireHelper:
           self.lane_change_state in (LaneChangeState.off, LaneChangeState.preLaneChange)):
         self.maneuver_type = "turn"
 
-      # An ATC turn waits for the driver too: the blinker on that side, or a
-      # nudge toward it, which then holds until the instruction changes.
-      turn_nudge = carstate.steeringPressed and (
-        (carstate.steeringTorque > 0) if blinker_state == BLINKER_LEFT else (carstate.steeringTorque < 0))
-      if driver_enabled or turn_nudge:
+      # An ATC turn waits for the driver too: the blinker on that side, which
+      # then holds until the instruction changes (or the driver cancels the
+      # turn). A push of the wheel no longer counts (see the class docstring).
+      if driver_enabled and not self.turn_cancel_lock:
         self.atc_turn_confirmed = True
 
       if desire_enabled and self.maneuver_type == "turn" and self.enable_turn_desires:
@@ -848,7 +882,7 @@ class DesireHelper:
         new_point_close = (self.turn_rearm_new_point and self.atc_type in ("turn left", "turn right") and
                            0. < self.atc_dist <= ATC_TURN_FORCE_M)
         rearm_hold = self.turn_disable_count > 0 and not new_point_close
-        if rearm_hold or not (driver_enabled or self.atc_turn_confirmed):
+        if rearm_hold or self.turn_cancel_lock or not (driver_enabled or self.atc_turn_confirmed):
           self.turn_direction = TURN_NONE
           self.lane_change_direction = LaneChangeDirection.none
         else:
