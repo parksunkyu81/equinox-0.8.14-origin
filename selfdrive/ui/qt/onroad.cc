@@ -3869,10 +3869,12 @@ void NvgWindow::drawGpsStatus(QPainter &p) {
 
 // Traffic light at the top centre: red / green as guessed from the driving
 // model's plan (selfdrive/controls/lib/traffic_light.py), nothing otherwise.
+// It sits just under the header line (clock + CPU/LatA, baseline y 55), which
+// runs the full width and is drawn after it.
 void NvgWindow::drawTrafficLight(QPainter &p) {
   const int light = (*(uiState()->sm))["controlsState"].getControlsState().getTrafficState();
   if (light != 1 && light != 2) return;
-  const float w = 264, h = 88, x = rect().center().x() - w / 2, y = 30, r = 31;
+  const float w = 264, h = 88, x = rect().center().x() - w / 2, y = 75, r = 31;
   static const QColor off(95, 94, 90);
   static const QColor on[3] = {QColor(226, 75, 74), QColor(239, 159, 39), QColor(99, 153, 34)};
   const int lit = light == 1 ? 0 : 2;
