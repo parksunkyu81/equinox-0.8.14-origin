@@ -71,6 +71,7 @@ from selfdrive.controls.lib.comma_pedal_profile import (
 from selfdrive.controls.lib.comma_pedal_auto import CommaPedalAutoLearner
 from selfdrive.controls.lib.follow_learner import FollowLearner
 from selfdrive.controls.lib.traffic_state import JamDetector
+from selfdrive.controls.lib.traffic_light import TrafficLight
 from selfdrive.controls.lib.follow_accel_cap import (
   follow_accel_cap, hold_weight, SpeedHoldOffset, EASE_MPS3 as FOLLOW_CAP_EASE_MPS3)
 from selfdrive.controls.lib.pedal_hold_diag import PedalHoldDiag
@@ -465,6 +466,8 @@ class Controls:
         self.corner_alert = CornerAlert()
         self.atc_lane_guide = AtcLaneGuide()
         self.atc_lane_prompt = BLINKER_NONE
+        # HUD traffic light guessed from the model's plan (traffic_light.py)
+        self.traffic_light = TrafficLight()
         self._atc_rls = None
         self._atc_type = ""
         # modelV2 changes at 20 Hz; what the launch latch reads from it is
@@ -1381,6 +1384,23 @@ class Controls:
             self.events.add(EventName.atcBlinkerLeft)
         elif self.atc_lane_prompt == BLINKER_RIGHT:
             self.events.add(EventName.atcBlinkerRight)
+
+        # Traffic light guess for the HUD, once per model frame. Display and the
+        # green-light chime only; it never acts on the car.
+        if self.sm.updated['modelV2']:
+            md = self.sm['modelV2']
+            pos = md.position
+            xs = pos.x
+            acc = list(md.acceleration.x)[:11]
+            lead = self.sm['radarState'].leadOne
+            self.traffic_light.update(
+              CS.vEgo, float(xs[len(xs) - 1]) if len(xs) else 1000.,
+              sum(acc) / len(acc) if acc else 0., CS.standstill,
+              CS.leftBlinker or CS.rightBlinker, CS.steeringAngleDeg,
+              bool(lead.status), lead.dRel, lead.vLead,
+              max((abs(y) for y in pos.y), default=0.))
+            if self.traffic_light.green_event and self.enabled and not CS.gasPressed:
+                self.events.add(EventName.trafficLightGreen)
 
         # Handle lane change. Under an ATC instruction the planner holds in
         # preLaneChange for the whole approach; the guide speaks for it, so the
@@ -2734,6 +2754,7 @@ class Controls:
         bump_planner = get_road_speed_limiter().bump_planner
         controlsState.speedBumpTracking = bool(bump_planner.tracking)
         controlsState.speedBumpDist = float(bump_planner.left_dist)
+        controlsState.trafficState = int(self.traffic_light.state)
         # drivingStyleAI* fields are left in the schema (removing capnp fields
         # would break replay of every log recorded before this) but nothing
         # writes them any more, so they read as their defaults.

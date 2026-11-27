@@ -146,6 +146,8 @@ struct CarEvent @0x9b1657f34caf3ad3 {
     # for the driver's blinker: the car cannot light its own lamp.
     atcBlinkerLeft @121;
     atcBlinkerRight @122;
+    # The light the car stopped for turned green (controls/lib/traffic_light.py).
+    trafficLightGreen @123;
   }
 }
 

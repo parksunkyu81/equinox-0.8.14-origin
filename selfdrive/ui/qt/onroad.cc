@@ -1113,6 +1113,7 @@ void NvgWindow::drawHud(QPainter &p) {
 
   //drawMaxSpeed(p);
   drawSpeed(p);
+  drawTrafficLight(p);
   paint_profile::mark(paint_profile::SPEED);
   drawSpeedLimit(p);
   paint_profile::mark(paint_profile::SPEED_LIMIT);
@@ -3865,6 +3866,27 @@ void NvgWindow::drawGpsStatus(QPainter &p) {
   p.drawText(rect, Qt::AlignHCenter, str);
   p.setOpacity(1.);
 }*/
+
+// Traffic light at the top centre: red / green as guessed from the driving
+// model's plan (selfdrive/controls/lib/traffic_light.py), nothing otherwise.
+void NvgWindow::drawTrafficLight(QPainter &p) {
+  const int light = (*(uiState()->sm))["controlsState"].getControlsState().getTrafficState();
+  if (light != 1 && light != 2) return;
+  const float w = 264, h = 88, x = rect().center().x() - w / 2, y = 30, r = 31;
+  static const QColor off(95, 94, 90);
+  static const QColor on[3] = {QColor(226, 75, 74), QColor(239, 159, 39), QColor(99, 153, 34)};
+  const int lit = light == 1 ? 0 : 2;
+  p.save();
+  p.setPen(QPen(QColor(255, 255, 255, 90), 3));
+  p.setBrush(QColor(44, 44, 42, 240));
+  p.drawRoundedRect(QRectF(x, y, w, h), 14, 14);
+  p.setPen(Qt::NoPen);
+  for (int i = 0; i < 3; i++) {
+    p.setBrush(i == lit ? on[i] : off);
+    p.drawEllipse(QPointF(x + w / 2 + (i - 1) * 82, y + h / 2), r, r);
+  }
+  p.restore();
+}
 
 void NvgWindow::drawThermal(QPainter &p) {
   p.save();

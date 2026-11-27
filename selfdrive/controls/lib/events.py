@@ -584,6 +584,15 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
     ET.WARNING: atc_lane_prompt_alert(left=False),
   },
 
+  # One frame from controlsd when the light the car stopped for turns green
+  # (traffic_light.py); the duration keeps it up for 3 s.
+  EventName.trafficLightGreen: {
+    ET.WARNING: Alert(
+      "초록불로 바뀌었어요", "",
+      AlertStatus.normal, AlertSize.small,
+      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 3.),
+  },
+
   EventName.laneChangeBlocked: {
     ET.WARNING: Alert(
       #"Car Detected in Blindspot",

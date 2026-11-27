@@ -780,6 +780,9 @@ struct ControlsState @0x97ff69c53601abf1 {
   # own estimate (m), used when TmapNda stops reporting before the bump.
   speedBumpTracking @218 :Bool;
   speedBumpDist @219 :Float32;
+  # Traffic light guessed from the model's plan (controls/lib/traffic_light.py):
+  # 0 none, 1 red, 2 green. HUD only.
+  trafficState @220 :Int8;
 
 
 
