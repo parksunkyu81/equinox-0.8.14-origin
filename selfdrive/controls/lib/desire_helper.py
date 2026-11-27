@@ -150,6 +150,36 @@ TURN_REARM_NEW_POINT_M = 20.
 # time before the road opened stayed 4.2 -> 4.3 s. 50 m gained no more on
 # the late turns and only reaches further toward driveways before the point.
 ATC_TURN_FORCE_M = 40.
+# ... but no ATC turn desire before the point is inside turn_start_m(v):
+# ATC_TURN_START_BASE_M + v * ATC_TURN_START_S, between ATC_TURN_START_MIN_M
+# and ATC_TURN_FORCE_M. A blinker put on earlier (to move toward the turn
+# lane, or just early) is held as the go-ahead and waits. Before 2026-11-27
+# the turn could start much earlier: at 40 m, or anywhere on the instruction
+# when the road edge on that side read more than 4 m away (carrot's
+# classify_maneuver_type), which on a multi-lane road it does in every lane
+# but the outermost. On 2026-11-27--01-27-06 two left turns started at 42.7 m
+# that way and the car steered 50 deg left 35-42 m out, before the driver had
+# reached the turn lane. Where real turns start: the heading reached 10 deg
+# toward the side at a navigation distance of p50 12 m, p75 20 m, p90 28 m
+# (121 navigation turns, 2026-11-22..25). The model bends 1-1.5 s after the
+# desire pulse, and on 2026-11-25 moving the desire from 40 m to 15-25 m did
+# not delay the bend in the three late slow turns (on-device modeld replay).
+# When the road opens on that side (no lane, no edge, open beyond 4 m: the
+# blinker-only turn's gate, which multi-lane roads do not pass) the
+# intersection is in view and the turn may start from ATC_TURN_FORCE_M.
+# 15 + 2 s: 23 m at 15 km/h, 26 m at 20, 32 m at 30, 40 m from 45. Navigation
+# distance is off by +-10 m, so no distance alone fits every turn. Replay of
+# 94 navigation turns on 17 drives (2026-11-22..27; desire start vs the real
+# heading reaching 10 deg): starts beyond 30 m 65 -> 16, more than 4 s before
+# the turn 53 -> 24, less than 0.5 s before it 0 -> 6, median lead 4.9 ->
+# 3.0 s. 10 + 2 s had 11 late, 20 + 2 s 32 early.
+ATC_TURN_START_BASE_M = 15.
+ATC_TURN_START_S = 2.
+ATC_TURN_START_MIN_M = 15.
+
+
+def turn_start_m(v_ego):
+  return min(ATC_TURN_FORCE_M, max(ATC_TURN_START_MIN_M, ATC_TURN_START_BASE_M + max(0., v_ego) * ATC_TURN_START_S))
 # No lane change starts this close to an ATC turn point: the blinker waits as
 # the turn, and ATC_TURN_FORCE_M turns it into the turn desire.
 # 2026-11-24--01-18-04 at 747 s: the blinker put on 132 m before a left turn
@@ -296,6 +326,7 @@ class DesireHelper:
     self.turn_cancel_lock = False
     self.turn_cancel_saw_off = False   # the blinker has been off since the cancel
     self.turn_opp_press_t = 0.         # driver pushing against the latched turn this long
+    self.atc_turn_open = 0             # frames the ATC side has read as open road
     self.atc_dist = 0.               # navigation distance to the point [m] (0: unknown)
     self.atc_side = BLINKER_NONE     # side of the current instruction
     self.atc_stale_blinker = BLINKER_NONE  # driver blinker already on when it started
@@ -801,6 +832,11 @@ class DesireHelper:
       self.atc_tap_used = False
 
     side = self._get_selected_side(blinker_state) if blinker_state in (BLINKER_LEFT, BLINKER_RIGHT) else None
+    # The road opens on the turn side (same gate as the blinker-only turn):
+    # the intersection is in view, so the turn may start from ATC_TURN_FORCE_M.
+    open_now = (side is not None and not side.lane_available and not side.edge_available and
+                side.dist_to_edge_far > DRIVER_TURN_EDGE_FAR_M)
+    self.atc_turn_open = self.atc_turn_open + 1 if open_now else 0
     atc_lane_change_requested = atc_enabled and self.atc_type in ATC_LANE_TYPES
     # carrot lets a right fork start on its own; here any ATC request (fork,
     # pre-turn lane, or a turn) needs the driver's blinker, since the car
@@ -861,13 +897,24 @@ class DesireHelper:
       if atc_lane_change_manual_only and self.maneuver_type == "turn":
         self.maneuver_type = "lane_change"
 
+      # Not yet inside turn_start_m of an ATC turn point: no turn, whatever the
+      # road edge reads. The blinker waits as a lane change that cannot start
+      # inside ATC_TURN_NO_LANE_CHANGE_M (further out a tap still moves the car
+      # one lane toward the turn).
+      start_m = turn_start_m(v_ego)
+      if self.atc_turn_open >= DRIVER_TURN_OPEN_FRAMES:
+        start_m = ATC_TURN_FORCE_M
+      if (self.atc_type in ATC_TURN_TYPES and self.maneuver_type == "turn" and
+          self.turn_latched == TURN_NONE and self.atc_dist > start_m):
+        self.maneuver_type = "lane_change"
+
       # Close to an ATC turn point with the driver's blinker on that side, a
-      # waiting (or not yet armed) lane change becomes the turn (ATC_TURN_FORCE_M).
+      # waiting (or not yet armed) lane change becomes the turn (turn_start_m).
       # Nothing has moved yet in preLaneChange, so nothing is cut short.
       atc_turn_side = (BLINKER_LEFT if self.atc_type == "turn left" else
                        BLINKER_RIGHT if self.atc_type == "turn right" else BLINKER_NONE)
       if (atc_turn_side != BLINKER_NONE and driver_st == atc_turn_side and
-          0. < self.atc_dist <= ATC_TURN_FORCE_M and
+          0. < self.atc_dist <= start_m and
           self.lane_change_state in (LaneChangeState.off, LaneChangeState.preLaneChange)):
         self.maneuver_type = "turn"
 
@@ -880,7 +927,7 @@ class DesireHelper:
       if desire_enabled and self.maneuver_type == "turn" and self.enable_turn_desires:
         self.lane_change_state = LaneChangeState.off
         new_point_close = (self.turn_rearm_new_point and self.atc_type in ("turn left", "turn right") and
-                           0. < self.atc_dist <= ATC_TURN_FORCE_M)
+                           0. < self.atc_dist <= start_m)
         rearm_hold = self.turn_disable_count > 0 and not new_point_close
         if rearm_hold or self.turn_cancel_lock or not (driver_enabled or self.atc_turn_confirmed):
           self.turn_direction = TURN_NONE
