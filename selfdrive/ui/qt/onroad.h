@@ -117,7 +117,7 @@ protected:
 
   void drawMaxSpeed(QPainter &p);
   void drawSpeed(QPainter &p);
-  void drawTrafficLight(QPainter &p, int cx, int bottom);
+  void drawTrafficLight(QPainter &p, int right, int bottom);
   void drawBottomIcons(QPainter &p);
   void drawSteerGauge(QPainter &p, int cx, int cy, int w);
   void drawConfidenceGauge(QPainter &p, int cx, int top_y, int bottom_y);

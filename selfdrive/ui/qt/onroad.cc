@@ -2541,8 +2541,9 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     statusCircle(col_l, row_b, "ACC", acc_bool ? "ON" : "OFF",
                  acc_bool ? QColor(120, 255, 120, 200) : QColor(254, 32, 32, 200), "OFF");
     statusCircle(col_r, row_b, "LKAS", lkas_str, lkas_color, "OFF");
-    // Traffic light right above the ACC tile, the block's row gap clear of it.
-    drawTrafficLight(p, col_l, row_b - SD / 2 - SGAP_Y);
+    // Traffic light above the ACC tile, the block's row gap clear of it, its
+    // right edge flush with the thermal panel's (21 px off the screen edge).
+    drawTrafficLight(p, col_r + SD / 2, row_b - SD / 2 - SGAP_Y);
     paint_profile::sub_mark(paint_profile::BI_STATUS);
 
     // The four pedal/following readings ride above the NDA/HDA badge, at the
@@ -3869,15 +3870,15 @@ void NvgWindow::drawGpsStatus(QPainter &p) {
 }*/
 
 // Traffic light: red / green as guessed from the driving model's plan
-// (selfdrive/controls/lib/traffic_light.py), nothing otherwise. Centred on cx
-// with its bottom at `bottom`; drawBottomIcons puts it right above the ACC
-// tile (2026-11-27, on request; it was at the top centre). On the 1880 x 1040
-// HUD that is x 1503..1767, y 355..443, clear of the record button above
-// (y 137..327).
-void NvgWindow::drawTrafficLight(QPainter &p, int cx, int bottom) {
+// (selfdrive/controls/lib/traffic_light.py), nothing otherwise. Right edge at
+// `right`, bottom at `bottom`; drawBottomIcons puts it above the ACC tile,
+// right-aligned with the thermal panel and the status block (2026-11-27, on
+// request). On the 1880 x 1040 HUD that is x 1595..1859, y 355..443, clear of
+// the record button above (y 137..327).
+void NvgWindow::drawTrafficLight(QPainter &p, int right, int bottom) {
   const int light = (*(uiState()->sm))["controlsState"].getControlsState().getTrafficState();
   if (light != 1 && light != 2) return;
-  const float w = 264, h = 88, x = cx - w / 2, y = bottom - h, r = 31;
+  const float w = 264, h = 88, x = right - w, y = bottom - h, r = 31;
   static const QColor off(95, 94, 90);
   static const QColor on[3] = {QColor(226, 75, 74), QColor(239, 159, 39), QColor(99, 153, 34)};
   const int lit = light == 1 ? 0 : 2;
