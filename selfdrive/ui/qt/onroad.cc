@@ -3465,16 +3465,17 @@ static int laneChangeStage(const SubMaster &sm, QString *label) {
   const bool atc_lane = (atc.startsWith("fork ") || atc.startsWith("atc ") || atc.startsWith("turn ")) &&
                         !atc.contains("prepare");
 
+  if (lane_change_low_speed_kph < 0) {
+    const int kph = QString::fromStdString(Params().get("LaneChangeLowSpeed")).toInt();
+    lane_change_low_speed_kph = (kph == 40 || kph == 50 || kph == 60) ? kph : 30;
+  }
+
   QString text;
   int stage = 0;
   if (changing) {
     stage = 2;
     text = "차선변경 중";
   } else if (armed) {
-    if (lane_change_low_speed_kph < 0) {
-      const int kph = QString::fromStdString(Params().get("LaneChangeLowSpeed")).toInt();
-      lane_change_low_speed_kph = (kph == 40 || kph == 50 || kph == 60) ? kph : 30;
-    }
     const bool fast = car_state.getVEgo() >= lane_change_low_speed_kph / 3.6f;
     const bool auto_start = atc_lane ? car_state.getVEgo() >= 15 / 3.6f
                                      : (lp.getAutoLaneChangeEnabled() && fast);
@@ -3486,11 +3487,13 @@ static int laneChangeStage(const SubMaster &sm, QString *label) {
     }
   } else {
     // planner isn't arming: not engaged, or under LANE_CHANGE_SPEED_MIN
-    // (10 = desire_helper.py). Under a navigation instruction the car moves
-    // across by itself only from ATC_TAP_SPEED_MIN, so the hint names 15
-    // there (2026-11-28, on request).
+    // (10 = desire_helper.py). The hint names the speed the car moves across
+    // by itself from (2026-11-28, on request): ATC_TAP_SPEED_MIN under a
+    // navigation instruction, otherwise the Community 차선변경 자동 시작 속도
+    // (LaneChangeLowSpeed), or 10 when auto lane change is off.
     if (uiState()->status == STATUS_ENGAGED && car_state.getVEgo() < 10 / 3.6f) {
-      text = atc_lane ? "15km/h+" : "10km/h+";
+      const int kph = atc_lane ? 15 : (lp.getAutoLaneChangeEnabled() ? lane_change_low_speed_kph : 10);
+      text = QString("%1km/h+").arg(kph);
     }
   }
   if (label) *label = text;
