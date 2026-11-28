@@ -316,9 +316,20 @@ static constexpr int BOTTOM_ROW_DROP = 43;
 // old 30 px margin off the left edge and the panel half its old gap to the
 // board (2026-11-24, on request). Everything anchored to the panel's right
 // edge (wheel, steering bar, confidence gauge) moves with it.
-static constexpr int SPEED_BOARD_X = 15;
+//
+// 2026-11-28, on request: the panel and the board swapped places. The panel
+// now starts at the left margin and the board sits right of it; the NDA/HDA
+// badge (and the pedal tiles stacked above it) stays where it was, at the left.
+// speed_panel_right_ is published as the group's right edge (the board's), so
+// the wheel and everything else anchored to it keeps its old place (x 472).
+static constexpr int SPEED_GROUP_X = 15;
 static constexpr int SPEED_BOARD_W = 210;
 static constexpr int SPEED_BOARD_PANEL_GAP = 15;
+// Speed panel width: 220 content * 1.10 * 0.8 (2026-11-22 narrowing) * 1.2 bg.
+static constexpr qreal SPEED_PANEL_W = 220.0 * 1.10 * 0.8 * 1.2;
+static constexpr int SPEED_BOARD_X = SPEED_GROUP_X + (int)SPEED_PANEL_W + SPEED_BOARD_PANEL_GAP;
+// The NDA/HDA badge keeps its pre-swap column (centred on the old board).
+static constexpr int NDA_BADGE_X = SPEED_GROUP_X;
 
 // Turn-signal chevron bands, shared by NvgWindow::drawTurnSignals and the ATC
 // lane prompt in OnroadAlerts (both widgets fill the same stacked layout).
@@ -2766,10 +2777,9 @@ void NvgWindow::drawSpeed(QPainter &p) {
   // in (261 -> 319 on 1920 px). The widest text, the current speed at 100 px
   // ("888" 198 px in Inter Bold, from the font's advance widths), still fits
   // with ~17 px each side.
-  constexpr qreal PANEL_W_SCALE = 0.8;
-  const qreal panel_content_w = 220.0 * 1.10 * PANEL_W_SCALE;
+  const qreal panel_bg_w = SPEED_PANEL_W;
+  const qreal panel_content_w = panel_bg_w / 1.2;
   const qreal panel_content_h = bgFixed.height();
-  const qreal panel_bg_w = panel_content_w * 1.2;
   const qreal panel_bg_h = panel_content_h;
 
   // How far below the reference box the panel sits: the bottom row's shared
@@ -2779,7 +2789,7 @@ void NvgWindow::drawSpeed(QPainter &p) {
   // The left edge is pinned to the speed-limit board rather than derived from
   // the reference box: SPEED_BOARD_PANEL_GAP right of the board (x 240 on the
   // 1880 px HUD). The reference box is still what sets the panel's height.
-  QRectF panelBg(SPEED_BOARD_X + SPEED_BOARD_W + SPEED_BOARD_PANEL_GAP,
+  QRectF panelBg(SPEED_GROUP_X,
                  bgFixed.top() + group_drop,
                  panel_bg_w,
                  panel_bg_h);
@@ -2793,7 +2803,9 @@ void NvgWindow::drawSpeed(QPainter &p) {
   // (see the members' comment in onroad.h).
   speed_panel_top_ = (int)panelBg.top();
   speed_panel_cx_ = (int)panelBg.center().x();
-  speed_panel_right_ = (int)panelBg.right();
+  // The board now sits right of the panel, so the group's right edge is the
+  // board's (see SPEED_GROUP_X).
+  speed_panel_right_ = SPEED_BOARD_X + SPEED_BOARD_W;
   speed_panel_bottom_ = (int)std::lround(panelBg.top() + panelBg.height());
 
   // 패널 배경 (✅ 더 투명)
@@ -3051,7 +3063,7 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
     const int road_max_shift = std::max(0, height() - (base_y_start + road_needed_h) - S(20));
     const int road_y_start = base_y_start + std::clamp(desired_shift, 0, road_max_shift);
     nda_badge_top_ = std::max(0, road_y_start - S(54) - S(10));
-    nda_badge_cx_ = x_start + S(210) / 2;
+    nda_badge_cx_ = NDA_BADGE_X + S(210) / 2;
   }
 
   if (!show_sign && !show_cam_or_section && !show_road) {
@@ -3062,7 +3074,7 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
       const int w = S(120);
       const int h = S(54);
       p.setOpacity(1.f);
-      p.drawPixmap(x_start + (S(SPEED_BOARD_W) - w) / 2, nda_badge_top_, w, h,
+      p.drawPixmap(NDA_BADGE_X + (S(SPEED_BOARD_W) - w) / 2, nda_badge_top_, w, h,
                    (activeNDA == 1) ? ic_nda : ic_hda);
     }
     p.restore();
@@ -3106,7 +3118,7 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
     const int h = S(54);
     const int top_margin = S(10);
     const int board_width = S(SPEED_BOARD_W);
-    const int x_icon = x_start + (board_width - w) / 2;
+    const int x_icon = NDA_BADGE_X + (board_width - w) / 2;
     const int y_icon = std::max(0, y_start - h - top_margin);
 
     p.setOpacity(1.f);
