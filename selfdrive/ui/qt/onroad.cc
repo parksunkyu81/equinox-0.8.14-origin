@@ -339,9 +339,11 @@ static constexpr int NDA_BADGE_X = SPEED_GROUP_X;
 // band sits 130 px further in (2026-11-22, on request), so its outermost
 // chevron starts 12 px right of the 자동 출발 tile (338..478 x 498..638 on the
 // 1880 x 1040 HUD): chevrons 490..640. The right band is unchanged.
+// 2026-11-28: ACC / LKAS joined that group as a fourth column right of
+// 자동 출발 (140 disc + 14 gap), so the left band moved in by 154 more.
 static constexpr int TURN_BAND_W = 240;
 static constexpr int TURN_BAND_GAP = 400;      // inner edge of the band, out from screen centre
-static constexpr int TURN_LEFT_BAND_SHIFT = 130;
+static constexpr int TURN_LEFT_BAND_SHIFT = 130 + 154;
 // The indicator itself is one filled arrow, the ISO 2575 turn-signal
 // tell-tale (2026-11-26, on request; it was three sequential chevrons). It
 // fills the span the chevrons did: back edge at turnBandInner, tip 150 px
@@ -2481,13 +2483,11 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // above it (rightColumnLayout); it used to stand on the thermal panel.
     const int row_b = rightColumnLayout(width(), height()).status_bottom - SD / 2;
 
-    // The brake and auto-hold icons are gone (on request, 2026-11-26), and ACC
-    // moved down from above LKAS to sit left of it, so the block is one row.
-    statusCircle(col_l, row_b, "ACC", acc_bool ? "ON" : "OFF",
-                 acc_bool ? QColor(120, 255, 120, 200) : QColor(254, 32, 32, 200), "OFF");
-    statusCircle(col_r, row_b, "LKAS", lkas_str, lkas_color, "OFF");
-    // Traffic light above the ACC tile, the block's row gap clear of it, its
-    // right edge flush with the thermal panel's (21 px off the screen edge).
+    // ACC and LKAS moved to the left-hand group (2026-11-28, on request): ACC
+    // right of 조향 신호, LKAS right of 자동 출발. The traffic light keeps the
+    // spot it had above this block, its right edge flush with the thermal
+    // panel's (21 px off the screen edge).
+    (void)col_l;
     drawTrafficLight(p, col_r + SD / 2, row_b - SD / 2 - SGAP_Y);
     paint_profile::sub_mark(paint_profile::BI_STATUS);
 
@@ -2581,6 +2581,14 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
       // stays inside the ring.
       statusRing(scol_r + SD + SGAP_X, speed_row_top, "조향 신호",
                  QString::number(steer_torque), steer_ratio, "300", 0.10f, 1.40f);
+
+      // ACC right of 조향 신호, LKAS right of 자동 출발 (2026-11-28, on
+      // request; they used to sit in the right-hand status block). The left
+      // turn arrow moved right by this column's width to stay clear of LKAS.
+      const int acc_lkas_x = auto_launch_x + SD + SGAP_X;
+      statusCircle(acc_lkas_x, speed_row_top, "ACC", acc_bool ? "ON" : "OFF",
+                   acc_bool ? QColor(120, 255, 120, 200) : QColor(254, 32, 32, 200), "OFF");
+      statusCircle(acc_lkas_x, speed_row, "LKAS", lkas_str, lkas_color, "OFF");
       paint_profile::sub_mark(paint_profile::BI_TILES);
     }
   }
