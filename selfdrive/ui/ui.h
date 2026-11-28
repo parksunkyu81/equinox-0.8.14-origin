@@ -142,6 +142,9 @@ public:
 
   bool recording = false;
   bool show_debug = false;
+  // Community toggle (ShowSteerGauges): the HUD's steering bar and model
+  // confidence gauge beside the wheel.
+  bool show_steer_gauges = true;
   std::string lat_control;
 
 signals:

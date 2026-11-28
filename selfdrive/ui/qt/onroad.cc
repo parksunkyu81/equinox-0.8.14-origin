@@ -1695,14 +1695,17 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   const int bar_right_max = rightColumnLayout(width(), height()).turn_box.left()
                             - GAUGE_BOX_GAP - 2 * GAUGE_HALF_W - GAUGE_GAP - BAR_CAP;
   const int bar_right = std::min(bar_left + (bar_right_orig - bar_left) / 2, bar_right_max);
-  if (bar_right > bar_left) {
+  // Both hidden by the Community toggle ShowSteerGauges (2026-11-28, on
+  // request); everything else keeps its place either way.
+  const bool show_steer_gauges = uiState()->show_steer_gauges;
+  if (show_steer_gauges && bar_right > bar_left) {
     drawSteerGauge(p, (bar_left + bar_right) / 2, bar_cy, bar_right - bar_left);
   }
 
   // Confidence gauge right of the steering bar, centred on the wheel's line,
   // with the extent it had in the bottom icon rows (y2 - radius/2 ..
   // y1 + radius/2, drawn 1.2x about its centre).
-  {
+  if (show_steer_gauges) {
     const int half = ((y1 + radius / 2) - (y2 - radius / 2)) / 2;
     drawConfidenceGauge(p, bar_right + BAR_CAP + GAUGE_GAP + GAUGE_HALF_W, bar_cy - half, bar_cy + half);
   }

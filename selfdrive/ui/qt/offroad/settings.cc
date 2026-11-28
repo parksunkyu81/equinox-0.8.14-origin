@@ -848,6 +848,12 @@ CommunityPanel::CommunityPanel(QWidget* parent) : QWidget(parent) {
                                           "../assets/offroad/icon_shell.png",
                                           this));*/
 
+  toggles.append(new ParamControl("ShowSteerGauges",
+                                          "조향 바 · 신뢰도 게이지 표시",
+                                          "주행 화면에서 핸들 오른쪽의 조향 바와 모델 신뢰도 게이지를 보여줍니다. 끄면 두 개만 사라지고 다른 표시는 그대로입니다.",
+                                          "../assets/offroad/icon_shell.png",
+                                          this));
+
   toggles.append(new ParamControl("AutoShutdown",
                                           "Enable auto shutdown",
                                           "Automatically power off the EON 180 seconds after external power is disconnected and driving has stopped.",
