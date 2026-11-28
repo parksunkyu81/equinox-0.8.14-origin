@@ -68,6 +68,16 @@ QRect cachedTextRect(QHash<QString, QRect> &rects, const QString &text, Measure 
 }
 }
 
+// Blinker stage colours, shared by the screen border and the blinker label:
+// 0 red = will not move over, 1 orange = armed, 2 blue = moving over now.
+static QColor laneChangeStageColor(int stage) {
+  switch (stage) {
+    case 2: return QColor(40, 120, 255);
+    case 1: return QColor(255, 140, 0);
+    default: return QColor(255, 40, 40);
+  }
+}
+
 OnroadWindow::OnroadWindow(QWidget *parent) : QWidget(parent) {
   QVBoxLayout *main_layout  = new QVBoxLayout(this);
   main_layout->setMargin(bdr_s);
@@ -155,17 +165,25 @@ void OnroadWindow::updateState(const UIState &s) {
     // 3 = hazards: both sides (2026-11-28, on request).
     const int side = l ? (r ? 3 : 1) : (r ? 2 : 0);
     bool lit = false;
+    int stage = 0;
     if (side != 0) {
+      // The three lane-change stages, one plain colour each (2026-11-28, on
+      // request): red = the car will not move over (not engaged, under
+      // 10 km/h), orange = armed (waiting / nudge the wheel), blue = moving
+      // over now, and faster. Hazards always read orange.
       const auto lc = (*s.sm)["lateralPlan"].getLateralPlan().getLaneChangeState();
       const bool changing = lc == cereal::LateralPlan::LaneChangeState::LANE_CHANGE_STARTING ||
                             lc == cereal::LateralPlan::LaneChangeState::LANE_CHANGE_FINISHING;
+      const bool armed = lc == cereal::LateralPlan::LaneChangeState::PRE_LANE_CHANGE;
+      stage = (side == 3) ? 1 : (changing ? 2 : (armed ? 1 : 0));
       const double period = changing ? 460.0 : 800.0;
       lit = fmod(millis_since_boot(), period) / period < 0.55;
     }
-    if (side != border_blink_side_ || lit != border_blink_lit_) {
+    if (side != border_blink_side_ || lit != border_blink_lit_ || stage != border_blink_stage_) {
       const int old_side = border_blink_side_;
       border_blink_side_ = side;
       border_blink_lit_ = lit;
+      border_blink_stage_ = stage;
       for (int sd : {old_side, side}) {
         if (sd & 1) update(QRect(0, 0, bdr_s, height()));
         if (sd & 2) update(QRect(width() - bdr_s, 0, bdr_s, height()));
@@ -332,9 +350,9 @@ void OnroadWindow::paintEvent(QPaintEvent *event) {
   QPainter p(this);
   p.fillRect(rect(), QColor(bg.red(), bg.green(), bg.blue(), 255));
   if (border_blink_lit_) {
-    const QColor amber(255, 175, 0);
-    if (border_blink_side_ & 1) p.fillRect(QRect(0, 0, bdr_s, height()), amber);
-    if (border_blink_side_ & 2) p.fillRect(QRect(width() - bdr_s, 0, bdr_s, height()), amber);
+    const QColor c = laneChangeStageColor(border_blink_stage_);
+    if (border_blink_side_ & 1) p.fillRect(QRect(0, 0, bdr_s, height()), c);
+    if (border_blink_side_ & 2) p.fillRect(QRect(width() - bdr_s, 0, bdr_s, height()), c);
   }
 }
 
@@ -3403,10 +3421,10 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
   QColor color;
   QString label;
   if (changing) {
-    color = QColor(0, 225, 120);
+    color = laneChangeStageColor(2);
     label = "차선변경 중";
   } else if (armed) {
-    color = QColor(255, 175, 0);
+    color = laneChangeStageColor(1);
     // With a navigation (ATC) instruction: from 15 km/h the blinker (a tap is
     // enough) moves the car one lane when there is room, under 15 the driver
     // does it by hand (desire_helper.py ATC_TAP_SPEED_MIN). Otherwise: under 30 km/h a nudge starts it
@@ -3426,7 +3444,7 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
     else label = (lp.getAutoLaneChangeEnabled() && fast) ? "자동 대기" : "핸들 밀기";
   } else {
     // planner isn't arming: not engaged, or under LANE_CHANGE_SPEED_MIN
-    color = QColor(210, 210, 210);
+    color = laneChangeStageColor(0);
     // 10 = desire_helper.py LANE_CHANGE_SPEED_MIN
     label = (uiState()->status == STATUS_ENGAGED && car_state.getVEgo() < 10 / 3.6f) ? "10km/h+" : "";
   }

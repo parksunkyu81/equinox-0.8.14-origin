@@ -192,6 +192,7 @@ private:
   // whether that side is in the lit half of the blink.
   int border_blink_side_ = 0;
   bool border_blink_lit_ = false;
+  int border_blink_stage_ = 0;   // 0 red, 1 orange, 2 blue (laneChangeStageColor)
   QHBoxLayout* split;
 
   // neokii
