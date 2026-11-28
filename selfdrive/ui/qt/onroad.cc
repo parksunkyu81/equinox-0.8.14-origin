@@ -188,6 +188,7 @@ void OnroadWindow::updateState(const UIState &s) {
         if (sd & 2) update(QRect(width() - bdr_s, 0, bdr_s, height()));
       }
     }
+    nvg->setBorderBlink(side, lit, laneChangeStageColor(stage));
   }
 
   placeRecorder();
@@ -3394,7 +3395,17 @@ void NvgWindow::drawBlindSpot(QPainter &p) {
   p.restore();
 }
 
+// The blinker strip is 10% wider than the 20 px border (2026-11-28, on
+// request): OnroadWindow paints the border's 20 px, the HUD the 2 px inside it.
+static constexpr int BORDER_BLINK_EXTRA = bdr_s / 10;
+
 void NvgWindow::drawTurnSignals(QPainter &p) {
+  if (border_blink_lit_) {
+    p.setOpacity(1.0);
+    if (border_blink_side_ & 1) p.fillRect(QRect(0, 0, BORDER_BLINK_EXTRA, height()), border_blink_color_);
+    if (border_blink_side_ & 2)
+      p.fillRect(QRect(width() - BORDER_BLINK_EXTRA, 0, BORDER_BLINK_EXTRA, height()), border_blink_color_);
+  }
   const SubMaster &sm = *(uiState()->sm);
   const auto car_state = sm["carState"].getCarState();
   const bool left_on = car_state.getLeftBlinker();

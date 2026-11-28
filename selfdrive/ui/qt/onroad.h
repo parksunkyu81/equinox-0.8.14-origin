@@ -49,6 +49,14 @@ class NvgWindow : public CameraViewWidget {
 public:
   explicit NvgWindow(VisionStreamType type, QWidget* parent = 0);
 
+  // Blinker strip on the screen border, as OnroadWindow paints it this
+  // frame (side bits 1 left / 2 right, lit, stage colour). The HUD paints its
+  // inner continuation (BORDER_BLINK_EXTRA px) so the strip is wider than
+  // the 20 px border.
+  void setBorderBlink(int side, bool lit, const QColor &color) {
+    border_blink_side_ = side; border_blink_lit_ = lit; border_blink_color_ = color;
+  }
+
   // 페달 강도 tile: tapping it cycles CommaPedalResistance. Returns true when
   // pos (in this widget's coordinates) is inside the tile as it was last
   // drawn, and that drawing is recent enough to still be on screen.
@@ -164,6 +172,9 @@ protected:
   void drawSpeedLimit(QPainter &p);
   void drawSteer(QPainter &p);
   void drawTurnSignals(QPainter &p);
+  int border_blink_side_ = 0;
+  bool border_blink_lit_ = false;
+  QColor border_blink_color_;
   void drawBlindSpot(QPainter &p);
   void drawGpsStatus(QPainter &p);
   void drawDebugText(QPainter &p);
