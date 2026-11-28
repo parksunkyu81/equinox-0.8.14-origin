@@ -3395,9 +3395,11 @@ void NvgWindow::drawBlindSpot(QPainter &p) {
   p.restore();
 }
 
-// The blinker strip is 10% wider than the 20 px border (2026-11-28, on
-// request): OnroadWindow paints the border's 20 px, the HUD the 2 px inside it.
-static constexpr int BORDER_BLINK_EXTRA = bdr_s / 10;
+// The blinker strip is 30 px wide (2026-11-28, on request), wider than the
+// 20 px border: OnroadWindow paints the border's 20 px, the HUD the 10 px
+// just inside it.
+static constexpr int BORDER_BLINK_W = 30;
+static constexpr int BORDER_BLINK_EXTRA = BORDER_BLINK_W - bdr_s;
 
 void NvgWindow::drawTurnSignals(QPainter &p) {
   if (border_blink_lit_) {
