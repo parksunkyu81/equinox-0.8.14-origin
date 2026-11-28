@@ -2793,18 +2793,31 @@ void NvgWindow::drawSpeed(QPainter &p) {
   // with ~17 px each side.
   const qreal panel_bg_w = SPEED_PANEL_W;
   const qreal panel_content_w = panel_bg_w / 1.2;
-  const qreal panel_content_h = bgFixed.height();
-  const qreal panel_bg_h = panel_content_h;
 
   // How far below the reference box the panel sits: the bottom row's shared
   // drop (see BOTTOM_ROW_DROP).
   const qreal group_drop = BOTTOM_ROW_DROP;
 
-  // The left edge is pinned to the speed-limit board rather than derived from
-  // the reference box: SPEED_BOARD_PANEL_GAP right of the board (x 240 on the
-  // 1880 px HUD). The reference box is still what sets the panel's height.
+  // The panel starts at the left margin (see SPEED_GROUP_X); the reference box
+  // sets its bottom edge. Since the swap (2026-11-28) the NDA/HDA badge sits
+  // above this panel rather than the board, and it overlapped the panel's top
+  // by ~30 px (badge 657..711, panel from 681 on the 1880 x 1040 HUD). The
+  // top edge now starts NDA_PANEL_CLEAR below the badge; the bottom edge
+  // stays, as it is only ~18 px off the HUD's bottom already, so the panel is
+  // that much shorter (341 -> ~301) and its three lines close up with it.
+  // nda_badge_top_ comes from drawSpeedLimit on the previous paint (it runs
+  // after this in drawHud) and is fixed for a given HUD size.
+  constexpr qreal NDA_BADGE_H = 54, NDA_PANEL_CLEAR = 10;
+  const qreal panel_bottom = bgFixed.bottom() + group_drop;
+  qreal panel_top = bgFixed.top() + group_drop;
+  if (nda_badge_top_ > 0) {
+    panel_top = std::max(panel_top, nda_badge_top_ + NDA_BADGE_H + NDA_PANEL_CLEAR);
+  }
+  const qreal panel_bg_h = panel_bottom - panel_top;
+  const qreal panel_content_h = panel_bg_h;
+
   QRectF panelBg(SPEED_GROUP_X,
-                 bgFixed.top() + group_drop,
+                 panel_top,
                  panel_bg_w,
                  panel_bg_h);
 
