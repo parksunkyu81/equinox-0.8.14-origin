@@ -143,6 +143,35 @@ void OnroadWindow::updateState(const UIState &s) {
     update();
   }
 
+  // Blinker on the screen border (2026-11-28, on request): the border's left
+  // or right side, full height, blinks amber with the driver's blinker, in
+  // step with the HUD arrow (drawTurnSignals: lit 55% of an 800 ms period,
+  // 460 ms while the car is moving over). Hazards paint neither side, like
+  // the arrows. Only that bdr_s-wide strip is repainted, and only when its
+  // state flips, so it costs a few fills per second.
+  {
+    const auto cs = (*s.sm)["carState"].getCarState();
+    const bool l = cs.getLeftBlinker(), r = cs.getRightBlinker();
+    const int side = (l == r) ? 0 : (l ? 1 : 2);
+    bool lit = false;
+    if (side != 0) {
+      const auto lc = (*s.sm)["lateralPlan"].getLateralPlan().getLaneChangeState();
+      const bool changing = lc == cereal::LateralPlan::LaneChangeState::LANE_CHANGE_STARTING ||
+                            lc == cereal::LateralPlan::LaneChangeState::LANE_CHANGE_FINISHING;
+      const double period = changing ? 460.0 : 800.0;
+      lit = fmod(millis_since_boot(), period) / period < 0.55;
+    }
+    if (side != border_blink_side_ || lit != border_blink_lit_) {
+      const int old_side = border_blink_side_;
+      border_blink_side_ = side;
+      border_blink_lit_ = lit;
+      for (int sd : {old_side, side}) {
+        if (sd == 1) update(QRect(0, 0, bdr_s, height()));
+        else if (sd == 2) update(QRect(width() - bdr_s, 0, bdr_s, height()));
+      }
+    }
+  }
+
   placeRecorder();
 
 }
@@ -301,6 +330,10 @@ void OnroadWindow::offroadTransition(bool offroad) {
 void OnroadWindow::paintEvent(QPaintEvent *event) {
   QPainter p(this);
   p.fillRect(rect(), QColor(bg.red(), bg.green(), bg.blue(), 255));
+  if (border_blink_side_ != 0 && border_blink_lit_) {
+    const int x = border_blink_side_ == 1 ? 0 : width() - bdr_s;
+    p.fillRect(QRect(x, 0, bdr_s, height()), QColor(255, 175, 0));
+  }
 }
 
 // ***** onroad widgets *****

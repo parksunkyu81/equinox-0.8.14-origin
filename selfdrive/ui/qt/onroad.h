@@ -188,6 +188,10 @@ private:
   OnroadAlerts *alerts;
   NvgWindow *nvg;
   QColor bg = bg_colors[STATUS_DISENGAGED];
+  // Blinker side painted on the screen border: 0 none, 1 left, 2 right; and
+  // whether that side is in the lit half of the blink.
+  int border_blink_side_ = 0;
+  bool border_blink_lit_ = false;
   QHBoxLayout* split;
 
   // neokii
