@@ -1152,6 +1152,7 @@ class RoadSpeedLimiter:
     self.speed_bump_active = False
     self.bump_log = BumpLog()
     self.atc_slowing_down = False
+    self.atc_applied = False   # the ATC cap is the limit get_max_speed returned
     # ATC limit below V_CRUISE_MIN is in force (intersection turn); controlsd reads it.
     self.atc_low_active = False
 
@@ -1181,6 +1182,7 @@ class RoadSpeedLimiter:
     log = ""
     self.recv()
     self.atc_low_active = False
+    self.atc_applied = False
 
     if self.roadLimitSpeed is None:
       return 0, 0, 0, False, ""
@@ -1237,6 +1239,7 @@ class RoadSpeedLimiter:
         if self.slowing_down and cam_result[0] > 0:
           self.slowing_down = False   # camera hands over to ATC
         cam_result = atc_result
+        self.atc_applied = True
         kph_to_clu = 1. if is_metric else CV.KPH_TO_MPH
         self.atc_low_active = atc_result[0] < ATC_FLOOR_KPH * kph_to_clu
 
@@ -1248,6 +1251,7 @@ class RoadSpeedLimiter:
           return cam_result
         self.slowing_down = False
         self.atc_low_active = False
+        self.atc_applied = False
         return bump_apply, SpeedBumpPlanner.BUMP_SPEED_KPH * kph_to_clu, \
                self.bump_planner.left_dist, not was_bump_active, log
       return cam_result

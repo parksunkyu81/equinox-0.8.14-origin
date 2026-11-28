@@ -148,6 +148,9 @@ struct CarEvent @0x9b1657f34caf3ad3 {
     atcBlinkerRight @122;
     # The light the car stopped for turned green (controls/lib/traffic_light.py).
     trafficLightGreen @123;
+    # AutoTurnControl is slowing the car for an intersection turn, toward the
+    # Community 회전 목표 속도 (controls/controlsd.py cal_max_speed).
+    atcTurnSlowdown @124;
   }
 }
 

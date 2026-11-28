@@ -279,6 +279,9 @@ PROMPT_STATE = {"kind": PROMPT_MANUAL, "voice": False}
 # events.py turn_in_progress_alert reads it). sub: "" / "sat" (the steering is
 # at its 300 limit) / "slow" (under 10 km/h, where LKAS is off).
 TURN_STATE = {"left": False, "sub": ""}
+# The turn target (km/h) for the "ATC 회전 목표 속도 (N km/h) 감속중" line;
+# controlsd fills it while AutoTurnControl slows the car for a turn.
+SLOWDOWN_STATE = {"kph": 0}
 PROMPT_AUTO_SPEED_MIN = 15. / 3.6   # = desire_helper.ATC_TAP_SPEED_MIN
 # A turn instruction ("atc left/right" is its lane stage) this close to the
 # point is the turn: the prompt comes at ~45 m, and the navigation's turn

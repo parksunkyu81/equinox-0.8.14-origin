@@ -326,6 +326,15 @@ def turn_in_progress_alert(CP: car.CarParams, sm: messaging.SubMaster, metric: b
                Priority.LOW, VisualAlert.none, AudibleAlert.none, .1)
 
 
+def atc_turn_slowdown_alert(CP: car.CarParams, sm: messaging.SubMaster, metric: bool, soft_disable_time: int) -> Alert:
+  # Silent: the turn prompt already chimed. Shown in the centre box with the
+  # lane alerts (onroad.cc OnroadAlerts), orange like the navigation prompts.
+  from selfdrive.controls.lib.atc_desire import SLOWDOWN_STATE
+  return Alert("ATC 회전 목표 속도 (%d km/h) 감속중" % SLOWDOWN_STATE.get("kph", 0), "",
+               AlertStatus.normal, AlertSize.small,
+               Priority.LOW, VisualAlert.none, AudibleAlert.none, .1)
+
+
 def auto_lane_change_alert(CP: car.CarParams, sm: messaging.SubMaster, metric: bool, soft_disable_time: int) -> Alert:
   alc_timer = sm['lateralPlan'].autoLaneChangeTimer
   return Alert(
@@ -1115,6 +1124,10 @@ EVENTS: Dict[int, Dict[str, Union[Alert, AlertCallbackType]]] = {
 
   EventName.autoLaneChange: {
     ET.WARNING: auto_lane_change_alert,
+  },
+
+  EventName.atcTurnSlowdown: {
+    ET.WARNING: atc_turn_slowdown_alert,
   },
 
   # EventName.predictiveBrakeNeeded has no entry: nothing raises it any more.

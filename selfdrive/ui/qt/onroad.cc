@@ -443,7 +443,8 @@ void OnroadAlerts::paintEvent(QPaintEvent *event) {
   const bool lane_change = alert.type.startsWith("laneChange/") ||
                            alert.type.startsWith("preLaneChangeLeft/") ||
                            alert.type.startsWith("preLaneChangeRight/") ||
-                           alert.type.startsWith("turningIndicatorOn/");
+                           alert.type.startsWith("turningIndicatorOn/") ||
+                           alert.type.startsWith("atcTurnSlowdown/");
   if (atc_left || atc_right || lane_change) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
@@ -471,7 +472,7 @@ void OnroadAlerts::paintEvent(QPaintEvent *event) {
     const int h1 = s1 + 26, h2 = two ? s2 + 20 : 0;
     const QRect box(gap_l, cy - (h1 + h2) / 2 - 18, gap_w, h1 + h2 + 36);
 
-    const bool prompt = (atc_left || atc_right) ||
+    const bool prompt = (atc_left || atc_right) || alert.type.startsWith("atcTurnSlowdown/") ||
                         alert.status == cereal::ControlsState::AlertStatus::USER_PROMPT;
     p.setPen(QPen(prompt ? QColor(0xDA, 0x6F, 0x25) : QColor(0x17, 0x86, 0x44), 5));
     p.setBrush(QColor(0, 0, 0, 165));

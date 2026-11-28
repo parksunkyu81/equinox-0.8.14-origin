@@ -16,7 +16,7 @@ from selfdrive.boardd.boardd import can_list_to_can_capnp
 from selfdrive.car.car_helpers import get_car, get_startup_event, get_one_can
 from selfdrive.controls.lib.lane_planner import CAMERA_OFFSET
 from selfdrive.controls.lib.atc_desire import ATC_LEFT_TYPES, ATC_RIGHT_TYPES, AtcLaneGuide, \
-  BLINKER_NONE, BLINKER_LEFT, BLINKER_RIGHT, TURN_STATE
+  BLINKER_NONE, BLINKER_LEFT, BLINKER_RIGHT, TURN_STATE, SLOWDOWN_STATE
 from selfdrive.controls.lib.drive_helpers import update_v_cruise, initialize_v_cruise
 from selfdrive.controls.lib.drive_helpers import get_lag_adjusted_curvature
 from selfdrive.controls.lib.straight_wobble_filter import StraightWobbleFilter
@@ -442,6 +442,7 @@ class Controls:
         self.speed_bump_active = False
         self.speed_bump_released = False
         self.atc_low_active = False
+        self.atc_turn_slowdown_kph = 0
         self.curve_speed_ms = 0.
         self.curve_speed_limiter = CurveSpeedLimiter()
         # Speed the current curve was entered at, or None between curves.
@@ -829,6 +830,7 @@ class Controls:
         self.max_speed_clu = 0.
         self.speed_bump_active = False
         self.atc_low_active = False
+        self.atc_turn_slowdown_kph = 0
         self.curve_speed_ms = 0.
         self._curve_entry_speed_ms = None
         self.curve_speed_limiter.reset()
@@ -1146,6 +1148,16 @@ class Controls:
         self.speed_bump_released = bool(was_bump_active and not self.speed_bump_active)
         # ATC 교차로 회전(15km/h): 방지턱처럼 V_CRUISE_MIN 아래 제한을 허용한다. 필터는 그대로 탄다.
         self.atc_low_active = bool(getattr(road_speed_limiter, 'atc_low_active', False))
+        # ATC is slowing the car for an intersection turn (xTurnInfo 1 left /
+        # 2 right, the turns that use the Community 회전 목표 속도): the HUD says
+        # so until the car is within 1 km/h of the target (update_events).
+        self.atc_turn_slowdown_kph = 0
+        rls_now = road_speed_limiter.roadLimitSpeed
+        if (getattr(road_speed_limiter, 'atc_applied', False) and rls_now is not None and
+                int(rls_now.xTurnInfo) in (1, 2)):
+            turn_target_kph = float(rls_now.atcTargetSpeed)
+            if turn_target_kph > 0. and vEgo * CV.MS_TO_KPH > turn_target_kph + 1.:
+                self.atc_turn_slowdown_kph = int(round(turn_target_kph))
 
         # print("apply_limit_speed : ", apply_limit_speed)
         # print("road_limit_speed : ", road_limit_speed)
@@ -1386,6 +1398,9 @@ class Controls:
             self.events.add(EventName.atcBlinkerLeft)
         elif self.atc_lane_prompt == BLINKER_RIGHT:
             self.events.add(EventName.atcBlinkerRight)
+        if self.atc_turn_slowdown_kph > 0 and self.enabled:
+            SLOWDOWN_STATE["kph"] = self.atc_turn_slowdown_kph
+            self.events.add(EventName.atcTurnSlowdown)
 
         # Traffic light guess for the HUD, once per model frame. Display and the
         # green-light chime only; it never acts on the car.
