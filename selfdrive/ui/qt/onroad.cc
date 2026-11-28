@@ -2528,8 +2528,10 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     (void)col_l; (void)col_r; (void)row_b;
     {
       const RightColumnLayout rc = rightColumnLayout(width(), height());
-      const int strip_left = (thermal_panel_right_ > 0 ? thermal_panel_right_ : width() - 21) - THERMAL_W;
-      drawTrafficLight(p, strip_left - 12, rc.thermal_top + (THERMAL_H + 88) / 2);
+      // Swapped with the thermal strip (2026-11-28, on request): the light
+      // now takes the right edge, 21 px in, and the strip sits left of it
+      // (drawThermal).
+      drawTrafficLight(p, width() - 21, rc.thermal_top + (THERMAL_H + 88) / 2);
     }
     paint_profile::sub_mark(paint_profile::BI_STATUS);
 
@@ -3774,7 +3776,11 @@ void NvgWindow::drawThermal(QPainter &p) {
   // it); the two text lines are centred in it.
   const RightColumnLayout col = rightColumnLayout(width(), height());
   const int total_h = col.thermal_bottom - col.thermal_top;
-  const int right = width() - RIGHT_MARGIN;
+  // Left of the traffic light (264 wide + 12 gap, drawBottomIcons), which
+  // took the right edge on 2026-11-28 (on request): x 1211..1583 on the
+  // 1880 px HUD, still over the turn-info box (1171..1870).
+  constexpr int TRAFFIC_LIGHT_W = 264, TRAFFIC_LIGHT_GAP = 12;
+  const int right = width() - RIGHT_MARGIN - TRAFFIC_LIGHT_W - TRAFFIC_LIGHT_GAP;
   const int left = right - STRIP_W;
   const int top = col.thermal_top;
   const int text_top = top + (total_h - (val_ink_h + value_label_gap + lab_ink_h)) / 2;
