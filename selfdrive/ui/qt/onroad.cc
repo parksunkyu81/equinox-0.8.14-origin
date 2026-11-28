@@ -561,13 +561,17 @@ void NvgWindow::initializeGL() {
   ic_turn_signal_l = QPixmap("../assets/images/turn_signal_l.png");
   ic_turn_signal_r = QPixmap("../assets/images/turn_signal_r.png");
   ic_satellite = QPixmap("../assets/images/satellite.png");
-  // Unused-upstream asset, not under assets/images/ like the icons above.
   {
     // 0.85 of the wheel tile's own diameter, which is 20% over the shared
     // tile size (see drawBottomIcons' wheel_d), so the icon keeps the same
     // margin inside its disc as before.
-    const int wheel_icon_size = static_cast<int>(radius * 6 / 5 * 0.85f);
-    ic_wheel = QPixmap("../assets/img_chffr_wheel.png").scaled(wheel_icon_size, wheel_icon_size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    // 2026-11-28, on request: a round photo (assets/images/wheel_face.png,
+    // already cut to a circle with a transparent outside) replaces the wheel
+    // picture. It fills the disc but for a WHEEL_FACE_RING px rim, so the
+    // disc's green / black (hands-off / hands-on) still shows around it.
+    constexpr int WHEEL_FACE_RING = 7;
+    const int wheel_icon_size = radius * 6 / 5 - 2 * WHEEL_FACE_RING;
+    ic_wheel = QPixmap("../assets/images/wheel_face.png").scaled(wheel_icon_size, wheel_icon_size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
   }
 
   // Turn-info box icons (assets/navigation/).
@@ -2131,7 +2135,7 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
   // live steeringAngleDeg rendered as a physically rotating wheel icon
   // instead of a number, so it reads together with the bar's effort and
   // lane-centring rather than as a separate row. Not present in the original
-  // source; uses the previously-unused ../assets/img_chffr_wheel.png.
+  // source. The picture is a round photo since 2026-11-28 (see ic_wheel).
   x = wheel_cx;
   {
     const float steer_angle_deg = car_state.getSteeringAngleDeg();
@@ -2153,10 +2157,13 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     // drawArc() convention above -- negate so positive (left) still spins CCW.
     p.rotate(-steer_angle_deg);
     p.setOpacity(1.0);
+    // The photo turns with the wheel; smooth sampling keeps it from jagging.
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
     p.drawPixmap(-ic_wheel.width() / 2, -ic_wheel.height() / 2, ic_wheel);
     p.setPen(Qt::NoPen);
     p.setBrush(QColor(255, 59, 59, 255));
-    p.drawEllipse(QPointF(0, -wheel_d * 0.42), 4.5, 4.5);
+    // The top marker rides on the rim now that the photo fills the inside.
+    p.drawEllipse(QPointF(0, -(wheel_d / 2.0 - 3.5)), 3.5, 3.5);
     p.restore();
 
     // Angle readout, centred under the wheel. The icon shows direction and
