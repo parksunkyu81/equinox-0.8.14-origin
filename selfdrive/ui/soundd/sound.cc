@@ -96,7 +96,12 @@ void Sound::setAlert(const Alert &alert) {
       // The volume update skips whatever is playing, so a clip that was live
       // through a speed change still carries the old level. Set it here, where
       // the write lands before the stream starts rather than into it.
-      s->setVolume(current_volume);
+      //
+      // The corner prompt always comes before a bend, at 30-45 km/h (all five
+      // on 2026-11-27), where the speed map above sits at MIN_VOLUME, so the
+      // line was spoken at the floor every time and went unheard. It plays at
+      // MAX_VOLUME whatever the speed.
+      s->setVolume(alert.sound == AudibleAlert::CORNER_ENTRY ? Hardware::MAX_VOLUME : current_volume);
       s->setLoopCount(loops);
       s->play();
     }
