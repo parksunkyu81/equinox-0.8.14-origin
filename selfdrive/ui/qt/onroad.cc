@@ -3454,22 +3454,23 @@ static int laneChangeStage(const SubMaster &sm, QString *label) {
                         lc_state == cereal::LateralPlan::LaneChangeState::LANE_CHANGE_FINISHING;
   const bool armed = lc_state == cereal::LateralPlan::LaneChangeState::PRE_LANE_CHANGE;
 
+  // With a navigation (ATC) instruction: from 15 km/h the blinker (a tap is
+  // enough) moves the car one lane when there is room, under 15 the driver
+  // does it by hand (desire_helper.py ATC_TAP_SPEED_MIN). Otherwise: under 30 km/h a nudge starts it
+  // (LANE_CHANGE_LOW_SPEED, the LaneChangeLowSpeed param), from there the
+  // blinker alone after 1 s.
+  const QString atc = ndaFresh(sm)
+      ? QString::fromUtf8(sm["roadLimitSpeed"].getRoadLimitSpeed().getAtcType().cStr())
+      : QString();
+  const bool atc_lane = (atc.startsWith("fork ") || atc.startsWith("atc ") || atc.startsWith("turn ")) &&
+                        !atc.contains("prepare");
+
   QString text;
   int stage = 0;
   if (changing) {
     stage = 2;
     text = "차선변경 중";
   } else if (armed) {
-    // With a navigation (ATC) instruction: from 15 km/h the blinker (a tap is
-    // enough) moves the car one lane when there is room, under 15 the driver
-    // does it by hand (desire_helper.py ATC_TAP_SPEED_MIN). Otherwise: under 30 km/h a nudge starts it
-    // (LANE_CHANGE_LOW_SPEED, the LaneChangeLowSpeed param), from there the
-    // blinker alone after 1 s.
-    const QString atc = ndaFresh(sm)
-        ? QString::fromUtf8(sm["roadLimitSpeed"].getRoadLimitSpeed().getAtcType().cStr())
-        : QString();
-    const bool atc_lane = (atc.startsWith("fork ") || atc.startsWith("atc ") || atc.startsWith("turn ")) &&
-                          !atc.contains("prepare");
     if (lane_change_low_speed_kph < 0) {
       const int kph = QString::fromStdString(Params().get("LaneChangeLowSpeed")).toInt();
       lane_change_low_speed_kph = (kph == 40 || kph == 50 || kph == 60) ? kph : 30;
@@ -3485,8 +3486,12 @@ static int laneChangeStage(const SubMaster &sm, QString *label) {
     }
   } else {
     // planner isn't arming: not engaged, or under LANE_CHANGE_SPEED_MIN
-    // 10 = desire_helper.py LANE_CHANGE_SPEED_MIN
-    text = (uiState()->status == STATUS_ENGAGED && car_state.getVEgo() < 10 / 3.6f) ? "10km/h+" : "";
+    // (10 = desire_helper.py). Under a navigation instruction the car moves
+    // across by itself only from ATC_TAP_SPEED_MIN, so the hint names 15
+    // there (2026-11-28, on request).
+    if (uiState()->status == STATUS_ENGAGED && car_state.getVEgo() < 10 / 3.6f) {
+      text = atc_lane ? "15km/h+" : "10km/h+";
+    }
   }
   if (label) *label = text;
   return stage;
