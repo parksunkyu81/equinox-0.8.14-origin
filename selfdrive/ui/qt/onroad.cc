@@ -71,12 +71,12 @@ QRect cachedTextRect(QHash<QString, QRect> &rects, const QString &text, Measure 
 // Blinker stage colours, shared by the screen border and the blinker label:
 // 0 red = the car will not move over by itself (off, or under the Community
 // "차선변경 자동 시작 속도" LaneChangeLowSpeed, where only a wheel nudge
-// starts it), 1 orange = 자동 대기 (it will start on its own), 2 blue = moving
-// over now. laneChangeStage (by drawTurnSignals) picks the stage.
+// starts it), 1 orange = 자동 대기 (it will start on its own), 2 orange = moving
+// over now, told apart by a faster blink. laneChangeStage (by drawTurnSignals) picks the stage.
 static int laneChangeStage(const SubMaster &sm, QString *label);
 static QColor laneChangeStageColor(int stage) {
   switch (stage) {
-    case 2: return QColor(40, 120, 255);
+    case 2: return QColor(255, 140, 0);   // orange too since 2026-11-28 (on request); it blinks faster
     case 1: return QColor(255, 140, 0);
     default: return QColor(255, 40, 40);
   }
