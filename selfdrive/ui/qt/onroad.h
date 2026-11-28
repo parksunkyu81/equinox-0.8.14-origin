@@ -155,6 +155,9 @@ protected:
   // it keep their place on the roads where no limit is being shown at all.
   int nda_badge_top_ = 0;
   int nda_badge_cx_ = 0;
+  // Top of the speed-limit board as drawSpeedLimit last placed it; the
+  // road-type badge (drawBottomIcons) sits above it.
+  int speed_board_top_ = 0;
 
   // Where the 페달 강도 tile was last drawn, and when, for hitPedalTile.
   QRect pedal_tile_rect_;

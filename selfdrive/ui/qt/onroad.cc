@@ -2240,13 +2240,17 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
 
       const int nda_w = std::max(badge_min_w, angle_fm.horizontalAdvance(nda_text) + 38);
       const int nda_h = angle_h;
-      // Centred on the wheel, but never over the speed panel to its left: a
-      // Hangul label is wider than the wheel, and centred it ran 15-35 px into
-      // that panel's right edge. It shifts right instead.
-      int nda_left = x - nda_w / 2;
-      if (speed_panel_right_ > 0) nda_left = std::max(nda_left, speed_panel_right_ + 10);
+      // Above the speed-limit board, centred on it (2026-11-28, on request; it
+      // used to sit above the wheel). drawSpeedLimit runs earlier in drawHud
+      // and publishes the board's top (speed_board_top_). A long label is kept
+      // clear of the NDA/HDA icon to its left (NDA_BADGE_X + 165 = its right
+      // edge + 10).
+      const int board_cx = SPEED_BOARD_X + SPEED_BOARD_W / 2;
+      int nda_left = board_cx - nda_w / 2;
+      nda_left = std::max(nda_left, NDA_BADGE_X + (SPEED_BOARD_W + 120) / 2 + 10);
       nda_left = std::clamp(nda_left, 12, std::max(12, width() - nda_w - 12));
-      QRect nda_rect(nda_left, wheel_cy - wheel_d / 2 - 10 - nda_h, nda_w, nda_h);
+      const int board_top = speed_board_top_ > 0 ? speed_board_top_ : wheel_cy - wheel_d / 2;
+      QRect nda_rect(nda_left, board_top - 10 - nda_h, nda_w, nda_h);
 
       p.setBrush(QColor(0, 0, 0, 160));
       p.drawRoundedRect(nda_rect, 10, 10);
@@ -3122,6 +3126,10 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
     const int road_max_shift = std::max(0, height() - (base_y_start + road_needed_h) - S(20));
     const int road_y_start = base_y_start + std::clamp(desired_shift, 0, road_max_shift);
     nda_badge_top_ = std::max(0, road_y_start - S(54) - S(10));
+    // Where the road-type badge (drawBottomIcons) sits above: the road-limit
+    // board's top when no board is drawn, the drawn board's top otherwise
+    // (set again below).
+    speed_board_top_ = road_y_start;
     nda_badge_cx_ = NDA_BADGE_X + S(210) / 2;
   }
 
@@ -3167,6 +3175,7 @@ void NvgWindow::drawSpeedLimit(QPainter &p) {
     const int pill_end = board_h + S(15) + S(55) + S(10) + S(10);
     y_start = std::clamp(speed_panel_bottom_ - pill_end, base_y_start, height() - pill_end);
   }
+  speed_board_top_ = y_start;
 
   // ---- NDA/HDA 아이콘 ----
   // 어느 표지가 그려지든 그 표지 바로 위에 중앙 정렬한다. CAM/SECTION 분기는
