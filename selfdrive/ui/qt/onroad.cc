@@ -146,13 +146,14 @@ void OnroadWindow::updateState(const UIState &s) {
   // Blinker on the screen border (2026-11-28, on request): the border's left
   // or right side, full height, blinks amber with the driver's blinker, in
   // step with the HUD arrow (drawTurnSignals: lit 55% of an 800 ms period,
-  // 460 ms while the car is moving over). Hazards paint neither side, like
-  // the arrows. Only that bdr_s-wide strip is repainted, and only when its
+  // 460 ms while the car is moving over). Hazards paint both sides. The HUD
+  // arrows are gone. Only the bdr_s-wide strips are repainted, and only when their
   // state flips, so it costs a few fills per second.
   {
     const auto cs = (*s.sm)["carState"].getCarState();
     const bool l = cs.getLeftBlinker(), r = cs.getRightBlinker();
-    const int side = (l == r) ? 0 : (l ? 1 : 2);
+    // 3 = hazards: both sides (2026-11-28, on request).
+    const int side = l ? (r ? 3 : 1) : (r ? 2 : 0);
     bool lit = false;
     if (side != 0) {
       const auto lc = (*s.sm)["lateralPlan"].getLateralPlan().getLaneChangeState();
@@ -166,8 +167,8 @@ void OnroadWindow::updateState(const UIState &s) {
       border_blink_side_ = side;
       border_blink_lit_ = lit;
       for (int sd : {old_side, side}) {
-        if (sd == 1) update(QRect(0, 0, bdr_s, height()));
-        else if (sd == 2) update(QRect(width() - bdr_s, 0, bdr_s, height()));
+        if (sd & 1) update(QRect(0, 0, bdr_s, height()));
+        if (sd & 2) update(QRect(width() - bdr_s, 0, bdr_s, height()));
       }
     }
   }
@@ -330,9 +331,10 @@ void OnroadWindow::offroadTransition(bool offroad) {
 void OnroadWindow::paintEvent(QPaintEvent *event) {
   QPainter p(this);
   p.fillRect(rect(), QColor(bg.red(), bg.green(), bg.blue(), 255));
-  if (border_blink_side_ != 0 && border_blink_lit_) {
-    const int x = border_blink_side_ == 1 ? 0 : width() - bdr_s;
-    p.fillRect(QRect(x, 0, bdr_s, height()), QColor(255, 175, 0));
+  if (border_blink_lit_) {
+    const QColor amber(255, 175, 0);
+    if (border_blink_side_ & 1) p.fillRect(QRect(0, 0, bdr_s, height()), amber);
+    if (border_blink_side_ & 2) p.fillRect(QRect(width() - bdr_s, 0, bdr_s, height()), amber);
   }
 }
 
@@ -377,14 +379,11 @@ static constexpr int NDA_BADGE_X = SPEED_GROUP_X;
 static constexpr int TURN_BAND_W = 240;
 static constexpr int TURN_BAND_GAP = 400;      // inner edge of the band, out from screen centre
 static constexpr int TURN_LEFT_BAND_SHIFT = 130 + 154;
-// The indicator itself is one filled arrow, the ISO 2575 turn-signal
-// tell-tale (2026-11-26, on request; it was three sequential chevrons). It
-// fills the span the chevrons did: back edge at turnBandInner, tip 150 px
-// out from it.
+// The arrow itself was removed 2026-11-28 (the screen border's side blinks
+// instead); its old span, back edge at turnBandInner and tip 150 px out,
+// still bounds the lane alert box, and its height places the blinker label.
 static constexpr int TURN_ARROW_LEN = 150;     // back edge to tip
-static constexpr int TURN_ARROW_HEAD = 66;     // head length along the arrow
 static constexpr int TURN_ARROW_H = 64;        // half height of the head
-static constexpr int TURN_ARROW_SHAFT = 26;    // half height of the shaft
 
 static int turnBandX(int w, bool left) {
   return left ? w / 2 - TURN_BAND_GAP - TURN_BAND_W + TURN_LEFT_BAND_SHIFT : w / 2 + TURN_BAND_GAP;
@@ -396,31 +395,6 @@ static int turnBandInner(int w, bool left) {
   return left ? band_x + TURN_BAND_W - 30 : band_x + 30;
 }
 
-// One filled arrow pointing outward, full colour when lit and faint when not
-// (the off half of a blink).
-static void drawTurnArrow(QPainter &p, int w, int h, bool left, const QColor &color, bool lit) {
-  const int cy = h / 2;
-  const int dir = left ? -1 : 1;
-  const int back = turnBandInner(w, left);
-  const int tip = back + dir * TURN_ARROW_LEN;
-  const int head = tip - dir * TURN_ARROW_HEAD;
-  const QPointF pts[] = {
-    {(qreal)tip, (qreal)cy},
-    {(qreal)head, (qreal)(cy - TURN_ARROW_H)},
-    {(qreal)head, (qreal)(cy - TURN_ARROW_SHAFT)},
-    {(qreal)back, (qreal)(cy - TURN_ARROW_SHAFT)},
-    {(qreal)back, (qreal)(cy + TURN_ARROW_SHAFT)},
-    {(qreal)head, (qreal)(cy + TURN_ARROW_SHAFT)},
-    {(qreal)head, (qreal)(cy + TURN_ARROW_H)},
-  };
-  QColor c = color;
-  c.setAlpha(lit ? 255 : 50);
-  p.save();
-  p.setPen(QPen(c, 6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-  p.setBrush(c);
-  p.drawPolygon(pts, 7);
-  p.restore();
-}
 
 // OnroadAlerts
 void OnroadAlerts::updateAlert(const Alert &a, const QColor &color) {
@@ -456,14 +430,13 @@ void OnroadAlerts::paintEvent(QPaintEvent *event) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
     p.setRenderHint(QPainter::TextAntialiasing);
-    if (atc_left || atc_right) {
-      const QColor amber(255, 175, 0);
-      drawTurnArrow(p, width(), height(), true, amber, atc_left);
-      drawTurnArrow(p, width(), height(), false, amber, atc_right);
-    }
-
-    const int gap_l = turnBandInner(width(), true) + 30;
-    const int gap_r = turnBandInner(width(), false) - 30;
+    // The turn arrows are gone (2026-11-28, on request), the ATC prompt's
+    // included: the box takes the space they left, centred on the screen.
+    // Its left edge stops where the left arrow's tip was (12 px clear of the
+    // LKAS tile, x 632 on the 1880 x 1040 HUD), and the right edge mirrors it,
+    // so x 644..1236 there (it was 824..1340, off centre).
+    const int gap_l = turnBandInner(width(), true) - TURN_ARROW_LEN;
+    const int gap_r = width() - gap_l;
     const int gap_w = gap_r - gap_l;
     const int cy = height() / 2;
 
@@ -3458,35 +3431,23 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
     label = (uiState()->status == STATUS_ENGAGED && car_state.getVEgo() < 10 / 3.6f) ? "10km/h+" : "";
   }
 
-  // Geometry: TURN_BAND_* / TURN_ARROW_* above OnroadAlerts.
-  const int band_w = TURN_BAND_W;
-  const int band_x = turnBandX(width(), left);
+  (void)left;
   const int cy = height() / 2;
-  const int ch = TURN_ARROW_H;
   p.save();
   p.setRenderHint(QPainter::Antialiasing);
   p.setOpacity(1.0);
 
-  // Arrow and label only -- no halo behind them, so the path view stays
-  // unobstructed where the indicator overlaps it.
-
-  // The arrow blinks like the dashboard tell-tale: lit for 55% of the period,
-  // faint for the rest, and faster while the car is actually moving over.
-  const double period = changing ? 460.0 : 800.0;
-  const double phase = fmod(millis_since_boot(), period) / period;
-  drawTurnArrow(p, width(), height(), left, color, phase < 0.55);
-
+  // The HUD arrow is gone (2026-11-28, on request): the blinker now shows as
+  // the screen border's side blinking (OnroadWindow::updateState). Only the
+  // status label is left, centred on the screen above the lane alert box
+  // (OnroadAlerts), at the height the left label had (y 366..426 on the
+  // 1880 x 1040 HUD), clear of the tile group (x <= 632) on the left.
   if (!label.isEmpty()) {
     configFont(p, "Open Sans", 40, "Bold");
     p.setPen(color);
-    // Left: above the chevrons. Below them (y 608..668) the shifted band's
-    // label would land on the cruise panel's top edge (x 300..532 from y 638).
-    // Both labels are centred 60 px inboard of their band (2026-11-24): on the
-    // left the lowered 조향 신호 ring reaches x 478 at that height, and on the
-    // right the thermal strip now starts at x 1521 just below the chevrons.
-    const int label_y = left ? cy - ch - 30 - 60 : cy + ch + 30;
-    const int label_x = left ? band_x + 60 : band_x - 60;
-    p.drawText(QRect(label_x, label_y, band_w, 60), Qt::AlignCenter, label);
+    const int label_w = 400;
+    const int label_y = cy - TURN_ARROW_H - 30 - 60;
+    p.drawText(QRect(width() / 2 - label_w / 2, label_y, label_w, 60), Qt::AlignCenter, label);
   }
 
   p.restore();
