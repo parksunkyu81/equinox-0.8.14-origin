@@ -69,7 +69,11 @@ QRect cachedTextRect(QHash<QString, QRect> &rects, const QString &text, Measure 
 }
 
 // Blinker stage colours, shared by the screen border and the blinker label:
-// 0 red = will not move over, 1 orange = armed, 2 blue = moving over now.
+// 0 red = the car will not move over by itself (off, or under the Community
+// "차선변경 자동 시작 속도" LaneChangeLowSpeed, where only a wheel nudge
+// starts it), 1 orange = 자동 대기 (it will start on its own), 2 blue = moving
+// over now. laneChangeStage (by drawTurnSignals) picks the stage.
+static int laneChangeStage(const SubMaster &sm, QString *label);
 static QColor laneChangeStageColor(int stage) {
   switch (stage) {
     case 2: return QColor(40, 120, 255);
@@ -168,15 +172,10 @@ void OnroadWindow::updateState(const UIState &s) {
     int stage = 0;
     if (side != 0) {
       // The three lane-change stages, one plain colour each (2026-11-28, on
-      // request): red = the car will not move over (not engaged, under
-      // 10 km/h), orange = armed (waiting / nudge the wheel), blue = moving
-      // over now, and faster. Hazards always read orange.
-      const auto lc = (*s.sm)["lateralPlan"].getLateralPlan().getLaneChangeState();
-      const bool changing = lc == cereal::LateralPlan::LaneChangeState::LANE_CHANGE_STARTING ||
-                            lc == cereal::LateralPlan::LaneChangeState::LANE_CHANGE_FINISHING;
-      const bool armed = lc == cereal::LateralPlan::LaneChangeState::PRE_LANE_CHANGE;
-      stage = (side == 3) ? 1 : (changing ? 2 : (armed ? 1 : 0));
-      const double period = changing ? 460.0 : 800.0;
+      // request; see laneChangeStageColor), blue blinking faster. Hazards
+      // always read orange.
+      stage = (side == 3) ? 1 : laneChangeStage(*s.sm, nullptr);
+      const double period = stage == 2 ? 460.0 : 800.0;
       lit = fmod(millis_since_boot(), period) / period < 0.55;
     }
     if (side != border_blink_side_ || lit != border_blink_lit_ || stage != border_blink_stage_) {
@@ -3407,49 +3406,8 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
     p.setOpacity(1.0);
     return;
   }
-  const bool left = left_on;
-
-  // The blinker alone doesn't say whether openpilot will actually move the car
-  // over. Pull the planner's lane change state so the indicator can tell the
-  // driver which of the three situations they're in.
-  const auto lp = sm["lateralPlan"].getLateralPlan();
-  const auto lc_state = lp.getLaneChangeState();
-  const bool changing = lc_state == cereal::LateralPlan::LaneChangeState::LANE_CHANGE_STARTING ||
-                        lc_state == cereal::LateralPlan::LaneChangeState::LANE_CHANGE_FINISHING;
-  const bool armed = lc_state == cereal::LateralPlan::LaneChangeState::PRE_LANE_CHANGE;
-
-  QColor color;
   QString label;
-  if (changing) {
-    color = laneChangeStageColor(2);
-    label = "차선변경 중";
-  } else if (armed) {
-    color = laneChangeStageColor(1);
-    // With a navigation (ATC) instruction: from 15 km/h the blinker (a tap is
-    // enough) moves the car one lane when there is room, under 15 the driver
-    // does it by hand (desire_helper.py ATC_TAP_SPEED_MIN). Otherwise: under 30 km/h a nudge starts it
-    // (LANE_CHANGE_LOW_SPEED, the LaneChangeLowSpeed param), from there the
-    // blinker alone after 1 s.
-    const QString atc = ndaFresh(sm)
-        ? QString::fromUtf8(sm["roadLimitSpeed"].getRoadLimitSpeed().getAtcType().cStr())
-        : QString();
-    const bool atc_lane = (atc.startsWith("fork ") || atc.startsWith("atc ") || atc.startsWith("turn ")) &&
-                          !atc.contains("prepare");
-    if (lane_change_low_speed_kph < 0) {
-      const int kph = QString::fromStdString(Params().get("LaneChangeLowSpeed")).toInt();
-      lane_change_low_speed_kph = (kph == 40 || kph == 50 || kph == 60) ? kph : 30;
-    }
-    const bool fast = car_state.getVEgo() >= lane_change_low_speed_kph / 3.6f;
-    if (atc_lane) label = car_state.getVEgo() >= 15 / 3.6f ? "자동 대기" : "직접 변경";
-    else label = (lp.getAutoLaneChangeEnabled() && fast) ? "자동 대기" : "핸들 밀기";
-  } else {
-    // planner isn't arming: not engaged, or under LANE_CHANGE_SPEED_MIN
-    color = laneChangeStageColor(0);
-    // 10 = desire_helper.py LANE_CHANGE_SPEED_MIN
-    label = (uiState()->status == STATUS_ENGAGED && car_state.getVEgo() < 10 / 3.6f) ? "10km/h+" : "";
-  }
-
-  (void)left;
+  const QColor color = laneChangeStageColor(laneChangeStage(sm, &label));
   const int cy = height() / 2;
   p.save();
   p.setRenderHint(QPainter::Antialiasing);
@@ -3469,6 +3427,56 @@ void NvgWindow::drawTurnSignals(QPainter &p) {
   }
 
   p.restore();
+}
+
+// The blinker's lane-change stage (see laneChangeStageColor) and its label.
+// The blinker alone doesn't say whether openpilot will actually move the car
+// over; the planner's lane change state, the ATC instruction and the Community
+// LaneChangeLowSpeed setting do.
+static int laneChangeStage(const SubMaster &sm, QString *label) {
+  const auto car_state = sm["carState"].getCarState();
+  const auto lp = sm["lateralPlan"].getLateralPlan();
+  const auto lc_state = lp.getLaneChangeState();
+  const bool changing = lc_state == cereal::LateralPlan::LaneChangeState::LANE_CHANGE_STARTING ||
+                        lc_state == cereal::LateralPlan::LaneChangeState::LANE_CHANGE_FINISHING;
+  const bool armed = lc_state == cereal::LateralPlan::LaneChangeState::PRE_LANE_CHANGE;
+
+  QString text;
+  int stage = 0;
+  if (changing) {
+    stage = 2;
+    text = "차선변경 중";
+  } else if (armed) {
+    // With a navigation (ATC) instruction: from 15 km/h the blinker (a tap is
+    // enough) moves the car one lane when there is room, under 15 the driver
+    // does it by hand (desire_helper.py ATC_TAP_SPEED_MIN). Otherwise: under 30 km/h a nudge starts it
+    // (LANE_CHANGE_LOW_SPEED, the LaneChangeLowSpeed param), from there the
+    // blinker alone after 1 s.
+    const QString atc = ndaFresh(sm)
+        ? QString::fromUtf8(sm["roadLimitSpeed"].getRoadLimitSpeed().getAtcType().cStr())
+        : QString();
+    const bool atc_lane = (atc.startsWith("fork ") || atc.startsWith("atc ") || atc.startsWith("turn ")) &&
+                          !atc.contains("prepare");
+    if (lane_change_low_speed_kph < 0) {
+      const int kph = QString::fromStdString(Params().get("LaneChangeLowSpeed")).toInt();
+      lane_change_low_speed_kph = (kph == 40 || kph == 50 || kph == 60) ? kph : 30;
+    }
+    const bool fast = car_state.getVEgo() >= lane_change_low_speed_kph / 3.6f;
+    const bool auto_start = atc_lane ? car_state.getVEgo() >= 15 / 3.6f
+                                     : (lp.getAutoLaneChangeEnabled() && fast);
+    if (auto_start) {
+      stage = 1;
+      text = "자동 대기";
+    } else {
+      text = atc_lane ? "직접 변경" : "핸들 밀기";
+    }
+  } else {
+    // planner isn't arming: not engaged, or under LANE_CHANGE_SPEED_MIN
+    // 10 = desire_helper.py LANE_CHANGE_SPEED_MIN
+    text = (uiState()->status == STATUS_ENGAGED && car_state.getVEgo() < 10 / 3.6f) ? "10km/h+" : "";
+  }
+  if (label) *label = text;
+  return stage;
 }
 
 // Text with a dark drop shadow (carrot draws its HUD text with a border and a
