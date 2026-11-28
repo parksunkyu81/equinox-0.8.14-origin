@@ -2484,11 +2484,17 @@ void NvgWindow::drawBottomIcons(QPainter &p) {
     const int row_b = rightColumnLayout(width(), height()).status_bottom - SD / 2;
 
     // ACC and LKAS moved to the left-hand group (2026-11-28, on request): ACC
-    // right of 조향 신호, LKAS right of 자동 출발. The traffic light keeps the
-    // spot it had above this block, its right edge flush with the thermal
-    // panel's (21 px off the screen edge).
-    (void)col_l;
-    drawTrafficLight(p, col_r + SD / 2, row_b - SD / 2 - SGAP_Y);
+    // right of 조향 신호, LKAS right of 자동 출발. The traffic light moved
+    // beside the thermal strip the same day: left of it, 12 px clear, on the
+    // strip's row (88 tall against the strip's 89). On the 1880 x 1040 HUD the
+    // strip is x 1487..1859, so the light spans 1211..1475, over the left part
+    // of the turn-info box (x 1171..1870) and clear of it.
+    (void)col_l; (void)col_r; (void)row_b;
+    {
+      const RightColumnLayout rc = rightColumnLayout(width(), height());
+      const int strip_left = (thermal_panel_right_ > 0 ? thermal_panel_right_ : width() - 21) - THERMAL_W;
+      drawTrafficLight(p, strip_left - 12, rc.thermal_top + (THERMAL_H + 88) / 2);
+    }
     paint_profile::sub_mark(paint_profile::BI_STATUS);
 
     // The four pedal/following readings ride above the NDA/HDA badge, at the
@@ -3615,10 +3621,8 @@ void NvgWindow::drawGpsStatus(QPainter &p) {
 
 // Traffic light: red / green as guessed from the driving model's plan
 // (selfdrive/controls/lib/traffic_light.py), nothing otherwise. Right edge at
-// `right`, bottom at `bottom`; drawBottomIcons puts it above the ACC tile,
-// right-aligned with the thermal panel and the status block (2026-11-27, on
-// request). On the 1880 x 1040 HUD that is x 1595..1859, y 355..443, clear of
-// the record button above (y 137..327).
+// `right`, bottom at `bottom`; drawBottomIcons puts it left of the thermal
+// strip, on the strip's row (2026-11-28, on request).
 void NvgWindow::drawTrafficLight(QPainter &p, int right, int bottom) {
   const int light = (*(uiState()->sm))["controlsState"].getControlsState().getTrafficState();
   if (light != 1 && light != 2) return;
